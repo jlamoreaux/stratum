@@ -10,3 +10,45 @@ namespace = "default"
 [[kv_namespaces]]
 binding = "STATE"
 id = "2285977f426647cf9e3db347cbc0f03b"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "stratum"
+database_id = "placeholder-replace-with-real-id"
+migrations_dir = "migrations"
+
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "stratum_requests"
+
+[ai]
+binding = "AI"
+
+[[durable_objects.bindings]]
+name = "MERGE_QUEUE"
+class_name = "MergeQueue"
+script_name = "stratum"
+
+[[queues.producers]]
+binding = "EVENTS_QUEUE"
+queue = "stratum-events"
+
+[[queues.consumers]]
+queue = "stratum-events"
+
+[triggers]
+crons = ["0 6 * * *"]
+
+[vars]
+POSTHOG_HOST = "https://app.posthog.com"
+OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
+
+# Sandboxes binding — beta feature, only available with Cloudflare Sandboxes access
+# [[sandboxes]]
+# binding = "SANDBOX"
+
+# Secrets — set via: wrangler secret put <NAME>
+# POSTHOG_API_KEY =
+# STRATUM_TELEMETRY_DISABLED = "true"  # uncomment to disable telemetry for self-hosted
+# GITHUB_CLIENT_ID =
+# GITHUB_CLIENT_SECRET =

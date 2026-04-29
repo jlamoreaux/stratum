@@ -252,3 +252,90 @@ export async function getCommitLog(
     timestamp: c.commit.author.timestamp,
   }));
 }
+
+export async function importFromGitHub(
+  remote: string,
+  token: string,
+  githubUrl: string,
+  branch = 'main',
+  depth = 10,
+): Promise<void> {
+  const importRes = await fetch(`${remote}/import`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: githubUrl, branch, depth }),
+  });
+  if (!importRes.ok) {
+    const detail = await importRes.text().catch(() => 'unknown error');
+    throw new Error(`Artifacts import failed (${importRes.status}): ${detail}`);
+  }
+}
+
+export async function getDiffBetweenRepos(
+  baseRemote: string,
+  baseToken: string,
+  workspaceRemote: string,
+  workspaceToken: string,
+): Promise<string> {
+  const [{ fs: workspaceFs }, { fs: baseFs }] = await Promise.all([
+    cloneRepo(workspaceRemote, workspaceToken),
+    cloneRepo(baseRemote, baseToken),
+  ]);
+
+  const [workspaceFiles, baseFiles] = await Promise.all([
+    listFilesAtCommit(workspaceFs, 'main'),
+    listFilesAtCommit(baseFs, 'main'),
+  ]);
+
+  const baseMap = new Map(baseFiles);
+  const workspaceMap = new Map(workspaceFiles);
+
+  const diffParts: string[] = [];
+
+  for (const [path, oid] of workspaceFiles) {
+    const baseOid = baseMap.get(path);
+    if (baseOid === oid) continue;
+
+    const workspaceContent = await readFileAtCommit(workspaceFs, 'main', path);
+    const workspaceLines = workspaceContent.split('\n');
+
+    diffParts.push(`diff --git a/${path} b/${path}`);
+
+    if (baseOid === undefined) {
+      diffParts.push(`--- /dev/null`);
+      diffParts.push(`+++ b/${path}`);
+      diffParts.push(`@@ -0,0 +1,${workspaceLines.length} @@`);
+      for (const line of workspaceLines) {
+        diffParts.push(`+${line}`);
+      }
+    } else {
+      const baseContent = await readFileAtCommit(baseFs, 'main', path);
+      const baseLines = baseContent.split('\n');
+      diffParts.push(`--- a/${path}`);
+      diffParts.push(`+++ b/${path}`);
+      diffParts.push(`@@ -1,${baseLines.length} +1,${workspaceLines.length} @@`);
+      for (const line of baseLines) {
+        diffParts.push(`-${line}`);
+      }
+      for (const line of workspaceLines) {
+        diffParts.push(`+${line}`);
+      }
+    }
+  }
+
+  for (const [path] of baseFiles) {
+    if (!workspaceMap.has(path)) {
+      const baseContent = await readFileAtCommit(baseFs, 'main', path);
+      const baseLines = baseContent.split('\n');
+      diffParts.push(`diff --git a/${path} b/${path}`);
+      diffParts.push(`--- a/${path}`);
+      diffParts.push(`+++ /dev/null`);
+      diffParts.push(`@@ -1,${baseLines.length} +0,0 @@`);
+      for (const line of baseLines) {
+        diffParts.push(`-${line}`);
+      }
+    }
+  }
+
+  return diffParts.join('\n');
+}

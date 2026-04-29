@@ -67,6 +67,7 @@ function makeEnv(): Env {
       list: vi.fn(),
     } as unknown as Env["ARTIFACTS"],
     STATE: makeKV(),
+    DB: {} as D1Database,
   };
 }
 
@@ -308,17 +309,16 @@ describe("POST /api/workspaces/:name/merge", () => {
     );
   });
 
-  it("merges workspace into project", async () => {
+  it("returns 410 Gone (deprecated endpoint)", async () => {
     const res = await app.fetch(request("POST", "/api/workspaces/fix-bug/merge"), env);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { merged: boolean; commit: string };
-    expect(body.merged).toBe(true);
-    expect(body.commit).toBe("sha_merge");
+    expect(res.status).toBe(410);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('/api/projects/:name/changes');
   });
 
-  it("returns 404 for missing workspace", async () => {
+  it("returns 410 Gone even for missing workspace (deprecated endpoint)", async () => {
     const res = await app.fetch(request("POST", "/api/workspaces/nope/merge"), env);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(410);
   });
 });
 
@@ -351,10 +351,10 @@ describe("DELETE /api/workspaces/:name", () => {
     expect(res.status).toBe(404);
   });
 
-  it("workspace is gone after delete", async () => {
+  it("workspace is gone after delete (merge returns 410 deprecated)", async () => {
     await app.fetch(request("DELETE", "/api/workspaces/fix-bug"), env);
     const res = await app.fetch(request("POST", "/api/workspaces/fix-bug/merge"), env);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(410);
   });
 });
 

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { cloneRepo, commitAndPush, mergeWorkspaceIntoProject } from "../storage/git-ops";
+import { cloneRepo, commitAndPush } from "../storage/git-ops";
 import {
   deleteWorkspace,
   getProject,
@@ -71,22 +71,11 @@ app.post("/:name/commit", async (c) => {
   return ok({ workspace: workspaceName, commit: sha, filesChanged: Object.keys(body.files) });
 });
 
-app.post("/:name/merge", async (c) => {
-  const { name: workspaceName } = c.req.param();
-  const workspace = await getWorkspace(c.env.STATE, workspaceName);
-  if (!workspace) return notFound("Workspace", workspaceName);
-
-  const project = await getProject(c.env.STATE, workspace.parent);
-  if (!project) return notFound("Project", workspace.parent);
-
-  const sha = await mergeWorkspaceIntoProject(
-    project.remote,
-    project.token,
-    workspace.remote,
-    workspace.token,
+app.post("/:name/merge", (c) => {
+  return c.json(
+    { error: 'This endpoint is deprecated. Use POST /api/projects/:name/changes instead.' },
+    410,
   );
-
-  return ok({ merged: true, project: workspace.parent, workspace: workspaceName, commit: sha });
 });
 
 app.delete("/:name", async (c) => {

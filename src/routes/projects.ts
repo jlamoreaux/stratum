@@ -1,6 +1,7 @@
 import { Hono } from "hono";
-import { getCommitLog, initAndPush, listFilesInRepo } from "../storage/git-ops";
+import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "../storage/git-ops";
 import { getProject, listProjects, setProject } from "../storage/state";
+import { listProvenance } from "../storage/provenance";
 import type { Env } from "../types";
 import { badRequest, created, notFound, ok } from "../utils/response";
 import { isStringRecord, isValidGitHubUrl, isValidSlug } from "../utils/validation";
@@ -54,21 +55,14 @@ app.post("/:name/import", async (c) => {
   const depth = typeof body.depth === "number" ? body.depth : 10;
 
   const repo = await c.env.ARTIFACTS.create(name);
-  const importRes = await fetch(`${repo.remote}/import`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${repo.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ url: body.url, branch, depth }),
-  });
-  if (!importRes.ok) {
-    const detail = await importRes.text().catch(() => "unknown error");
-    throw new Error(`Artifacts import failed (${importRes.status}): ${detail}`);
-  }
+  await importFromGitHub(repo.remote, repo.token, body.url, branch, depth);
 
   await setProject(c.env.STATE, {
     name,
     remote: repo.remote,
     token: repo.token,
     createdAt: new Date().toISOString(),
+    githubUrl: body.url,
   });
 
   return created({ name, remote: repo.remote, source: body.url });
@@ -91,6 +85,18 @@ app.get("/:name/log", async (c) => {
   const depth = Number(c.req.query("depth") ?? 20);
   const log = await getCommitLog(project.remote, project.token, depth);
   return ok({ project: name, log });
+});
+
+app.get("/:name/provenance", async (c) => {
+  const { name } = c.req.param();
+  const project = await getProject(c.env.STATE, name);
+  if (!project) return notFound("Project", name);
+
+  const limitParam = c.req.query("limit");
+  const limit = limitParam !== undefined ? Number(limitParam) : undefined;
+
+  const records = await listProvenance(c.env.DB, name, limit);
+  return ok({ project: name, records });
 });
 
 export { app as projectsRouter };

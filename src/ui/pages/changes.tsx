@@ -1,0 +1,72 @@
+import type { FC } from 'hono/jsx';
+import { Layout } from '../layout';
+
+interface ChangesProps {
+  project: string;
+  changes: Array<{
+    id: string;
+    workspace: string;
+    status: string;
+    evalScore?: number;
+    evalPassed?: boolean;
+    createdAt: string;
+  }>;
+}
+
+function statusBadgeClass(status: string): string {
+  switch (status) {
+    case 'open': return 'badge badge-open';
+    case 'approved': return 'badge badge-approved';
+    case 'merged': return 'badge badge-merged';
+    case 'rejected': return 'badge badge-rejected';
+    default: return 'badge';
+  }
+}
+
+export const ChangesPage: FC<ChangesProps> = ({ project, changes }) => {
+  return (
+    <Layout title={`Changes — ${project}`}>
+      <div class="page-header">
+        <h1>Changes</h1>
+        <a class="btn" href={`/ui/projects/${project}`}>Back to repo</a>
+      </div>
+
+      {changes.length === 0 ? (
+        <div class="empty-state">
+          <p>No changes yet.</p>
+        </div>
+      ) : (
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Workspace</th>
+              <th>Status</th>
+              <th>Eval score</th>
+              <th>Created</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {changes.map((change) => (
+              <tr key={change.id}>
+                <td>{change.workspace}</td>
+                <td>
+                  <span class={statusBadgeClass(change.status)}>{change.status}</span>
+                </td>
+                <td>
+                  {change.evalScore !== undefined
+                    ? `${Math.round(change.evalScore * 100)}%`
+                    : '—'}
+                </td>
+                <td>{new Date(change.createdAt).toLocaleDateString()}</td>
+                <td>
+                  <a href={`/ui/changes/${change.id}`}>View</a>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Layout>
+  );
+};
