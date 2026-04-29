@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS description TEXT;
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS prompt_hash TEXT;
+ALTER TABLE agents ADD COLUMN description TEXT;
+ALTER TABLE agents ADD COLUMN prompt_hash TEXT;

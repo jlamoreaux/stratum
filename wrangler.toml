@@ -14,7 +14,7 @@ id = "2285977f426647cf9e3db347cbc0f03b"
 [[d1_databases]]
 binding = "DB"
 database_name = "stratum"
-database_id = "placeholder-replace-with-real-id"
+database_id = "de9b583b-d5f3-4868-a1eb-2208b76c7062"
 migrations_dir = "migrations"
 
 [[analytics_engine_datasets]]
