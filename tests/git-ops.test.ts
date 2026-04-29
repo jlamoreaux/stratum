@@ -1,0 +1,75 @@
+import { describe, expect, it } from "vitest";
+import { extractTokenSecret } from "../src/storage/git-ops";
+import { MemoryFS } from "../src/storage/memory-fs";
+
+describe("extractTokenSecret", () => {
+  it("returns full token when no expiry suffix", () => {
+    expect(extractTokenSecret("art_v1_abc123")).toBe("art_v1_abc123");
+  });
+
+  it("strips ?expires= suffix", () => {
+    expect(extractTokenSecret("art_v1_abc123?expires=1234567890")).toBe("art_v1_abc123");
+  });
+
+  it("handles empty string", () => {
+    expect(extractTokenSecret("")).toBe("");
+  });
+
+  it("returns base when multiple ?expires= present (only first split)", () => {
+    expect(extractTokenSecret("base?expires=111?expires=222")).toBe("base");
+  });
+});
+
+describe("MemoryFS walkDir (via manual test)", () => {
+  it("lists files recursively excluding .git", async () => {
+    const fs = new MemoryFS();
+    await fs.promises.writeFile("/.git/HEAD", "ref: refs/heads/main");
+    await fs.promises.writeFile("/src/index.ts", "export {}");
+    await fs.promises.writeFile("/src/utils/helpers.ts", "export {}");
+    await fs.promises.writeFile("/README.md", "# Hello");
+
+    const files = await walkDir(fs, "/", "");
+    expect(files).toContain("src/index.ts");
+    expect(files).toContain("src/utils/helpers.ts");
+    expect(files).toContain("README.md");
+    expect(files.some((f) => f.startsWith(".git"))).toBe(false);
+  });
+});
+
+async function walkDir(fs: MemoryFS, base: string, prefix: string): Promise<string[]> {
+  const entries = await fs.promises.readdir(base === "/" ? "/" : base);
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (entry === ".git") continue;
+    const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
+    const stat = await fs.promises.stat(fullPath);
+    if (stat.isDirectory()) {
+      files.push(...(await walkDir(fs, fullPath, `${prefix}${entry}/`)));
+    } else {
+      files.push(`${prefix}${entry}`);
+    }
+  }
+  return files;
+}
+
+describe("commitAndPush path construction", () => {
+  it("writeFile path is correct when dir has trailing slash", async () => {
+    const fs = new MemoryFS();
+    const base = "/";
+    const path = "src/index.ts";
+    const fullPath = `${base.endsWith("/") ? base : `${base}/`}${path}`;
+    await fs.promises.writeFile(fullPath, "content");
+    const result = await fs.promises.readFile("/src/index.ts", { encoding: "utf8" });
+    expect(result).toBe("content");
+  });
+
+  it("writeFile path is correct when dir has no trailing slash", async () => {
+    const fs = new MemoryFS();
+    const base = "/repo";
+    const path = "src/index.ts";
+    const fullPath = `${base.endsWith("/") ? base : `${base}/`}${path}`;
+    await fs.promises.writeFile(fullPath, "content");
+    const result = await fs.promises.readFile("/repo/src/index.ts", { encoding: "utf8" });
+    expect(result).toBe("content");
+  });
+});
