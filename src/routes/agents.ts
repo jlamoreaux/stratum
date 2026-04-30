@@ -1,23 +1,35 @@
-import { Hono } from 'hono';
-import { createAgent, deleteAgent, getAgent, listAgents } from '../storage/agents';
-import type { Env } from '../types';
-import { badRequest, created, ok } from '../utils/response';
+import { Hono } from "hono";
+import { createAgent, deleteAgent, getAgent, listAgents } from "../storage/agents";
+import type { Env } from "../types";
+import { badRequest, created, ok } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.post('/', async (c) => {
-  const userId = c.get('userId');
-  if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+app.post("/", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return c.json({ error: "Unauthorized" }, 401);
 
-  const body = await c.req.json<{ name?: unknown; model?: unknown; description?: unknown; promptHash?: unknown }>();
-  if (typeof body.name !== 'string' || !body.name.trim()) {
-    return badRequest('name is required');
+  const body = await c.req.json<{
+    name?: unknown;
+    model?: unknown;
+    description?: unknown;
+    promptHash?: unknown;
+  }>();
+  if (typeof body.name !== "string" || !body.name.trim()) {
+    return badRequest("name is required");
   }
 
-  const model = typeof body.model === 'string' ? body.model : undefined;
-  const description = typeof body.description === 'string' ? body.description : undefined;
-  const promptHash = typeof body.promptHash === 'string' ? body.promptHash : undefined;
-  const { agent, plaintext } = await createAgent(c.env.DB, userId, body.name, model, description, promptHash);
+  const model = typeof body.model === "string" ? body.model : undefined;
+  const description = typeof body.description === "string" ? body.description : undefined;
+  const promptHash = typeof body.promptHash === "string" ? body.promptHash : undefined;
+  const { agent, plaintext } = await createAgent(
+    c.env.DB,
+    userId,
+    body.name,
+    model,
+    description,
+    promptHash,
+  );
 
   return created({
     agent: {
@@ -33,9 +45,9 @@ app.post('/', async (c) => {
   });
 });
 
-app.get('/', async (c) => {
-  const userId = c.get('userId');
-  if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+app.get("/", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return c.json({ error: "Unauthorized" }, 401);
 
   const agents = await listAgents(c.env.DB, userId);
 
@@ -52,7 +64,7 @@ app.get('/', async (c) => {
   });
 });
 
-app.get('/:id', async (c) => {
+app.get("/:id", async (c) => {
   const { id } = c.req.param();
   const agent = await getAgent(c.env.DB, id);
   if (!agent) return c.json({ error: "Agent not found" }, 404);
@@ -68,14 +80,14 @@ app.get('/:id', async (c) => {
   });
 });
 
-app.delete('/:id', async (c) => {
-  const userId = c.get('userId');
-  if (!userId) return c.json({ error: 'Unauthorized' }, 401);
+app.delete("/:id", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return c.json({ error: "Unauthorized" }, 401);
 
   const { id } = c.req.param();
   const agent = await getAgent(c.env.DB, id);
   if (!agent) return c.json({ error: "Agent not found" }, 404);
-  if (agent.ownerId !== userId) return c.json({ error: 'Forbidden' }, 403);
+  if (agent.ownerId !== userId) return c.json({ error: "Forbidden" }, 403);
 
   await deleteAgent(c.env.DB, id);
   return ok({ deleted: true, id });

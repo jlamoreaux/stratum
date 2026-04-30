@@ -1,6 +1,6 @@
-import { generateApiKey, hashToken } from '../utils/crypto';
-import { newId } from '../utils/ids';
-import type { User } from '../types';
+import type { User } from "../types";
+import { generateApiKey, hashToken } from "../utils/crypto";
+import { newId } from "../utils/ids";
 
 export interface CreateUserResult {
   user: User;
@@ -29,12 +29,12 @@ function rowToUser(row: UserRow): User {
 }
 
 export async function createUser(db: D1Database, email: string): Promise<CreateUserResult> {
-  const id = newId('usr');
-  const plaintext = await generateApiKey('stratum_user');
+  const id = newId("usr");
+  const plaintext = await generateApiKey("stratum_user");
   const tokenHash = await hashToken(plaintext);
 
   await db
-    .prepare('INSERT INTO users (id, email, token_hash) VALUES (?, ?, ?)')
+    .prepare("INSERT INTO users (id, email, token_hash) VALUES (?, ?, ?)")
     .bind(id, email, tokenHash)
     .run();
 
@@ -49,10 +49,7 @@ export async function createUser(db: D1Database, email: string): Promise<CreateU
 }
 
 export async function getUser(db: D1Database, id: string): Promise<User | null> {
-  const row = await db
-    .prepare('SELECT * FROM users WHERE id = ?')
-    .bind(id)
-    .first<UserRow>();
+  const row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first<UserRow>();
 
   return row ? rowToUser(row) : null;
 }
@@ -60,7 +57,7 @@ export async function getUser(db: D1Database, id: string): Promise<User | null> 
 export async function getUserByToken(db: D1Database, plaintext: string): Promise<User | null> {
   const tokenHash = await hashToken(plaintext);
   const row = await db
-    .prepare('SELECT * FROM users WHERE token_hash = ?')
+    .prepare("SELECT * FROM users WHERE token_hash = ?")
     .bind(tokenHash)
     .first<UserRow>();
 
@@ -69,7 +66,7 @@ export async function getUserByToken(db: D1Database, plaintext: string): Promise
 
 export async function getUserByGitHubId(db: D1Database, githubId: string): Promise<User | null> {
   const row = await db
-    .prepare('SELECT * FROM users WHERE github_id = ?')
+    .prepare("SELECT * FROM users WHERE github_id = ?")
     .bind(githubId)
     .first<UserRow>();
 
@@ -77,10 +74,7 @@ export async function getUserByGitHubId(db: D1Database, githubId: string): Promi
 }
 
 export async function getUserByEmail(db: D1Database, email: string): Promise<User | null> {
-  const row = await db
-    .prepare('SELECT * FROM users WHERE email = ?')
-    .bind(email)
-    .first<UserRow>();
+  const row = await db.prepare("SELECT * FROM users WHERE email = ?").bind(email).first<UserRow>();
 
   return row ? rowToUser(row) : null;
 }
@@ -92,7 +86,7 @@ export async function linkGitHub(
   username: string,
 ): Promise<void> {
   await db
-    .prepare('UPDATE users SET github_id = ?, github_username = ? WHERE id = ?')
+    .prepare("UPDATE users SET github_id = ?, github_username = ? WHERE id = ?")
     .bind(githubId, username, userId)
     .run();
 }
@@ -110,11 +104,13 @@ export async function upsertGitHubUser(
   if (byEmail) {
     await linkGitHub(db, byEmail.id, opts.githubId, opts.username);
     const updated = await getUser(db, byEmail.id);
-    return updated!;
+    if (!updated) throw new Error(`User ${byEmail.id} not found after linkGitHub`);
+    return updated;
   }
 
   const { user } = await createUser(db, opts.email);
   await linkGitHub(db, user.id, opts.githubId, opts.username);
   const linked = await getUser(db, user.id);
-  return linked!;
+  if (!linked) throw new Error(`User ${user.id} not found after createUser`);
+  return linked;
 }

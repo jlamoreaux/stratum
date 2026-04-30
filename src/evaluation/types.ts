@@ -16,7 +16,13 @@ export interface EvalPolicy {
 }
 
 export type EvaluatorConfig =
-  | { type: 'diff'; maxLines?: number; maxFiles?: number; forbiddenPatterns?: string[]; requiredPatterns?: string[] }
-  | { type: 'webhook'; url: string; secret?: string; timeoutMs?: number }
-  | { type: 'sandbox'; command?: string; timeoutMs?: number }
-  | { type: 'llm'; model?: string; threshold?: number };
+  | {
+      type: "diff";
+      maxLines?: number;
+      maxFiles?: number;
+      forbiddenPatterns?: string[];
+      requiredPatterns?: string[];
+    }
+  | { type: "webhook"; url: string; secret?: string; timeoutMs?: number }
+  | { type: "sandbox"; command?: string; timeoutMs?: number }
+  | { type: "llm"; model?: string; threshold?: number };

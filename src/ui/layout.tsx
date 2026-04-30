@@ -1,4 +1,4 @@
-import type { FC } from 'hono/jsx';
+import type { FC } from "hono/jsx";
 
 interface LayoutProps {
   title: string;
@@ -16,14 +16,14 @@ export const Layout: FC<LayoutProps> = ({ title, children }) => {
       </head>
       <body>
         <nav class="nav">
-          <a class="nav-brand" href="/">stratum</a>
+          <a class="nav-brand" href="/">
+            stratum
+          </a>
           <div class="nav-links">
             <a href="/ui/projects">projects</a>
           </div>
         </nav>
-        <main class="main">
-          {children}
-        </main>
+        <main class="main">{children}</main>
       </body>
     </html>
   );

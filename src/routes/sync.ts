@@ -1,25 +1,25 @@
-import { Hono } from 'hono';
-import { importFromGitHub } from '../storage/git-ops';
-import { getProject, listProjects, setProject } from '../storage/state';
-import type { Env, ProjectEntry } from '../types';
-import { badRequest, notFound, ok } from '../utils/response';
-import { isValidGitHubUrl } from '../utils/validation';
+import { Hono } from "hono";
+import { importFromGitHub } from "../storage/git-ops";
+import { getProject, listProjects, setProject } from "../storage/state";
+import type { Env, ProjectEntry } from "../types";
+import { badRequest, notFound, ok } from "../utils/response";
+import { isValidGitHubUrl } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.post('/projects/:name/sync', async (c) => {
+app.post("/projects/:name/sync", async (c) => {
   const { name } = c.req.param();
 
   const project = await getProject(c.env.STATE, name);
-  if (!project) return notFound('Project', name);
+  if (!project) return notFound("Project", name);
 
   const body = await c.req.json<{ githubUrl?: unknown }>().catch(() => ({}));
 
   let githubUrl = project.githubUrl;
 
-  if ('githubUrl' in body) {
+  if ("githubUrl" in body) {
     if (!isValidGitHubUrl(body.githubUrl)) {
-      return badRequest('githubUrl must be a valid github.com repository URL');
+      return badRequest("githubUrl must be a valid github.com repository URL");
     }
     githubUrl = body.githubUrl;
     const updated: ProjectEntry = { ...project, githubUrl };
@@ -27,7 +27,7 @@ app.post('/projects/:name/sync', async (c) => {
   }
 
   if (!githubUrl) {
-    return badRequest('no githubUrl set for this project — provide one in the request body');
+    return badRequest("no githubUrl set for this project — provide one in the request body");
   }
 
   await importFromGitHub(project.remote, project.token, githubUrl);

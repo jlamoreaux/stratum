@@ -1,23 +1,23 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { Hono } from 'hono';
-import { authMiddleware } from '../src/middleware/auth';
-import { orgsRouter } from '../src/routes/orgs';
-import type { Env } from '../src/types';
+import { Hono } from "hono";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { authMiddleware } from "../src/middleware/auth";
+import { orgsRouter } from "../src/routes/orgs";
+import type { Env } from "../src/types";
 
-vi.mock('../src/storage/users', () => ({
+vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
 }));
 
-vi.mock('../src/storage/agents', () => ({
+vi.mock("../src/storage/agents", () => ({
   getAgentByToken: vi.fn(),
 }));
 
-vi.mock('../src/storage/sessions', () => ({
+vi.mock("../src/storage/sessions", () => ({
   getSession: vi.fn(),
   deleteSession: vi.fn(),
 }));
 
-vi.mock('../src/storage/orgs', () => ({
+vi.mock("../src/storage/orgs", () => ({
   createOrg: vi.fn(),
   getOrgBySlug: vi.fn(),
   listOrgsForUser: vi.fn(),
@@ -27,7 +27,7 @@ vi.mock('../src/storage/orgs', () => ({
   isOrgMember: vi.fn(),
 }));
 
-vi.mock('../src/storage/teams', () => ({
+vi.mock("../src/storage/teams", () => ({
   createTeam: vi.fn(),
   getTeam: vi.fn(),
   listTeams: vi.fn(),
@@ -37,7 +37,6 @@ vi.mock('../src/storage/teams', () => ({
   listTeamMembers: vi.fn(),
 }));
 
-import { getUserByToken } from '../src/storage/users';
 import {
   addOrgMember,
   createOrg,
@@ -45,24 +44,20 @@ import {
   isOrgAdmin,
   listOrgsForUser,
   removeOrgMember,
-} from '../src/storage/orgs';
-import {
-  createTeam,
-  deleteTeam,
-  getTeam,
-  listTeams,
-} from '../src/storage/teams';
+} from "../src/storage/orgs";
+import { createTeam, deleteTeam, getTeam, listTeams } from "../src/storage/teams";
+import { getUserByToken } from "../src/storage/users";
 
 function makeApp() {
   const app = new Hono<{ Bindings: Env }>();
-  app.use('*', authMiddleware);
-  app.route('/api/orgs', orgsRouter);
+  app.use("*", authMiddleware);
+  app.route("/api/orgs", orgsRouter);
   return app;
 }
 
 function makeEnv(): Env {
   return {
-    ARTIFACTS: {} as Env['ARTIFACTS'],
+    ARTIFACTS: {} as Env["ARTIFACTS"],
     STATE: {} as KVNamespace,
     DB: {} as D1Database,
   };
@@ -78,7 +73,7 @@ function request(
   return new Request(`http://localhost${path}`, {
     method,
     headers: {
-      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
       ...headers,
     },
     ...(hasBody ? { body: JSON.stringify(body) } : {}),
@@ -86,32 +81,32 @@ function request(
 }
 
 const mockUser = {
-  id: 'usr_owner',
-  email: 'owner@example.com',
-  tokenHash: 'hash',
-  createdAt: '2026-01-01T00:00:00.000Z',
+  id: "usr_owner",
+  email: "owner@example.com",
+  tokenHash: "hash",
+  createdAt: "2026-01-01T00:00:00.000Z",
 };
 
 const mockOrg = {
-  id: 'org_abc',
-  name: 'My Org',
-  slug: 'my-org',
-  ownerId: 'usr_owner',
-  createdAt: '2026-01-01T00:00:00.000Z',
+  id: "org_abc",
+  name: "My Org",
+  slug: "my-org",
+  ownerId: "usr_owner",
+  createdAt: "2026-01-01T00:00:00.000Z",
 };
 
 const mockTeam = {
-  id: 'team_abc',
-  orgId: 'org_abc',
-  name: 'Engineers',
-  slug: 'engineers',
-  permissions: 'read' as const,
-  createdAt: '2026-01-01T00:00:00.000Z',
+  id: "team_abc",
+  orgId: "org_abc",
+  name: "Engineers",
+  slug: "engineers",
+  permissions: "read" as const,
+  createdAt: "2026-01-01T00:00:00.000Z",
 };
 
-const authHeader = { Authorization: 'Bearer stratum_user_token' };
+const authHeader = { Authorization: "Bearer stratum_user_token" };
 
-describe('POST /api/orgs', () => {
+describe("POST /api/orgs", () => {
   let app: ReturnType<typeof makeApp>;
   let env: Env;
 
@@ -124,47 +119,44 @@ describe('POST /api/orgs', () => {
     vi.mocked(addOrgMember).mockResolvedValue(undefined);
   });
 
-  it('creates org and auto-adds owner as admin', async () => {
+  it("creates org and auto-adds owner as admin", async () => {
     const res = await app.fetch(
-      request('POST', '/api/orgs', { name: 'My Org', slug: 'my-org' }, authHeader),
+      request("POST", "/api/orgs", { name: "My Org", slug: "my-org" }, authHeader),
       env,
     );
     expect(res.status).toBe(201);
     const body = (await res.json()) as { org: typeof mockOrg };
-    expect(body.org.id).toBe('org_abc');
-    expect(body.org.slug).toBe('my-org');
-    expect(createOrg).toHaveBeenCalledWith(env.DB, 'usr_owner', 'My Org', 'my-org');
-    expect(addOrgMember).toHaveBeenCalledWith(env.DB, 'org_abc', 'usr_owner', 'admin');
+    expect(body.org.id).toBe("org_abc");
+    expect(body.org.slug).toBe("my-org");
+    expect(createOrg).toHaveBeenCalledWith(env.DB, "usr_owner", "My Org", "my-org");
+    expect(addOrgMember).toHaveBeenCalledWith(env.DB, "org_abc", "usr_owner", "admin");
   });
 
-  it('returns 401 without auth', async () => {
+  it("returns 401 without auth", async () => {
     const res = await app.fetch(
-      request('POST', '/api/orgs', { name: 'My Org', slug: 'my-org' }),
+      request("POST", "/api/orgs", { name: "My Org", slug: "my-org" }),
       env,
     );
     expect(res.status).toBe(401);
     expect(createOrg).not.toHaveBeenCalled();
   });
 
-  it('returns 400 with invalid slug', async () => {
+  it("returns 400 with invalid slug", async () => {
     const res = await app.fetch(
-      request('POST', '/api/orgs', { name: 'My Org', slug: 'invalid slug!' }, authHeader),
+      request("POST", "/api/orgs", { name: "My Org", slug: "invalid slug!" }, authHeader),
       env,
     );
     expect(res.status).toBe(400);
     expect(createOrg).not.toHaveBeenCalled();
   });
 
-  it('returns 400 when name is missing', async () => {
-    const res = await app.fetch(
-      request('POST', '/api/orgs', { slug: 'my-org' }, authHeader),
-      env,
-    );
+  it("returns 400 when name is missing", async () => {
+    const res = await app.fetch(request("POST", "/api/orgs", { slug: "my-org" }, authHeader), env);
     expect(res.status).toBe(400);
   });
 });
 
-describe('GET /api/orgs', () => {
+describe("GET /api/orgs", () => {
   let app: ReturnType<typeof makeApp>;
   let env: Env;
 
@@ -176,22 +168,22 @@ describe('GET /api/orgs', () => {
     vi.mocked(listOrgsForUser).mockResolvedValue([mockOrg]);
   });
 
-  it('lists orgs for current user', async () => {
-    const res = await app.fetch(request('GET', '/api/orgs', undefined, authHeader), env);
+  it("lists orgs for current user", async () => {
+    const res = await app.fetch(request("GET", "/api/orgs", undefined, authHeader), env);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { orgs: typeof mockOrg[] };
+    const body = (await res.json()) as { orgs: (typeof mockOrg)[] };
     expect(body.orgs).toHaveLength(1);
-    expect(body.orgs[0]?.id).toBe('org_abc');
-    expect(listOrgsForUser).toHaveBeenCalledWith(env.DB, 'usr_owner');
+    expect(body.orgs[0]?.id).toBe("org_abc");
+    expect(listOrgsForUser).toHaveBeenCalledWith(env.DB, "usr_owner");
   });
 
-  it('returns 401 when not authenticated', async () => {
-    const res = await app.fetch(request('GET', '/api/orgs'), env);
+  it("returns 401 when not authenticated", async () => {
+    const res = await app.fetch(request("GET", "/api/orgs"), env);
     expect(res.status).toBe(401);
   });
 });
 
-describe('GET /api/orgs/:slug', () => {
+describe("GET /api/orgs/:slug", () => {
   let app: ReturnType<typeof makeApp>;
   let env: Env;
 
@@ -202,22 +194,22 @@ describe('GET /api/orgs/:slug', () => {
     vi.mocked(getOrgBySlug).mockResolvedValue(mockOrg);
   });
 
-  it('returns org by slug', async () => {
-    const res = await app.fetch(request('GET', '/api/orgs/my-org'), env);
+  it("returns org by slug", async () => {
+    const res = await app.fetch(request("GET", "/api/orgs/my-org"), env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { org: typeof mockOrg };
-    expect(body.org.slug).toBe('my-org');
-    expect(getOrgBySlug).toHaveBeenCalledWith(env.DB, 'my-org');
+    expect(body.org.slug).toBe("my-org");
+    expect(getOrgBySlug).toHaveBeenCalledWith(env.DB, "my-org");
   });
 
-  it('returns 404 for unknown slug', async () => {
+  it("returns 404 for unknown slug", async () => {
     vi.mocked(getOrgBySlug).mockResolvedValue(null);
-    const res = await app.fetch(request('GET', '/api/orgs/no-such-org'), env);
+    const res = await app.fetch(request("GET", "/api/orgs/no-such-org"), env);
     expect(res.status).toBe(404);
   });
 });
 
-describe('POST /api/orgs/:slug/members', () => {
+describe("POST /api/orgs/:slug/members", () => {
   let app: ReturnType<typeof makeApp>;
   let env: Env;
 
@@ -231,43 +223,38 @@ describe('POST /api/orgs/:slug/members', () => {
     vi.mocked(addOrgMember).mockResolvedValue(undefined);
   });
 
-  it('adds member when caller is org admin', async () => {
+  it("adds member when caller is org admin", async () => {
     const res = await app.fetch(
-      request(
-        'POST',
-        '/api/orgs/my-org/members',
-        { userId: 'usr_other' },
-        authHeader,
-      ),
+      request("POST", "/api/orgs/my-org/members", { userId: "usr_other" }, authHeader),
       env,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { added: boolean; userId: string };
     expect(body.added).toBe(true);
-    expect(body.userId).toBe('usr_other');
-    expect(addOrgMember).toHaveBeenCalledWith(env.DB, 'org_abc', 'usr_other', 'member');
+    expect(body.userId).toBe("usr_other");
+    expect(addOrgMember).toHaveBeenCalledWith(env.DB, "org_abc", "usr_other", "member");
   });
 
-  it('returns 403 when caller is not org admin', async () => {
+  it("returns 403 when caller is not org admin", async () => {
     vi.mocked(isOrgAdmin).mockResolvedValue(false);
     const res = await app.fetch(
-      request('POST', '/api/orgs/my-org/members', { userId: 'usr_other' }, authHeader),
+      request("POST", "/api/orgs/my-org/members", { userId: "usr_other" }, authHeader),
       env,
     );
     expect(res.status).toBe(403);
     expect(addOrgMember).not.toHaveBeenCalled();
   });
 
-  it('returns 401 when not authenticated', async () => {
+  it("returns 401 when not authenticated", async () => {
     const res = await app.fetch(
-      request('POST', '/api/orgs/my-org/members', { userId: 'usr_other' }),
+      request("POST", "/api/orgs/my-org/members", { userId: "usr_other" }),
       env,
     );
     expect(res.status).toBe(401);
   });
 });
 
-describe('DELETE /api/orgs/:slug/members/:uid', () => {
+describe("DELETE /api/orgs/:slug/members/:uid", () => {
   let app: ReturnType<typeof makeApp>;
   let env: Env;
 
@@ -281,22 +268,22 @@ describe('DELETE /api/orgs/:slug/members/:uid', () => {
     vi.mocked(removeOrgMember).mockResolvedValue(undefined);
   });
 
-  it('removes member when caller is org admin', async () => {
+  it("removes member when caller is org admin", async () => {
     const res = await app.fetch(
-      request('DELETE', '/api/orgs/my-org/members/usr_other', undefined, authHeader),
+      request("DELETE", "/api/orgs/my-org/members/usr_other", undefined, authHeader),
       env,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { removed: boolean; userId: string };
     expect(body.removed).toBe(true);
-    expect(body.userId).toBe('usr_other');
-    expect(removeOrgMember).toHaveBeenCalledWith(env.DB, 'org_abc', 'usr_other');
+    expect(body.userId).toBe("usr_other");
+    expect(removeOrgMember).toHaveBeenCalledWith(env.DB, "org_abc", "usr_other");
   });
 
-  it('returns 403 when caller is not org admin', async () => {
+  it("returns 403 when caller is not org admin", async () => {
     vi.mocked(isOrgAdmin).mockResolvedValue(false);
     const res = await app.fetch(
-      request('DELETE', '/api/orgs/my-org/members/usr_other', undefined, authHeader),
+      request("DELETE", "/api/orgs/my-org/members/usr_other", undefined, authHeader),
       env,
     );
     expect(res.status).toBe(403);
@@ -304,7 +291,7 @@ describe('DELETE /api/orgs/:slug/members/:uid', () => {
   });
 });
 
-describe('POST /api/orgs/:slug/teams', () => {
+describe("POST /api/orgs/:slug/teams", () => {
   let app: ReturnType<typeof makeApp>;
   let env: Env;
 
@@ -318,43 +305,53 @@ describe('POST /api/orgs/:slug/teams', () => {
     vi.mocked(createTeam).mockResolvedValue(mockTeam);
   });
 
-  it('creates team when caller is org admin', async () => {
+  it("creates team when caller is org admin", async () => {
     const res = await app.fetch(
       request(
-        'POST',
-        '/api/orgs/my-org/teams',
-        { name: 'Engineers', slug: 'engineers' },
+        "POST",
+        "/api/orgs/my-org/teams",
+        { name: "Engineers", slug: "engineers" },
         authHeader,
       ),
       env,
     );
     expect(res.status).toBe(201);
     const body = (await res.json()) as { team: typeof mockTeam };
-    expect(body.team.id).toBe('team_abc');
-    expect(body.team.slug).toBe('engineers');
-    expect(createTeam).toHaveBeenCalledWith(env.DB, 'org_abc', 'Engineers', 'engineers', 'read');
+    expect(body.team.id).toBe("team_abc");
+    expect(body.team.slug).toBe("engineers");
+    expect(createTeam).toHaveBeenCalledWith(env.DB, "org_abc", "Engineers", "engineers", "read");
   });
 
-  it('returns 403 when caller is not org admin', async () => {
+  it("returns 403 when caller is not org admin", async () => {
     vi.mocked(isOrgAdmin).mockResolvedValue(false);
     const res = await app.fetch(
-      request('POST', '/api/orgs/my-org/teams', { name: 'Engineers', slug: 'engineers' }, authHeader),
+      request(
+        "POST",
+        "/api/orgs/my-org/teams",
+        { name: "Engineers", slug: "engineers" },
+        authHeader,
+      ),
       env,
     );
     expect(res.status).toBe(403);
     expect(createTeam).not.toHaveBeenCalled();
   });
 
-  it('returns 400 with invalid slug', async () => {
+  it("returns 400 with invalid slug", async () => {
     const res = await app.fetch(
-      request('POST', '/api/orgs/my-org/teams', { name: 'Engineers', slug: 'bad slug!' }, authHeader),
+      request(
+        "POST",
+        "/api/orgs/my-org/teams",
+        { name: "Engineers", slug: "bad slug!" },
+        authHeader,
+      ),
       env,
     );
     expect(res.status).toBe(400);
   });
 });
 
-describe('DELETE /api/orgs/:slug/teams/:id', () => {
+describe("DELETE /api/orgs/:slug/teams/:id", () => {
   let app: ReturnType<typeof makeApp>;
   let env: Env;
 
@@ -370,41 +367,41 @@ describe('DELETE /api/orgs/:slug/teams/:id', () => {
     vi.mocked(listTeams).mockResolvedValue([mockTeam]);
   });
 
-  it('deletes team when caller is org admin', async () => {
+  it("deletes team when caller is org admin", async () => {
     const res = await app.fetch(
-      request('DELETE', '/api/orgs/my-org/teams/team_abc', undefined, authHeader),
+      request("DELETE", "/api/orgs/my-org/teams/team_abc", undefined, authHeader),
       env,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { deleted: boolean; id: string };
     expect(body.deleted).toBe(true);
-    expect(body.id).toBe('team_abc');
-    expect(deleteTeam).toHaveBeenCalledWith(env.DB, 'team_abc');
+    expect(body.id).toBe("team_abc");
+    expect(deleteTeam).toHaveBeenCalledWith(env.DB, "team_abc");
   });
 
-  it('returns 403 when caller is not org admin', async () => {
+  it("returns 403 when caller is not org admin", async () => {
     vi.mocked(isOrgAdmin).mockResolvedValue(false);
     const res = await app.fetch(
-      request('DELETE', '/api/orgs/my-org/teams/team_abc', undefined, authHeader),
+      request("DELETE", "/api/orgs/my-org/teams/team_abc", undefined, authHeader),
       env,
     );
     expect(res.status).toBe(403);
     expect(deleteTeam).not.toHaveBeenCalled();
   });
 
-  it('returns 404 when team does not exist', async () => {
+  it("returns 404 when team does not exist", async () => {
     vi.mocked(getTeam).mockResolvedValue(null);
     const res = await app.fetch(
-      request('DELETE', '/api/orgs/my-org/teams/team_missing', undefined, authHeader),
+      request("DELETE", "/api/orgs/my-org/teams/team_missing", undefined, authHeader),
       env,
     );
     expect(res.status).toBe(404);
   });
 
-  it('returns 404 when team belongs to a different org', async () => {
-    vi.mocked(getTeam).mockResolvedValue({ ...mockTeam, orgId: 'org_other' });
+  it("returns 404 when team belongs to a different org", async () => {
+    vi.mocked(getTeam).mockResolvedValue({ ...mockTeam, orgId: "org_other" });
     const res = await app.fetch(
-      request('DELETE', '/api/orgs/my-org/teams/team_abc', undefined, authHeader),
+      request("DELETE", "/api/orgs/my-org/teams/team_abc", undefined, authHeader),
       env,
     );
     expect(res.status).toBe(404);

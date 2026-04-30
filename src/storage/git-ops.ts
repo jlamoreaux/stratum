@@ -1,3 +1,4 @@
+import { createPatch } from "diff";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import type { Author, CommitLogEntry } from "../types";
@@ -257,18 +258,53 @@ export async function importFromGitHub(
   remote: string,
   token: string,
   githubUrl: string,
-  branch = 'main',
+  branch = "main",
   depth = 10,
 ): Promise<void> {
   const importRes = await fetch(`${remote}/import`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ url: githubUrl, branch, depth }),
   });
   if (!importRes.ok) {
-    const detail = await importRes.text().catch(() => 'unknown error');
+    const detail = await importRes.text().catch(() => "unknown error");
     throw new Error(`Artifacts import failed (${importRes.status}): ${detail}`);
   }
+}
+
+/**
+ * Builds a git-style unified diff header + POSIX patch for a modified file.
+ * `createPatch` computes a real line-level diff with proper @@ hunks.
+ */
+function fileUnifiedDiff(path: string, oldContent: string, newContent: string): string {
+  // createPatch returns: "Index: <path>\n===...\n--- <path>\n+++ <path>\n@@ ... @@\n..."
+  // We strip the Index/=== preamble and replace the --- / +++ markers with git-style ones.
+  const patch = createPatch(path, oldContent, newContent, "", "");
+  const lines = patch.split("\n");
+  // Drop the first two lines ("Index: …" and "===…") then fix up --- / +++ paths.
+  const body = lines
+    .slice(2)
+    .map((line) => {
+      if (line.startsWith("--- ")) return `--- a/${path}`;
+      if (line.startsWith("+++ ")) return `+++ b/${path}`;
+      return line;
+    })
+    .join("\n");
+  return `diff --git a/${path} b/${path}\n${body}`;
+}
+
+function newFileDiff(path: string, content: string): string {
+  const lines = content.split("\n");
+  const lineCount = lines.length;
+  const body = lines.map((l) => `+${l}`).join("\n");
+  return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lineCount} @@\n${body}\n`;
+}
+
+function deletedFileDiff(path: string, content: string): string {
+  const lines = content.split("\n");
+  const lineCount = lines.length;
+  const body = lines.map((l) => `-${l}`).join("\n");
+  return `diff --git a/${path} b/${path}\ndeleted file mode 100644\n--- a/${path}\n+++ /dev/null\n@@ -1,${lineCount} +0,0 @@\n${body}\n`;
 }
 
 export async function getDiffBetweenRepos(
@@ -283,8 +319,8 @@ export async function getDiffBetweenRepos(
   ]);
 
   const [workspaceFiles, baseFiles] = await Promise.all([
-    listFilesAtCommit(workspaceFs, 'main'),
-    listFilesAtCommit(baseFs, 'main'),
+    listFilesAtCommit(workspaceFs, "main"),
+    listFilesAtCommit(baseFs, "main"),
   ]);
 
   const baseMap = new Map(baseFiles);
@@ -296,46 +332,23 @@ export async function getDiffBetweenRepos(
     const baseOid = baseMap.get(path);
     if (baseOid === oid) continue;
 
-    const workspaceContent = await readFileAtCommit(workspaceFs, 'main', path);
-    const workspaceLines = workspaceContent.split('\n');
-
-    diffParts.push(`diff --git a/${path} b/${path}`);
+    const workspaceContent = await readFileAtCommit(workspaceFs, "main", path);
 
     if (baseOid === undefined) {
-      diffParts.push(`--- /dev/null`);
-      diffParts.push(`+++ b/${path}`);
-      diffParts.push(`@@ -0,0 +1,${workspaceLines.length} @@`);
-      for (const line of workspaceLines) {
-        diffParts.push(`+${line}`);
-      }
+      diffParts.push(newFileDiff(path, workspaceContent));
     } else {
-      const baseContent = await readFileAtCommit(baseFs, 'main', path);
-      const baseLines = baseContent.split('\n');
-      diffParts.push(`--- a/${path}`);
-      diffParts.push(`+++ b/${path}`);
-      diffParts.push(`@@ -1,${baseLines.length} +1,${workspaceLines.length} @@`);
-      for (const line of baseLines) {
-        diffParts.push(`-${line}`);
-      }
-      for (const line of workspaceLines) {
-        diffParts.push(`+${line}`);
-      }
+      const baseContent = await readFileAtCommit(baseFs, "main", path);
+      const patch = fileUnifiedDiff(path, baseContent, workspaceContent);
+      diffParts.push(patch);
     }
   }
 
   for (const [path] of baseFiles) {
     if (!workspaceMap.has(path)) {
-      const baseContent = await readFileAtCommit(baseFs, 'main', path);
-      const baseLines = baseContent.split('\n');
-      diffParts.push(`diff --git a/${path} b/${path}`);
-      diffParts.push(`--- a/${path}`);
-      diffParts.push(`+++ /dev/null`);
-      diffParts.push(`@@ -1,${baseLines.length} +0,0 @@`);
-      for (const line of baseLines) {
-        diffParts.push(`-${line}`);
-      }
+      const baseContent = await readFileAtCommit(baseFs, "main", path);
+      diffParts.push(deletedFileDiff(path, baseContent));
     }
   }
 
-  return diffParts.join('\n');
+  return diffParts.join("\n");
 }

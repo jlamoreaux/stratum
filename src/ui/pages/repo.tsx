@@ -1,5 +1,5 @@
-import type { FC } from 'hono/jsx';
-import { Layout } from '../layout';
+import type { FC } from "hono/jsx";
+import { Layout } from "../layout";
 
 interface RepoProps {
   project: { name: string; remote: string; createdAt: string };
@@ -12,7 +12,9 @@ export const RepoPage: FC<RepoProps> = ({ project, files, log }) => {
     <Layout title={project.name}>
       <div class="page-header">
         <h1>{project.name}</h1>
-        <a class="btn btn-primary" href={`/ui/projects/${project.name}/changes`}>View changes</a>
+        <a class="btn btn-primary" href={`/ui/projects/${project.name}/changes`}>
+          View changes
+        </a>
       </div>
 
       <div class="card">
@@ -24,7 +26,9 @@ export const RepoPage: FC<RepoProps> = ({ project, files, log }) => {
         ) : (
           <ul class="file-list">
             {files.map((file) => (
-              <li key={file} class="file-item">{file}</li>
+              <li key={file} class="file-item">
+                {file}
+              </li>
             ))}
           </ul>
         )}

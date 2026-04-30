@@ -1,4 +1,4 @@
-import { newId } from '../utils/ids';
+import { newId } from "../utils/ids";
 
 export interface Org {
   id: string;
@@ -11,7 +11,7 @@ export interface Org {
 export interface OrgMember {
   orgId: string;
   userId: string;
-  role: 'member' | 'admin';
+  role: "member" | "admin";
   joinedAt: string;
 }
 
@@ -46,11 +46,11 @@ export async function createOrg(
   name: string,
   slug: string,
 ): Promise<Org> {
-  const id = newId('org');
+  const id = newId("org");
   const createdAt = new Date().toISOString();
 
   await db
-    .prepare('INSERT INTO orgs (id, name, slug, owner_id, created_at) VALUES (?, ?, ?, ?, ?)')
+    .prepare("INSERT INTO orgs (id, name, slug, owner_id, created_at) VALUES (?, ?, ?, ?, ?)")
     .bind(id, name, slug, ownerId, createdAt)
     .run();
 
@@ -58,28 +58,20 @@ export async function createOrg(
 }
 
 export async function getOrg(db: D1Database, id: string): Promise<Org | null> {
-  const row = await db
-    .prepare('SELECT * FROM orgs WHERE id = ?')
-    .bind(id)
-    .first<OrgRow>();
+  const row = await db.prepare("SELECT * FROM orgs WHERE id = ?").bind(id).first<OrgRow>();
 
   return row ? rowToOrg(row) : null;
 }
 
 export async function getOrgBySlug(db: D1Database, slug: string): Promise<Org | null> {
-  const row = await db
-    .prepare('SELECT * FROM orgs WHERE slug = ?')
-    .bind(slug)
-    .first<OrgRow>();
+  const row = await db.prepare("SELECT * FROM orgs WHERE slug = ?").bind(slug).first<OrgRow>();
 
   return row ? rowToOrg(row) : null;
 }
 
 export async function listOrgsForUser(db: D1Database, userId: string): Promise<Org[]> {
   const { results } = await db
-    .prepare(
-      'SELECT o.* FROM orgs o JOIN org_members m ON o.id = m.org_id WHERE m.user_id = ?',
-    )
+    .prepare("SELECT o.* FROM orgs o JOIN org_members m ON o.id = m.org_id WHERE m.user_id = ?")
     .bind(userId)
     .all<OrgRow>();
 
@@ -90,12 +82,12 @@ export async function addOrgMember(
   db: D1Database,
   orgId: string,
   userId: string,
-  role: 'member' | 'admin' = 'member',
+  role: "member" | "admin" = "member",
 ): Promise<void> {
   const joinedAt = new Date().toISOString();
   await db
     .prepare(
-      'INSERT INTO org_members (org_id, user_id, role, joined_at) VALUES (?, ?, ?, ?) ON CONFLICT (org_id, user_id) DO UPDATE SET role = excluded.role',
+      "INSERT INTO org_members (org_id, user_id, role, joined_at) VALUES (?, ?, ?, ?) ON CONFLICT (org_id, user_id) DO UPDATE SET role = excluded.role",
     )
     .bind(orgId, userId, role, joinedAt)
     .run();
@@ -107,29 +99,21 @@ export async function removeOrgMember(
   userId: string,
 ): Promise<void> {
   await db
-    .prepare('DELETE FROM org_members WHERE org_id = ? AND user_id = ?')
+    .prepare("DELETE FROM org_members WHERE org_id = ? AND user_id = ?")
     .bind(orgId, userId)
     .run();
 }
 
-export async function isOrgMember(
-  db: D1Database,
-  orgId: string,
-  userId: string,
-): Promise<boolean> {
+export async function isOrgMember(db: D1Database, orgId: string, userId: string): Promise<boolean> {
   const row = await db
-    .prepare('SELECT 1 FROM org_members WHERE org_id = ? AND user_id = ?')
+    .prepare("SELECT 1 FROM org_members WHERE org_id = ? AND user_id = ?")
     .bind(orgId, userId)
     .first<OrgMemberRow>();
 
   return row !== null;
 }
 
-export async function isOrgAdmin(
-  db: D1Database,
-  orgId: string,
-  userId: string,
-): Promise<boolean> {
+export async function isOrgAdmin(db: D1Database, orgId: string, userId: string): Promise<boolean> {
   const row = await db
     .prepare("SELECT 1 FROM org_members WHERE org_id = ? AND user_id = ? AND role = 'admin'")
     .bind(orgId, userId)

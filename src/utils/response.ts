@@ -16,6 +16,10 @@ export function badRequest(message: string): Response {
   return error(message, 400);
 }
 
+export function unauthorized(message: string): Response {
+  return error(message, 401);
+}
+
 export function internalError(message: string): Response {
   return error(message, 500);
 }

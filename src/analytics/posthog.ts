@@ -15,13 +15,13 @@ export class PostHogClient {
     if (this.disabled || !this.apiKey) return;
     try {
       await fetch(`${this.host}/capture/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           api_key: this.apiKey,
           event: event.event,
           distinct_id: event.distinctId,
-          properties: { $lib: 'stratum-server', ...event.properties },
+          properties: { $lib: "stratum-server", ...event.properties },
         }),
       });
     } catch {
@@ -35,10 +35,10 @@ export function createPostHogClient(env: {
   POSTHOG_HOST?: string;
   STRATUM_TELEMETRY_DISABLED?: string;
 }): PostHogClient {
-  const disabled = env.STRATUM_TELEMETRY_DISABLED === 'true' || !env.POSTHOG_API_KEY;
+  const disabled = env.STRATUM_TELEMETRY_DISABLED === "true" || !env.POSTHOG_API_KEY;
   return new PostHogClient(
-    env.POSTHOG_API_KEY ?? '',
-    env.POSTHOG_HOST ?? 'https://app.posthog.com',
+    env.POSTHOG_API_KEY ?? "",
+    env.POSTHOG_HOST ?? "https://app.posthog.com",
     disabled,
   );
 }

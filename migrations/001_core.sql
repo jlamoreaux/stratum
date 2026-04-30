@@ -44,3 +44,5 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 CREATE INDEX IF NOT EXISTS idx_changes_project ON changes(project);
 CREATE INDEX IF NOT EXISTS idx_changes_status ON changes(status);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_change ON eval_runs(change_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_token_hash ON users(token_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_token_hash ON agents(token_hash);

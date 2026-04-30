@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { hashToken, verifyToken, generateApiKey } from "../src/utils/crypto";
+import { describe, expect, it } from "vitest";
+import { generateApiKey, hashToken, verifyToken } from "../src/utils/crypto";
 
 describe("hashToken", () => {
   it("returns a 64-character hex string", async () => {

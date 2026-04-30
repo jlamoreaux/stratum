@@ -1,5 +1,5 @@
-import type { FC } from 'hono/jsx';
-import { Layout } from '../layout';
+import type { FC } from "hono/jsx";
+import { Layout } from "../layout";
 
 interface HomeProps {
   projects: Array<{ name: string; remote: string; createdAt: string }>;

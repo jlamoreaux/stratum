@@ -56,7 +56,10 @@ export interface SandboxBinding {
 
 export interface SandboxInstance {
   writeFile(path: string, content: string): Promise<void>;
-  run(command: string, opts?: { timeout?: number }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  run(
+    command: string,
+    opts?: { timeout?: number },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
   destroy(): Promise<void>;
 }
 
@@ -83,6 +86,7 @@ export interface ProjectEntry {
   token: string;
   createdAt: string;
   githubUrl?: string;
+  ownerId?: string;
 }
 
 export interface WorkspaceEntry {
@@ -140,7 +144,7 @@ export interface Change {
   id: string;
   project: string;
   workspace: string;
-  status: 'open' | 'approved' | 'merged' | 'rejected';
+  status: "open" | "approved" | "merged" | "rejected";
   agentId?: string;
   evalScore?: number;
   evalPassed?: boolean;

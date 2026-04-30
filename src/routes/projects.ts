@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "../storage/git-ops";
-import { getProject, listProjects, setProject } from "../storage/state";
 import { listProvenance } from "../storage/provenance";
+import { getProject, listProjects, setProject } from "../storage/state";
 import type { Env } from "../types";
-import { badRequest, created, notFound, ok } from "../utils/response";
+import { badRequest, created, notFound, ok, unauthorized } from "../utils/response";
 import { isStringRecord, isValidGitHubUrl, isValidSlug } from "../utils/validation";
 
 const DEFAULT_FILES: Record<string, string> = {
@@ -14,11 +14,21 @@ const DEFAULT_FILES: Record<string, string> = {
 const app = new Hono<{ Bindings: Env }>();
 
 app.post("/", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Authentication required");
+
   const body = await c.req.json<{ name?: unknown; files?: unknown }>();
   if (!isValidSlug(body.name)) return badRequest("name must be a 1-64 char alphanumeric slug");
 
+  const seed = c.req.query("seed") === "true";
   const files =
-    body.files !== undefined ? (isStringRecord(body.files) ? body.files : null) : DEFAULT_FILES;
+    body.files !== undefined
+      ? isStringRecord(body.files)
+        ? body.files
+        : null
+      : seed
+        ? DEFAULT_FILES
+        : { ".gitkeep": "" };
 
   if (files === null)
     return badRequest("files must be an object of string paths to string contents");
@@ -31,6 +41,7 @@ app.post("/", async (c) => {
     remote: repo.remote,
     token: repo.token,
     createdAt: new Date().toISOString(),
+    ownerId: userId,
   });
 
   return created({ name: body.name, remote: repo.remote, commit: sha });
@@ -44,6 +55,9 @@ app.get("/", async (c) => {
 });
 
 app.post("/:name/import", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Authentication required");
+
   const { name } = c.req.param();
   if (!isValidSlug(name)) return badRequest("invalid project name");
 
@@ -63,11 +77,13 @@ app.post("/:name/import", async (c) => {
     token: repo.token,
     createdAt: new Date().toISOString(),
     githubUrl: body.url,
+    ownerId: userId,
   });
 
   return created({ name, remote: repo.remote, source: body.url });
 });
 
+// TODO: restrict read-only endpoints to authenticated users or project members
 app.get("/:name/files", async (c) => {
   const { name } = c.req.param();
   const project = await getProject(c.env.STATE, name);
@@ -77,6 +93,7 @@ app.get("/:name/files", async (c) => {
   return ok({ project: name, files });
 });
 
+// TODO: restrict read-only endpoints to authenticated users or project members
 app.get("/:name/log", async (c) => {
   const { name } = c.req.param();
   const project = await getProject(c.env.STATE, name);
@@ -87,6 +104,7 @@ app.get("/:name/log", async (c) => {
   return ok({ project: name, log });
 });
 
+// TODO: restrict read-only endpoints to authenticated users or project members
 app.get("/:name/provenance", async (c) => {
   const { name } = c.req.param();
   const project = await getProject(c.env.STATE, name);

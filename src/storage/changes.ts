@@ -1,5 +1,5 @@
-import { newId } from '../utils/ids';
-import type { Change } from '../types';
+import type { Change } from "../types";
+import { newId } from "../utils/ids";
 
 interface ChangeRow {
   id: string;
@@ -19,7 +19,7 @@ function rowToChange(row: ChangeRow): Change {
     id: row.id,
     project: row.project,
     workspace: row.workspace,
-    status: row.status as Change['status'],
+    status: row.status as Change["status"],
     createdAt: row.created_at,
   };
   if (row.agent_id !== null) change.agentId = row.agent_id;
@@ -38,21 +38,21 @@ export async function createChange(
     agentId?: string;
   },
 ): Promise<Change> {
-  const id = newId('chg');
+  const id = newId("chg");
   const createdAt = new Date().toISOString();
 
   await db
     .prepare(
-      'INSERT INTO changes (id, project, workspace, status, agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      "INSERT INTO changes (id, project, workspace, status, agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .bind(id, opts.project, opts.workspace, 'open', opts.agentId ?? null, createdAt)
+    .bind(id, opts.project, opts.workspace, "open", opts.agentId ?? null, createdAt)
     .run();
 
   const change: Change = {
     id,
     project: opts.project,
     workspace: opts.workspace,
-    status: 'open',
+    status: "open",
     createdAt,
   };
   if (opts.agentId !== undefined) change.agentId = opts.agentId;
@@ -60,10 +60,7 @@ export async function createChange(
 }
 
 export async function getChange(db: D1Database, id: string): Promise<Change | null> {
-  const row = await db
-    .prepare('SELECT * FROM changes WHERE id = ?')
-    .bind(id)
-    .first<ChangeRow>();
+  const row = await db.prepare("SELECT * FROM changes WHERE id = ?").bind(id).first<ChangeRow>();
 
   return row ? rowToChange(row) : null;
 }
@@ -71,15 +68,15 @@ export async function getChange(db: D1Database, id: string): Promise<Change | nu
 export async function listChanges(
   db: D1Database,
   project: string,
-  status?: Change['status'],
+  status?: Change["status"],
 ): Promise<Change[]> {
   const result = status
     ? await db
-        .prepare('SELECT * FROM changes WHERE project = ? AND status = ? ORDER BY created_at DESC')
+        .prepare("SELECT * FROM changes WHERE project = ? AND status = ? ORDER BY created_at DESC")
         .bind(project, status)
         .all<ChangeRow>()
     : await db
-        .prepare('SELECT * FROM changes WHERE project = ? ORDER BY created_at DESC')
+        .prepare("SELECT * FROM changes WHERE project = ? ORDER BY created_at DESC")
         .bind(project)
         .all<ChangeRow>();
 
@@ -89,7 +86,7 @@ export async function listChanges(
 export async function updateChangeStatus(
   db: D1Database,
   id: string,
-  status: Change['status'],
+  status: Change["status"],
   opts?: {
     evalScore?: number;
     evalPassed?: boolean;
@@ -99,7 +96,7 @@ export async function updateChangeStatus(
 ): Promise<void> {
   await db
     .prepare(
-      'UPDATE changes SET status = ?, eval_score = ?, eval_passed = ?, eval_reason = ?, merged_at = ? WHERE id = ?',
+      "UPDATE changes SET status = ?, eval_score = ?, eval_passed = ?, eval_reason = ?, merged_at = ? WHERE id = ?",
     )
     .bind(
       status,

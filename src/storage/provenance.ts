@@ -1,4 +1,4 @@
-import { newId } from '../utils/ids';
+import { newId } from "../utils/ids";
 
 export interface ProvenanceRecord {
   id: string;
@@ -47,12 +47,12 @@ export async function recordProvenance(
     evalScore?: number;
   },
 ): Promise<ProvenanceRecord> {
-  const id = newId('prv');
+  const id = newId("prv");
   const mergedAt = new Date().toISOString();
 
   await db
     .prepare(
-      'INSERT INTO provenance (id, commit_sha, project, workspace, change_id, agent_id, eval_score, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      "INSERT INTO provenance (id, commit_sha, project, workspace, change_id, agent_id, eval_score, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       id,
@@ -79,9 +79,12 @@ export async function recordProvenance(
   return record;
 }
 
-export async function getProvenance(db: D1Database, changeId: string): Promise<ProvenanceRecord | null> {
+export async function getProvenance(
+  db: D1Database,
+  changeId: string,
+): Promise<ProvenanceRecord | null> {
   const row = await db
-    .prepare('SELECT * FROM provenance WHERE change_id = ?')
+    .prepare("SELECT * FROM provenance WHERE change_id = ?")
     .bind(changeId)
     .first<ProvenanceRow>();
 
@@ -94,7 +97,7 @@ export async function listProvenance(
   limit = 50,
 ): Promise<ProvenanceRecord[]> {
   const result = await db
-    .prepare('SELECT * FROM provenance WHERE project = ? ORDER BY merged_at DESC LIMIT ?')
+    .prepare("SELECT * FROM provenance WHERE project = ? ORDER BY merged_at DESC LIMIT ?")
     .bind(project, limit)
     .all<ProvenanceRow>();
 

@@ -2,6 +2,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import app from "../src/index";
 import type { Env, ProjectEntry } from "../src/types";
 
+vi.mock("../src/storage/users", () => ({
+  getUserByToken: vi.fn(async (_, token: string) => {
+    if (token === "stratum_user_testtoken00000000000000000") {
+      return {
+        id: "user_test",
+        email: "test@example.com",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+    }
+    return null;
+  }),
+}));
+
+vi.mock("../src/storage/agents", () => ({
+  getAgentByToken: vi.fn(async () => null),
+}));
+
+vi.mock("../src/storage/sessions", () => ({
+  getSession: vi.fn(async () => null),
+  deleteSession: vi.fn(async () => {}),
+}));
+
+const AUTH_HEADERS = { Authorization: "Bearer stratum_user_testtoken00000000000000000" };
+
 // ─── KV mock ──────────────────────────────────────────────────────────────────
 
 function makeKV(): KVNamespace {
@@ -71,11 +96,19 @@ function makeEnv(): Env {
   };
 }
 
-function request(method: string, path: string, body?: unknown): Request {
+function request(
+  method: string,
+  path: string,
+  body?: unknown,
+  headers?: Record<string, string>,
+): Request {
   const hasBody = body !== undefined;
   return new Request(`http://localhost${path}`, {
     method,
-    headers: hasBody ? { "Content-Type": "application/json" } : {},
+    headers: {
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
+      ...(headers ?? {}),
+    },
     ...(hasBody ? { body: JSON.stringify(body) } : {}),
   });
 }
@@ -90,29 +123,45 @@ describe("POST /api/projects", () => {
   });
 
   it("creates a project and returns 201", async () => {
-    const res = await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    const res = await app.fetch(
+      request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS),
+      env,
+    );
     expect(res.status).toBe(201);
     const body = (await res.json()) as { name: string; commit: string };
     expect(body.name).toBe("my-project");
     expect(body.commit).toBe("sha_init");
   });
 
+  it("returns 401 when unauthenticated", async () => {
+    const res = await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    expect(res.status).toBe(401);
+  });
+
   it("rejects invalid name", async () => {
-    const res = await app.fetch(request("POST", "/api/projects", { name: "invalid name!" }), env);
+    const res = await app.fetch(
+      request("POST", "/api/projects", { name: "invalid name!" }, AUTH_HEADERS),
+      env,
+    );
     expect(res.status).toBe(400);
   });
 
   it("rejects missing name", async () => {
-    const res = await app.fetch(request("POST", "/api/projects", {}), env);
+    const res = await app.fetch(request("POST", "/api/projects", {}, AUTH_HEADERS), env);
     expect(res.status).toBe(400);
   });
 
   it("accepts custom files", async () => {
     const res = await app.fetch(
-      request("POST", "/api/projects", {
-        name: "custom",
-        files: { "hello.txt": "world" },
-      }),
+      request(
+        "POST",
+        "/api/projects",
+        {
+          name: "custom",
+          files: { "hello.txt": "world" },
+        },
+        AUTH_HEADERS,
+      ),
       env,
     );
     expect(res.status).toBe(201);
@@ -120,10 +169,15 @@ describe("POST /api/projects", () => {
 
   it("rejects non-string file contents", async () => {
     const res = await app.fetch(
-      request("POST", "/api/projects", {
-        name: "bad",
-        files: { "hello.txt": 42 },
-      }),
+      request(
+        "POST",
+        "/api/projects",
+        {
+          name: "bad",
+          files: { "hello.txt": 42 },
+        },
+        AUTH_HEADERS,
+      ),
       env,
     );
     expect(res.status).toBe(400);
@@ -141,7 +195,7 @@ describe("GET /api/projects", () => {
 
   it("lists created projects", async () => {
     const env = makeEnv();
-    await app.fetch(request("POST", "/api/projects", { name: "proj-a" }), env);
+    await app.fetch(request("POST", "/api/projects", { name: "proj-a" }, AUTH_HEADERS), env);
     const res = await app.fetch(request("GET", "/api/projects"), env);
     const body = (await res.json()) as { projects: ProjectEntry[] };
     expect(body.projects).toHaveLength(1);
@@ -152,7 +206,7 @@ describe("GET /api/projects", () => {
 describe("GET /api/projects/:name/files", () => {
   it("returns file list for existing project", async () => {
     const env = makeEnv();
-    await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
     const res = await app.fetch(request("GET", "/api/projects/my-project/files"), env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { files: string[] };
@@ -169,7 +223,7 @@ describe("GET /api/projects/:name/files", () => {
 describe("GET /api/projects/:name/log", () => {
   it("returns commit log for existing project", async () => {
     const env = makeEnv();
-    await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
     const res = await app.fetch(request("GET", "/api/projects/my-project/log"), env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { log: unknown[] };
@@ -195,12 +249,17 @@ describe("POST /api/workspaces/projects/:name/workspaces", () => {
       remote: "https://artifacts.example.com/repos/fix-bug",
       token: "tok_fix-bug",
     });
-    await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
   });
 
   it("forks a workspace and returns 201", async () => {
     const res = await app.fetch(
-      request("POST", "/api/workspaces/projects/my-project/workspaces", { name: "fix-bug" }),
+      request(
+        "POST",
+        "/api/workspaces/projects/my-project/workspaces",
+        { name: "fix-bug" },
+        AUTH_HEADERS,
+      ),
       env,
     );
     expect(res.status).toBe(201);
@@ -209,9 +268,17 @@ describe("POST /api/workspaces/projects/:name/workspaces", () => {
     expect(body.parent).toBe("my-project");
   });
 
+  it("returns 401 when unauthenticated", async () => {
+    const res = await app.fetch(
+      request("POST", "/api/workspaces/projects/my-project/workspaces", { name: "fix-bug" }),
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
   it("returns 404 for missing project", async () => {
     const res = await app.fetch(
-      request("POST", "/api/workspaces/projects/nope/workspaces", { name: "ws" }),
+      request("POST", "/api/workspaces/projects/nope/workspaces", { name: "ws" }, AUTH_HEADERS),
       env,
     );
     expect(res.status).toBe(404);
@@ -219,7 +286,7 @@ describe("POST /api/workspaces/projects/:name/workspaces", () => {
 
   it("auto-generates workspace name when not provided", async () => {
     const res = await app.fetch(
-      request("POST", "/api/workspaces/projects/my-project/workspaces", {}),
+      request("POST", "/api/workspaces/projects/my-project/workspaces", {}, AUTH_HEADERS),
       env,
     );
     expect(res.status).toBe(201);
@@ -238,19 +305,29 @@ describe("POST /api/workspaces/:name/commit", () => {
       remote: "https://artifacts.example.com/repos/fix-bug",
       token: "tok_fix-bug",
     });
-    await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
     await app.fetch(
-      request("POST", "/api/workspaces/projects/my-project/workspaces", { name: "fix-bug" }),
+      request(
+        "POST",
+        "/api/workspaces/projects/my-project/workspaces",
+        { name: "fix-bug" },
+        AUTH_HEADERS,
+      ),
       env,
     );
   });
 
   it("commits changes and returns sha", async () => {
     const res = await app.fetch(
-      request("POST", "/api/workspaces/fix-bug/commit", {
-        files: { "src/index.ts": "export const x = 1;" },
-        message: "Fix bug",
-      }),
+      request(
+        "POST",
+        "/api/workspaces/fix-bug/commit",
+        {
+          files: { "src/index.ts": "export const x = 1;" },
+          message: "Fix bug",
+        },
+        AUTH_HEADERS,
+      ),
       env,
     );
     expect(res.status).toBe(200);
@@ -261,9 +338,14 @@ describe("POST /api/workspaces/:name/commit", () => {
 
   it("returns 400 for missing message", async () => {
     const res = await app.fetch(
-      request("POST", "/api/workspaces/fix-bug/commit", {
-        files: { "src/index.ts": "content" },
-      }),
+      request(
+        "POST",
+        "/api/workspaces/fix-bug/commit",
+        {
+          files: { "src/index.ts": "content" },
+        },
+        AUTH_HEADERS,
+      ),
       env,
     );
     expect(res.status).toBe(400);
@@ -271,10 +353,15 @@ describe("POST /api/workspaces/:name/commit", () => {
 
   it("returns 400 for non-string file values", async () => {
     const res = await app.fetch(
-      request("POST", "/api/workspaces/fix-bug/commit", {
-        files: { "src/index.ts": 42 },
-        message: "oops",
-      }),
+      request(
+        "POST",
+        "/api/workspaces/fix-bug/commit",
+        {
+          files: { "src/index.ts": 42 },
+          message: "oops",
+        },
+        AUTH_HEADERS,
+      ),
       env,
     );
     expect(res.status).toBe(400);
@@ -282,10 +369,15 @@ describe("POST /api/workspaces/:name/commit", () => {
 
   it("returns 404 for missing workspace", async () => {
     const res = await app.fetch(
-      request("POST", "/api/workspaces/nope/commit", {
-        files: { "f.ts": "x" },
-        message: "msg",
-      }),
+      request(
+        "POST",
+        "/api/workspaces/nope/commit",
+        {
+          files: { "f.ts": "x" },
+          message: "msg",
+        },
+        AUTH_HEADERS,
+      ),
       env,
     );
     expect(res.status).toBe(404);
@@ -302,9 +394,14 @@ describe("POST /api/workspaces/:name/merge", () => {
       remote: "https://artifacts.example.com/repos/fix-bug",
       token: "tok_fix-bug",
     });
-    await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
     await app.fetch(
-      request("POST", "/api/workspaces/projects/my-project/workspaces", { name: "fix-bug" }),
+      request(
+        "POST",
+        "/api/workspaces/projects/my-project/workspaces",
+        { name: "fix-bug" },
+        AUTH_HEADERS,
+      ),
       env,
     );
   });
@@ -313,7 +410,7 @@ describe("POST /api/workspaces/:name/merge", () => {
     const res = await app.fetch(request("POST", "/api/workspaces/fix-bug/merge"), env);
     expect(res.status).toBe(410);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain('/api/projects/:name/changes');
+    expect(body.error).toContain("/api/projects/:name/changes");
   });
 
   it("returns 410 Gone even for missing workspace (deprecated endpoint)", async () => {
@@ -332,27 +429,43 @@ describe("DELETE /api/workspaces/:name", () => {
       remote: "https://artifacts.example.com/repos/fix-bug",
       token: "tok_fix-bug",
     });
-    await app.fetch(request("POST", "/api/projects", { name: "my-project" }), env);
+    await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
     await app.fetch(
-      request("POST", "/api/workspaces/projects/my-project/workspaces", { name: "fix-bug" }),
+      request(
+        "POST",
+        "/api/workspaces/projects/my-project/workspaces",
+        { name: "fix-bug" },
+        AUTH_HEADERS,
+      ),
       env,
     );
   });
 
   it("deletes workspace", async () => {
-    const res = await app.fetch(request("DELETE", "/api/workspaces/fix-bug"), env);
+    const res = await app.fetch(
+      request("DELETE", "/api/workspaces/fix-bug", undefined, AUTH_HEADERS),
+      env,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { deleted: boolean };
     expect(body.deleted).toBe(true);
   });
 
+  it("returns 401 when unauthenticated", async () => {
+    const res = await app.fetch(request("DELETE", "/api/workspaces/fix-bug"), env);
+    expect(res.status).toBe(401);
+  });
+
   it("returns 404 for missing workspace", async () => {
-    const res = await app.fetch(request("DELETE", "/api/workspaces/nope"), env);
+    const res = await app.fetch(
+      request("DELETE", "/api/workspaces/nope", undefined, AUTH_HEADERS),
+      env,
+    );
     expect(res.status).toBe(404);
   });
 
   it("workspace is gone after delete (merge returns 410 deprecated)", async () => {
-    await app.fetch(request("DELETE", "/api/workspaces/fix-bug"), env);
+    await app.fetch(request("DELETE", "/api/workspaces/fix-bug", undefined, AUTH_HEADERS), env);
     const res = await app.fetch(request("POST", "/api/workspaces/fix-bug/merge"), env);
     expect(res.status).toBe(410);
   });

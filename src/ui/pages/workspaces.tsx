@@ -1,5 +1,5 @@
-import type { FC } from 'hono/jsx';
-import { Layout } from '../layout';
+import type { FC } from "hono/jsx";
+import { Layout } from "../layout";
 
 interface WorkspacesProps {
   project: string;
@@ -11,7 +11,9 @@ export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces }) => 
     <Layout title={`Workspaces — ${project}`}>
       <div class="page-header">
         <h1>Workspaces</h1>
-        <a class="btn" href={`/ui/projects/${project}`}>Back to repo</a>
+        <a class="btn" href={`/ui/projects/${project}`}>
+          Back to repo
+        </a>
       </div>
 
       {workspaces.length === 0 ? (

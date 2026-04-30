@@ -8,12 +8,16 @@ import {
   setWorkspace,
 } from "../storage/state";
 import type { Env } from "../types";
-import { badRequest, created, notFound, ok } from "../utils/response";
+import { badRequest, created, notFound, ok, unauthorized } from "../utils/response";
 import { isStringRecord, isValidSlug } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.post("/projects/:name/workspaces", async (c) => {
+  const userId = c.get("userId");
+  const agentId = c.get("agentId");
+  if (!userId && !agentId) return unauthorized("Authentication required");
+
   const { name: projectName } = c.req.param();
   const project = await getProject(c.env.STATE, projectName);
   if (!project) return notFound("Project", projectName);
@@ -48,6 +52,10 @@ app.get("/projects/:name/workspaces", async (c) => {
 });
 
 app.post("/:name/commit", async (c) => {
+  const userId = c.get("userId");
+  const agentId = c.get("agentId");
+  if (!userId && !agentId) return unauthorized("Authentication required");
+
   const { name: workspaceName } = c.req.param();
   const workspace = await getWorkspace(c.env.STATE, workspaceName);
   if (!workspace) return notFound("Workspace", workspaceName);
@@ -73,12 +81,16 @@ app.post("/:name/commit", async (c) => {
 
 app.post("/:name/merge", (c) => {
   return c.json(
-    { error: 'This endpoint is deprecated. Use POST /api/projects/:name/changes instead.' },
+    { error: "This endpoint is deprecated. Use POST /api/projects/:name/changes instead." },
     410,
   );
 });
 
 app.delete("/:name", async (c) => {
+  const userId = c.get("userId");
+  const agentId = c.get("agentId");
+  if (!userId && !agentId) return unauthorized("Authentication required");
+
   const { name: workspaceName } = c.req.param();
   const workspace = await getWorkspace(c.env.STATE, workspaceName);
   if (!workspace) return notFound("Workspace", workspaceName);

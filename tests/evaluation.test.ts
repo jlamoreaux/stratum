@@ -1,25 +1,27 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DiffEvaluator } from '../src/evaluation/diff-evaluator';
-import { WebhookEvaluator } from '../src/evaluation/webhook-evaluator';
-import { CompositeEvaluator } from '../src/evaluation/composite-evaluator';
-import { loadPolicy } from '../src/evaluation/policy-loader';
-import type { EvalPolicy, EvalResult, Evaluator } from '../src/evaluation/types';
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CompositeEvaluator } from "../src/evaluation/composite-evaluator";
+import { DiffEvaluator } from "../src/evaluation/diff-evaluator";
+import { loadPolicy } from "../src/evaluation/policy-loader";
+import type { EvalPolicy, EvalResult, Evaluator } from "../src/evaluation/types";
+import { WebhookEvaluator } from "../src/evaluation/webhook-evaluator";
 
-vi.mock('../src/storage/git-ops', () => ({
+vi.mock("../src/storage/git-ops", () => ({
   readFileFromRepo: vi.fn(),
 }));
 
-import { readFileFromRepo } from '../src/storage/git-ops';
+import { readFileFromRepo } from "../src/storage/git-ops";
 const mockReadFileFromRepo = vi.mocked(readFileFromRepo);
 
-function makeDiff(opts: {
-  files?: Array<{ path: string; addedLines?: number; removedLines?: number }>;
-} = {}): string {
-  const files = opts.files ?? [{ path: 'src/index.ts', addedLines: 3, removedLines: 1 }];
+function makeDiff(
+  opts: {
+    files?: Array<{ path: string; addedLines?: number; removedLines?: number }>;
+  } = {},
+): string {
+  const files = opts.files ?? [{ path: "src/index.ts", addedLines: 3, removedLines: 1 }];
   return files
     .map(({ path, addedLines = 1, removedLines = 0 }) => {
-      const added = Array.from({ length: addedLines }, (_, i) => `+line${i + 1}`).join('\n');
-      const removed = Array.from({ length: removedLines }, (_, i) => `-old${i + 1}`).join('\n');
+      const added = Array.from({ length: addedLines }, (_, i) => `+line${i + 1}`).join("\n");
+      const removed = Array.from({ length: removedLines }, (_, i) => `-old${i + 1}`).join("\n");
       const lines = [
         `diff --git a/${path} b/${path}`,
         `--- a/${path}`,
@@ -27,74 +29,74 @@ function makeDiff(opts: {
         removed,
         added,
       ].filter(Boolean);
-      return lines.join('\n');
+      return lines.join("\n");
     })
-    .join('\n');
+    .join("\n");
 }
 
 function makePolicy(overrides: Partial<EvalPolicy> = {}): EvalPolicy {
   return {
-    evaluators: [{ type: 'diff' }],
+    evaluators: [{ type: "diff" }],
     requireAll: true,
     minScore: 0.7,
     ...overrides,
   };
 }
 
-describe('DiffEvaluator', () => {
+describe("DiffEvaluator", () => {
   const evaluator = new DiffEvaluator();
 
-  it('passes a clean small diff', async () => {
-    const diff = makeDiff({ files: [{ path: 'src/index.ts', addedLines: 5, removedLines: 2 }] });
-    const policy = makePolicy({ evaluators: [{ type: 'diff' }] });
+  it("passes a clean small diff", async () => {
+    const diff = makeDiff({ files: [{ path: "src/index.ts", addedLines: 5, removedLines: 2 }] });
+    const policy = makePolicy({ evaluators: [{ type: "diff" }] });
     const result = await evaluator.evaluate(diff, policy);
     expect(result.passed).toBe(true);
     expect(result.score).toBe(1.0);
   });
 
-  it('fails when lines exceed maxLines', async () => {
+  it("fails when lines exceed maxLines", async () => {
     const diff = makeDiff({
-      files: [{ path: 'src/big.ts', addedLines: 600, removedLines: 0 }],
+      files: [{ path: "src/big.ts", addedLines: 600, removedLines: 0 }],
     });
-    const policy = makePolicy({ evaluators: [{ type: 'diff', maxLines: 500 }], minScore: 1.0 });
+    const policy = makePolicy({ evaluators: [{ type: "diff", maxLines: 500 }], minScore: 1.0 });
     const result = await evaluator.evaluate(diff, policy);
     expect(result.passed).toBe(false);
     expect(result.score).toBeLessThan(1.0);
     expect(result.issues).toBeDefined();
-    expect(result.issues?.some((i) => i.includes('maxLines'))).toBe(true);
+    expect(result.issues?.some((i) => i.includes("maxLines"))).toBe(true);
   });
 
-  it('fails when files exceed maxFiles', async () => {
+  it("fails when files exceed maxFiles", async () => {
     const files = Array.from({ length: 25 }, (_, i) => ({
       path: `src/file${i}.ts`,
       addedLines: 1,
     }));
     const diff = makeDiff({ files });
-    const policy = makePolicy({ evaluators: [{ type: 'diff', maxFiles: 20 }], minScore: 1.0 });
+    const policy = makePolicy({ evaluators: [{ type: "diff", maxFiles: 20 }], minScore: 1.0 });
     const result = await evaluator.evaluate(diff, policy);
     expect(result.passed).toBe(false);
-    expect(result.issues?.some((i) => i.includes('maxFiles'))).toBe(true);
+    expect(result.issues?.some((i) => i.includes("maxFiles"))).toBe(true);
   });
 
-  it('fails when added file matches forbidden pattern', async () => {
-    const diff = makeDiff({ files: [{ path: 'yarn.lock', addedLines: 2 }] });
+  it("fails when added file matches forbidden pattern", async () => {
+    const diff = makeDiff({ files: [{ path: "yarn.lock", addedLines: 2 }] });
     const policy = makePolicy({
-      evaluators: [{ type: 'diff', forbiddenPatterns: ['*.lock'] }],
+      evaluators: [{ type: "diff", forbiddenPatterns: ["*.lock"] }],
       minScore: 1.0,
     });
     const result = await evaluator.evaluate(diff, policy);
     expect(result.passed).toBe(false);
-    expect(result.issues?.some((i) => i.includes('forbidden'))).toBe(true);
+    expect(result.issues?.some((i) => i.includes("forbidden"))).toBe(true);
   });
 
-  it('score decrements by 0.25 per violation — 2 violations yields score 0.5', async () => {
+  it("score decrements by 0.25 per violation — 2 violations yields score 0.5", async () => {
     const files = Array.from({ length: 25 }, (_, i) => ({
       path: `src/file${i}.ts`,
       addedLines: 600,
     }));
     const diff = makeDiff({ files });
     const policy = makePolicy({
-      evaluators: [{ type: 'diff', maxLines: 500, maxFiles: 20 }],
+      evaluators: [{ type: "diff", maxLines: 500, maxFiles: 20 }],
       minScore: 0.3,
     });
     const result = await evaluator.evaluate(diff, policy);
@@ -102,43 +104,43 @@ describe('DiffEvaluator', () => {
     expect(result.passed).toBe(true);
   });
 
-  it('fails requiredPatterns when no file matches', async () => {
-    const diff = makeDiff({ files: [{ path: 'src/index.ts', addedLines: 2 }] });
+  it("fails requiredPatterns when no file matches", async () => {
+    const diff = makeDiff({ files: [{ path: "src/index.ts", addedLines: 2 }] });
     const policy = makePolicy({
-      evaluators: [{ type: 'diff', requiredPatterns: ['tests/*'] }],
+      evaluators: [{ type: "diff", requiredPatterns: ["tests/*"] }],
       minScore: 1.0,
     });
     const result = await evaluator.evaluate(diff, policy);
     expect(result.passed).toBe(false);
-    expect(result.issues?.some((i) => i.includes('required pattern'))).toBe(true);
+    expect(result.issues?.some((i) => i.includes("required pattern"))).toBe(true);
   });
 
-  it('passes requiredPatterns when a file matches', async () => {
+  it("passes requiredPatterns when a file matches", async () => {
     const diff = makeDiff({
       files: [
-        { path: 'src/index.ts', addedLines: 2 },
-        { path: 'tests/index.test.ts', addedLines: 1 },
+        { path: "src/index.ts", addedLines: 2 },
+        { path: "tests/index.test.ts", addedLines: 1 },
       ],
     });
     const policy = makePolicy({
-      evaluators: [{ type: 'diff', requiredPatterns: ['tests/*'] }],
+      evaluators: [{ type: "diff", requiredPatterns: ["tests/*"] }],
     });
     const result = await evaluator.evaluate(diff, policy);
     expect(result.passed).toBe(true);
   });
 });
 
-describe('WebhookEvaluator', () => {
+describe("WebhookEvaluator", () => {
   const evaluator = new WebhookEvaluator();
 
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('returns result from successful 200 response', async () => {
-    const mockResponse = { score: 0.9, passed: true, reason: 'Looks good' };
+  it("returns result from successful 200 response", async () => {
+    const mockResponse = { score: 0.9, passed: true, reason: "Looks good" };
     vi.stubGlobal(
-      'fetch',
+      "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
@@ -147,17 +149,17 @@ describe('WebhookEvaluator', () => {
     );
 
     const policy = makePolicy({
-      evaluators: [{ type: 'webhook', url: 'https://example.com/eval' }],
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
     });
-    const result = await evaluator.evaluate('diff content', policy);
+    const result = await evaluator.evaluate("diff content", policy);
     expect(result.passed).toBe(true);
     expect(result.score).toBe(0.9);
-    expect(result.reason).toBe('Looks good');
+    expect(result.reason).toBe("Looks good");
   });
 
-  it('returns failed result on non-2xx', async () => {
+  it("returns failed result on non-2xx", async () => {
     vi.stubGlobal(
-      'fetch',
+      "fetch",
       vi.fn().mockResolvedValue({
         ok: false,
         status: 422,
@@ -166,60 +168,57 @@ describe('WebhookEvaluator', () => {
     );
 
     const policy = makePolicy({
-      evaluators: [{ type: 'webhook', url: 'https://example.com/eval' }],
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
     });
-    const result = await evaluator.evaluate('diff content', policy);
+    const result = await evaluator.evaluate("diff content", policy);
     expect(result.passed).toBe(false);
     expect(result.score).toBe(0);
-    expect(result.reason).toContain('422');
+    expect(result.reason).toContain("422");
   });
 
-  it('returns failed result when fetch throws (timeout)', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockRejectedValue(new Error('The operation was aborted')),
-    );
+  it("returns failed result when fetch throws (timeout)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("The operation was aborted")));
 
     const policy = makePolicy({
-      evaluators: [{ type: 'webhook', url: 'https://example.com/eval', timeoutMs: 1 }],
+      evaluators: [{ type: "webhook", url: "https://example.com/eval", timeoutMs: 1 }],
     });
-    const result = await evaluator.evaluate('diff content', policy);
+    const result = await evaluator.evaluate("diff content", policy);
     expect(result.passed).toBe(false);
     expect(result.score).toBe(0);
-    expect(result.reason).toContain('Webhook failed');
+    expect(result.reason).toContain("Webhook failed");
   });
 
-  it('adds X-Stratum-Signature header when secret is configured', async () => {
+  it("adds X-Stratum-Signature header when secret is configured", async () => {
     let capturedHeaders: Record<string, string> = {};
     vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation((url: string, init: RequestInit) => {
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
         capturedHeaders = init.headers as Record<string, string>;
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ score: 1.0, passed: true, reason: 'ok' }),
+          json: async () => ({ score: 1.0, passed: true, reason: "ok" }),
         });
       }),
     );
 
     const policy = makePolicy({
-      evaluators: [{ type: 'webhook', url: 'https://example.com/eval', secret: 'mysecret' }],
+      evaluators: [{ type: "webhook", url: "https://example.com/eval", secret: "mysecret" }],
     });
-    await evaluator.evaluate('diff content', policy);
+    await evaluator.evaluate("diff content", policy);
 
-    expect(capturedHeaders['X-Stratum-Signature']).toBeDefined();
-    expect(capturedHeaders['X-Stratum-Signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(capturedHeaders["X-Stratum-Signature"]).toBeDefined();
+    expect(capturedHeaders["X-Stratum-Signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
   });
 });
 
-describe('CompositeEvaluator', () => {
+describe("CompositeEvaluator", () => {
   function makePassingEvaluator(score = 1.0): Evaluator {
     return {
       evaluate: vi.fn().mockResolvedValue({
         score,
         passed: true,
-        reason: 'passed',
+        reason: "passed",
       } satisfies EvalResult),
     };
   }
@@ -229,146 +228,152 @@ describe('CompositeEvaluator', () => {
       evaluate: vi.fn().mockResolvedValue({
         score,
         passed: false,
-        reason: 'failed',
-        issues: ['something went wrong'],
+        reason: "failed",
+        issues: ["something went wrong"],
       } satisfies EvalResult),
     };
   }
 
-  it('requireAll=true: fails if any evaluator fails', async () => {
+  it("requireAll=true: fails if any evaluator fails", async () => {
     const composite = new CompositeEvaluator([makePassingEvaluator(), makeFailingEvaluator()]);
     const policy = makePolicy({ requireAll: true });
-    const result = await composite.evaluateAndAggregate('diff', policy);
+    const result = await composite.evaluateAndAggregate("diff", policy);
     expect(result.passed).toBe(false);
   });
 
-  it('requireAll=true: passes when all evaluators pass', async () => {
+  it("requireAll=true: passes when all evaluators pass", async () => {
     const composite = new CompositeEvaluator([makePassingEvaluator(), makePassingEvaluator()]);
     const policy = makePolicy({ requireAll: true });
-    const result = await composite.evaluateAndAggregate('diff', policy);
+    const result = await composite.evaluateAndAggregate("diff", policy);
     expect(result.passed).toBe(true);
   });
 
-  it('requireAll=false: passes if any evaluator passes', async () => {
+  it("requireAll=false: passes if any evaluator passes", async () => {
     const composite = new CompositeEvaluator([makeFailingEvaluator(), makePassingEvaluator()]);
     const policy = makePolicy({ requireAll: false });
-    const result = await composite.evaluateAndAggregate('diff', policy);
+    const result = await composite.evaluateAndAggregate("diff", policy);
     expect(result.passed).toBe(true);
   });
 
-  it('requireAll=false: fails if all evaluators fail', async () => {
+  it("requireAll=false: fails if all evaluators fail", async () => {
     const composite = new CompositeEvaluator([makeFailingEvaluator(), makeFailingEvaluator()]);
     const policy = makePolicy({ requireAll: false });
-    const result = await composite.evaluateAndAggregate('diff', policy);
+    const result = await composite.evaluateAndAggregate("diff", policy);
     expect(result.passed).toBe(false);
   });
 
-  it('runs all evaluators in parallel (spy on evaluate calls)', async () => {
+  it("runs all evaluators in parallel (spy on evaluate calls)", async () => {
     const e1 = makePassingEvaluator();
     const e2 = makePassingEvaluator();
     const composite = new CompositeEvaluator([e1, e2]);
     const policy = makePolicy();
-    await composite.evaluate('diff', policy);
+    await composite.evaluate("diff", policy);
     expect(e1.evaluate).toHaveBeenCalledOnce();
     expect(e2.evaluate).toHaveBeenCalledOnce();
   });
 
-  it('aggregates scores as average when requireAll=true', async () => {
-    const composite = new CompositeEvaluator([makePassingEvaluator(0.8), makePassingEvaluator(0.6)]);
+  it("aggregates scores as average when requireAll=true", async () => {
+    const composite = new CompositeEvaluator([
+      makePassingEvaluator(0.8),
+      makePassingEvaluator(0.6),
+    ]);
     const policy = makePolicy({ requireAll: true });
-    const result = await composite.evaluateAndAggregate('diff', policy);
+    const result = await composite.evaluateAndAggregate("diff", policy);
     expect(result.score).toBeCloseTo(0.7);
   });
 
-  it('aggregates scores as max when requireAll=false', async () => {
-    const composite = new CompositeEvaluator([makeFailingEvaluator(0.2), makePassingEvaluator(0.9)]);
+  it("aggregates scores as max when requireAll=false", async () => {
+    const composite = new CompositeEvaluator([
+      makeFailingEvaluator(0.2),
+      makePassingEvaluator(0.9),
+    ]);
     const policy = makePolicy({ requireAll: false });
-    const result = await composite.evaluateAndAggregate('diff', policy);
+    const result = await composite.evaluateAndAggregate("diff", policy);
     expect(result.score).toBe(0.9);
   });
 
-  it('collects issues from all evaluators', async () => {
+  it("collects issues from all evaluators", async () => {
     const e1: Evaluator = {
       evaluate: vi.fn().mockResolvedValue({
         score: 0.5,
         passed: false,
-        reason: 'fail1',
-        issues: ['issue A'],
+        reason: "fail1",
+        issues: ["issue A"],
       } satisfies EvalResult),
     };
     const e2: Evaluator = {
       evaluate: vi.fn().mockResolvedValue({
         score: 0.5,
         passed: false,
-        reason: 'fail2',
-        issues: ['issue B'],
+        reason: "fail2",
+        issues: ["issue B"],
       } satisfies EvalResult),
     };
     const composite = new CompositeEvaluator([e1, e2]);
     const policy = makePolicy({ requireAll: true });
-    const result = await composite.evaluateAndAggregate('diff', policy);
-    expect(result.issues).toContain('issue A');
-    expect(result.issues).toContain('issue B');
+    const result = await composite.evaluateAndAggregate("diff", policy);
+    expect(result.issues).toContain("issue A");
+    expect(result.issues).toContain("issue B");
   });
 
   it('reason is "All evaluators passed." when all pass', async () => {
     const composite = new CompositeEvaluator([makePassingEvaluator(), makePassingEvaluator()]);
     const policy = makePolicy({ requireAll: true });
-    const result = await composite.evaluateAndAggregate('diff', policy);
-    expect(result.reason).toBe('All evaluators passed.');
+    const result = await composite.evaluateAndAggregate("diff", policy);
+    expect(result.reason).toBe("All evaluators passed.");
   });
 });
 
-describe('loadPolicy', () => {
+describe("loadPolicy", () => {
   beforeEach(() => {
     mockReadFileFromRepo.mockReset();
   });
 
-  it('returns DEFAULT_POLICY when readFileFromRepo returns null', async () => {
+  it("returns DEFAULT_POLICY when readFileFromRepo returns null", async () => {
     mockReadFileFromRepo.mockResolvedValue(null as unknown as string);
-    const policy = await loadPolicy('https://repo.example.com', 'tok');
-    expect(policy.evaluators).toEqual([{ type: 'diff' }]);
+    const policy = await loadPolicy("https://repo.example.com", "tok");
+    expect(policy.evaluators).toEqual([{ type: "diff" }]);
     expect(policy.requireAll).toBe(true);
     expect(policy.minScore).toBe(0.7);
   });
 
-  it('parses valid stratum.config.json', async () => {
+  it("parses valid stratum.config.json", async () => {
     const config = {
-      evaluators: [{ type: 'webhook', url: 'https://example.com/eval' }],
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
       requireAll: false,
       minScore: 0.5,
     };
     mockReadFileFromRepo.mockResolvedValue(JSON.stringify(config));
-    const policy = await loadPolicy('https://repo.example.com', 'tok');
+    const policy = await loadPolicy("https://repo.example.com", "tok");
     expect(policy.requireAll).toBe(false);
     expect(policy.minScore).toBe(0.5);
-    expect(policy.evaluators[0]?.type).toBe('webhook');
+    expect(policy.evaluators[0]?.type).toBe("webhook");
   });
 
-  it('merges parsed config with defaults', async () => {
-    const config = { evaluators: [{ type: 'diff', maxLines: 100 }] };
+  it("merges parsed config with defaults", async () => {
+    const config = { evaluators: [{ type: "diff", maxLines: 100 }] };
     mockReadFileFromRepo.mockResolvedValue(JSON.stringify(config));
-    const policy = await loadPolicy('https://repo.example.com', 'tok');
+    const policy = await loadPolicy("https://repo.example.com", "tok");
     expect(policy.requireAll).toBe(true);
     expect(policy.minScore).toBe(0.7);
-    expect(policy.evaluators[0]).toMatchObject({ type: 'diff', maxLines: 100 });
+    expect(policy.evaluators[0]).toMatchObject({ type: "diff", maxLines: 100 });
   });
 
-  it('returns DEFAULT_POLICY on invalid JSON', async () => {
-    mockReadFileFromRepo.mockResolvedValue('not { valid json');
-    const policy = await loadPolicy('https://repo.example.com', 'tok');
-    expect(policy.evaluators).toEqual([{ type: 'diff' }]);
+  it("returns DEFAULT_POLICY on invalid JSON", async () => {
+    mockReadFileFromRepo.mockResolvedValue("not { valid json");
+    const policy = await loadPolicy("https://repo.example.com", "tok");
+    expect(policy.evaluators).toEqual([{ type: "diff" }]);
   });
 
-  it('returns DEFAULT_POLICY when evaluators is missing', async () => {
+  it("returns DEFAULT_POLICY when evaluators is missing", async () => {
     mockReadFileFromRepo.mockResolvedValue(JSON.stringify({ minScore: 0.5 }));
-    const policy = await loadPolicy('https://repo.example.com', 'tok');
-    expect(policy.evaluators).toEqual([{ type: 'diff' }]);
+    const policy = await loadPolicy("https://repo.example.com", "tok");
+    expect(policy.evaluators).toEqual([{ type: "diff" }]);
   });
 
-  it('returns DEFAULT_POLICY when readFileFromRepo throws', async () => {
-    mockReadFileFromRepo.mockRejectedValue(new Error('Network error'));
-    const policy = await loadPolicy('https://repo.example.com', 'tok');
-    expect(policy.evaluators).toEqual([{ type: 'diff' }]);
+  it("returns DEFAULT_POLICY when readFileFromRepo throws", async () => {
+    mockReadFileFromRepo.mockRejectedValue(new Error("Network error"));
+    const policy = await loadPolicy("https://repo.example.com", "tok");
+    expect(policy.evaluators).toEqual([{ type: "diff" }]);
   });
 });

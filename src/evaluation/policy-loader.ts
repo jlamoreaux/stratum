@@ -1,15 +1,15 @@
-import { readFileFromRepo } from '../storage/git-ops';
-import type { EvalPolicy } from './types';
+import { readFileFromRepo } from "../storage/git-ops";
+import type { EvalPolicy } from "./types";
 
 const DEFAULT_POLICY: EvalPolicy = {
-  evaluators: [{ type: 'diff' }],
+  evaluators: [{ type: "diff" }],
   requireAll: true,
   minScore: 0.7,
 };
 
 export async function loadPolicy(remote: string, token: string): Promise<EvalPolicy> {
   try {
-    const content = await readFileFromRepo(remote, token, 'stratum.config.json');
+    const content = await readFileFromRepo(remote, token, "stratum.config.json");
     if (content === null || content === undefined) return DEFAULT_POLICY;
 
     let parsed: unknown;
@@ -20,10 +20,10 @@ export async function loadPolicy(remote: string, token: string): Promise<EvalPol
     }
 
     if (
-      typeof parsed !== 'object' ||
+      typeof parsed !== "object" ||
       parsed === null ||
-      !('evaluators' in parsed) ||
-      !Array.isArray((parsed as Record<string, unknown>)['evaluators'])
+      !("evaluators" in parsed) ||
+      !Array.isArray((parsed as Record<string, unknown>).evaluators)
     ) {
       return DEFAULT_POLICY;
     }

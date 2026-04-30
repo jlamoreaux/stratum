@@ -1,41 +1,44 @@
-import { Hono } from 'hono';
-import { createChange, getChange, listChanges, updateChangeStatus } from '../storage/changes';
-import { getDiffBetweenRepos, mergeWorkspaceIntoProject } from '../storage/git-ops';
-import { getProject, getWorkspace } from '../storage/state';
-import { recordProvenance } from '../storage/provenance';
+import { Hono } from "hono";
 import {
   CompositeEvaluator,
   DiffEvaluator,
   LLMEvaluator,
   WebhookEvaluator,
   loadPolicy,
-} from '../evaluation';
-import type { Evaluator } from '../evaluation/types';
-import type { Change, Env } from '../types';
-import { badRequest, created, notFound, ok } from '../utils/response';
-import { publishEvent } from '../queue/events';
+} from "../evaluation";
+import type { Evaluator } from "../evaluation/types";
+import { publishEvent } from "../queue/events";
+import { createChange, getChange, listChanges, updateChangeStatus } from "../storage/changes";
+import { getDiffBetweenRepos, mergeWorkspaceIntoProject } from "../storage/git-ops";
+import { recordProvenance } from "../storage/provenance";
+import { getProject, getWorkspace } from "../storage/state";
+import type { Change, Env } from "../types";
+import { badRequest, created, notFound, ok, unauthorized } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.post('/projects/:name/changes', async (c) => {
+app.post("/projects/:name/changes", async (c) => {
+  const userId = c.get("userId");
+  const agentId = c.get("agentId");
+  if (!userId && !agentId) return unauthorized("Authentication required");
+
   const { name: projectName } = c.req.param();
 
   const project = await getProject(c.env.STATE, projectName);
-  if (!project) return notFound('Project', projectName);
+  if (!project) return notFound("Project", projectName);
 
   const body = await c.req.json<{ workspace?: unknown }>().catch(() => ({ workspace: undefined }));
-  if (typeof body.workspace !== 'string' || !body.workspace.trim()) {
-    return badRequest('workspace is required');
+  if (typeof body.workspace !== "string" || !body.workspace.trim()) {
+    return badRequest("workspace is required");
   }
 
   const workspace = await getWorkspace(c.env.STATE, body.workspace);
-  if (!workspace) return notFound('Workspace', body.workspace);
+  if (!workspace) return notFound("Workspace", body.workspace);
 
   if (workspace.parent !== projectName) {
     return badRequest(`Workspace '${body.workspace}' does not belong to project '${projectName}'`);
   }
 
-  const agentId = c.get('agentId');
   const change = await createChange(c.env.DB, {
     project: projectName,
     workspace: body.workspace,
@@ -43,7 +46,7 @@ app.post('/projects/:name/changes', async (c) => {
   });
 
   await publishEvent(c.env.EVENTS_QUEUE, {
-    type: 'change.created',
+    type: "change.created",
     changeId: change.id,
     project: projectName,
     workspace: body.workspace,
@@ -60,11 +63,11 @@ app.post('/projects/:name/changes', async (c) => {
 
   const evaluators: Evaluator[] = policy.evaluators.flatMap((cfg) => {
     switch (cfg.type) {
-      case 'diff':
+      case "diff":
         return [new DiffEvaluator()];
-      case 'webhook':
+      case "webhook":
         return [new WebhookEvaluator()];
-      case 'llm':
+      case "llm":
         if (c.env.AI) return [new LLMEvaluator(c.env.AI)];
         return [];
       default:
@@ -72,11 +75,14 @@ app.post('/projects/:name/changes', async (c) => {
     }
   });
 
-  const composite = new CompositeEvaluator(evaluators.length > 0 ? evaluators : [new DiffEvaluator()]);
+  const composite = new CompositeEvaluator(
+    evaluators.length > 0 ? evaluators : [new DiffEvaluator()],
+  );
   const evalResult = await composite.evaluateAndAggregate(diff, policy);
 
-  const newStatus: Change['status'] = evalResult.passed ? 'approved' : 'open';
+  const newStatus: Change["status"] = evalResult.passed ? "approved" : "open";
 
+  // TODO: write per-evaluator results to eval_runs table (currently only aggregate stored on changes)
   await updateChangeStatus(c.env.DB, change.id, newStatus, {
     evalScore: evalResult.score,
     evalPassed: evalResult.passed,
@@ -84,7 +90,7 @@ app.post('/projects/:name/changes', async (c) => {
   });
 
   await publishEvent(c.env.EVENTS_QUEUE, {
-    type: 'change.evaluated',
+    type: "change.evaluated",
     changeId: change.id,
     score: evalResult.score,
     passed: evalResult.passed,
@@ -101,55 +107,62 @@ app.post('/projects/:name/changes', async (c) => {
   return created({ change: updatedChange, eval: evalResult });
 });
 
-app.get('/projects/:name/changes', async (c) => {
+app.get("/projects/:name/changes", async (c) => {
   const { name: projectName } = c.req.param();
 
   const project = await getProject(c.env.STATE, projectName);
-  if (!project) return notFound('Project', projectName);
+  if (!project) return notFound("Project", projectName);
 
-  const statusParam = c.req.query('status');
-  const validStatuses: Change['status'][] = ['open', 'approved', 'merged', 'rejected'];
+  const statusParam = c.req.query("status");
+  const validStatuses: Change["status"][] = ["open", "approved", "merged", "rejected"];
   const status =
     statusParam && (validStatuses as string[]).includes(statusParam)
-      ? (statusParam as Change['status'])
+      ? (statusParam as Change["status"])
       : undefined;
 
   const changes = await listChanges(c.env.DB, projectName, status);
   return ok({ project: projectName, changes });
 });
 
-app.get('/changes/:id', async (c) => {
+app.get("/changes/:id", async (c) => {
   const { id } = c.req.param();
   const change = await getChange(c.env.DB, id);
-  if (!change) return notFound('Change', id);
+  if (!change) return notFound("Change", id);
   return ok({ change });
 });
 
-app.post('/changes/:id/merge', async (c) => {
+app.post("/changes/:id/merge", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Only authenticated users can trigger merges directly");
+
   const { id } = c.req.param();
-  const force = c.req.query('force') === 'true';
+  const force = c.req.query("force") === "true";
 
   const change = await getChange(c.env.DB, id);
-  if (!change) return notFound('Change', id);
+  if (!change) return notFound("Change", id);
 
-  if (change.status !== 'approved' && !force) {
-    return badRequest('Change must be approved before merging');
+  if (change.status !== "approved" && !force) {
+    return badRequest("Change must be approved before merging");
   }
 
   if (c.env.MERGE_QUEUE) {
     const doId = c.env.MERGE_QUEUE.idFromName(change.project);
     const stub = c.env.MERGE_QUEUE.get(doId);
-    const result = await (stub as unknown as { merge(changeId: string): Promise<{ success: boolean; commit?: string; error?: string }> }).merge(id);
+    const result = await (
+      stub as unknown as {
+        merge(changeId: string): Promise<{ success: boolean; commit?: string; error?: string }>;
+      }
+    ).merge(id);
 
     if (!result.success) {
-      return badRequest(result.error ?? 'Merge failed');
+      return badRequest(result.error ?? "Merge failed");
     }
 
     await publishEvent(c.env.EVENTS_QUEUE, {
-      type: 'change.merged',
+      type: "change.merged",
       changeId: id,
       project: change.project,
-      commit: result.commit ?? '',
+      commit: result.commit ?? "",
     });
 
     return ok({
@@ -162,10 +175,10 @@ app.post('/changes/:id/merge', async (c) => {
   }
 
   const project = await getProject(c.env.STATE, change.project);
-  if (!project) return notFound('Project', change.project);
+  if (!project) return notFound("Project", change.project);
 
   const workspace = await getWorkspace(c.env.STATE, change.workspace);
-  if (!workspace) return notFound('Workspace', change.workspace);
+  if (!workspace) return notFound("Workspace", change.workspace);
 
   const commit = await mergeWorkspaceIntoProject(
     project.remote,
@@ -175,7 +188,7 @@ app.post('/changes/:id/merge', async (c) => {
   );
 
   const mergedAt = new Date().toISOString();
-  await updateChangeStatus(c.env.DB, id, 'merged', {
+  await updateChangeStatus(c.env.DB, id, "merged", {
     ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
     ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
     ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
@@ -192,7 +205,7 @@ app.post('/changes/:id/merge', async (c) => {
   });
 
   await publishEvent(c.env.EVENTS_QUEUE, {
-    type: 'change.merged',
+    type: "change.merged",
     changeId: id,
     project: change.project,
     commit,
@@ -207,24 +220,27 @@ app.post('/changes/:id/merge', async (c) => {
   });
 });
 
-app.post('/changes/:id/reject', async (c) => {
+app.post("/changes/:id/reject", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Only authenticated users can reject changes");
+
   const { id } = c.req.param();
 
   const change = await getChange(c.env.DB, id);
-  if (!change) return notFound('Change', id);
+  if (!change) return notFound("Change", id);
 
-  if (change.status === 'merged') {
-    return badRequest('Cannot reject a merged change');
+  if (change.status === "merged") {
+    return badRequest("Cannot reject a merged change");
   }
 
-  await updateChangeStatus(c.env.DB, id, 'rejected', {
+  await updateChangeStatus(c.env.DB, id, "rejected", {
     ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
     ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
     ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
   });
 
   await publishEvent(c.env.EVENTS_QUEUE, {
-    type: 'change.rejected',
+    type: "change.rejected",
     changeId: id,
     project: change.project,
   });
