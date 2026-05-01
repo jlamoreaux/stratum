@@ -3,7 +3,8 @@ import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "..
 import { listProvenance } from "../storage/provenance";
 import { getProject, listProjects, setProject } from "../storage/state";
 import type { Env } from "../types";
-import { badRequest, created, notFound, ok, unauthorized } from "../utils/response";
+import { canReadProject, filterReadableProjects } from "../utils/authz";
+import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 import { isStringRecord, isValidGitHubUrl, isValidSlug } from "../utils/validation";
 
 const DEFAULT_FILES: Record<string, string> = {
@@ -48,7 +49,10 @@ app.post("/", async (c) => {
 });
 
 app.get("/", async (c) => {
-  const projects = await listProjects(c.env.STATE);
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+
+  const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
   return ok({
     projects: projects.map(({ name, remote, createdAt }) => ({ name, remote, createdAt })),
   });
@@ -83,32 +87,38 @@ app.post("/:name/import", async (c) => {
   return created({ name, remote: repo.remote, source: body.url });
 });
 
-// TODO: restrict read-only endpoints to authenticated users or project members
 app.get("/:name/files", async (c) => {
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const { name } = c.req.param();
   const project = await getProject(c.env.STATE, name);
   if (!project) return notFound("Project", name);
+  if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const files = await listFilesInRepo(project.remote, project.token);
   return ok({ project: name, files });
 });
 
-// TODO: restrict read-only endpoints to authenticated users or project members
 app.get("/:name/log", async (c) => {
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const { name } = c.req.param();
   const project = await getProject(c.env.STATE, name);
   if (!project) return notFound("Project", name);
+  if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const depth = Number(c.req.query("depth") ?? 20);
   const log = await getCommitLog(project.remote, project.token, depth);
   return ok({ project: name, log });
 });
 
-// TODO: restrict read-only endpoints to authenticated users or project members
 app.get("/:name/provenance", async (c) => {
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const { name } = c.req.param();
   const project = await getProject(c.env.STATE, name);
   if (!project) return notFound("Project", name);
+  if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const limitParam = c.req.query("limit");
   const limit = limitParam !== undefined ? Number(limitParam) : undefined;

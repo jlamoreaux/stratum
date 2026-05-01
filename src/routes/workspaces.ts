@@ -8,7 +8,8 @@ import {
   setWorkspace,
 } from "../storage/state";
 import type { Env } from "../types";
-import { badRequest, created, notFound, ok, unauthorized } from "../utils/response";
+import { canReadProject, canWriteProject } from "../utils/authz";
+import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 import { isStringRecord, isValidSlug } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -16,11 +17,13 @@ const app = new Hono<{ Bindings: Env }>();
 app.post("/projects/:name/workspaces", async (c) => {
   const userId = c.get("userId");
   const agentId = c.get("agentId");
+  const agentOwnerId = c.get("agentOwnerId");
   if (!userId && !agentId) return unauthorized("Authentication required");
 
   const { name: projectName } = c.req.param();
   const project = await getProject(c.env.STATE, projectName);
   if (!project) return notFound("Project", projectName);
+  if (!canWriteProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const body = await c.req.json<{ name?: unknown }>().catch(() => ({ name: undefined }));
   const workspaceName = isValidSlug(body.name) ? body.name : `ws-${Date.now()}`;
@@ -40,9 +43,12 @@ app.post("/projects/:name/workspaces", async (c) => {
 });
 
 app.get("/projects/:name/workspaces", async (c) => {
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const { name: projectName } = c.req.param();
   const project = await getProject(c.env.STATE, projectName);
   if (!project) return notFound("Project", projectName);
+  if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const workspaces = await listWorkspaces(c.env.STATE, projectName);
   return ok({
@@ -54,11 +60,15 @@ app.get("/projects/:name/workspaces", async (c) => {
 app.post("/:name/commit", async (c) => {
   const userId = c.get("userId");
   const agentId = c.get("agentId");
+  const agentOwnerId = c.get("agentOwnerId");
   if (!userId && !agentId) return unauthorized("Authentication required");
 
   const { name: workspaceName } = c.req.param();
   const workspace = await getWorkspace(c.env.STATE, workspaceName);
   if (!workspace) return notFound("Workspace", workspaceName);
+  const project = await getProject(c.env.STATE, workspace.parent);
+  if (!project) return notFound("Project", workspace.parent);
+  if (!canWriteProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const body = await c.req.json<{ files?: unknown; message?: unknown }>();
   if (!isStringRecord(body.files))
@@ -89,11 +99,15 @@ app.post("/:name/merge", (c) => {
 app.delete("/:name", async (c) => {
   const userId = c.get("userId");
   const agentId = c.get("agentId");
+  const agentOwnerId = c.get("agentOwnerId");
   if (!userId && !agentId) return unauthorized("Authentication required");
 
   const { name: workspaceName } = c.req.param();
   const workspace = await getWorkspace(c.env.STATE, workspaceName);
   if (!workspace) return notFound("Workspace", workspaceName);
+  const project = await getProject(c.env.STATE, workspace.parent);
+  if (!project) return notFound("Project", workspace.parent);
+  if (!canWriteProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   await c.env.ARTIFACTS.delete(workspaceName).catch((err: unknown) => {
     console.warn(`[workspaces] Failed to delete Artifacts repo "${workspaceName}":`, err);

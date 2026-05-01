@@ -9,6 +9,7 @@ declare module "hono" {
   interface ContextVariableMap {
     userId?: string;
     agentId?: string;
+    agentOwnerId?: string;
   }
 }
 
@@ -34,6 +35,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       const agent = await getAgentByToken(c.env.DB, token);
       if (!agent) return c.json({ error: "Invalid token" }, 401);
       c.set("agentId", agent.id);
+      c.set("agentOwnerId", agent.ownerId);
       await next();
       return;
     }

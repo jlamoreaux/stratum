@@ -13,6 +13,22 @@ interface ChangeDetailProps {
     createdAt: string;
     mergedAt?: string;
   };
+  evalRuns: Array<{
+    id: string;
+    evaluatorType: string;
+    score: number;
+    passed: boolean;
+    reason: string;
+    issues?: string[];
+    ranAt: string;
+  }>;
+  provenance: {
+    commitSha: string;
+    workspace: string;
+    agentId?: string;
+    evalScore?: number;
+    mergedAt: string;
+  } | null;
 }
 
 function statusBadgeClass(status: string): string {
@@ -30,7 +46,7 @@ function statusBadgeClass(status: string): string {
   }
 }
 
-export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change }) => {
+export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change, evalRuns, provenance }) => {
   return (
     <Layout title={`Change ${change.id}`}>
       <div class="page-header">
@@ -87,6 +103,71 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change }) => {
           )}
         </dl>
       </div>
+
+      <div class="card">
+        <h2>Evaluator evidence</h2>
+        {evalRuns.length === 0 ? (
+          <div class="empty-state">
+            <p>No evaluator evidence recorded.</p>
+          </div>
+        ) : (
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Evaluator</th>
+                <th>Status</th>
+                <th>Score</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {evalRuns.map((run) => (
+                <tr key={run.id}>
+                  <td>{run.evaluatorType}</td>
+                  <td>
+                    {run.passed ? (
+                      <span class="badge badge-approved">passed</span>
+                    ) : (
+                      <span class="badge badge-rejected">failed</span>
+                    )}
+                  </td>
+                  <td>{Math.round(run.score * 100)}%</td>
+                  <td>
+                    {run.reason}
+                    {run.issues !== undefined && run.issues.length > 0 && (
+                      <ul class="issue-list">
+                        {run.issues.map((issue) => (
+                          <li key={issue}>{issue}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {provenance !== null && (
+        <div class="card">
+          <h2>Provenance</h2>
+          <dl class="detail-list">
+            <dt>Commit</dt>
+            <dd class="mono">{provenance.commitSha}</dd>
+            <dt>Workspace</dt>
+            <dd>{provenance.workspace}</dd>
+            {provenance.agentId !== undefined && (
+              <>
+                <dt>Agent</dt>
+                <dd>{provenance.agentId}</dd>
+              </>
+            )}
+            <dt>Merged</dt>
+            <dd>{new Date(provenance.mergedAt).toLocaleString()}</dd>
+          </dl>
+        </div>
+      )}
 
       {(change.status === "approved" || change.status === "open") && (
         <div class="action-row">

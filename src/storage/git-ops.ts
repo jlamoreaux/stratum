@@ -8,6 +8,20 @@ const DIR = "/";
 
 const SYSTEM_AUTHOR: Author = { name: "Stratum", email: "system@usestratum.dev" };
 
+export type MergeStrategy = "merge" | "squash";
+
+export interface MergeWorkspaceOptions {
+  author?: Author;
+  strategy?: MergeStrategy;
+}
+
+export class MergeConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MergeConflictError";
+  }
+}
+
 /**
  * Artifacts tokens are formatted as `<secret>?expires=<timestamp>`.
  * Only the secret portion is used for HTTP Basic auth.
@@ -92,8 +106,9 @@ export async function mergeWorkspaceIntoProject(
   projectToken: string,
   workspaceRemote: string,
   workspaceToken: string,
-  author: Author = SYSTEM_AUTHOR,
+  options: MergeWorkspaceOptions = {},
 ): Promise<string> {
+  const author = options.author ?? SYSTEM_AUTHOR;
   const { fs, dir } = await cloneRepo(projectRemote, projectToken);
 
   await git.addRemote({ fs, dir, remote: "workspace", url: workspaceRemote });
@@ -114,8 +129,13 @@ export async function mergeWorkspaceIntoProject(
     workspaceSha = await git.resolveRef({ fs, dir, ref: "refs/remotes/workspace/main" });
   }
 
+  if (options.strategy === "squash") {
+    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author);
+  }
+
+  let result: Awaited<ReturnType<typeof git.merge>>;
   try {
-    const result = await git.merge({
+    result = await git.merge({
       fs,
       dir,
       ours: "main",
@@ -123,19 +143,21 @@ export async function mergeWorkspaceIntoProject(
       author,
       message: "Merge workspace into project",
     });
-    await git.push({
-      fs,
-      dir,
-      http,
-      url: projectRemote,
-      ref: "main",
-      onAuth: makeAuth(projectToken),
-    });
-    if (!result.oid) throw new Error("Merge produced no commit OID");
-    return result.oid;
-  } catch {
-    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`);
   }
+
+  await git.push({
+    fs,
+    dir,
+    http,
+    url: projectRemote,
+    ref: "main",
+    onAuth: makeAuth(projectToken),
+  });
+  if (!result.oid) throw new Error("Merge produced no commit OID");
+  return result.oid;
 }
 
 async function squashMerge(
@@ -148,11 +170,13 @@ async function squashMerge(
 ): Promise<string> {
   const workspaceFiles = await listFilesAtCommit(projectFs, workspaceSha);
   const projectFiles = await listFilesAtCommit(projectFs, "main");
+  const workspaceMap = new Map(workspaceFiles);
 
   const changed = workspaceFiles.filter(([path, hash]) => {
     const projectHash = projectFiles.find(([p]) => p === path)?.[1];
     return projectHash !== hash;
   });
+  const deleted = projectFiles.filter(([path]) => !workspaceMap.has(path));
 
   for (const [path] of changed) {
     const content = await readFileAtCommit(projectFs, workspaceSha, path);
@@ -160,10 +184,20 @@ async function squashMerge(
     await git.add({ fs: projectFs, dir: projectDir, filepath: path });
   }
 
+  for (const [path] of deleted) {
+    await projectFs.promises.unlink(`${projectDir}/${path}`);
+    await git.remove({ fs: projectFs, dir: projectDir, filepath: path });
+  }
+
+  const changeCount = changed.length + deleted.length;
+  if (changeCount === 0) {
+    return git.resolveRef({ fs: projectFs, dir: projectDir, ref: "main" });
+  }
+
   const sha = await git.commit({
     fs: projectFs,
     dir: projectDir,
-    message: `Squash merge workspace (${changed.length} file${changed.length === 1 ? "" : "s"} changed)`,
+    message: `Squash merge workspace (${changeCount} file${changeCount === 1 ? "" : "s"} changed)`,
     author,
   });
 
@@ -323,30 +357,39 @@ export async function getDiffBetweenRepos(
     listFilesAtCommit(baseFs, "main"),
   ]);
 
-  const baseMap = new Map(baseFiles);
-  const workspaceMap = new Map(workspaceFiles);
+  const baseContent = new Map<string, string>();
+  const workspaceContent = new Map<string, string>();
 
+  await Promise.all([
+    ...baseFiles.map(async ([path]) => {
+      baseContent.set(path, await readFileAtCommit(baseFs, "main", path));
+    }),
+    ...workspaceFiles.map(async ([path]) => {
+      workspaceContent.set(path, await readFileAtCommit(workspaceFs, "main", path));
+    }),
+  ]);
+
+  return buildUnifiedDiff(baseContent, workspaceContent);
+}
+
+export function buildUnifiedDiff(
+  baseFiles: Map<string, string>,
+  workspaceFiles: Map<string, string>,
+): string {
   const diffParts: string[] = [];
+  const paths = new Set([...baseFiles.keys(), ...workspaceFiles.keys()]);
 
-  for (const [path, oid] of workspaceFiles) {
-    const baseOid = baseMap.get(path);
-    if (baseOid === oid) continue;
+  for (const path of [...paths].sort()) {
+    const oldContent = baseFiles.get(path);
+    const newContent = workspaceFiles.get(path);
+    if (oldContent === newContent) continue;
 
-    const workspaceContent = await readFileAtCommit(workspaceFs, "main", path);
-
-    if (baseOid === undefined) {
-      diffParts.push(newFileDiff(path, workspaceContent));
-    } else {
-      const baseContent = await readFileAtCommit(baseFs, "main", path);
-      const patch = fileUnifiedDiff(path, baseContent, workspaceContent);
-      diffParts.push(patch);
-    }
-  }
-
-  for (const [path] of baseFiles) {
-    if (!workspaceMap.has(path)) {
-      const baseContent = await readFileAtCommit(baseFs, "main", path);
-      diffParts.push(deletedFileDiff(path, baseContent));
+    if (oldContent === undefined && newContent !== undefined) {
+      diffParts.push(newFileDiff(path, newContent));
+    } else if (newContent === undefined && oldContent !== undefined) {
+      diffParts.push(deletedFileDiff(path, oldContent));
+    } else if (oldContent !== undefined && newContent !== undefined) {
+      diffParts.push(fileUnifiedDiff(path, oldContent, newContent));
     }
   }
 

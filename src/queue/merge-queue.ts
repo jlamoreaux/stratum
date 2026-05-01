@@ -31,6 +31,7 @@ export class MergeQueue {
         project.token,
         workspace.remote,
         workspace.token,
+        { strategy: "merge" },
       );
 
       await updateChangeStatus(this.env.DB, changeId, "merged", {
