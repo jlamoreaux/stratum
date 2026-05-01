@@ -54,22 +54,47 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # GITHUB_CLIENT_SECRET =
 
 # Staging environment
-# Before deploying to staging, create the required resources in the Cloudflare
-# dashboard and uncomment the blocks below. Then fill in the IDs.
-#
-# [env.staging]
-# name = "stratum-staging"
-#
-# [[env.staging.kv_namespaces]]
-# binding = "STATE"
-# id = "<staging-kv-namespace-id>"
-#
-# [[env.staging.d1_databases]]
-# binding = "DB"
-# database_name = "stratum-staging"
-# database_id = "<staging-d1-database-id>"
-# migrations_dir = "migrations"
-#
-# [env.staging.vars]
-# POSTHOG_HOST = "https://app.posthog.com"
-# OAUTH_REDIRECT_URI = "https://stratum-staging.<your-subdomain>.workers.dev/auth/github/callback"
+[env.staging]
+name = "stratum-staging"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["MergeQueue"]
+
+[[env.staging.artifacts]]
+binding = "ARTIFACTS"
+namespace = "default"
+
+[[env.staging.kv_namespaces]]
+binding = "STATE"
+id = "18a609aeddac442087de919a12677856"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "stratum-staging"
+database_id = "85c63ac2-381e-4cd9-9c35-e89dad02df65"
+migrations_dir = "migrations"
+
+[[env.staging.analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "stratum_requests"
+
+[env.staging.ai]
+binding = "AI"
+
+[[env.staging.durable_objects.bindings]]
+name = "MERGE_QUEUE"
+class_name = "MergeQueue"
+script_name = "stratum-staging"
+
+[[env.staging.queues.producers]]
+binding = "EVENTS_QUEUE"
+queue = "stratum-events"
+
+# Note: Only production should consume from the queue
+# [[env.staging.queues.consumers]]
+# queue = "stratum-events"
+
+[env.staging.vars]
+POSTHOG_HOST = "https://app.posthog.com"
+OAUTH_REDIRECT_URI = "https://stratum-staging.jlmx.workers.dev/auth/github/callback"
