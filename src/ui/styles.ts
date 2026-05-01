@@ -127,5 +127,7 @@ a:hover { text-decoration: underline; }
 
 .action-row { display: flex; gap: 0.75rem; margin-top: 1rem; }
 
+.issue-list { margin-top: 0.35rem; padding-left: 1rem; color: #fca5a5; }
+
 .mono { font-family: 'JetBrains Mono', monospace; }
 `;

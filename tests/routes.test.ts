@@ -12,12 +12,40 @@ vi.mock("../src/storage/users", () => ({
         createdAt: "2026-01-01T00:00:00.000Z",
       };
     }
+    if (token === "stratum_user_othertoken000000000000000") {
+      return {
+        id: "user_other",
+        email: "other@example.com",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+    }
     return null;
   }),
 }));
 
 vi.mock("../src/storage/agents", () => ({
-  getAgentByToken: vi.fn(async () => null),
+  getAgentByToken: vi.fn(async (_, token: string) => {
+    if (token === "stratum_agent_testtoken0000000000000000") {
+      return {
+        id: "agent_test",
+        name: "agent",
+        ownerId: "user_test",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+    }
+    if (token === "stratum_agent_othertoken00000000000000") {
+      return {
+        id: "agent_other",
+        name: "other-agent",
+        ownerId: "user_other",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+    }
+    return null;
+  }),
 }));
 
 vi.mock("../src/storage/sessions", () => ({
@@ -26,6 +54,11 @@ vi.mock("../src/storage/sessions", () => ({
 }));
 
 const AUTH_HEADERS = { Authorization: "Bearer stratum_user_testtoken00000000000000000" };
+const OTHER_AUTH_HEADERS = { Authorization: "Bearer stratum_user_othertoken000000000000000" };
+const AGENT_AUTH_HEADERS = { Authorization: "Bearer stratum_agent_testtoken0000000000000000" };
+const OTHER_AGENT_AUTH_HEADERS = {
+  Authorization: "Bearer stratum_agent_othertoken00000000000000",
+};
 
 // ─── KV mock ──────────────────────────────────────────────────────────────────
 
@@ -187,7 +220,7 @@ describe("POST /api/projects", () => {
 describe("GET /api/projects", () => {
   it("returns empty list initially", async () => {
     const env = makeEnv();
-    const res = await app.fetch(request("GET", "/api/projects"), env);
+    const res = await app.fetch(request("GET", "/api/projects", undefined, AUTH_HEADERS), env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { projects: unknown[] };
     expect(body.projects).toEqual([]);
@@ -196,10 +229,28 @@ describe("GET /api/projects", () => {
   it("lists created projects", async () => {
     const env = makeEnv();
     await app.fetch(request("POST", "/api/projects", { name: "proj-a" }, AUTH_HEADERS), env);
-    const res = await app.fetch(request("GET", "/api/projects"), env);
+    const res = await app.fetch(request("GET", "/api/projects", undefined, AUTH_HEADERS), env);
     const body = (await res.json()) as { projects: ProjectEntry[] };
     expect(body.projects).toHaveLength(1);
     expect(body.projects[0]?.name).toBe("proj-a");
+  });
+
+  it("requires auth to list projects", async () => {
+    const env = makeEnv();
+    const res = await app.fetch(request("GET", "/api/projects"), env);
+    expect(res.status).toBe(401);
+  });
+
+  it("does not list private projects for a different user", async () => {
+    const env = makeEnv();
+    await app.fetch(request("POST", "/api/projects", { name: "proj-a" }, AUTH_HEADERS), env);
+    const res = await app.fetch(
+      request("GET", "/api/projects", undefined, OTHER_AUTH_HEADERS),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { projects: ProjectEntry[] };
+    expect(body.projects).toHaveLength(0);
   });
 });
 
@@ -207,7 +258,10 @@ describe("GET /api/projects/:name/files", () => {
   it("returns file list for existing project", async () => {
     const env = makeEnv();
     await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
-    const res = await app.fetch(request("GET", "/api/projects/my-project/files"), env);
+    const res = await app.fetch(
+      request("GET", "/api/projects/my-project/files", undefined, AUTH_HEADERS),
+      env,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { files: string[] };
     expect(body.files).toContain("src/index.ts");
@@ -218,13 +272,26 @@ describe("GET /api/projects/:name/files", () => {
     const res = await app.fetch(request("GET", "/api/projects/nope/files"), env);
     expect(res.status).toBe(404);
   });
+
+  it("returns 403 for another user's private project", async () => {
+    const env = makeEnv();
+    await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
+    const res = await app.fetch(
+      request("GET", "/api/projects/my-project/files", undefined, OTHER_AUTH_HEADERS),
+      env,
+    );
+    expect(res.status).toBe(403);
+  });
 });
 
 describe("GET /api/projects/:name/log", () => {
   it("returns commit log for existing project", async () => {
     const env = makeEnv();
     await app.fetch(request("POST", "/api/projects", { name: "my-project" }, AUTH_HEADERS), env);
-    const res = await app.fetch(request("GET", "/api/projects/my-project/log"), env);
+    const res = await app.fetch(
+      request("GET", "/api/projects/my-project/log", undefined, AUTH_HEADERS),
+      env,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { log: unknown[] };
     expect(body.log).toHaveLength(1);
@@ -266,6 +333,32 @@ describe("POST /api/workspaces/projects/:name/workspaces", () => {
     const body = (await res.json()) as { workspace: string; parent: string };
     expect(body.workspace).toBe("fix-bug");
     expect(body.parent).toBe("my-project");
+  });
+
+  it("allows an agent owned by the project owner to fork a workspace", async () => {
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/workspaces/projects/my-project/workspaces",
+        { name: "agent-workspace" },
+        AGENT_AUTH_HEADERS,
+      ),
+      env,
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("returns 403 for an agent owned by a different user", async () => {
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/workspaces/projects/my-project/workspaces",
+        { name: "bad-agent-workspace" },
+        OTHER_AGENT_AUTH_HEADERS,
+      ),
+      env,
+    );
+    expect(res.status).toBe(403);
   });
 
   it("returns 401 when unauthenticated", async () => {

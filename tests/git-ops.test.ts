@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractTokenSecret } from "../src/storage/git-ops";
+import { buildUnifiedDiff, extractTokenSecret } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
 
 describe("extractTokenSecret", () => {
@@ -71,5 +71,38 @@ describe("commitAndPush path construction", () => {
     await fs.promises.writeFile(fullPath, "content");
     const result = await fs.promises.readFile("/repo/src/index.ts", { encoding: "utf8" });
     expect(result).toBe("content");
+  });
+});
+
+describe("buildUnifiedDiff", () => {
+  it("emits a real hunk for a one-line edit in a large file", () => {
+    const base = Array.from({ length: 120 }, (_, i) => `line ${i + 1}`);
+    const changed = [...base];
+    changed[59] = "line 60 changed";
+
+    const diff = buildUnifiedDiff(
+      new Map([["src/large.ts", `${base.join("\n")}\n`]]),
+      new Map([["src/large.ts", `${changed.join("\n")}\n`]]),
+    );
+
+    expect(diff).toContain("diff --git a/src/large.ts b/src/large.ts");
+    expect(diff).toContain("@@");
+    expect(diff).toContain("-line 60");
+    expect(diff).toContain("+line 60 changed");
+    expect(diff).not.toContain("-line 1\n-line 2\n-line 3");
+  });
+
+  it("preserves new-file and deleted-file diffs", () => {
+    const diff = buildUnifiedDiff(
+      new Map([["src/old.ts", "export const old = true;\n"]]),
+      new Map([["src/new.ts", "export const fresh = true;\n"]]),
+    );
+
+    expect(diff).toContain("diff --git a/src/new.ts b/src/new.ts");
+    expect(diff).toContain("new file mode 100644");
+    expect(diff).toContain("+export const fresh = true;");
+    expect(diff).toContain("diff --git a/src/old.ts b/src/old.ts");
+    expect(diff).toContain("deleted file mode 100644");
+    expect(diff).toContain("-export const old = true;");
   });
 });

@@ -9,6 +9,10 @@ export class CompositeEvaluator {
 
   async evaluateAndAggregate(diff: string, policy: EvalPolicy): Promise<EvalResult> {
     const results = await this.evaluate(diff, policy);
+    return this.aggregate(results, policy);
+  }
+
+  aggregate(results: EvalResult[], policy: EvalPolicy): EvalResult {
     const requireAll = policy.requireAll ?? true;
 
     const passed = requireAll ? results.every((r) => r.passed) : results.some((r) => r.passed);

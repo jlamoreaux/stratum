@@ -3,29 +3,47 @@ import {
   CompositeEvaluator,
   DiffEvaluator,
   LLMEvaluator,
+  SandboxEvaluator,
+  SecretScanEvaluator,
   WebhookEvaluator,
   loadPolicy,
 } from "../evaluation";
+import type { EvalPolicy, EvalResult } from "../evaluation/types";
 import type { Evaluator } from "../evaluation/types";
 import { publishEvent } from "../queue/events";
 import { createChange, getChange, listChanges, updateChangeStatus } from "../storage/changes";
+import { listEvalRuns, recordEvalRuns } from "../storage/eval-runs";
 import { getDiffBetweenRepos, mergeWorkspaceIntoProject } from "../storage/git-ops";
 import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
 import type { Change, Env } from "../types";
-import { badRequest, created, notFound, ok, unauthorized } from "../utils/response";
+import { canReadProject, canWriteProject } from "../utils/authz";
+import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
+
+class UnavailableEvaluator implements Evaluator {
+  constructor(
+    private evaluatorType: string,
+    private reason: string,
+  ) {}
+
+  async evaluate(_diff: string, _policy: EvalPolicy): Promise<EvalResult> {
+    return { score: 0, passed: false, reason: `${this.evaluatorType} unavailable: ${this.reason}` };
+  }
+}
 
 app.post("/projects/:name/changes", async (c) => {
   const userId = c.get("userId");
   const agentId = c.get("agentId");
+  const agentOwnerId = c.get("agentOwnerId");
   if (!userId && !agentId) return unauthorized("Authentication required");
 
   const { name: projectName } = c.req.param();
 
   const project = await getProject(c.env.STATE, projectName);
   if (!project) return notFound("Project", projectName);
+  if (!canWriteProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const body = await c.req.json<{ workspace?: unknown }>().catch(() => ({ workspace: undefined }));
   if (typeof body.workspace !== "string" || !body.workspace.trim()) {
@@ -61,28 +79,72 @@ app.post("/projects/:name/changes", async (c) => {
     workspace.token,
   );
 
-  const evaluators: Evaluator[] = policy.evaluators.flatMap((cfg) => {
-    switch (cfg.type) {
-      case "diff":
-        return [new DiffEvaluator()];
-      case "webhook":
-        return [new WebhookEvaluator()];
-      case "llm":
-        if (c.env.AI) return [new LLMEvaluator(c.env.AI)];
-        return [];
-      default:
-        return [];
-    }
-  });
+  const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
+    { type: "secret_scan", evaluator: new SecretScanEvaluator() },
+  ];
 
-  const composite = new CompositeEvaluator(
-    evaluators.length > 0 ? evaluators : [new DiffEvaluator()],
+  evaluators.push(
+    ...policy.evaluators.flatMap((cfg): Array<{ type: string; evaluator: Evaluator }> => {
+      switch (cfg.type) {
+        case "diff":
+          return [{ type: "diff", evaluator: new DiffEvaluator() }];
+        case "webhook":
+          return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
+        case "llm":
+          if (c.env.AI) return [{ type: "llm", evaluator: new LLMEvaluator(c.env.AI) }];
+          return [
+            {
+              type: "llm",
+              evaluator: new UnavailableEvaluator("llm", "AI binding is not configured"),
+            },
+          ];
+        case "sandbox":
+          if (c.env.SANDBOX) {
+            return [{ type: "sandbox", evaluator: new SandboxEvaluator(c.env.SANDBOX) }];
+          }
+          return [
+            {
+              type: "sandbox",
+              evaluator: new UnavailableEvaluator("sandbox", "SANDBOX binding is not configured"),
+            },
+          ];
+        default:
+          return [];
+      }
+    }),
   );
-  const evalResult = await composite.evaluateAndAggregate(diff, policy);
+
+  const evalRuns = await Promise.all(
+    evaluators.map(async ({ type, evaluator }) => ({
+      evaluatorType: type,
+      result: await evaluator.evaluate(diff, policy),
+    })),
+  );
+
+  const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
+  const aggregateResult = composite.aggregate(
+    evalRuns.map(({ result }) => result),
+    policy,
+  );
+  const blockingFailure = evalRuns.find(
+    ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
+  );
+  const evalResult =
+    blockingFailure === undefined
+      ? aggregateResult
+      : {
+          score: Math.min(aggregateResult.score, blockingFailure.result.score),
+          passed: false,
+          reason:
+            aggregateResult.reason === blockingFailure.result.reason
+              ? blockingFailure.result.reason
+              : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
+          issues: [...(blockingFailure.result.issues ?? []), ...(aggregateResult.issues ?? [])],
+        };
 
   const newStatus: Change["status"] = evalResult.passed ? "approved" : "open";
 
-  // TODO: write per-evaluator results to eval_runs table (currently only aggregate stored on changes)
+  await recordEvalRuns(c.env.DB, change.id, evalRuns);
   await updateChangeStatus(c.env.DB, change.id, newStatus, {
     evalScore: evalResult.score,
     evalPassed: evalResult.passed,
@@ -104,14 +166,17 @@ app.post("/projects/:name/changes", async (c) => {
     evalReason: evalResult.reason,
   };
 
-  return created({ change: updatedChange, eval: evalResult });
+  return created({ change: updatedChange, eval: evalResult, evalRuns });
 });
 
 app.get("/projects/:name/changes", async (c) => {
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const { name: projectName } = c.req.param();
 
   const project = await getProject(c.env.STATE, projectName);
   if (!project) return notFound("Project", projectName);
+  if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const statusParam = c.req.query("status");
   const validStatuses: Change["status"][] = ["open", "approved", "merged", "rejected"];
@@ -125,10 +190,16 @@ app.get("/projects/:name/changes", async (c) => {
 });
 
 app.get("/changes/:id", async (c) => {
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const { id } = c.req.param();
   const change = await getChange(c.env.DB, id);
   if (!change) return notFound("Change", id);
-  return ok({ change });
+  const project = await getProject(c.env.STATE, change.project);
+  if (!project) return notFound("Project", change.project);
+  if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
+  const evalRuns = await listEvalRuns(c.env.DB, id);
+  return ok({ change, evalRuns });
 });
 
 app.post("/changes/:id/merge", async (c) => {
@@ -137,15 +208,24 @@ app.post("/changes/:id/merge", async (c) => {
 
   const { id } = c.req.param();
   const force = c.req.query("force") === "true";
+  const strategyParam = c.req.query("strategy");
+  const strategy = strategyParam === "squash" ? "squash" : "merge";
+  if (strategyParam !== undefined && strategyParam !== "squash" && strategyParam !== "merge") {
+    return badRequest("strategy must be 'merge' or 'squash'");
+  }
 
   const change = await getChange(c.env.DB, id);
   if (!change) return notFound("Change", id);
+
+  const project = await getProject(c.env.STATE, change.project);
+  if (!project) return notFound("Project", change.project);
+  if (!canWriteProject(project, userId)) return forbidden("Project access denied");
 
   if (change.status !== "approved" && !force) {
     return badRequest("Change must be approved before merging");
   }
 
-  if (c.env.MERGE_QUEUE) {
+  if (c.env.MERGE_QUEUE && strategy === "merge") {
     const doId = c.env.MERGE_QUEUE.idFromName(change.project);
     const stub = c.env.MERGE_QUEUE.get(doId);
     const result = await (
@@ -174,18 +254,22 @@ app.post("/changes/:id/merge", async (c) => {
     });
   }
 
-  const project = await getProject(c.env.STATE, change.project);
-  if (!project) return notFound("Project", change.project);
-
   const workspace = await getWorkspace(c.env.STATE, change.workspace);
   if (!workspace) return notFound("Workspace", change.workspace);
 
-  const commit = await mergeWorkspaceIntoProject(
-    project.remote,
-    project.token,
-    workspace.remote,
-    workspace.token,
-  );
+  let commit: string;
+  try {
+    commit = await mergeWorkspaceIntoProject(
+      project.remote,
+      project.token,
+      workspace.remote,
+      workspace.token,
+      { strategy },
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return badRequest(message);
+  }
 
   const mergedAt = new Date().toISOString();
   await updateChangeStatus(c.env.DB, id, "merged", {
@@ -228,6 +312,10 @@ app.post("/changes/:id/reject", async (c) => {
 
   const change = await getChange(c.env.DB, id);
   if (!change) return notFound("Change", id);
+
+  const project = await getProject(c.env.STATE, change.project);
+  if (!project) return notFound("Project", change.project);
+  if (!canWriteProject(project, userId)) return forbidden("Project access denied");
 
   if (change.status === "merged") {
     return badRequest("Cannot reject a merged change");

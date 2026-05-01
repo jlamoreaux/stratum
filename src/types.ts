@@ -87,6 +87,7 @@ export interface ProjectEntry {
   createdAt: string;
   githubUrl?: string;
   ownerId?: string;
+  visibility?: "private" | "public";
 }
 
 export interface WorkspaceEntry {

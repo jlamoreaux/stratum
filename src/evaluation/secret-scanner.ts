@@ -1,4 +1,4 @@
-import type { EvalResult } from "./types";
+import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
 const SECRET_PATTERNS = [
   { name: "AWS Access Key", pattern: /AKIA[0-9A-Z]{16}/ },
@@ -9,8 +9,8 @@ const SECRET_PATTERNS = [
   { name: "Stratum Agent Token", pattern: /stratum_agent_[a-f0-9]{32}/ },
 ];
 
-export class SecretScanEvaluator {
-  async evaluate(diff: string, _policy: unknown): Promise<EvalResult> {
+export class SecretScanEvaluator implements Evaluator {
+  async evaluate(diff: string, _policy: EvalPolicy): Promise<EvalResult> {
     const issues: string[] = [];
 
     const lines = diff.split("\n");

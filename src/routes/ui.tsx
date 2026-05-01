@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { getChange, listChanges } from "../storage/changes";
+import { listEvalRuns } from "../storage/eval-runs";
 import { getCommitLog, listFilesInRepo } from "../storage/git-ops";
+import { getProvenance } from "../storage/provenance";
 import { getProject, listProjects, listWorkspaces } from "../storage/state";
 import type { Env } from "../types";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
@@ -109,7 +111,12 @@ app.get("/changes/:id", async (c) => {
     );
   }
 
-  return c.html(<ChangeDetailPage change={change} />);
+  const [evalRuns, provenance] = await Promise.all([
+    listEvalRuns(c.env.DB, id),
+    getProvenance(c.env.DB, id),
+  ]);
+
+  return c.html(<ChangeDetailPage change={change} evalRuns={evalRuns} provenance={provenance} />);
 });
 
 // GET /ui/projects/:name/workspaces — Workspace list

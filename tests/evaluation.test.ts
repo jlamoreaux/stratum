@@ -343,7 +343,9 @@ describe("loadPolicy", () => {
       requireAll: false,
       minScore: 0.5,
     };
-    mockReadFileFromRepo.mockResolvedValue(JSON.stringify(config));
+    mockReadFileFromRepo
+      .mockRejectedValueOnce(new Error("missing yaml"))
+      .mockResolvedValueOnce(JSON.stringify(config));
     const policy = await loadPolicy("https://repo.example.com", "tok");
     expect(policy.requireAll).toBe(false);
     expect(policy.minScore).toBe(0.5);
@@ -352,7 +354,9 @@ describe("loadPolicy", () => {
 
   it("merges parsed config with defaults", async () => {
     const config = { evaluators: [{ type: "diff", maxLines: 100 }] };
-    mockReadFileFromRepo.mockResolvedValue(JSON.stringify(config));
+    mockReadFileFromRepo
+      .mockRejectedValueOnce(new Error("missing yaml"))
+      .mockResolvedValueOnce(JSON.stringify(config));
     const policy = await loadPolicy("https://repo.example.com", "tok");
     expect(policy.requireAll).toBe(true);
     expect(policy.minScore).toBe(0.7);
@@ -360,13 +364,17 @@ describe("loadPolicy", () => {
   });
 
   it("returns DEFAULT_POLICY on invalid JSON", async () => {
-    mockReadFileFromRepo.mockResolvedValue("not { valid json");
+    mockReadFileFromRepo
+      .mockRejectedValueOnce(new Error("missing yaml"))
+      .mockResolvedValueOnce("not { valid json");
     const policy = await loadPolicy("https://repo.example.com", "tok");
     expect(policy.evaluators).toEqual([{ type: "diff" }]);
   });
 
   it("returns DEFAULT_POLICY when evaluators is missing", async () => {
-    mockReadFileFromRepo.mockResolvedValue(JSON.stringify({ minScore: 0.5 }));
+    mockReadFileFromRepo
+      .mockRejectedValueOnce(new Error("missing yaml"))
+      .mockResolvedValueOnce(JSON.stringify({ minScore: 0.5 }));
     const policy = await loadPolicy("https://repo.example.com", "tok");
     expect(policy.evaluators).toEqual([{ type: "diff" }]);
   });
@@ -375,5 +383,28 @@ describe("loadPolicy", () => {
     mockReadFileFromRepo.mockRejectedValue(new Error("Network error"));
     const policy = await loadPolicy("https://repo.example.com", "tok");
     expect(policy.evaluators).toEqual([{ type: "diff" }]);
+  });
+
+  it("parses .stratum/policy.yaml before stratum.config.json", async () => {
+    mockReadFileFromRepo.mockImplementation(async (_remote, _token, path) => {
+      if (path === ".stratum/policy.yaml") {
+        return [
+          "evaluators:",
+          "  - type: diff",
+          "    maxLines: 42",
+          "requireAll: false",
+          "minScore: 0.4",
+        ].join("\n");
+      }
+      return JSON.stringify({
+        evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+      });
+    });
+
+    const policy = await loadPolicy("https://repo.example.com", "tok");
+    expect(policy.requireAll).toBe(false);
+    expect(policy.minScore).toBe(0.4);
+    expect(policy.evaluators[0]).toMatchObject({ type: "diff", maxLines: 42 });
+    expect(mockReadFileFromRepo).toHaveBeenCalledTimes(1);
   });
 });
