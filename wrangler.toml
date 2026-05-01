@@ -43,6 +43,10 @@ crons = ["0 6 * * *"]
 POSTHOG_HOST = "https://app.posthog.com"
 OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 
+# Email Sending — configure via: wrangler email sending enable yourdomain.com
+[[send_email]]
+name = "EMAIL"
+
 # Sandboxes binding — beta feature, only available with Cloudflare Sandboxes access
 # [[sandboxes]]
 # binding = "SANDBOX"
@@ -52,6 +56,7 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # STRATUM_TELEMETRY_DISABLED = "true"  # uncomment to disable telemetry for self-hosted
 # GITHUB_CLIENT_ID =
 # GITHUB_CLIENT_SECRET =
+# EMAIL_FROM_ADDRESS = "noreply@yourdomain.com"  # for magic link emails
 
 # Staging environment
 [env.staging]
@@ -94,6 +99,9 @@ queue = "stratum-events"
 # Note: Only production should consume from the queue
 # [[env.staging.queues.consumers]]
 # queue = "stratum-events"
+
+[[env.staging.send_email]]
+name = "EMAIL"
 
 [env.staging.vars]
 POSTHOG_HOST = "https://app.posthog.com"

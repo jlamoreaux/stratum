@@ -63,6 +63,18 @@ export interface SandboxInstance {
   destroy(): Promise<void>;
 }
 
+export interface EmailMessage {
+  to: string;
+  from: { email: string; name?: string };
+  subject: string;
+  text: string;
+  html: string;
+}
+
+export interface EmailBinding {
+  send(message: EmailMessage): Promise<{ messageId: string }>;
+}
+
 export interface Env {
   ARTIFACTS: ArtifactsNamespace;
   STATE: KVNamespace;
@@ -73,6 +85,8 @@ export interface Env {
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   OAUTH_REDIRECT_URI?: string;
+  EMAIL?: EmailBinding;
+  EMAIL_FROM_ADDRESS?: string;
   ANALYTICS?: AnalyticsEngineDataset;
   SANDBOX?: SandboxBinding;
   AI?: AiBinding;

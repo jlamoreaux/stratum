@@ -7,6 +7,7 @@ import { runTtlSweep } from "./queue/ttl-sweep";
 import { agentsRouter } from "./routes/agents";
 import { authRouter } from "./routes/auth";
 import { changesRouter } from "./routes/changes";
+import { emailAuthRouter } from "./routes/email-auth";
 import { orgsRouter } from "./routes/orgs";
 import { projectsRouter } from "./routes/projects";
 import { syncAllProjects, syncRouter } from "./routes/sync";
@@ -30,6 +31,7 @@ app.get("/ui.css", (c) => {
 });
 
 app.route("/auth", authRouter);
+app.route("/auth/email", emailAuthRouter);
 app.route("/ui", uiRouter);
 app.route("/api/projects", projectsRouter);
 app.route("/api/workspaces", workspacesRouter);
