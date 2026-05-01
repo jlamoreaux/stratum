@@ -26,6 +26,8 @@ app.use("*", rateLimitMiddleware());
 
 app.get("/health", (c) => c.json({ status: "ok", service: "stratum" }));
 
+app.get("/", (c) => c.redirect("/ui"));
+
 app.get("/ui.css", (c) => {
   return c.text(CSS, 200, { "Content-Type": "text/css; charset=UTF-8" });
 });
