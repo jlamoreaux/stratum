@@ -52,3 +52,24 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # STRATUM_TELEMETRY_DISABLED = "true"  # uncomment to disable telemetry for self-hosted
 # GITHUB_CLIENT_ID =
 # GITHUB_CLIENT_SECRET =
+
+# Staging environment
+# Before deploying to staging, create the required resources in the Cloudflare
+# dashboard and uncomment the blocks below. Then fill in the IDs.
+#
+# [env.staging]
+# name = "stratum-staging"
+#
+# [[env.staging.kv_namespaces]]
+# binding = "STATE"
+# id = "<staging-kv-namespace-id>"
+#
+# [[env.staging.d1_databases]]
+# binding = "DB"
+# database_name = "stratum-staging"
+# database_id = "<staging-d1-database-id>"
+# migrations_dir = "migrations"
+#
+# [env.staging.vars]
+# POSTHOG_HOST = "https://app.posthog.com"
+# OAUTH_REDIRECT_URI = "https://stratum-staging.<your-subdomain>.workers.dev/auth/github/callback"
