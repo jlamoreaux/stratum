@@ -66,10 +66,18 @@ npm install
 # Authenticate with Cloudflare
 npx wrangler login
 
-# Set up required secrets
+# Set up required secrets (pick authentication method)
+
+# For email magic links (recommended - no external dependencies):
+npx wrangler email sending enable yourdomain.com
+npx wrangler secret put EMAIL_FROM_ADDRESS  # e.g., noreply@yourdomain.com
+
+# Or for GitHub OAuth:
 npx wrangler secret put GITHUB_CLIENT_ID
 npx wrangler secret put GITHUB_CLIENT_SECRET
-npx wrangler secret put POSTHOG_API_KEY  # optional, for analytics
+
+# Optional:
+npx wrangler secret put POSTHOG_API_KEY  # for analytics
 ```
 
 ### Local Development
@@ -140,7 +148,28 @@ npx wrangler d1 migrations apply stratum --remote  # for production
 
 ### Authentication
 
-**GitHub OAuth (for humans):**
+Stratum supports multiple authentication methods:
+
+**Email Magic Links (Recommended - no GitHub required):**
+```bash
+# Visit the login page
+https://stratum.jlmx.workers.dev/auth/email
+
+# Enter your email and click "Send Magic Link"
+# Check your inbox and click the secure link to sign in
+```
+
+To enable email authentication:
+```bash
+# 1. Enable email sending on your domain
+npx wrangler email sending enable yourdomain.com
+
+# 2. Set the from address secret
+npx wrangler secret put EMAIL_FROM_ADDRESS
+# Enter: noreply@yourdomain.com
+```
+
+**GitHub OAuth (Alternative):**
 ```bash
 # Initiate login
 curl https://stratum.jlmx.workers.dev/auth/github
@@ -148,7 +177,9 @@ curl https://stratum.jlmx.workers.dev/auth/github
 # After OAuth callback, you'll have a session cookie
 ```
 
-**API Tokens (for agents):**
+Requires setting `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` secrets.
+
+**API Tokens (for agents/programmatic access):**
 ```bash
 # Create an agent identity (via web UI or API)
 # Then use the token in requests:
