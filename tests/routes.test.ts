@@ -235,10 +235,12 @@ describe("GET /api/projects", () => {
     expect(body.projects[0]?.name).toBe("proj-a");
   });
 
-  it("requires auth to list projects", async () => {
+  it("allows unauthenticated users to list public projects", async () => {
     const env = makeEnv();
     const res = await app.fetch(request("GET", "/api/projects"), env);
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { projects: unknown[] };
+    expect(body.projects).toEqual([]);
   });
 
   it("does not list private projects for a different user", async () => {

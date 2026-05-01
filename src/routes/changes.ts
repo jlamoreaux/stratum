@@ -109,6 +109,9 @@ app.post("/projects/:name/changes", async (c) => {
             },
           ];
         default:
+          console.warn(
+            `Unknown evaluator type "${(cfg as { type: string }).type}" in policy for project ${projectName}`,
+          );
           return [];
       }
     }),
@@ -139,7 +142,7 @@ app.post("/projects/:name/changes", async (c) => {
             aggregateResult.reason === blockingFailure.result.reason
               ? blockingFailure.result.reason
               : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
-          issues: [...(blockingFailure.result.issues ?? []), ...(aggregateResult.issues ?? [])],
+          issues: aggregateResult.issues,
         };
 
   const newStatus: Change["status"] = evalResult.passed ? "approved" : "open";

@@ -51,7 +51,6 @@ app.post("/", async (c) => {
 app.get("/", async (c) => {
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
-  if (!userId && !agentOwnerId) return unauthorized("Authentication required");
 
   const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
   return ok({

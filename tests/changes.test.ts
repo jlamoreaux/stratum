@@ -684,6 +684,7 @@ describe("POST /api/changes/:id/reject", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
+    vi.mocked(getProject).mockResolvedValue(mockProject);
     vi.mocked(updateChangeStatus).mockResolvedValue(undefined);
   });
 

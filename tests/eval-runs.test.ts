@@ -46,6 +46,13 @@ function makeD1(): D1Database {
 
   return {
     prepare: (sql: string) => makeStmt(sql, []),
+    batch: async (
+      statements: Array<{
+        run: () => Promise<{ success: boolean; meta: Record<string, unknown> }>;
+      }>,
+    ) => {
+      return Promise.all(statements.map((stmt) => stmt.run()));
+    },
   } as unknown as D1Database;
 }
 

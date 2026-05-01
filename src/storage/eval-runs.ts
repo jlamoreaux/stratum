@@ -33,7 +33,16 @@ function rowToEvalRun(row: EvalRunRow): EvalRun {
     reason: row.reason,
     ranAt: row.ran_at,
   };
-  if (row.issues !== null) run.issues = JSON.parse(row.issues) as string[];
+  if (row.issues !== null) {
+    try {
+      const parsed = JSON.parse(row.issues);
+      if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) {
+        run.issues = parsed as string[];
+      }
+    } catch {
+      // ignore malformed issues
+    }
+  }
   return run;
 }
 
@@ -42,27 +51,16 @@ export async function recordEvalRuns(
   changeId: string,
   results: Array<{ evaluatorType: string; result: EvalResult }>,
 ): Promise<EvalRun[]> {
+  const stmt = db.prepare(
+    "INSERT INTO eval_runs (id, change_id, evaluator_type, score, passed, reason, issues, ran_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+
   const runs: EvalRun[] = [];
+  const statements: D1PreparedStatement[] = [];
 
   for (const { evaluatorType, result } of results) {
     const id = newId("evl");
     const ranAt = new Date().toISOString();
-    await db
-      .prepare(
-        "INSERT INTO eval_runs (id, change_id, evaluator_type, score, passed, reason, issues, ran_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .bind(
-        id,
-        changeId,
-        evaluatorType,
-        result.score,
-        result.passed ? 1 : 0,
-        result.reason,
-        result.issues !== undefined ? JSON.stringify(result.issues) : null,
-        ranAt,
-      )
-      .run();
-
     const run: EvalRun = {
       id,
       changeId,
@@ -74,8 +72,22 @@ export async function recordEvalRuns(
     };
     if (result.issues !== undefined) run.issues = result.issues;
     runs.push(run);
+
+    statements.push(
+      stmt.bind(
+        id,
+        changeId,
+        evaluatorType,
+        result.score,
+        result.passed ? 1 : 0,
+        result.reason,
+        result.issues !== undefined ? JSON.stringify(result.issues) : null,
+        ranAt,
+      ),
+    );
   }
 
+  await db.batch(statements);
   return runs;
 }
 
