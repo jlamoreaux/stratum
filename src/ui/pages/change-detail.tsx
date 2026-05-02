@@ -30,6 +30,7 @@ interface ChangeDetailProps {
     evalScore?: number;
     mergedAt: string;
   } | null;
+  user?: { id: string; email: string } | null;
 }
 
 function statusBadgeClass(status: string): string {
@@ -52,9 +53,9 @@ function statusBadgeClass(status: string): string {
   }
 }
 
-export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change, evalRuns, provenance }) => {
+export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change, evalRuns, provenance, user }) => {
   return (
-    <Layout title={`Change ${change.id}`}>
+    <Layout title={`Change ${change.id}`} user={user}>
       <div class="page-header">
         <h1>
           <span class="mono">{change.id}</span>{" "}

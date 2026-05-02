@@ -3,11 +3,12 @@ import { Layout } from "../layout";
 
 interface HomeProps {
   projects: Array<{ name: string; remote: string; createdAt: string }>;
+  user?: { id: string; email: string } | null;
 }
 
-export const HomePage: FC<HomeProps> = ({ projects }) => {
+export const HomePage: FC<HomeProps> = ({ projects, user }) => {
   return (
-    <Layout title="Dashboard">
+    <Layout title="Dashboard" user={user}>
       <div class="page-header">
         <h1>Dashboard</h1>
       </div>

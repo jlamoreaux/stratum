@@ -11,6 +11,7 @@ interface ChangesProps {
     evalPassed?: boolean;
     createdAt: string;
   }>;
+  user?: { id: string; email: string } | null;
 }
 
 function statusBadgeClass(status: string): string {
@@ -28,9 +29,9 @@ function statusBadgeClass(status: string): string {
   }
 }
 
-export const ChangesPage: FC<ChangesProps> = ({ project, changes }) => {
+export const ChangesPage: FC<ChangesProps> = ({ project, changes, user }) => {
   return (
-    <Layout title={`Changes — ${project}`}>
+    <Layout title={`Changes — ${project}`} user={user}>
       <div class="page-header">
         <h1>Changes</h1>
         <a class="btn" href={`/ui/projects/${project}`}>

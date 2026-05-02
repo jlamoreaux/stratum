@@ -35,6 +35,30 @@ a:hover { text-decoration: underline; }
 .nav-links a { color: #999; font-size: 0.9rem; }
 .nav-links a:hover { color: #f0f0f0; text-decoration: none; }
 
+.nav-auth {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.nav-user {
+  color: #888;
+  font-size: 0.85rem;
+}
+
+.nav-auth-link {
+  color: #7ca9f7;
+  font-size: 0.9rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.nav-auth-link:hover {
+  background: #1a3a6e;
+  text-decoration: none;
+}
+
 .main {
   max-width: 800px;
   margin: 0 auto;

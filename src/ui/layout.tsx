@@ -2,10 +2,11 @@ import type { FC } from "hono/jsx";
 
 interface LayoutProps {
   title: string;
+  user?: { id: string; email: string } | null;
   children?: unknown;
 }
 
-export const Layout: FC<LayoutProps> = ({ title, children }) => {
+export const Layout: FC<LayoutProps> = ({ title, user, children }) => {
   return (
     <html lang="en">
       <head>
@@ -21,6 +22,16 @@ export const Layout: FC<LayoutProps> = ({ title, children }) => {
           </a>
           <div class="nav-links">
             <a href="/ui/projects">projects</a>
+          </div>
+          <div class="nav-auth">
+            {user ? (
+              <>
+                <span class="nav-user">{user.email}</span>
+                <a href="/auth/logout" class="nav-auth-link">logout</a>
+              </>
+            ) : (
+              <a href="/auth/email" class="nav-auth-link">sign in</a>
+            )}
           </div>
         </nav>
         <main class="main">{children}</main>

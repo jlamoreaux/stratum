@@ -4,11 +4,12 @@ import { Layout } from "../layout";
 interface WorkspacesProps {
   project: string;
   workspaces: Array<{ name: string; parent: string; createdAt: string }>;
+  user?: { id: string; email: string } | null;
 }
 
-export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces }) => {
+export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, user }) => {
   return (
-    <Layout title={`Workspaces — ${project}`}>
+    <Layout title={`Workspaces — ${project}`} user={user}>
       <div class="page-header">
         <h1>Workspaces</h1>
         <a class="btn" href={`/ui/projects/${project}`}>

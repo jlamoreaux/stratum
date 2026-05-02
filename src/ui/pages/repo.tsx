@@ -5,11 +5,12 @@ interface RepoProps {
   project: { name: string; remote: string; createdAt: string };
   files: string[];
   log: Array<{ sha: string; message: string; author: string; timestamp: number }>;
+  user?: { id: string; email: string } | null;
 }
 
-export const RepoPage: FC<RepoProps> = ({ project, files, log }) => {
+export const RepoPage: FC<RepoProps> = ({ project, files, log, user }) => {
   return (
-    <Layout title={project.name}>
+    <Layout title={project.name} user={user}>
       <div class="page-header">
         <h1>{project.name}</h1>
         <a class="btn btn-primary" href={`/ui/projects/${project.name}/changes`}>
