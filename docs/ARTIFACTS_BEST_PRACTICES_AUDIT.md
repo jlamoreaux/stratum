@@ -64,7 +64,8 @@ namespace = "stratum-staging"
 
 ## Validation checklist
 
-- [ ] Prod and staging no longer share a namespace.
+- [x] Prod and staging no longer share a namespace.
 - [ ] Repo provisioning enforces the chosen isolation unit.
-- [ ] Metadata policy (Git notes vs DB) is documented.
-- [ ] Hot namespace detection + sharding process is documented.
+  - TODO: enforcement in project provisioning flow is still outstanding; track as a separate implementation issue.
+- [x] Metadata policy (Git notes vs DB) is documented.
+- [x] Hot namespace detection + sharding process is documented.

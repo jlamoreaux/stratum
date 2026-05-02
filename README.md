@@ -151,7 +151,7 @@ To align with Cloudflare Artifacts best practices:
 
 - **Environment namespace separation**: production and staging must use distinct Artifacts namespaces.
 - **Isolation unit**: each Stratum project maps to a dedicated Git repository in Artifacts.
-- **Metadata strategy**: commit/evaluation provenance that should not alter tree contents is stored as **Git notes**; relational/query metadata remains in D1.
+- **Metadata strategy**: commit/evaluation provenance that should not alter tree contents is **planned to be stored** as Git notes (Phase 2 design decision); relational/query metadata remains in D1.
 - **Scaling**: when namespace traffic grows, shard by workload class (for example: `stratum-prod-realtime` and `stratum-prod-batch`) and migrate new projects to shard-specific namespaces.
 
 ### Namespace checklist
@@ -159,6 +159,10 @@ To align with Cloudflare Artifacts best practices:
 - Production namespace: `stratum-prod`
 - Staging namespace: `stratum-staging`
 - Never share a namespace between environments.
+
+### Namespace change safety
+
+Before changing `[[artifacts]]` / `[[env.staging.artifacts]]` namespace values in `wrangler.toml`, perform a pre-deploy audit and migrate existing repos from the old namespace using the Artifacts REST API so data is not orphaned. Track project-to-namespace migration in the runbook at `docs/runbooks/artifacts-scaling.md`.
 
 ## API Usage
 
