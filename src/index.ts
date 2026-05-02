@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { setCookie } from "hono/cookie";
 import { analyticsMiddleware } from "./middleware/analytics";
 import { authMiddleware } from "./middleware/auth";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
@@ -14,6 +15,8 @@ import { syncAllProjects, syncRouter } from "./routes/sync";
 import { uiRouter } from "./routes/ui";
 import { usersRouter } from "./routes/users";
 import { workspacesRouter } from "./routes/workspaces";
+import { createSession } from "./storage/sessions";
+import { createUser, getUserByEmail } from "./storage/users";
 import type { Env, MessageBatch } from "./types";
 import { CSS } from "./ui/styles";
 export { MergeQueue } from "./queue/merge-queue";
@@ -25,6 +28,43 @@ app.use("*", authMiddleware);
 app.use("*", rateLimitMiddleware());
 
 app.get("/health", (c) => c.json({ status: "ok", service: "stratum" }));
+
+// DEV ONLY: Quick login for local development
+app.get("/dev-login", async (c) => {
+  // Only allow in local development
+  const url = new URL(c.req.url);
+  if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+    return c.json({ error: "Dev login only available in local development" }, 403);
+  }
+
+  const email = c.req.query("email") || "dev@example.com";
+  
+  // Get or create user
+  let user = await getUserByEmail(c.env.DB, email);
+  if (!user) {
+    const result = await createUser(c.env.DB, email);
+    user = result.user;
+    console.log(`[dev-login] Created new user: ${user.id} (${email})`);
+  } else {
+    console.log(`[dev-login] Using existing user: ${user.id} (${email})`);
+  }
+
+  // Create session
+  const session = await createSession(c.env.DB, user.id);
+
+  // Set cookie
+  setCookie(c, "stratum_session", session.id, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "Lax",
+    maxAge: 2592000,
+    path: "/",
+  });
+
+  // Redirect to home or specified redirect URL
+  const redirectTo = c.req.query("redirect") || "/";
+  return c.redirect(redirectTo);
+});
 
 app.get("/ui.css", (c) => {
   return c.text(CSS, 200, { "Content-Type": "text/css; charset=UTF-8" });
