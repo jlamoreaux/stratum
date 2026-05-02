@@ -13,6 +13,11 @@ const DEFAULT_FILES: Record<string, string> = {
 };
 
 const app = new Hono<{ Bindings: Env }>();
+function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
+  const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2] };
+}
 
 app.post("/", async (c) => {
   const userId = c.get("userId");
@@ -81,6 +86,10 @@ app.post("/:name/import", async (c) => {
     token: repo.token,
     createdAt: new Date().toISOString(),
     githubUrl: body.url,
+    ...(parseGitHubRepo(body.url) ?? {}),
+    githubDefaultBranch: branch,
+    githubConnectedAt: new Date().toISOString(),
+    githubConnectionStatus: "connected",
     ownerId: userId,
   });
 

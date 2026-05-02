@@ -21,6 +21,11 @@ import { canReadProject, canWriteProject } from "../utils/authz";
 import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
+function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
+  const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2] };
+}
 
 class UnavailableEvaluator implements Evaluator {
   constructor(
@@ -145,7 +150,7 @@ app.post("/projects/:name/changes", async (c) => {
           issues: aggregateResult.issues,
         };
 
-  const newStatus: Change["status"] = evalResult.passed ? "approved" : "open";
+  const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
 
   await recordEvalRuns(c.env.DB, change.id, evalRuns);
   await updateChangeStatus(c.env.DB, change.id, newStatus, {
@@ -182,7 +187,7 @@ app.get("/projects/:name/changes", async (c) => {
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const statusParam = c.req.query("status");
-  const validStatuses: Change["status"][] = ["open", "approved", "merged", "rejected"];
+  const validStatuses: Change["status"][] = ["open", "needs_changes", "accepted", "promoted", "merged", "rejected"];
   const status =
     statusParam && (validStatuses as string[]).includes(statusParam)
       ? (statusParam as Change["status"])
@@ -224,8 +229,8 @@ app.post("/changes/:id/merge", async (c) => {
   if (!project) return notFound("Project", change.project);
   if (!canWriteProject(project, userId)) return forbidden("Project access denied");
 
-  if (change.status !== "approved" && !force) {
-    return badRequest("Change must be approved before merging");
+  if (change.status !== "accepted" && change.status !== "promoted" && !force) {
+    return badRequest("Change must be accepted before merging");
   }
 
   if (c.env.MERGE_QUEUE && strategy === "merge") {
@@ -337,6 +342,66 @@ app.post("/changes/:id/reject", async (c) => {
   });
 
   return ok({ rejected: true, changeId: id });
+});
+
+app.post("/changes/:id/evaluate", async (c) => {
+  const { id } = c.req.param();
+  const change = await getChange(c.env.DB, id);
+  if (!change) return notFound("Change", id);
+  const project = await getProject(c.env.STATE, change.project);
+  const workspace = await getWorkspace(c.env.STATE, change.workspace);
+  if (!project || !workspace) return badRequest("Change references missing project/workspace");
+  const policy = await loadPolicy(project.remote, project.token);
+  const diff = await getDiffBetweenRepos(project.remote, project.token, workspace.remote, workspace.token);
+  const secret = new SecretScanEvaluator();
+  const result = await secret.evaluate(diff, policy);
+  await recordEvalRuns(c.env.DB, id, [{ evaluatorType: "secret_scan", result }]);
+  await updateChangeStatus(c.env.DB, id, result.passed ? "accepted" : "needs_changes", {
+    evalScore: result.score,
+    evalPassed: result.passed,
+    evalReason: result.reason,
+  });
+  return ok({ changeId: id, eval: result });
+});
+
+app.post("/changes/:id/github-pr", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Authentication required");
+  const { id } = c.req.param();
+  const change = await getChange(c.env.DB, id);
+  if (!change) return notFound("Change", id);
+  if (change.status !== "accepted" && change.status !== "promoted") {
+    return badRequest("Change must be accepted before promotion");
+  }
+  const project = await getProject(c.env.STATE, change.project);
+  if (!project?.githubUrl) return badRequest("Project is not connected to GitHub");
+  const repo = parseGitHubRepo(project.githubUrl);
+  if (!repo) return badRequest("Project githubUrl is invalid");
+  const body = await c.req.json<{ title?: string; body?: string; base?: string; draft?: boolean }>().catch(() => ({}));
+  const branch = `stratum/${change.id}`;
+  const prBody = `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
+  const ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${project.token}`, "User-Agent": "stratum" },
+    body: JSON.stringify({ title: body.title ?? `Stratum: ${change.id}`, body: prBody, head: branch, base: body.base ?? project.githubDefaultBranch ?? "main", draft: body.draft ?? true }),
+  });
+  if (!ghRes.ok) return badRequest(`GitHub PR creation failed (${ghRes.status})`);
+  const pr = (await ghRes.json()) as { number: number; html_url: string; state: string };
+  const promotedAt = new Date().toISOString();
+  await updateChangeStatus(c.env.DB, id, "promoted", {
+    ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
+    ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
+    ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
+    githubOwner: repo.owner,
+    githubRepo: repo.repo,
+    githubBranch: branch,
+    githubPrNumber: pr.number,
+    githubPrUrl: pr.html_url,
+    githubPrState: pr.state,
+    promotedAt,
+    promotedBy: userId,
+  });
+  return ok({ changeId: id, github: { owner: repo.owner, repo: repo.repo, branch, pullRequestNumber: pr.number, pullRequestUrl: pr.html_url } });
 });
 
 export { app as changesRouter };

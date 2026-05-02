@@ -100,6 +100,11 @@ export interface ProjectEntry {
   token: string;
   createdAt: string;
   githubUrl?: string;
+  githubOwner?: string;
+  githubRepo?: string;
+  githubDefaultBranch?: string;
+  githubConnectedAt?: string;
+  githubConnectionStatus?: "connected" | "disconnected";
   ownerId?: string;
   visibility?: "private" | "public";
 }
@@ -159,11 +164,19 @@ export interface Change {
   id: string;
   project: string;
   workspace: string;
-  status: "open" | "approved" | "merged" | "rejected";
+  status: "open" | "needs_changes" | "accepted" | "promoted" | "merged" | "rejected";
   agentId?: string;
   evalScore?: number;
   evalPassed?: boolean;
   evalReason?: string;
   createdAt: string;
   mergedAt?: string;
+  githubOwner?: string;
+  githubRepo?: string;
+  githubBranch?: string;
+  githubPrNumber?: number;
+  githubPrUrl?: string;
+  githubPrState?: string;
+  promotedAt?: string;
+  promotedBy?: string;
 }

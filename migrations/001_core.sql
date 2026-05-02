@@ -26,7 +26,15 @@ CREATE TABLE IF NOT EXISTS changes (
   eval_passed INTEGER,
   eval_reason TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  merged_at TEXT
+  merged_at TEXT,
+  github_owner TEXT,
+  github_repo TEXT,
+  github_branch TEXT,
+  github_pr_number INTEGER,
+  github_pr_url TEXT,
+  github_pr_state TEXT,
+  promoted_at TEXT,
+  promoted_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS eval_runs (

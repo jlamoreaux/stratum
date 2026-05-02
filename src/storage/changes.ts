@@ -12,6 +12,14 @@ interface ChangeRow {
   eval_reason: string | null;
   created_at: string;
   merged_at: string | null;
+  github_owner: string | null;
+  github_repo: string | null;
+  github_branch: string | null;
+  github_pr_number: number | null;
+  github_pr_url: string | null;
+  github_pr_state: string | null;
+  promoted_at: string | null;
+  promoted_by: string | null;
 }
 
 function rowToChange(row: ChangeRow): Change {
@@ -27,6 +35,14 @@ function rowToChange(row: ChangeRow): Change {
   if (row.eval_passed !== null) change.evalPassed = row.eval_passed === 1;
   if (row.eval_reason !== null) change.evalReason = row.eval_reason;
   if (row.merged_at !== null) change.mergedAt = row.merged_at;
+  if (row.github_owner !== null) change.githubOwner = row.github_owner;
+  if (row.github_repo !== null) change.githubRepo = row.github_repo;
+  if (row.github_branch !== null) change.githubBranch = row.github_branch;
+  if (row.github_pr_number !== null) change.githubPrNumber = row.github_pr_number;
+  if (row.github_pr_url !== null) change.githubPrUrl = row.github_pr_url;
+  if (row.github_pr_state !== null) change.githubPrState = row.github_pr_state;
+  if (row.promoted_at !== null) change.promotedAt = row.promoted_at;
+  if (row.promoted_by !== null) change.promotedBy = row.promoted_by;
   return change;
 }
 
@@ -92,11 +108,23 @@ export async function updateChangeStatus(
     evalPassed?: boolean;
     evalReason?: string;
     mergedAt?: string;
+    githubOwner?: string;
+    githubRepo?: string;
+    githubBranch?: string;
+    githubPrNumber?: number;
+    githubPrUrl?: string;
+    githubPrState?: string;
+    promotedAt?: string;
+    promotedBy?: string;
   },
 ): Promise<void> {
   await db
     .prepare(
-      "UPDATE changes SET status = ?, eval_score = ?, eval_passed = ?, eval_reason = ?, merged_at = ? WHERE id = ?",
+      `UPDATE changes
+       SET status = ?, eval_score = ?, eval_passed = ?, eval_reason = ?, merged_at = ?,
+           github_owner = ?, github_repo = ?, github_branch = ?, github_pr_number = ?, github_pr_url = ?, github_pr_state = ?,
+           promoted_at = ?, promoted_by = ?
+       WHERE id = ?`,
     )
     .bind(
       status,
@@ -104,6 +132,14 @@ export async function updateChangeStatus(
       opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : null,
       opts?.evalReason ?? null,
       opts?.mergedAt ?? null,
+      opts?.githubOwner ?? null,
+      opts?.githubRepo ?? null,
+      opts?.githubBranch ?? null,
+      opts?.githubPrNumber ?? null,
+      opts?.githubPrUrl ?? null,
+      opts?.githubPrState ?? null,
+      opts?.promotedAt ?? null,
+      opts?.promotedBy ?? null,
       id,
     )
     .run();

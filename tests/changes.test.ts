@@ -222,7 +222,7 @@ describe("POST /api/projects/:name/changes", () => {
     );
   });
 
-  it("creates a change, runs evaluators, and returns approved status when eval passes", async () => {
+  it("creates a change, runs evaluators, and returns accepted status when eval passes", async () => {
     const res = await app.fetch(
       request("POST", "/api/projects/my-project/changes", { workspace: "fix-bug" }, USER_AUTH),
       env,
@@ -233,13 +233,13 @@ describe("POST /api/projects/:name/changes", () => {
       eval: typeof passingEvalResult;
       evalRuns: unknown[];
     };
-    expect(body.change.status).toBe("approved");
+    expect(body.change.status).toBe("accepted");
     expect(body.change.evalPassed).toBe(true);
     expect(body.eval.passed).toBe(true);
     expect(updateChangeStatus).toHaveBeenCalledWith(
       env.DB,
       "chg_abc123",
-      "approved",
+      "accepted",
       expect.objectContaining({ evalPassed: true }),
     );
     expect(recordEvalRuns).toHaveBeenCalledWith(
@@ -282,7 +282,7 @@ describe("POST /api/projects/:name/changes", () => {
     expect(createChange).not.toHaveBeenCalled();
   });
 
-  it("returns open status when eval fails", async () => {
+  it("returns needs_changes status when eval fails", async () => {
     vi.mocked(CompositeEvaluator).mockImplementation(
       () =>
         ({
@@ -296,13 +296,13 @@ describe("POST /api/projects/:name/changes", () => {
     );
     expect(res.status).toBe(201);
     const body = (await res.json()) as { change: Change; eval: typeof failingEvalResult };
-    expect(body.change.status).toBe("open");
+    expect(body.change.status).toBe("needs_changes");
     expect(body.change.evalPassed).toBe(false);
     expect(body.eval.passed).toBe(false);
     expect(updateChangeStatus).toHaveBeenCalledWith(
       env.DB,
       "chg_abc123",
-      "open",
+      "needs_changes",
       expect.objectContaining({ evalPassed: false }),
     );
   });
@@ -341,7 +341,7 @@ describe("POST /api/projects/:name/changes", () => {
     );
     expect(res.status).toBe(201);
     const body = (await res.json()) as { change: Change; eval: typeof failingEvalResult };
-    expect(body.change.status).toBe("open");
+    expect(body.change.status).toBe("needs_changes");
     expect(body.eval.passed).toBe(false);
     expect(body.eval.reason).toContain("Secret detected");
   });
@@ -537,7 +537,7 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("merges an approved change and returns merged=true", async () => {
-    const approvedChange: Change = { ...mockChange, status: "approved" };
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue(approvedChange);
 
     const res = await app.fetch(
@@ -573,7 +573,7 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("returns 401 when unauthenticated", async () => {
-    const approvedChange: Change = { ...mockChange, status: "approved" };
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue(approvedChange);
 
     const res = await app.fetch(request("POST", "/api/changes/chg_abc123/merge"), env);
@@ -581,7 +581,7 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("returns 403 when merging another user's project", async () => {
-    const approvedChange: Change = { ...mockChange, status: "approved" };
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue(approvedChange);
 
     const res = await app.fetch(
@@ -592,7 +592,7 @@ describe("POST /api/changes/:id/merge", () => {
     expect(mergeWorkspaceIntoProject).not.toHaveBeenCalled();
   });
 
-  it("returns 400 when change is not approved", async () => {
+  it("returns 400 when change is not accepted", async () => {
     vi.mocked(getChange).mockResolvedValue(mockChange);
 
     const res = await app.fetch(
@@ -601,7 +601,7 @@ describe("POST /api/changes/:id/merge", () => {
     );
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("approved");
+    expect(body.error).toContain("accepted");
     expect(mergeWorkspaceIntoProject).not.toHaveBeenCalled();
   });
 
@@ -619,7 +619,7 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("passes explicit squash strategy to merge implementation", async () => {
-    const approvedChange: Change = { ...mockChange, status: "approved" };
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue(approvedChange);
 
     const res = await app.fetch(
@@ -637,7 +637,7 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("returns 400 when merge implementation reports a conflict", async () => {
-    const approvedChange: Change = { ...mockChange, status: "approved" };
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue(approvedChange);
     vi.mocked(mergeWorkspaceIntoProject).mockRejectedValue(
       new Error("Merge failed; workspace may be stale or conflicting"),
@@ -654,7 +654,7 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("rejects unknown merge strategy", async () => {
-    const approvedChange: Change = { ...mockChange, status: "approved" };
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue(approvedChange);
 
     const res = await app.fetch(
