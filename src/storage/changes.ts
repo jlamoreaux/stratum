@@ -35,14 +35,14 @@ function rowToChange(row: ChangeRow): Change {
   if (row.eval_passed !== null) change.evalPassed = row.eval_passed === 1;
   if (row.eval_reason !== null) change.evalReason = row.eval_reason;
   if (row.merged_at !== null) change.mergedAt = row.merged_at;
-  if (row.github_owner != null) change.githubOwner = row.github_owner;
-  if (row.github_repo != null) change.githubRepo = row.github_repo;
-  if (row.github_branch != null) change.githubBranch = row.github_branch;
-  if (row.github_pr_number != null) change.githubPrNumber = row.github_pr_number;
-  if (row.github_pr_url != null) change.githubPrUrl = row.github_pr_url;
-  if (row.github_pr_state != null) change.githubPrState = row.github_pr_state;
-  if (row.promoted_at != null) change.promotedAt = row.promoted_at;
-  if (row.promoted_by != null) change.promotedBy = row.promoted_by;
+  if (row.github_owner !== null) change.githubOwner = row.github_owner;
+  if (row.github_repo !== null) change.githubRepo = row.github_repo;
+  if (row.github_branch !== null) change.githubBranch = row.github_branch;
+  if (row.github_pr_number !== null) change.githubPrNumber = row.github_pr_number;
+  if (row.github_pr_url !== null) change.githubPrUrl = row.github_pr_url;
+  if (row.github_pr_state !== null) change.githubPrState = row.github_pr_state;
+  if (row.promoted_at !== null) change.promotedAt = row.promoted_at;
+  if (row.promoted_by !== null) change.promotedBy = row.promoted_by;
   return change;
 }
 

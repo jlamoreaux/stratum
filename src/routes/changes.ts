@@ -21,6 +21,11 @@ import { canReadProject, canWriteProject } from "../utils/authz";
 import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
+function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
+  const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
+  if (!match || !match[1] || !match[2]) return null;
+  return { owner: match[1], repo: match[2] };
+}
 
 const MERGEABLE_STATUSES: Change["status"][] = ["approved", "accepted", "promoted"];
 
@@ -147,7 +152,7 @@ app.post("/projects/:name/changes", async (c) => {
           issues: aggregateResult.issues,
         };
 
-  const newStatus: Change["status"] = evalResult.passed ? "approved" : "open";
+  const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
 
   await recordEvalRuns(c.env.DB, change.id, evalRuns);
   await updateChangeStatus(c.env.DB, change.id, newStatus, {
@@ -186,11 +191,12 @@ app.get("/projects/:name/changes", async (c) => {
   const statusParam = c.req.query("status");
   const validStatuses: Change["status"][] = [
     "open",
-    "approved",
+    "needs_changes",
     "accepted",
+    "approved",
+    "promoted",
     "merged",
     "rejected",
-    "promoted",
   ];
   const status =
     statusParam && (validStatuses as string[]).includes(statusParam)
@@ -346,6 +352,160 @@ app.post("/changes/:id/reject", async (c) => {
   });
 
   return ok({ rejected: true, changeId: id });
+});
+
+app.post("/changes/:id/evaluate", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Only authenticated users can run evaluations");
+  const { id } = c.req.param();
+  const change = await getChange(c.env.DB, id);
+  if (!change) return notFound("Change", id);
+  const project = await getProject(c.env.STATE, change.project);
+  if (!project) return notFound("Project", change.project);
+  if (!canWriteProject(project, userId)) return forbidden("Project access denied");
+  if (change.status === "merged" || change.status === "rejected" || change.status === "promoted") {
+    return badRequest(`Cannot re-evaluate a ${change.status} change`);
+  }
+  const workspace = await getWorkspace(c.env.STATE, change.workspace);
+  if (!workspace) return badRequest("Change references missing project/workspace");
+  const policy = await loadPolicy(project.remote, project.token);
+  const diff = await getDiffBetweenRepos(
+    project.remote,
+    project.token,
+    workspace.remote,
+    workspace.token,
+  );
+  const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
+    { type: "secret_scan", evaluator: new SecretScanEvaluator() },
+    ...policy.evaluators.flatMap((cfg): Array<{ type: string; evaluator: Evaluator }> => {
+      switch (cfg.type) {
+        case "diff":
+          return [{ type: "diff", evaluator: new DiffEvaluator() }];
+        case "webhook":
+          return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
+        case "llm":
+          return c.env.AI
+            ? [{ type: "llm", evaluator: new LLMEvaluator(c.env.AI) }]
+            : [
+                {
+                  type: "llm",
+                  evaluator: new UnavailableEvaluator("llm", "AI binding is not configured"),
+                },
+              ];
+        case "sandbox":
+          return c.env.SANDBOX
+            ? [{ type: "sandbox", evaluator: new SandboxEvaluator(c.env.SANDBOX) }]
+            : [
+                {
+                  type: "sandbox",
+                  evaluator: new UnavailableEvaluator(
+                    "sandbox",
+                    "SANDBOX binding is not configured",
+                  ),
+                },
+              ];
+        default:
+          return [];
+      }
+    }),
+  ];
+  const evalRuns = await Promise.all(
+    evaluators.map(async ({ type, evaluator }) => ({
+      evaluatorType: type,
+      result: await evaluator.evaluate(diff, policy),
+    })),
+  );
+  const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
+  const aggregateResult = composite.aggregate(
+    evalRuns.map(({ result }) => result),
+    policy,
+  );
+  const blockingFailure = evalRuns.find(
+    ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
+  );
+  const evalResult =
+    blockingFailure === undefined
+      ? aggregateResult
+      : {
+          score: Math.min(aggregateResult.score, blockingFailure.result.score),
+          passed: false,
+          reason:
+            aggregateResult.reason === blockingFailure.result.reason
+              ? blockingFailure.result.reason
+              : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
+          issues: aggregateResult.issues,
+        };
+  await recordEvalRuns(c.env.DB, id, evalRuns);
+  await updateChangeStatus(c.env.DB, id, evalResult.passed ? "accepted" : "needs_changes", {
+    evalScore: evalResult.score,
+    evalPassed: evalResult.passed,
+    evalReason: evalResult.reason,
+  });
+  return ok({ changeId: id, eval: evalResult, evalRuns });
+});
+
+app.post("/changes/:id/github-pr", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Authentication required");
+  const { id } = c.req.param();
+  const change = await getChange(c.env.DB, id);
+  if (!change) return notFound("Change", id);
+  if (change.status !== "accepted" && change.status !== "promoted") {
+    return badRequest("Change must be accepted before promotion");
+  }
+  const project = await getProject(c.env.STATE, change.project);
+  if (!project) return notFound("Project", change.project);
+  if (!canWriteProject(project, userId)) return forbidden("Project access denied");
+  if (!project?.githubUrl) return badRequest("Project is not connected to GitHub");
+  const repo = parseGitHubRepo(project.githubUrl);
+  if (!repo) return badRequest("Project githubUrl is invalid");
+  const body = await c.req
+    .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
+    .catch(() => ({}) as { title?: string; body?: string; base?: string; draft?: boolean });
+  const branch = `stratum/${change.id}`;
+  const prBody =
+    `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
+  const ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${project.token}`,
+      "User-Agent": "stratum",
+    },
+    body: JSON.stringify({
+      title: body.title ?? `Stratum: ${change.id}`,
+      body: prBody,
+      head: branch,
+      base: body.base ?? project.githubDefaultBranch ?? "main",
+      draft: body.draft ?? true,
+    }),
+  });
+  if (!ghRes.ok) return badRequest(`GitHub PR creation failed (${ghRes.status})`);
+  const pr = (await ghRes.json()) as { number: number; html_url: string; state: string };
+  const promotedAt = new Date().toISOString();
+  await updateChangeStatus(c.env.DB, id, "promoted", {
+    ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
+    ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
+    ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
+    githubOwner: repo.owner,
+    githubRepo: repo.repo,
+    githubBranch: branch,
+    githubPrNumber: pr.number,
+    githubPrUrl: pr.html_url,
+    githubPrState: pr.state,
+    promotedAt,
+    promotedBy: userId,
+  });
+  return ok({
+    changeId: id,
+    github: {
+      owner: repo.owner,
+      repo: repo.repo,
+      branch,
+      pullRequestNumber: pr.number,
+      pullRequestUrl: pr.html_url,
+    },
+  });
 });
 
 export { app as changesRouter };

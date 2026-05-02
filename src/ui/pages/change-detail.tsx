@@ -12,6 +12,7 @@ interface ChangeDetailProps {
     evalReason?: string;
     createdAt: string;
     mergedAt?: string;
+    githubPrUrl?: string;
   };
   evalRuns: Array<{
     id: string;
@@ -36,7 +37,12 @@ function statusBadgeClass(status: string): string {
     case "open":
       return "badge badge-open";
     case "approved":
+    case "accepted":
       return "badge badge-approved";
+    case "promoted":
+      return "badge badge-merged";
+    case "needs_changes":
+      return "badge badge-rejected";
     case "merged":
       return "badge badge-merged";
     case "rejected":
@@ -57,6 +63,39 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change, evalRuns, prov
         <a class="btn" href={`/ui/projects/${change.project}/changes`}>
           Back to changes
         </a>
+      </div>
+
+      <div class="card">
+        <h2>Actions</h2>
+        <div class="action-row">
+          {change.githubPrUrl !== undefined ? (
+            <a class="btn btn-primary" href={change.githubPrUrl} target="_blank" rel="noreferrer">
+              Open GitHub PR
+            </a>
+          ) : (
+            <>
+              {(change.status === "accepted" || change.status === "promoted") && (
+                <form method="post" action={`/api/changes/${change.id}/github-pr`}>
+                  <button type="submit" class="btn btn-primary">
+                    Promote to GitHub
+                  </button>
+                </form>
+              )}
+              {(change.status === "open" || change.status === "needs_changes") && (
+                <form method="post" action={`/api/changes/${change.id}/evaluate`}>
+                  <button type="submit" class="btn">
+                    Run evaluations again
+                  </button>
+                </form>
+              )}
+            </>
+          )}
+          <form method="post" action={`/api/changes/${change.id}/reject`}>
+            <button type="submit" class="btn btn-danger">
+              Reject change
+            </button>
+          </form>
+        </div>
       </div>
 
       <div class="card">
@@ -169,18 +208,11 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change, evalRuns, prov
         </div>
       )}
 
-      {(change.status === "approved" || change.status === "open") && (
+      {(change.status === "accepted" || change.status === "promoted") && (
         <div class="action-row">
-          {change.status === "approved" && (
-            <form method="post" action={`/api/changes/${change.id}/merge`}>
-              <button type="submit" class="btn btn-primary">
-                Merge
-              </button>
-            </form>
-          )}
-          <form method="post" action={`/api/changes/${change.id}/reject`}>
-            <button type="submit" class="btn btn-danger">
-              Reject
+          <form method="post" action={`/api/changes/${change.id}/merge`}>
+            <button type="submit" class="btn">
+              Merge into Stratum repo
             </button>
           </form>
         </div>
