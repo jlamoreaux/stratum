@@ -11,10 +11,29 @@ export const HomePage: FC<HomeProps> = ({ projects, user }) => {
     <Layout title="Dashboard" user={user}>
       <div class="page-header">
         <h1>Dashboard</h1>
+        {user && (
+          <a class="btn btn-primary" href="/new">
+            New Project
+          </a>
+        )}
       </div>
       {projects.length === 0 ? (
         <div class="empty-state">
-          <p>No projects yet. Create one via the API.</p>
+          {user ? (
+            <>
+              <p>No projects yet.</p>
+              <a href="/new" class="btn btn-primary" style={{ marginTop: "1rem", display: "inline-block" }}>
+                Create your first project
+              </a>
+            </>
+          ) : (
+            <>
+              <p>No public projects available.</p>
+              <a href="/auth/email" class="btn btn-primary" style={{ marginTop: "1rem", display: "inline-block" }}>
+                Sign in to see your projects
+              </a>
+            </>
+          )}
         </div>
       ) : (
         <div class="card-grid">

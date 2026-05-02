@@ -10,6 +10,7 @@ import { canReadProject, filterReadableProjects } from "../utils/authz";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
 import { ChangesPage } from "../ui/pages/changes";
 import { HomePage } from "../ui/pages/home";
+import { NewProjectPage } from "../ui/pages/new-project";
 import { RepoPage } from "../ui/pages/repo";
 import { WorkspacesPage } from "../ui/pages/workspaces";
 
@@ -39,6 +40,15 @@ app.get("/", async (c) => {
     visibility: p.visibility,
   }));
   return c.html(<HomePage projects={view} user={user} />);
+});
+
+// GET /new — New project form
+app.get("/new", async (c) => {
+  const user = await getCurrentUser(c);
+  if (!user) {
+    return c.redirect("/auth/email");
+  }
+  return c.html(<NewProjectPage user={user} />);
 });
 
 // GET /p/:name — Repo view (files + commit log)
