@@ -15,8 +15,8 @@ export class MergeQueue {
 
   async merge(changeId: string): Promise<{ success: boolean; commit?: string; error?: string }> {
     const change = await getChange(this.env.DB, changeId);
-    if (!change || change.status !== "approved") {
-      return { success: false, error: "Change not found or not approved" };
+    if (!change || (change.status !== "accepted" && change.status !== "promoted")) {
+      return { success: false, error: "Change not found or not accepted" };
     }
 
     try {

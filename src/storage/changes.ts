@@ -121,9 +121,19 @@ export async function updateChangeStatus(
   await db
     .prepare(
       `UPDATE changes
-       SET status = ?, eval_score = ?, eval_passed = ?, eval_reason = ?, merged_at = ?,
-           github_owner = ?, github_repo = ?, github_branch = ?, github_pr_number = ?, github_pr_url = ?, github_pr_state = ?,
-           promoted_at = ?, promoted_by = ?
+       SET status = ?,
+           eval_score = COALESCE(?, eval_score),
+           eval_passed = COALESCE(?, eval_passed),
+           eval_reason = COALESCE(?, eval_reason),
+           merged_at = COALESCE(?, merged_at),
+           github_owner = COALESCE(?, github_owner),
+           github_repo = COALESCE(?, github_repo),
+           github_branch = COALESCE(?, github_branch),
+           github_pr_number = COALESCE(?, github_pr_number),
+           github_pr_url = COALESCE(?, github_pr_url),
+           github_pr_state = COALESCE(?, github_pr_state),
+           promoted_at = COALESCE(?, promoted_at),
+           promoted_by = COALESCE(?, promoted_by)
        WHERE id = ?`,
     )
     .bind(

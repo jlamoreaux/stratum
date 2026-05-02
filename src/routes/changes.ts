@@ -345,23 +345,75 @@ app.post("/changes/:id/reject", async (c) => {
 });
 
 app.post("/changes/:id/evaluate", async (c) => {
+  const userId = c.get("userId");
+  if (!userId) return unauthorized("Only authenticated users can run evaluations");
   const { id } = c.req.param();
   const change = await getChange(c.env.DB, id);
   if (!change) return notFound("Change", id);
   const project = await getProject(c.env.STATE, change.project);
+  if (!project) return notFound("Project", change.project);
+  if (!canWriteProject(project, userId)) return forbidden("Project access denied");
+  if (change.status === "merged" || change.status === "rejected" || change.status === "promoted") {
+    return badRequest(`Cannot re-evaluate a ${change.status} change`);
+  }
   const workspace = await getWorkspace(c.env.STATE, change.workspace);
-  if (!project || !workspace) return badRequest("Change references missing project/workspace");
+  if (!workspace) return badRequest("Change references missing project/workspace");
   const policy = await loadPolicy(project.remote, project.token);
   const diff = await getDiffBetweenRepos(project.remote, project.token, workspace.remote, workspace.token);
-  const secret = new SecretScanEvaluator();
-  const result = await secret.evaluate(diff, policy);
-  await recordEvalRuns(c.env.DB, id, [{ evaluatorType: "secret_scan", result }]);
-  await updateChangeStatus(c.env.DB, id, result.passed ? "accepted" : "needs_changes", {
-    evalScore: result.score,
-    evalPassed: result.passed,
-    evalReason: result.reason,
+  const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
+    { type: "secret_scan", evaluator: new SecretScanEvaluator() },
+    ...policy.evaluators.flatMap((cfg): Array<{ type: string; evaluator: Evaluator }> => {
+      switch (cfg.type) {
+        case "diff":
+          return [{ type: "diff", evaluator: new DiffEvaluator() }];
+        case "webhook":
+          return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
+        case "llm":
+          return c.env.AI
+            ? [{ type: "llm", evaluator: new LLMEvaluator(c.env.AI) }]
+            : [{ type: "llm", evaluator: new UnavailableEvaluator("llm", "AI binding is not configured") }];
+        case "sandbox":
+          return c.env.SANDBOX
+            ? [{ type: "sandbox", evaluator: new SandboxEvaluator(c.env.SANDBOX) }]
+            : [{ type: "sandbox", evaluator: new UnavailableEvaluator("sandbox", "SANDBOX binding is not configured") }];
+        default:
+          return [];
+      }
+    }),
+  ];
+  const evalRuns = await Promise.all(
+    evaluators.map(async ({ type, evaluator }) => ({
+      evaluatorType: type,
+      result: await evaluator.evaluate(diff, policy),
+    })),
+  );
+  const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
+  const aggregateResult = composite.aggregate(
+    evalRuns.map(({ result }) => result),
+    policy,
+  );
+  const blockingFailure = evalRuns.find(
+    ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
+  );
+  const evalResult =
+    blockingFailure === undefined
+      ? aggregateResult
+      : {
+          score: Math.min(aggregateResult.score, blockingFailure.result.score),
+          passed: false,
+          reason:
+            aggregateResult.reason === blockingFailure.result.reason
+              ? blockingFailure.result.reason
+              : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
+          issues: aggregateResult.issues,
+        };
+  await recordEvalRuns(c.env.DB, id, evalRuns);
+  await updateChangeStatus(c.env.DB, id, evalResult.passed ? "accepted" : "needs_changes", {
+    evalScore: evalResult.score,
+    evalPassed: evalResult.passed,
+    evalReason: evalResult.reason,
   });
-  return ok({ changeId: id, eval: result });
+  return ok({ changeId: id, eval: evalResult, evalRuns });
 });
 
 app.post("/changes/:id/github-pr", async (c) => {
@@ -374,6 +426,8 @@ app.post("/changes/:id/github-pr", async (c) => {
     return badRequest("Change must be accepted before promotion");
   }
   const project = await getProject(c.env.STATE, change.project);
+  if (!project) return notFound("Project", change.project);
+  if (!canWriteProject(project, userId)) return forbidden("Project access denied");
   if (!project?.githubUrl) return badRequest("Project is not connected to GitHub");
   const repo = parseGitHubRepo(project.githubUrl);
   if (!repo) return badRequest("Project githubUrl is invalid");
