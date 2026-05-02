@@ -5,10 +5,11 @@ interface RepoProps {
   project: { name: string; remote: string; createdAt: string };
   files: string[];
   log: Array<{ sha: string; message: string; author: string; timestamp: number }>;
+  readme?: string | null;
   user?: { id: string; email: string } | null;
 }
 
-export const RepoPage: FC<RepoProps> = ({ project, files, log, user }) => {
+export const RepoPage: FC<RepoProps> = ({ project, files, log, readme, user }) => {
   return (
     <Layout title={project.name} user={user}>
       <div class="page-header">
@@ -17,6 +18,14 @@ export const RepoPage: FC<RepoProps> = ({ project, files, log, user }) => {
           View changes
         </a>
       </div>
+
+      {readme && (
+        <div class="card readme-card">
+          <div class="readme-content">
+            <pre>{readme}</pre>
+          </div>
+        </div>
+      )}
 
       <div class="card">
         <h2>Files</h2>

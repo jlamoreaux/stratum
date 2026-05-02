@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getChange, listChanges } from "../storage/changes";
 import { listEvalRuns } from "../storage/eval-runs";
-import { getCommitLog, listFilesInRepo } from "../storage/git-ops";
+import { getCommitLog, listFilesInRepo, readFileFromRepo } from "../storage/git-ops";
 import { getProvenance } from "../storage/provenance";
 import { getProject, listProjects, listWorkspaces } from "../storage/state";
 import { getUser } from "../storage/users";
@@ -70,12 +70,19 @@ app.get("/p/:name", async (c) => {
 
   let files: string[] = [];
   let log: Array<{ sha: string; message: string; author: string; timestamp: number }> = [];
+  let readme: string | null = null;
 
   try {
     [files, log] = await Promise.all([
       listFilesInRepo(project.remote, project.token),
       getCommitLog(project.remote, project.token, 20),
     ]);
+    
+    // Try to read README.md if it exists
+    const readmePath = files.find(f => f.toLowerCase() === "readme.md");
+    if (readmePath) {
+      readme = await readFileFromRepo(project.remote, project.token, readmePath);
+    }
   } catch {
     // Repo may be empty or unreachable — render with empty data
   }
@@ -85,6 +92,7 @@ app.get("/p/:name", async (c) => {
       project={{ name: project.name, remote: project.remote, createdAt: project.createdAt }}
       files={files}
       log={log}
+      readme={readme}
       user={user}
     />,
   );

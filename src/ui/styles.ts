@@ -121,6 +121,24 @@ a:hover { text-decoration: underline; }
 .badge-rejected { background: #3d1a1a; color: #f87171; }
 .badge-public   { background: #1a3a1e; color: #4ade80; margin-left: 0.5rem; font-size: 0.65rem; }
 
+/* README styling */
+.readme-card {
+  background: #0d0d0d;
+  border: 1px solid #1e1e1e;
+}
+
+.readme-content pre {
+  margin: 0;
+  padding: 1rem;
+  background: transparent;
+  color: #ccc;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
 .btn {
   display: inline-block;
   padding: 0.4rem 0.85rem;
