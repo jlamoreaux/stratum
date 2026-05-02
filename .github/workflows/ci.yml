@@ -39,11 +39,13 @@ jobs:
     name: Deploy to Staging
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request'
     concurrency:
-      group: deploy-staging
+      group: deploy-staging-${{ github.head_ref }}
       cancel-in-progress: true
     permissions:
+      contents: read
+      pull-requests: write
       issues: write
     steps:
       - name: Checkout
@@ -77,6 +79,25 @@ jobs:
           curl -sfS --retry 3 --retry-delay 5 "$URL/health"
           echo "✓ Smoke test passed"
 
+      - name: Comment PR with staging URL
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const subdomain = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/workers/subdomain`, {
+              headers: { 'Authorization': `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` }
+            }).then(r => r.json()).then(d => d.result.subdomain);
+            const url = `https://stratum-staging.${subdomain}.workers.dev`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🚀 **Staging deployment ready!**\n\nPreview URL: ${url}`
+            });
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: Notify on failure
         if: failure()
         uses: actions/github-script@v7
@@ -86,5 +107,59 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: "🚨 Staging deploy failed",
-              body: `The staging deployment workflow failed on \`${context.ref}\`.\n\n[View run](${context.payload.repository.html_url}/actions/runs/${context.runId})`
+              body: `The staging deployment workflow failed on PR #${context.issue.number}.\n\n[View run](${context.payload.repository.html_url}/actions/runs/${context.runId})`
+            });
+
+  deploy-production:
+    name: Deploy to Production
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: true
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Deploy to Cloudflare Production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy
+
+      - name: Smoke test
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -e
+          SUBDOMAIN=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | jq -r '.result.subdomain')
+          URL="https://stratum.$SUBDOMAIN.workers.dev"
+          echo "→ Smoke testing $URL/health"
+          curl -sfS --retry 3 --retry-delay 5 "$URL/health"
+          echo "✓ Smoke test passed"
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "🚨 Production deploy failed",
+              body: `The production deployment workflow failed on \`${context.ref}\`.\n\n[View run](${context.payload.repository.html_url}/actions/runs/${context.runId})`
             });
