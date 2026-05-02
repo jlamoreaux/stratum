@@ -2,7 +2,7 @@ import type { FC } from "hono/jsx";
 import { Layout } from "../layout";
 
 interface HomeProps {
-  projects: Array<{ name: string; remote: string; createdAt: string }>;
+  projects: Array<{ name: string; remote: string; createdAt: string; visibility?: string }>;
   user?: { id: string; email: string } | null;
 }
 
@@ -20,7 +20,10 @@ export const HomePage: FC<HomeProps> = ({ projects, user }) => {
         <div class="card-grid">
           {projects.map((project) => (
             <a class="card card-link" href={`/p/${project.name}`} key={project.name}>
-              <div class="card-title">{project.name}</div>
+              <div class="card-title">
+                {project.name}
+                {project.visibility === "public" && <span class="badge badge-public">public</span>}
+              </div>
               <div class="card-meta">{new Date(project.createdAt).toLocaleDateString()}</div>
             </a>
           ))}

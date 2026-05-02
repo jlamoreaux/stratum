@@ -36,6 +36,7 @@ app.get("/", async (c) => {
     name: p.name,
     remote: p.remote,
     createdAt: p.createdAt,
+    visibility: p.visibility,
   }));
   return c.html(<HomePage projects={view} user={user} />);
 });

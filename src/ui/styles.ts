@@ -119,6 +119,7 @@ a:hover { text-decoration: underline; }
 .badge-approved { background: #1a3d2b; color: #4ade80; }
 .badge-merged   { background: #2d1a5e; color: #c084fc; }
 .badge-rejected { background: #3d1a1a; color: #f87171; }
+.badge-public   { background: #1a3a1e; color: #4ade80; margin-left: 0.5rem; font-size: 0.65rem; }
 
 .btn {
   display: inline-block;

@@ -23,8 +23,17 @@ app.post("/", async (c) => {
   const userId = c.get("userId");
   if (!userId) return unauthorized("Authentication required");
 
-  const body = await c.req.json<{ name?: unknown; files?: unknown }>();
+  const body = await c.req.json<{ name?: unknown; files?: unknown; visibility?: unknown }>();
   if (!isValidSlug(body.name)) return badRequest("name must be a 1-64 char alphanumeric slug");
+
+  // Validate visibility if provided
+  let visibility: "private" | "public" = "private";
+  if (body.visibility !== undefined) {
+    if (body.visibility !== "private" && body.visibility !== "public") {
+      return badRequest("visibility must be 'private' or 'public'");
+    }
+    visibility = body.visibility;
+  }
 
   const seed = c.req.query("seed") === "true";
   const files =
@@ -48,9 +57,10 @@ app.post("/", async (c) => {
     token: repo.token,
     createdAt: new Date().toISOString(),
     ownerId: userId,
+    visibility,
   });
 
-  return created({ name: body.name, remote: repo.remote, commit: sha });
+  return created({ name: body.name, remote: repo.remote, commit: sha, visibility });
 });
 
 app.get("/", async (c) => {
@@ -59,7 +69,7 @@ app.get("/", async (c) => {
 
   const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
   return ok({
-    projects: projects.map(({ name, remote, createdAt }) => ({ name, remote, createdAt })),
+    projects: projects.map(({ name, remote, createdAt, visibility }) => ({ name, remote, createdAt, visibility })),
   });
 });
 
@@ -70,12 +80,21 @@ app.post("/:name/import", async (c) => {
   const { name } = c.req.param();
   if (!isValidSlug(name)) return badRequest("invalid project name");
 
-  const body = await c.req.json<{ url?: unknown; branch?: unknown; depth?: unknown }>();
+  const body = await c.req.json<{ url?: unknown; branch?: unknown; depth?: unknown; visibility?: unknown }>();
   if (!isValidGitHubUrl(body.url))
     return badRequest("url must be a valid github.com repository URL");
 
   const branch = typeof body.branch === "string" ? body.branch : "main";
   const depth = typeof body.depth === "number" ? body.depth : 10;
+
+  // Validate visibility if provided
+  let visibility: "private" | "public" = "private";
+  if (body.visibility !== undefined) {
+    if (body.visibility !== "private" && body.visibility !== "public") {
+      return badRequest("visibility must be 'private' or 'public'");
+    }
+    visibility = body.visibility;
+  }
 
   const repo = await c.env.ARTIFACTS.create(name);
   await importFromGitHub(repo.remote, repo.token, body.url, branch, depth);
@@ -91,9 +110,10 @@ app.post("/:name/import", async (c) => {
     githubConnectedAt: new Date().toISOString(),
     githubConnectionStatus: "connected",
     ownerId: userId,
+    visibility,
   });
 
-  return created({ name, remote: repo.remote, source: body.url });
+  return created({ name, remote: repo.remote, source: body.url, visibility });
 });
 
 app.get("/:name/files", async (c) => {
