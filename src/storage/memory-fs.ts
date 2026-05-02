@@ -24,8 +24,13 @@ class MemoryStats {
     return this.entry.mtimeMs;
   }
 
+  // mode needs to be writable for isomorphic-git compatibility
+  private _mode: number | undefined;
   get mode(): number {
-    return this.entry.kind === "file" ? 0o100644 : 0o040000;
+    return this._mode ?? (this.entry.kind === "file" ? 0o100644 : 0o040000);
+  }
+  set mode(value: number) {
+    this._mode = value;
   }
 
   isFile(): boolean {
@@ -41,21 +46,13 @@ class MemoryStats {
   }
 }
 
+// Type for callback-style fs functions
+type Callback<T> = (err: Error | null, result?: T) => void;
+
 export class MemoryFS {
   private readonly entries = new Map<string, Entry>([
     ["/", { kind: "dir", children: new Set(), mtimeMs: Date.now() }],
   ]);
-
-  readonly promises = {
-    readFile: this.readFile.bind(this),
-    writeFile: this.writeFile.bind(this),
-    unlink: this.unlink.bind(this),
-    readdir: this.readdir.bind(this),
-    mkdir: this.mkdir.bind(this),
-    rmdir: this.rmdir.bind(this),
-    stat: this.stat.bind(this),
-    lstat: this.lstat.bind(this),
-  };
 
   normalize(input: string): string {
     const segments: string[] = [];
@@ -98,7 +95,8 @@ export class MemoryFS {
     return entry;
   }
 
-  async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+  // Internal implementations
+  private async mkdirImpl(path: string, options?: { recursive?: boolean }): Promise<void> {
     const target = this.normalize(path);
     if (target === "/") return;
     const recursive = options?.recursive === true;
@@ -106,7 +104,7 @@ export class MemoryFS {
 
     if (!this.entries.has(parentPath)) {
       if (!recursive) throw fsError("ENOENT", `ENOENT: no such file or directory: ${parentPath}`);
-      await this.mkdir(parentPath, { recursive: true });
+      await this.mkdirImpl(parentPath, { recursive: true });
     }
 
     if (this.entries.has(target)) return;
@@ -115,10 +113,10 @@ export class MemoryFS {
     this.requireDir(parentPath).children.add(this.basename(target));
   }
 
-  async writeFile(path: string, data: string | Uint8Array | ArrayBuffer): Promise<void> {
+  private async writeFileImpl(path: string, data: string | Uint8Array | ArrayBuffer): Promise<void> {
     const target = this.normalize(path);
     const parentPath = this.parent(target);
-    await this.mkdir(parentPath, { recursive: true });
+    await this.mkdirImpl(parentPath, { recursive: true });
 
     const bytes =
       typeof data === "string"
@@ -134,7 +132,7 @@ export class MemoryFS {
     this.requireDir(parentPath).children.add(this.basename(target));
   }
 
-  async readFile(
+  private async readFileImpl(
     path: string,
     options?: string | { encoding?: string },
   ): Promise<string | Uint8Array> {
@@ -146,11 +144,11 @@ export class MemoryFS {
     return encoding ? decoder.decode(entry.data) : entry.data;
   }
 
-  async readdir(path: string): Promise<string[]> {
+  private async readdirImpl(path: string): Promise<string[]> {
     return [...this.requireDir(path).children].sort();
   }
 
-  async unlink(path: string): Promise<void> {
+  private async unlinkImpl(path: string): Promise<void> {
     const target = this.normalize(path);
     const entry = this.requireEntry(target);
     if (entry.kind !== "file")
@@ -159,7 +157,7 @@ export class MemoryFS {
     this.requireDir(this.parent(target)).children.delete(this.basename(target));
   }
 
-  async rmdir(path: string): Promise<void> {
+  private async rmdirImpl(path: string): Promise<void> {
     const target = this.normalize(path);
     const entry = this.requireDir(target);
     if (entry.children.size > 0)
@@ -168,11 +166,86 @@ export class MemoryFS {
     this.requireDir(this.parent(target)).children.delete(this.basename(target));
   }
 
-  async stat(path: string): Promise<MemoryStats> {
+  private async statImpl(path: string): Promise<MemoryStats> {
     return new MemoryStats(this.requireEntry(path));
   }
 
-  async lstat(path: string): Promise<MemoryStats> {
-    return this.stat(path);
+  private async lstatImpl(path: string): Promise<MemoryStats> {
+    return this.statImpl(path);
   }
+
+  // Promise-style API methods - these are the ones isomorphic-git prefers
+  async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+    return this.mkdirImpl(path, options);
+  }
+
+  async writeFile(path: string, data: string | Uint8Array | ArrayBuffer): Promise<void> {
+    return this.writeFileImpl(path, data);
+  }
+
+  async readFile(path: string, options?: string | { encoding?: string }): Promise<string | Uint8Array> {
+    return this.readFileImpl(path, options);
+  }
+
+  async readdir(path: string): Promise<string[]> {
+    return this.readdirImpl(path);
+  }
+
+  async unlink(path: string): Promise<void> {
+    return this.unlinkImpl(path);
+  }
+
+  async rmdir(path: string): Promise<void> {
+    return this.rmdirImpl(path);
+  }
+
+  async stat(path: string): Promise<MemoryStats> {
+    return this.statImpl(path);
+  }
+
+  async lstat(path: string): Promise<MemoryStats> {
+    return this.lstatImpl(path);
+  }
+
+  // Callback-style API methods - for compatibility
+  mkdirCb(path: string, options: { recursive?: boolean } | null | undefined, callback: Callback<void>): void {
+    this.mkdir(path, options ?? undefined).then(() => callback(null)).catch((err) => callback(err));
+  }
+
+  writeFileCb(path: string, data: string | Uint8Array | ArrayBuffer, options: { encoding?: string } | null | undefined, callback: Callback<void>): void {
+    this.writeFile(path, data).then(() => callback(null)).catch((err) => callback(err));
+  }
+
+  readFileCb(path: string, options: string | { encoding?: string } | null | undefined, callback: Callback<string | Uint8Array>): void {
+    this.readFile(path, options ?? undefined).then((data) => callback(null, data)).catch((err) => callback(err));
+  }
+
+  readdirCb(path: string, options: { encoding?: string } | null | undefined, callback: Callback<string[]>): void {
+    this.readdir(path).then((files) => callback(null, files)).catch((err) => callback(err));
+  }
+
+  unlinkCb(path: string, callback: Callback<void>): void {
+    this.unlink(path).then(() => callback(null)).catch((err) => callback(err));
+  }
+
+  rmdirCb(path: string, options: { recursive?: boolean } | null | undefined, callback: Callback<void>): void {
+    this.rmdir(path).then(() => callback(null)).catch((err) => callback(err));
+  }
+
+  statCb(path: string, options: { bigint?: boolean } | null | undefined, callback: Callback<MemoryStats>): void {
+    this.stat(path).then((stats) => callback(null, stats)).catch((err) => callback(err));
+  }
+
+  lstatCb(path: string, options: { bigint?: boolean } | null | undefined, callback: Callback<MemoryStats>): void {
+    this.lstat(path).then((stats) => callback(null, stats)).catch((err) => callback(err));
+  }
+
+  // The promises object that isomorphic-git checks for
+  get promises(): MemoryFS {
+    return this;
+  }
+
+  // Aliases for isomorphic-git compatibility
+  readlink = this.readFile.bind(this);
+  symlink = this.mkdir.bind(this);
 }

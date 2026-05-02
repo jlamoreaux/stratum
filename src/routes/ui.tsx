@@ -1,12 +1,13 @@
 import { Hono } from "hono";
 import { getChange, listChanges } from "../storage/changes";
 import { listEvalRuns } from "../storage/eval-runs";
-import { getCommitLog, listFilesInRepo } from "../storage/git-ops";
+import { getCommitLog, listFilesInRepo, readFileFromRepo } from "../storage/git-ops";
 import { getProvenance } from "../storage/provenance";
 import { getProject, listProjects, listWorkspaces } from "../storage/state";
 import type { Env } from "../types";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
 import { ChangesPage } from "../ui/pages/changes";
+import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { RepoPage } from "../ui/pages/repo";
 import { WorkspacesPage } from "../ui/pages/workspaces";
@@ -65,6 +66,49 @@ app.get("/projects/:name", async (c) => {
       project={{ name: project.name, remote: project.remote, createdAt: project.createdAt }}
       files={files}
       log={log}
+    />,
+  );
+});
+
+// GET /ui/projects/:name/files/:path — File viewer
+app.get("/projects/:name/files/:path{.+}", async (c) => {
+  const { name, path } = c.req.param();
+  
+  if (!path) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        No file path specified.
+      </div>,
+      400,
+    );
+  }
+  
+  const project = await getProject(c.env.STATE, name);
+  if (!project) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Project '{name}' not found.
+      </div>,
+      404,
+    );
+  }
+
+  let content = "";
+  let error = "";
+
+  try {
+    const fileContent = await readFileFromRepo(project.remote, project.token, path);
+    content = fileContent ?? "";
+  } catch {
+    error = "Failed to read file. It may be binary or too large.";
+  }
+
+  return c.html(
+    <FileViewerPage
+      project={{ name: project.name }}
+      filePath={path}
+      content={content}
+      error={error}
     />,
   );
 });

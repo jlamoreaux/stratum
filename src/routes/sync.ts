@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { importFromGitHub } from "../storage/git-ops";
 import { getProject, listProjects, setProject } from "../storage/state";
+import { getGitHubAccessToken } from "../storage/users";
 import type { Env, ProjectEntry } from "../types";
 import { badRequest, notFound, ok } from "../utils/response";
 import { isValidGitHubUrl } from "../utils/validation";
@@ -9,6 +10,7 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.post("/projects/:name/sync", async (c) => {
   const { name } = c.req.param();
+  const userId = c.get("userId");
 
   const project = await getProject(c.env.STATE, name);
   if (!project) return notFound("Project", name);
@@ -30,7 +32,10 @@ app.post("/projects/:name/sync", async (c) => {
     return badRequest("no githubUrl set for this project — provide one in the request body");
   }
 
-  await importFromGitHub(project.remote, project.token, githubUrl);
+  // Get user's GitHub token for private repo access
+  const githubToken = userId ? await getGitHubAccessToken(c.env.DB, userId) : null;
+
+  await importFromGitHub(c.env.ARTIFACTS, name, githubUrl, "main", 10, githubToken ?? undefined);
 
   return ok({ synced: true, project: name, source: githubUrl });
 });
@@ -45,7 +50,7 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
   for (const project of projects) {
     if (!project.githubUrl) continue;
     try {
-      await importFromGitHub(project.remote, project.token, project.githubUrl);
+      await importFromGitHub(env.ARTIFACTS, project.name, project.githubUrl);
       synced++;
     } catch {
       failed++;

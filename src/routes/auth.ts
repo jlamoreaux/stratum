@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createSession, deleteSession } from "../storage/sessions";
-import { upsertGitHubUser } from "../storage/users";
+import { setGitHubAccessToken, upsertGitHubUser } from "../storage/users";
 import type { Env } from "../types";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -20,7 +20,7 @@ app.get("/github", async (c) => {
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri ?? "",
-    scope: "user:email",
+    scope: "user:email,repo", // Added repo scope for private repository access
     state,
   });
 
@@ -117,6 +117,9 @@ app.get("/github/callback", async (c) => {
     email: primaryEmail,
     username: githubUser.login,
   });
+
+  // Store GitHub access token for private repo access
+  await setGitHubAccessToken(c.env.DB, user.id, accessToken);
 
   const session = await createSession(c.env.DB, user.id);
 

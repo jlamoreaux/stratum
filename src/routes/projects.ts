@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "../storage/git-ops";
 import { listProvenance } from "../storage/provenance";
 import { getProject, listProjects, setProject } from "../storage/state";
+import { getGitHubAccessToken } from "../storage/users";
 import type { Env } from "../types";
 import { canReadProject, filterReadableProjects } from "../utils/authz";
 import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
@@ -77,8 +78,10 @@ app.post("/:name/import", async (c) => {
   const branch = typeof body.branch === "string" ? body.branch : "main";
   const depth = typeof body.depth === "number" ? body.depth : 10;
 
-  const repo = await c.env.ARTIFACTS.create(name);
-  await importFromGitHub(repo.remote, repo.token, body.url, branch, depth);
+  // Get user's GitHub token for private repo access
+  const githubToken = await getGitHubAccessToken(c.env.DB, userId);
+
+  const repo = await importFromGitHub(c.env.ARTIFACTS, name, body.url, branch, depth, githubToken ?? undefined);
 
   await setProject(c.env.STATE, {
     name,
