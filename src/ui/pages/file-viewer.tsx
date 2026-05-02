@@ -52,7 +52,7 @@ export const FileViewerPage: FC<FileViewerProps> = ({ project, filePath, content
   const safePath = filePath ?? "";
   const language = getLanguageFromPath(safePath);
   const safeContent = content ?? "";
-  const lines = safeContent.split("\n");
+  const lines = safeContent.split(/\r?\n/);
   const maxLineNumWidth = String(lines.length).length;
 
   return (
@@ -93,7 +93,7 @@ export const FileViewerPage: FC<FileViewerProps> = ({ project, filePath, content
                         <code
                           // biome-ignore lint/security/noDangerouslySetInnerHtml: content is escaped via escapeHtml
                           dangerouslySetInnerHTML={{
-                            __html: line === "" ? "\n" : escapeHtml(line),
+                            __html: line === "" ? "&nbsp;" : escapeHtml(line),
                           }}
                         />
                       </pre>
