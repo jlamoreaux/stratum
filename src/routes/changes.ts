@@ -369,7 +369,12 @@ app.post("/changes/:id/evaluate", async (c) => {
   const workspace = await getWorkspace(c.env.STATE, change.workspace);
   if (!workspace) return badRequest("Change references missing project/workspace");
   const policy = await loadPolicy(project.remote, project.token);
-  const diff = await getDiffBetweenRepos(project.remote, project.token, workspace.remote, workspace.token);
+  const diff = await getDiffBetweenRepos(
+    project.remote,
+    project.token,
+    workspace.remote,
+    workspace.token,
+  );
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
     ...policy.evaluators.flatMap((cfg): Array<{ type: string; evaluator: Evaluator }> => {
@@ -381,11 +386,24 @@ app.post("/changes/:id/evaluate", async (c) => {
         case "llm":
           return c.env.AI
             ? [{ type: "llm", evaluator: new LLMEvaluator(c.env.AI) }]
-            : [{ type: "llm", evaluator: new UnavailableEvaluator("llm", "AI binding is not configured") }];
+            : [
+                {
+                  type: "llm",
+                  evaluator: new UnavailableEvaluator("llm", "AI binding is not configured"),
+                },
+              ];
         case "sandbox":
           return c.env.SANDBOX
             ? [{ type: "sandbox", evaluator: new SandboxEvaluator(c.env.SANDBOX) }]
-            : [{ type: "sandbox", evaluator: new UnavailableEvaluator("sandbox", "SANDBOX binding is not configured") }];
+            : [
+                {
+                  type: "sandbox",
+                  evaluator: new UnavailableEvaluator(
+                    "sandbox",
+                    "SANDBOX binding is not configured",
+                  ),
+                },
+              ];
         default:
           return [];
       }
@@ -441,13 +459,26 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!project?.githubUrl) return badRequest("Project is not connected to GitHub");
   const repo = parseGitHubRepo(project.githubUrl);
   if (!repo) return badRequest("Project githubUrl is invalid");
-  const body = await c.req.json<{ title?: string; body?: string; base?: string; draft?: boolean }>().catch(() => ({}));
+  const body = await c.req
+    .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
+    .catch(() => ({}));
   const branch = `stratum/${change.id}`;
-  const prBody = `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
+  const prBody =
+    `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
   const ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${project.token}`, "User-Agent": "stratum" },
-    body: JSON.stringify({ title: body.title ?? `Stratum: ${change.id}`, body: prBody, head: branch, base: body.base ?? project.githubDefaultBranch ?? "main", draft: body.draft ?? true }),
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${project.token}`,
+      "User-Agent": "stratum",
+    },
+    body: JSON.stringify({
+      title: body.title ?? `Stratum: ${change.id}`,
+      body: prBody,
+      head: branch,
+      base: body.base ?? project.githubDefaultBranch ?? "main",
+      draft: body.draft ?? true,
+    }),
   });
   if (!ghRes.ok) return badRequest(`GitHub PR creation failed (${ghRes.status})`);
   const pr = (await ghRes.json()) as { number: number; html_url: string; state: string };
@@ -465,7 +496,16 @@ app.post("/changes/:id/github-pr", async (c) => {
     promotedAt,
     promotedBy: userId,
   });
-  return ok({ changeId: id, github: { owner: repo.owner, repo: repo.repo, branch, pullRequestNumber: pr.number, pullRequestUrl: pr.html_url } });
+  return ok({
+    changeId: id,
+    github: {
+      owner: repo.owner,
+      repo: repo.repo,
+      branch,
+      pullRequestNumber: pr.number,
+      pullRequestUrl: pr.html_url,
+    },
+  });
 });
 
 export { app as changesRouter };
