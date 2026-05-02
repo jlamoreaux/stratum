@@ -144,6 +144,22 @@ npx wrangler d1 migrations apply stratum --remote  # for production
 - **UI**: Server-rendered JSX (no client JS)
 - **Styling**: CSS-in-JSX
 
+
+## Artifacts Operating Policy
+
+To align with Cloudflare Artifacts best practices:
+
+- **Environment namespace separation**: production and staging must use distinct Artifacts namespaces.
+- **Isolation unit**: each Stratum project maps to a dedicated Git repository in Artifacts.
+- **Metadata strategy**: commit/evaluation provenance that should not alter tree contents is stored as **Git notes**; relational/query metadata remains in D1.
+- **Scaling**: when namespace traffic grows, shard by workload class (for example: `stratum-prod-realtime` and `stratum-prod-batch`) and migrate new projects to shard-specific namespaces.
+
+### Namespace checklist
+
+- Production namespace: `stratum-prod`
+- Staging namespace: `stratum-staging`
+- Never share a namespace between environments.
+
 ## API Usage
 
 ### Authentication
