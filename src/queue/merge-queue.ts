@@ -4,6 +4,8 @@ import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
 import type { Env } from "../types";
 
+const MERGEABLE_STATUSES = new Set(["approved", "accepted", "promoted"]);
+
 export class MergeQueue {
   env: Env;
   ctx: DurableObjectState;
@@ -15,8 +17,8 @@ export class MergeQueue {
 
   async merge(changeId: string): Promise<{ success: boolean; commit?: string; error?: string }> {
     const change = await getChange(this.env.DB, changeId);
-    if (!change || change.status !== "approved") {
-      return { success: false, error: "Change not found or not approved" };
+    if (!change || !MERGEABLE_STATUSES.has(change.status)) {
+      return { success: false, error: "Change not found or not ready to merge" };
     }
 
     try {

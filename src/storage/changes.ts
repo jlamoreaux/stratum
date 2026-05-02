@@ -12,6 +12,14 @@ interface ChangeRow {
   eval_reason: string | null;
   created_at: string;
   merged_at: string | null;
+  github_owner: string | null;
+  github_repo: string | null;
+  github_branch: string | null;
+  github_pr_number: number | null;
+  github_pr_url: string | null;
+  github_pr_state: string | null;
+  promoted_at: string | null;
+  promoted_by: string | null;
 }
 
 function rowToChange(row: ChangeRow): Change {
@@ -27,6 +35,14 @@ function rowToChange(row: ChangeRow): Change {
   if (row.eval_passed !== null) change.evalPassed = row.eval_passed === 1;
   if (row.eval_reason !== null) change.evalReason = row.eval_reason;
   if (row.merged_at !== null) change.mergedAt = row.merged_at;
+  if (row.github_owner != null) change.githubOwner = row.github_owner;
+  if (row.github_repo != null) change.githubRepo = row.github_repo;
+  if (row.github_branch != null) change.githubBranch = row.github_branch;
+  if (row.github_pr_number != null) change.githubPrNumber = row.github_pr_number;
+  if (row.github_pr_url != null) change.githubPrUrl = row.github_pr_url;
+  if (row.github_pr_state != null) change.githubPrState = row.github_pr_state;
+  if (row.promoted_at != null) change.promotedAt = row.promoted_at;
+  if (row.promoted_by != null) change.promotedBy = row.promoted_by;
   return change;
 }
 
@@ -92,19 +108,45 @@ export async function updateChangeStatus(
     evalPassed?: boolean;
     evalReason?: string;
     mergedAt?: string;
+    githubOwner?: string;
+    githubRepo?: string;
+    githubBranch?: string;
+    githubPrNumber?: number;
+    githubPrUrl?: string;
+    githubPrState?: string;
+    promotedAt?: string;
+    promotedBy?: string;
   },
 ): Promise<void> {
+  const assignments = ["status = ?"];
+  const bindings: unknown[] = [status];
+
+  const addOptional = (column: string, value: unknown) => {
+    if (value === undefined) return;
+    assignments.push(`${column} = ?`);
+    bindings.push(value);
+  };
+
+  addOptional("eval_score", opts?.evalScore);
+  addOptional(
+    "eval_passed",
+    opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : undefined,
+  );
+  addOptional("eval_reason", opts?.evalReason);
+  addOptional("merged_at", opts?.mergedAt);
+  addOptional("github_owner", opts?.githubOwner);
+  addOptional("github_repo", opts?.githubRepo);
+  addOptional("github_branch", opts?.githubBranch);
+  addOptional("github_pr_number", opts?.githubPrNumber);
+  addOptional("github_pr_url", opts?.githubPrUrl);
+  addOptional("github_pr_state", opts?.githubPrState);
+  addOptional("promoted_at", opts?.promotedAt);
+  addOptional("promoted_by", opts?.promotedBy);
+
+  bindings.push(id);
+
   await db
-    .prepare(
-      "UPDATE changes SET status = ?, eval_score = ?, eval_passed = ?, eval_reason = ?, merged_at = ? WHERE id = ?",
-    )
-    .bind(
-      status,
-      opts?.evalScore ?? null,
-      opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : null,
-      opts?.evalReason ?? null,
-      opts?.mergedAt ?? null,
-      id,
-    )
+    .prepare(`UPDATE changes SET ${assignments.join(", ")} WHERE id = ?`)
+    .bind(...bindings)
     .run();
 }
