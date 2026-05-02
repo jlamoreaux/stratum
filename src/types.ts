@@ -159,11 +159,19 @@ export interface Change {
   id: string;
   project: string;
   workspace: string;
-  status: "open" | "approved" | "merged" | "rejected";
+  status: "open" | "approved" | "accepted" | "merged" | "rejected" | "promoted";
   agentId?: string;
   evalScore?: number;
   evalPassed?: boolean;
   evalReason?: string;
   createdAt: string;
   mergedAt?: string;
+  githubOwner?: string;
+  githubRepo?: string;
+  githubBranch?: string;
+  githubPrNumber?: number;
+  githubPrUrl?: string;
+  githubPrState?: string;
+  promotedAt?: string;
+  promotedBy?: string;
 }

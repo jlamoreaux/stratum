@@ -22,6 +22,8 @@ import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../u
 
 const app = new Hono<{ Bindings: Env }>();
 
+const MERGEABLE_STATUSES: Change["status"][] = ["approved", "accepted", "promoted"];
+
 class UnavailableEvaluator implements Evaluator {
   constructor(
     private evaluatorType: string,
@@ -182,7 +184,14 @@ app.get("/projects/:name/changes", async (c) => {
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const statusParam = c.req.query("status");
-  const validStatuses: Change["status"][] = ["open", "approved", "merged", "rejected"];
+  const validStatuses: Change["status"][] = [
+    "open",
+    "approved",
+    "accepted",
+    "merged",
+    "rejected",
+    "promoted",
+  ];
   const status =
     statusParam && (validStatuses as string[]).includes(statusParam)
       ? (statusParam as Change["status"])
@@ -224,8 +233,8 @@ app.post("/changes/:id/merge", async (c) => {
   if (!project) return notFound("Project", change.project);
   if (!canWriteProject(project, userId)) return forbidden("Project access denied");
 
-  if (change.status !== "approved" && !force) {
-    return badRequest("Change must be approved before merging");
+  if (!MERGEABLE_STATUSES.includes(change.status) && !force) {
+    return badRequest("Change must be approved, accepted, or promoted before merging");
   }
 
   if (c.env.MERGE_QUEUE && strategy === "merge") {

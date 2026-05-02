@@ -1,0 +1,9 @@
+-- merged_at is already present in 001_core.sql.
+ALTER TABLE changes ADD COLUMN github_owner TEXT;
+ALTER TABLE changes ADD COLUMN github_repo TEXT;
+ALTER TABLE changes ADD COLUMN github_branch TEXT;
+ALTER TABLE changes ADD COLUMN github_pr_number INTEGER;
+ALTER TABLE changes ADD COLUMN github_pr_url TEXT;
+ALTER TABLE changes ADD COLUMN github_pr_state TEXT;
+ALTER TABLE changes ADD COLUMN promoted_at TEXT;
+ALTER TABLE changes ADD COLUMN promoted_by TEXT;
