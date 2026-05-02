@@ -15,7 +15,7 @@ const DEFAULT_FILES: Record<string, string> = {
 const app = new Hono<{ Bindings: Env }>();
 function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
   const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
-  if (!match) return null;
+  if (!match || !match[1] || !match[2]) return null;
   return { owner: match[1], repo: match[2] };
 }
 

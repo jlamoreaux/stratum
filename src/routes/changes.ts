@@ -23,7 +23,7 @@ import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../u
 const app = new Hono<{ Bindings: Env }>();
 function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
   const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
-  if (!match) return null;
+  if (!match || !match[1] || !match[2]) return null;
   return { owner: match[1], repo: match[2] };
 }
 
@@ -461,7 +461,7 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!repo) return badRequest("Project githubUrl is invalid");
   const body = await c.req
     .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
-    .catch(() => ({}));
+    .catch(() => ({}) as { title?: string; body?: string; base?: string; draft?: boolean });
   const branch = `stratum/${change.id}`;
   const prBody =
     `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
