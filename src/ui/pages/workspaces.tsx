@@ -12,7 +12,7 @@ export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, user 
     <Layout title={`Workspaces — ${project}`} user={user}>
       <div class="page-header">
         <h1>Workspaces</h1>
-        <a class="btn" href={`/ui/projects/${project}`}>
+        <a class="btn" href={`/p/${project}`}>
           Back to repo
         </a>
       </div>

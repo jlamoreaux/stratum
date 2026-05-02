@@ -13,7 +13,7 @@ export const RepoPage: FC<RepoProps> = ({ project, files, log, user }) => {
     <Layout title={project.name} user={user}>
       <div class="page-header">
         <h1>{project.name}</h1>
-        <a class="btn btn-primary" href={`/ui/projects/${project.name}/changes`}>
+        <a class="btn btn-primary" href={`/p/${project.name}/changes`}>
           View changes
         </a>
       </div>

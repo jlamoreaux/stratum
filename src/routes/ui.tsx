@@ -23,7 +23,7 @@ async function getCurrentUser(c: { get: (key: "userId") => string | undefined; e
   return user ? { id: user.id, email: user.email } : null;
 }
 
-// GET /ui/ — Dashboard (list projects)
+// GET / — Dashboard (list projects)
 app.get("/", async (c) => {
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
@@ -40,25 +40,8 @@ app.get("/", async (c) => {
   return c.html(<HomePage projects={view} user={user} />);
 });
 
-// Alias: /ui/projects also shows dashboard
-app.get("/projects", async (c) => {
-  const userId = c.get("userId");
-  const agentOwnerId = c.get("agentOwnerId");
-  const [user, allProjects] = await Promise.all([
-    getCurrentUser(c),
-    listProjects(c.env.STATE),
-  ]);
-  const projects = filterReadableProjects(allProjects, userId, agentOwnerId);
-  const view = projects.map((p) => ({
-    name: p.name,
-    remote: p.remote,
-    createdAt: p.createdAt,
-  }));
-  return c.html(<HomePage projects={view} user={user} />);
-});
-
-// GET /ui/projects/:name — Repo view (files + commit log)
-app.get("/projects/:name", async (c) => {
+// GET /p/:name — Repo view (files + commit log)
+app.get("/p/:name", async (c) => {
   const { name } = c.req.param();
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
@@ -106,8 +89,8 @@ app.get("/projects/:name", async (c) => {
   );
 });
 
-// GET /ui/projects/:name/changes — Changes list
-app.get("/projects/:name/changes", async (c) => {
+// GET /p/:name/changes — Changes list
+app.get("/p/:name/changes", async (c) => {
   const { name } = c.req.param();
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
@@ -151,7 +134,7 @@ app.get("/projects/:name/changes", async (c) => {
   return c.html(<ChangesPage project={name} changes={view} user={user} />);
 });
 
-// GET /ui/changes/:id — Change detail
+// GET /changes/:id — Change detail
 app.get("/changes/:id", async (c) => {
   const { id } = c.req.param();
   const userId = c.get("userId");
@@ -186,8 +169,8 @@ app.get("/changes/:id", async (c) => {
   return c.html(<ChangeDetailPage change={change} evalRuns={evalRuns} provenance={provenance} user={user} />);
 });
 
-// GET /ui/projects/:name/workspaces — Workspace list
-app.get("/projects/:name/workspaces", async (c) => {
+// GET /p/:name/workspaces — Workspace list
+app.get("/p/:name/workspaces", async (c) => {
   const { name } = c.req.param();
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");

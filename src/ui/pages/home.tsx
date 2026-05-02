@@ -19,7 +19,7 @@ export const HomePage: FC<HomeProps> = ({ projects, user }) => {
       ) : (
         <div class="card-grid">
           {projects.map((project) => (
-            <a class="card card-link" href={`/ui/projects/${project.name}`} key={project.name}>
+            <a class="card card-link" href={`/p/${project.name}`} key={project.name}>
               <div class="card-title">{project.name}</div>
               <div class="card-meta">{new Date(project.createdAt).toLocaleDateString()}</div>
             </a>

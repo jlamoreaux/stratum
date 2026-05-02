@@ -34,7 +34,7 @@ export const ChangesPage: FC<ChangesProps> = ({ project, changes, user }) => {
     <Layout title={`Changes — ${project}`} user={user}>
       <div class="page-header">
         <h1>Changes</h1>
-        <a class="btn" href={`/ui/projects/${project}`}>
+        <a class="btn" href={`/p/${project}`}>
           Back to repo
         </a>
       </div>
@@ -66,7 +66,7 @@ export const ChangesPage: FC<ChangesProps> = ({ project, changes, user }) => {
                 </td>
                 <td>{new Date(change.createdAt).toLocaleDateString()}</td>
                 <td>
-                  <a href={`/ui/changes/${change.id}`}>View</a>
+                  <a href={`/changes/${change.id}`}>View</a>
                 </td>
               </tr>
             ))}

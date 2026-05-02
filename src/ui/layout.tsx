@@ -21,7 +21,7 @@ export const Layout: FC<LayoutProps> = ({ title, user, children }) => {
             stratum
           </a>
           <div class="nav-links">
-            <a href="/ui/projects">projects</a>
+            <a href="/">projects</a>
           </div>
           <div class="nav-auth">
             {user ? (

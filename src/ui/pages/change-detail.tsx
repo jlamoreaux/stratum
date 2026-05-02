@@ -61,7 +61,7 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change, evalRuns, prov
           <span class="mono">{change.id}</span>{" "}
           <span class={statusBadgeClass(change.status)}>{change.status}</span>
         </h1>
-        <a class="btn" href={`/ui/projects/${change.project}/changes`}>
+        <a class="btn" href={`/p/${change.project}/changes`}>
           Back to changes
         </a>
       </div>
@@ -103,7 +103,7 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({ change, evalRuns, prov
         <dl class="detail-list">
           <dt>Project</dt>
           <dd>
-            <a href={`/ui/projects/${change.project}`}>{change.project}</a>
+            <a href={`/p/${change.project}`}>{change.project}</a>
           </dd>
           <dt>Workspace</dt>
           <dd>{change.workspace}</dd>

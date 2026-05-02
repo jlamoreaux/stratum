@@ -26,15 +26,33 @@ app.use("*", rateLimitMiddleware());
 
 app.get("/health", (c) => c.json({ status: "ok", service: "stratum" }));
 
-app.get("/", (c) => c.redirect("/ui"));
-
 app.get("/ui.css", (c) => {
   return c.text(CSS, 200, { "Content-Type": "text/css; charset=UTF-8" });
 });
 
+// Redirects from old /ui/* URLs to new paths (backward compatibility)
+app.get("/ui", (c) => c.redirect("/", 301));
+app.get("/ui/projects", (c) => c.redirect("/", 301));
+app.get("/ui/projects/:name", (c) => {
+  const name = c.req.param("name");
+  return c.redirect(`/p/${name}`, 301);
+});
+app.get("/ui/projects/:name/changes", (c) => {
+  const name = c.req.param("name");
+  return c.redirect(`/p/${name}/changes`, 301);
+});
+app.get("/ui/projects/:name/workspaces", (c) => {
+  const name = c.req.param("name");
+  return c.redirect(`/p/${name}/workspaces`, 301);
+});
+app.get("/ui/changes/:id", (c) => {
+  const id = c.req.param("id");
+  return c.redirect(`/changes/${id}`, 301);
+});
+
 app.route("/auth", authRouter);
 app.route("/auth/email", emailAuthRouter);
-app.route("/ui", uiRouter);
+app.route("/", uiRouter);  // Mount UI at root
 app.route("/api/projects", projectsRouter);
 app.route("/api/workspaces", workspacesRouter);
 app.route("/api/users", usersRouter);
