@@ -11,12 +11,15 @@ import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { RepoPage } from "../ui/pages/repo";
 import { WorkspacesPage } from "../ui/pages/workspaces";
+import { canReadProject, filterReadableProjects } from "../utils/authz";
 
 const app = new Hono<{ Bindings: Env }>();
 
 // GET /ui/ — Dashboard (list projects)
 app.get("/", async (c) => {
-  const projects = await listProjects(c.env.STATE);
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
   const view = projects.map((p) => ({
     name: p.name,
     remote: p.remote,
@@ -27,7 +30,9 @@ app.get("/", async (c) => {
 
 // Alias: /ui/projects also shows dashboard
 app.get("/projects", async (c) => {
-  const projects = await listProjects(c.env.STATE);
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
   const view = projects.map((p) => ({
     name: p.name,
     remote: p.remote,
@@ -39,6 +44,8 @@ app.get("/projects", async (c) => {
 // GET /ui/projects/:name — Repo view (files + commit log)
 app.get("/projects/:name", async (c) => {
   const { name } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const project = await getProject(c.env.STATE, name);
   if (!project) {
     return c.html(
@@ -46,6 +53,13 @@ app.get("/projects/:name", async (c) => {
         Project '{name}' not found.
       </div>,
       404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
     );
   }
 
@@ -73,6 +87,8 @@ app.get("/projects/:name", async (c) => {
 // GET /ui/projects/:name/files/:path — File viewer
 app.get("/projects/:name/files/:path{.+}", async (c) => {
   const { name, path } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
 
   if (!path) {
     return c.html(
@@ -88,6 +104,13 @@ app.get("/projects/:name/files/:path{.+}", async (c) => {
         Project '{name}' not found.
       </div>,
       404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
     );
   }
 
@@ -132,6 +155,8 @@ app.get("/projects/:name/files/:path{.+}", async (c) => {
 // GET /ui/projects/:name/changes — Changes list
 app.get("/projects/:name/changes", async (c) => {
   const { name } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const project = await getProject(c.env.STATE, name);
   if (!project) {
     return c.html(
@@ -139,6 +164,13 @@ app.get("/projects/:name/changes", async (c) => {
         Project '{name}' not found.
       </div>,
       404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
     );
   }
 
@@ -182,6 +214,8 @@ app.get("/changes/:id", async (c) => {
 // GET /ui/projects/:name/workspaces — Workspace list
 app.get("/projects/:name/workspaces", async (c) => {
   const { name } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const project = await getProject(c.env.STATE, name);
   if (!project) {
     return c.html(
@@ -189,6 +223,13 @@ app.get("/projects/:name/workspaces", async (c) => {
         Project '{name}' not found.
       </div>,
       404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
     );
   }
 

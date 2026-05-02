@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-02  
 **Branches Audited:** main, feature/ui-improvements-and-private-repos (PR#13)  
-**Master Plan Version:** v2 (from /Users/jlmx/Downloads/stratum-master-plan-v2.md)
+**Master Plan Version:** v2
 
 ---
 
