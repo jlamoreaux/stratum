@@ -27,6 +27,8 @@ function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
   return { owner: match[1], repo: match[2] };
 }
 
+const MERGEABLE_STATUSES: Change["status"][] = ["approved", "accepted", "promoted"];
+
 class UnavailableEvaluator implements Evaluator {
   constructor(
     private evaluatorType: string,
@@ -187,7 +189,15 @@ app.get("/projects/:name/changes", async (c) => {
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const statusParam = c.req.query("status");
-  const validStatuses: Change["status"][] = ["open", "needs_changes", "accepted", "promoted", "merged", "rejected"];
+  const validStatuses: Change["status"][] = [
+    "open",
+    "needs_changes",
+    "accepted",
+    "approved",
+    "promoted",
+    "merged",
+    "rejected",
+  ];
   const status =
     statusParam && (validStatuses as string[]).includes(statusParam)
       ? (statusParam as Change["status"])
@@ -229,8 +239,8 @@ app.post("/changes/:id/merge", async (c) => {
   if (!project) return notFound("Project", change.project);
   if (!canWriteProject(project, userId)) return forbidden("Project access denied");
 
-  if (change.status !== "accepted" && change.status !== "promoted" && !force) {
-    return badRequest("Change must be accepted before merging");
+  if (!MERGEABLE_STATUSES.includes(change.status) && !force) {
+    return badRequest("Change must be approved, accepted, or promoted before merging");
   }
 
   if (c.env.MERGE_QUEUE && strategy === "merge") {

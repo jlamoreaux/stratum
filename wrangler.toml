@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [[artifacts]]
 binding = "ARTIFACTS"
-namespace = "default"
+namespace = "stratum-prod"
 
 [[kv_namespaces]]
 binding = "STATE"
@@ -68,7 +68,7 @@ new_classes = ["MergeQueue"]
 
 [[env.staging.artifacts]]
 binding = "ARTIFACTS"
-namespace = "default"
+namespace = "stratum-staging"
 
 [[env.staging.kv_namespaces]]
 binding = "STATE"

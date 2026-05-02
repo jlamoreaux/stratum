@@ -448,6 +448,17 @@ describe("GET /api/projects/:name/changes", () => {
     expect(listChanges).toHaveBeenCalledWith(env.DB, "my-project", "open");
   });
 
+  it("filters by promoted status when ?status= is provided", async () => {
+    vi.mocked(listChanges).mockResolvedValue([]);
+    const res = await app.fetch(
+      request("GET", "/api/projects/my-project/changes?status=promoted", undefined, USER_AUTH),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(listChanges).toHaveBeenCalledWith(env.DB, "my-project", "promoted");
+  });
+
   it("returns 404 when project not found", async () => {
     vi.mocked(getProject).mockResolvedValue(null);
     const res = await app.fetch(
@@ -570,6 +581,19 @@ describe("POST /api/changes/:id/merge", () => {
       "merged",
       expect.objectContaining({ mergedAt: expect.any(String) }),
     );
+  });
+
+  it("merges an accepted change", async () => {
+    const acceptedChange: Change = { ...mockChange, status: "accepted" };
+    vi.mocked(getChange).mockResolvedValue(acceptedChange);
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(mergeWorkspaceIntoProject).toHaveBeenCalled();
   });
 
   it("returns 401 when unauthenticated", async () => {

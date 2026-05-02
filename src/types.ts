@@ -164,7 +164,7 @@ export interface Change {
   id: string;
   project: string;
   workspace: string;
-  status: "open" | "needs_changes" | "accepted" | "promoted" | "merged" | "rejected";
+  status: "open" | "needs_changes" | "accepted" | "approved" | "promoted" | "merged" | "rejected";
   agentId?: string;
   evalScore?: number;
   evalPassed?: boolean;

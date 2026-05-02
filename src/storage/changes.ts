@@ -118,39 +118,35 @@ export async function updateChangeStatus(
     promotedBy?: string;
   },
 ): Promise<void> {
+  const assignments = ["status = ?"];
+  const bindings: unknown[] = [status];
+
+  const addOptional = (column: string, value: unknown) => {
+    if (value === undefined) return;
+    assignments.push(`${column} = ?`);
+    bindings.push(value);
+  };
+
+  addOptional("eval_score", opts?.evalScore);
+  addOptional(
+    "eval_passed",
+    opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : undefined,
+  );
+  addOptional("eval_reason", opts?.evalReason);
+  addOptional("merged_at", opts?.mergedAt);
+  addOptional("github_owner", opts?.githubOwner);
+  addOptional("github_repo", opts?.githubRepo);
+  addOptional("github_branch", opts?.githubBranch);
+  addOptional("github_pr_number", opts?.githubPrNumber);
+  addOptional("github_pr_url", opts?.githubPrUrl);
+  addOptional("github_pr_state", opts?.githubPrState);
+  addOptional("promoted_at", opts?.promotedAt);
+  addOptional("promoted_by", opts?.promotedBy);
+
+  bindings.push(id);
+
   await db
-    .prepare(
-      `UPDATE changes
-       SET status = ?,
-           eval_score = COALESCE(?, eval_score),
-           eval_passed = COALESCE(?, eval_passed),
-           eval_reason = COALESCE(?, eval_reason),
-           merged_at = COALESCE(?, merged_at),
-           github_owner = COALESCE(?, github_owner),
-           github_repo = COALESCE(?, github_repo),
-           github_branch = COALESCE(?, github_branch),
-           github_pr_number = COALESCE(?, github_pr_number),
-           github_pr_url = COALESCE(?, github_pr_url),
-           github_pr_state = COALESCE(?, github_pr_state),
-           promoted_at = COALESCE(?, promoted_at),
-           promoted_by = COALESCE(?, promoted_by)
-       WHERE id = ?`,
-    )
-    .bind(
-      status,
-      opts?.evalScore ?? null,
-      opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : null,
-      opts?.evalReason ?? null,
-      opts?.mergedAt ?? null,
-      opts?.githubOwner ?? null,
-      opts?.githubRepo ?? null,
-      opts?.githubBranch ?? null,
-      opts?.githubPrNumber ?? null,
-      opts?.githubPrUrl ?? null,
-      opts?.githubPrState ?? null,
-      opts?.promotedAt ?? null,
-      opts?.promotedBy ?? null,
-      id,
-    )
+    .prepare(`UPDATE changes SET ${assignments.join(", ")} WHERE id = ?`)
+    .bind(...bindings)
     .run();
 }
