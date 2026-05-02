@@ -35,7 +35,8 @@ app.post("/projects/:name/sync", async (c) => {
   // Get user's GitHub token for private repo access
   const githubToken = userId ? await getGitHubAccessToken(c.env.DB, userId) : null;
 
-  await importFromGitHub(c.env.ARTIFACTS, name, githubUrl, "main", 10, githubToken ?? undefined);
+  const branch = project.githubDefaultBranch ?? "main";
+  await importFromGitHub(c.env.ARTIFACTS, name, githubUrl, branch, 10, githubToken ?? undefined);
 
   return ok({ synced: true, project: name, source: githubUrl });
 });
@@ -50,7 +51,18 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
   for (const project of projects) {
     if (!project.githubUrl) continue;
     try {
-      await importFromGitHub(env.ARTIFACTS, project.name, project.githubUrl);
+      const githubToken = project.ownerId
+        ? await getGitHubAccessToken(env.DB, project.ownerId)
+        : null;
+      const branch = project.githubDefaultBranch ?? "main";
+      await importFromGitHub(
+        env.ARTIFACTS,
+        project.name,
+        project.githubUrl,
+        branch,
+        10,
+        githubToken ?? undefined,
+      );
       synced++;
     } catch {
       failed++;

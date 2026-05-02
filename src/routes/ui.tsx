@@ -73,16 +73,14 @@ app.get("/projects/:name", async (c) => {
 // GET /ui/projects/:name/files/:path — File viewer
 app.get("/projects/:name/files/:path{.+}", async (c) => {
   const { name, path } = c.req.param();
-  
+
   if (!path) {
     return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        No file path specified.
-      </div>,
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">No file path specified.</div>,
       400,
     );
   }
-  
+
   const project = await getProject(c.env.STATE, name);
   if (!project) {
     return c.html(
@@ -99,8 +97,26 @@ app.get("/projects/:name/files/:path{.+}", async (c) => {
   try {
     const fileContent = await readFileFromRepo(project.remote, project.token, path);
     content = fileContent ?? "";
-  } catch {
-    error = "Failed to read file. It may be binary or too large.";
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errStr = errMsg.toLowerCase();
+    if (
+      errStr.includes("401") ||
+      errStr.includes("unauthorized") ||
+      errStr.includes("authentication")
+    ) {
+      error = "Failed to read file: authentication or network error";
+    } else if (
+      errStr.includes("network") ||
+      errStr.includes("fetch") ||
+      errStr.includes("timeout")
+    ) {
+      error = "Failed to read file: network error";
+    } else if (errStr.includes("binary") || errStr.includes("large") || errStr.includes("size")) {
+      error = "Failed to read file: it may be binary or too large";
+    } else {
+      error = `Failed to read file: ${errMsg}`;
+    }
   }
 
   return c.html(

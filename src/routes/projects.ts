@@ -81,7 +81,14 @@ app.post("/:name/import", async (c) => {
   // Get user's GitHub token for private repo access
   const githubToken = await getGitHubAccessToken(c.env.DB, userId);
 
-  const repo = await importFromGitHub(c.env.ARTIFACTS, name, body.url, branch, depth, githubToken ?? undefined);
+  const repo = await importFromGitHub(
+    c.env.ARTIFACTS,
+    name,
+    body.url,
+    branch,
+    depth,
+    githubToken ?? undefined,
+  );
 
   await setProject(c.env.STATE, {
     name,

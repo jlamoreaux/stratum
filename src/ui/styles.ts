@@ -345,6 +345,7 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: 0.5rem;
   font-size: 0.95rem;
+  min-width: 0;
 }
 
 .breadcrumb a {
@@ -359,6 +360,9 @@ a:hover { text-decoration: underline; }
   color: #ccc;
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-viewer-card {
@@ -373,12 +377,16 @@ a:hover { text-decoration: underline; }
   padding: 0.75rem 1rem;
   background: #0d0d0d;
   border-bottom: 1px solid #1e1e1e;
+  min-width: 0;
 }
 
 .file-path-display {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.9rem;
   color: #e0e0e0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-language {

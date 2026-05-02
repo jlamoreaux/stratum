@@ -20,7 +20,7 @@ app.get("/github", async (c) => {
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri ?? "",
-    scope: "user:email,repo", // Added repo scope for private repository access
+    scope: "user:email repo", // Added repo scope for private repository access
     state,
   });
 

@@ -83,16 +83,15 @@ export const FileViewerPage: FC<FileViewerProps> = ({ project, filePath, content
             <table class="code-table">
               <tbody>
                 {lines.map((line, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: line numbers are stable
                   <tr key={i}>
-                    <td
-                      class="line-number"
-                      style={`width: ${maxLineNumWidth + 2}ch`}
-                    >
+                    <td class="line-number" style={`width: ${maxLineNumWidth + 2}ch`}>
                       {i + 1}
                     </td>
                     <td class="line-content">
                       <pre>
                         <code
+                          // biome-ignore lint/security/noDangerouslySetInnerHtml: content is escaped via escapeHtml
                           dangerouslySetInnerHTML={{
                             __html: line === "" ? "\n" : escapeHtml(line),
                           }}

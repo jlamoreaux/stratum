@@ -116,6 +116,16 @@ export async function upsertGitHubUser(
   return linked;
 }
 
+/**
+ * Store GitHub OAuth access token for a user.
+ *
+ * SECURITY NOTE: This stores the token in plaintext. For production, this should
+ * use envelope encryption with a KMS (Key Management Service) before storing.
+ * The token is needed in plaintext form to make API calls to GitHub, so hashing
+ * is not an option - encryption with decryption on-demand is required.
+ *
+ * TODO: Implement envelope encryption using Cloudflare Key Management or similar.
+ */
 export async function setGitHubAccessToken(
   db: D1Database,
   userId: string,

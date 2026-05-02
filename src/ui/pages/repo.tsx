@@ -34,11 +34,12 @@ function buildFileTree(files: string[]): FileNode {
   const root: FileNode = { name: "", type: "directory", children: [] };
 
   for (const filePath of files) {
-    const parts = filePath.split("/");
+    const parts = filePath.split("/").filter(Boolean);
     let current = root;
 
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
+      if (!part) continue;
       const isFile = i === parts.length - 1;
 
       if (isFile) {
@@ -50,7 +51,7 @@ function buildFileTree(files: string[]): FileNode {
         });
       } else {
         let dir = current.children.find(
-          (c): c is FileNode => c.type === "directory" && c.name === part
+          (c): c is FileNode => c.type === "directory" && c.name === part,
         );
         if (!dir) {
           dir = { name: part, type: "directory", children: [] };
@@ -70,9 +71,9 @@ function buildFileTree(files: string[]): FileNode {
 
   const sortRecursive = (node: FileNode) => {
     node.children.sort(sortNodes);
-    node.children.forEach((child) => {
+    for (const child of node.children) {
       if (child.type === "directory") sortRecursive(child);
-    });
+    }
   };
 
   sortRecursive(root);
@@ -137,16 +138,17 @@ const FileTreeNode: FC<{ node: FileNode | FileLeaf; level: number; projectName: 
 
   if (node.type === "file") {
     const IconComponent = getFileIcon(node.extension);
-  return (
-    <li class="file-tree-item file" style={`padding-left: ${indent + 20}px`}>
-      <a href={`/ui/projects/${projectName}/files/${node.path}`} class="file-link">
-        <span class="file-icon">
-          <IconComponent />
-        </span>
-        <span class="file-name">{node.name}</span>
-      </a>
-    </li>
-  );
+    const encodedPath = node.path.split("/").map(encodeURIComponent).join("/");
+    return (
+      <li class="file-tree-item file" style={`padding-left: ${indent + 20}px`}>
+        <a href={`/ui/projects/${projectName}/files/${encodedPath}`} class="file-link">
+          <span class="file-icon">
+            <IconComponent />
+          </span>
+          <span class="file-name">{node.name}</span>
+        </a>
+      </li>
+    );
   }
 
   // It's a directory
@@ -163,7 +165,12 @@ const FileTreeNode: FC<{ node: FileNode | FileLeaf; level: number; projectName: 
         </summary>
         <ul class="file-tree-list">
           {node.children.map((child) => (
-            <FileTreeNode node={child} level={level + 1} projectName={projectName} />
+            <FileTreeNode
+              key={child.type === "file" ? child.path : child.name}
+              node={child}
+              level={level + 1}
+              projectName={projectName}
+            />
           ))}
         </ul>
       </details>
@@ -202,7 +209,12 @@ export const RepoPage: FC<RepoProps> = ({ project, files, log }) => {
           ) : (
             <ul class="file-tree-list">
               {fileTree.children.map((child) => (
-                <FileTreeNode node={child} level={0} projectName={project.name} />
+                <FileTreeNode
+                  key={child.type === "file" ? child.path : child.name}
+                  node={child}
+                  level={0}
+                  projectName={project.name}
+                />
               ))}
             </ul>
           )}

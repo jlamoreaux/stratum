@@ -107,13 +107,20 @@ export class MemoryFS {
       await this.mkdirImpl(parentPath, { recursive: true });
     }
 
-    if (this.entries.has(target)) return;
+    const existing = this.getEntry(target);
+    if (existing) {
+      if (existing.kind === "dir" && recursive) return;
+      throw fsError("EEXIST", `EEXIST: file already exists, mkdir '${path}'`);
+    }
 
     this.entries.set(target, { kind: "dir", children: new Set(), mtimeMs: Date.now() });
     this.requireDir(parentPath).children.add(this.basename(target));
   }
 
-  private async writeFileImpl(path: string, data: string | Uint8Array | ArrayBuffer): Promise<void> {
+  private async writeFileImpl(
+    path: string,
+    data: string | Uint8Array | ArrayBuffer,
+  ): Promise<void> {
     const target = this.normalize(path);
     const parentPath = this.parent(target);
     await this.mkdirImpl(parentPath, { recursive: true });
@@ -159,6 +166,9 @@ export class MemoryFS {
 
   private async rmdirImpl(path: string): Promise<void> {
     const target = this.normalize(path);
+    if (target === "/") {
+      throw fsError("EBUSY", "EBUSY: cannot remove root directory");
+    }
     const entry = this.requireDir(target);
     if (entry.children.size > 0)
       throw fsError("ENOTEMPTY", `ENOTEMPTY: directory not empty: ${path}`);
@@ -183,7 +193,10 @@ export class MemoryFS {
     return this.writeFileImpl(path, data);
   }
 
-  async readFile(path: string, options?: string | { encoding?: string }): Promise<string | Uint8Array> {
+  async readFile(
+    path: string,
+    options?: string | { encoding?: string },
+  ): Promise<string | Uint8Array> {
     return this.readFileImpl(path, options);
   }
 
@@ -208,36 +221,125 @@ export class MemoryFS {
   }
 
   // Callback-style API methods - for compatibility
-  mkdirCb(path: string, options: { recursive?: boolean } | null | undefined, callback: Callback<void>): void {
-    this.mkdir(path, options ?? undefined).then(() => callback(null)).catch((err) => callback(err));
+  mkdirCb(
+    path: string,
+    options: { recursive?: boolean } | Callback<void> | null | undefined,
+    callback?: Callback<void>,
+  ): void {
+    if (typeof options === "function") {
+      this.mkdir(path)
+        .then(() => options(null))
+        .catch((err) => options(err));
+    } else if (callback) {
+      const opts = options ?? undefined;
+      this.mkdir(path, opts)
+        .then(() => callback(null))
+        .catch((err) => callback(err));
+    }
   }
 
-  writeFileCb(path: string, data: string | Uint8Array | ArrayBuffer, options: { encoding?: string } | null | undefined, callback: Callback<void>): void {
-    this.writeFile(path, data).then(() => callback(null)).catch((err) => callback(err));
+  writeFileCb(
+    path: string,
+    data: string | Uint8Array | ArrayBuffer,
+    options: { encoding?: string } | Callback<void> | null | undefined,
+    callback?: Callback<void>,
+  ): void {
+    if (typeof options === "function") {
+      this.writeFile(path, data)
+        .then(() => options(null))
+        .catch((err) => options(err));
+    } else if (callback) {
+      this.writeFile(path, data)
+        .then(() => callback(null))
+        .catch((err) => callback(err));
+    }
   }
 
-  readFileCb(path: string, options: string | { encoding?: string } | null | undefined, callback: Callback<string | Uint8Array>): void {
-    this.readFile(path, options ?? undefined).then((data) => callback(null, data)).catch((err) => callback(err));
+  readFileCb(
+    path: string,
+    options: string | { encoding?: string } | Callback<string | Uint8Array> | null | undefined,
+    callback?: Callback<string | Uint8Array>,
+  ): void {
+    if (typeof options === "function") {
+      this.readFile(path)
+        .then((data) => options(null, data))
+        .catch((err) => options(err));
+    } else if (callback) {
+      const opts = options ?? undefined;
+      this.readFile(path, opts)
+        .then((data) => callback(null, data))
+        .catch((err) => callback(err));
+    }
   }
 
-  readdirCb(path: string, options: { encoding?: string } | null | undefined, callback: Callback<string[]>): void {
-    this.readdir(path).then((files) => callback(null, files)).catch((err) => callback(err));
+  readdirCb(
+    path: string,
+    options: { encoding?: string } | Callback<string[]> | null | undefined,
+    callback?: Callback<string[]>,
+  ): void {
+    if (typeof options === "function") {
+      this.readdir(path)
+        .then((files) => options(null, files))
+        .catch((err) => options(err));
+    } else if (callback) {
+      this.readdir(path)
+        .then((files) => callback(null, files))
+        .catch((err) => callback(err));
+    }
   }
 
   unlinkCb(path: string, callback: Callback<void>): void {
-    this.unlink(path).then(() => callback(null)).catch((err) => callback(err));
+    this.unlink(path)
+      .then(() => callback(null))
+      .catch((err) => callback(err));
   }
 
-  rmdirCb(path: string, options: { recursive?: boolean } | null | undefined, callback: Callback<void>): void {
-    this.rmdir(path).then(() => callback(null)).catch((err) => callback(err));
+  rmdirCb(
+    path: string,
+    options: { recursive?: boolean } | Callback<void> | null | undefined,
+    callback?: Callback<void>,
+  ): void {
+    if (typeof options === "function") {
+      this.rmdir(path)
+        .then(() => options(null))
+        .catch((err) => options(err));
+    } else if (callback) {
+      this.rmdir(path)
+        .then(() => callback(null))
+        .catch((err) => callback(err));
+    }
   }
 
-  statCb(path: string, options: { bigint?: boolean } | null | undefined, callback: Callback<MemoryStats>): void {
-    this.stat(path).then((stats) => callback(null, stats)).catch((err) => callback(err));
+  statCb(
+    path: string,
+    options: { bigint?: boolean } | Callback<MemoryStats> | null | undefined,
+    callback?: Callback<MemoryStats>,
+  ): void {
+    if (typeof options === "function") {
+      this.stat(path)
+        .then((stats) => options(null, stats))
+        .catch((err) => options(err));
+    } else if (callback) {
+      this.stat(path)
+        .then((stats) => callback(null, stats))
+        .catch((err) => callback(err));
+    }
   }
 
-  lstatCb(path: string, options: { bigint?: boolean } | null | undefined, callback: Callback<MemoryStats>): void {
-    this.lstat(path).then((stats) => callback(null, stats)).catch((err) => callback(err));
+  lstatCb(
+    path: string,
+    options: { bigint?: boolean } | Callback<MemoryStats> | null | undefined,
+    callback?: Callback<MemoryStats>,
+  ): void {
+    if (typeof options === "function") {
+      this.lstat(path)
+        .then((stats) => options(null, stats))
+        .catch((err) => options(err));
+    } else if (callback) {
+      this.lstat(path)
+        .then((stats) => callback(null, stats))
+        .catch((err) => callback(err));
+    }
   }
 
   // The promises object that isomorphic-git checks for
@@ -245,7 +347,12 @@ export class MemoryFS {
     return this;
   }
 
-  // Aliases for isomorphic-git compatibility
-  readlink = this.readFile.bind(this);
-  symlink = this.mkdir.bind(this);
+  // Aliases for isomorphic-git compatibility - throw ENOSYS for unsupported operations
+  readlink(): Promise<never> {
+    throw fsError("ENOSYS", "readlink not implemented");
+  }
+
+  symlink(): Promise<never> {
+    throw fsError("ENOSYS", "symlink not implemented");
+  }
 }
