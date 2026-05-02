@@ -6,10 +6,39 @@ import type { Env } from "../types";
 
 const app = new Hono<{ Bindings: Env }>();
 
+const ERROR_MESSAGES: Record<string, string> = {
+  invalid_email: "Please enter a valid email address.",
+  auth_config_missing: "Email authentication is not configured. Please contact the administrator.",
+  auth_config_incomplete:
+    "Email authentication is not fully configured. Please contact the administrator.",
+  send_failed: "Failed to send email. Please try again later.",
+  invalid_link: "Invalid or expired link.",
+  link_expired: "This link has expired or already been used.",
+  verify_failed: "Failed to sign in. Please try again.",
+};
+
+const SUCCESS_MESSAGES: Record<string, string> = {
+  email_sent: "Check your email. We sent a magic link that expires in 15 minutes.",
+};
+
+function emailAuthRedirect(
+  c: { redirect(path: string): Response },
+  kind: "error" | "success",
+  code: string,
+): Response {
+  const params = new URLSearchParams({ [kind]: code });
+  return c.redirect(`/auth/email?${params.toString()}`);
+}
+
 // GET /auth/email - Show login form
 app.get("/", (c) => {
-  const error = c.req.query("error");
-  const success = c.req.query("success");
+  const errorCode = c.req.query("error");
+  const successCode = c.req.query("success");
+  const error =
+    errorCode !== undefined
+      ? (ERROR_MESSAGES[errorCode] ?? "Email authentication failed.")
+      : undefined;
+  const success = successCode !== undefined ? SUCCESS_MESSAGES[successCode] : undefined;
 
   return c.html(
     <html lang="en">
@@ -191,23 +220,19 @@ app.post("/send", async (c) => {
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
 
   if (!email || !email.includes("@")) {
-    return c.redirect("/auth/email?error=Please enter a valid email address");
+    return emailAuthRedirect(c, "error", "invalid_email");
   }
 
   // Check if email sending is configured
   if (!c.env.EMAIL) {
     console.error("[email-auth] Email sending not configured");
-    return c.redirect(
-      "/auth/email?error=Email authentication is not configured. Please contact the administrator.",
-    );
+    return emailAuthRedirect(c, "error", "auth_config_missing");
   }
 
   const fromAddress = c.env.EMAIL_FROM_ADDRESS;
   if (!fromAddress) {
     console.error("[email-auth] EMAIL_FROM_ADDRESS secret not set");
-    return c.redirect(
-      "/auth/email?error=Email authentication is not fully configured. Please contact the administrator.",
-    );
+    return emailAuthRedirect(c, "error", "auth_config_incomplete");
   }
 
   try {
@@ -269,14 +294,12 @@ app.post("/send", async (c) => {
 </html>`,
     });
 
-    console.log(`[email-auth] Magic link sent to ${email}`);
+    console.log("[email-auth] Magic link sent");
 
-    return c.redirect(
-      `/auth/email?success=Check your email! We've sent a magic link to ${email}. It expires in 15 minutes.`,
-    );
+    return emailAuthRedirect(c, "success", "email_sent");
   } catch (err) {
     console.error("[email-auth] Failed to send magic link:", err);
-    return c.redirect("/auth/email?error=Failed to send email. Please try again later.");
+    return emailAuthRedirect(c, "error", "send_failed");
   }
 });
 
@@ -285,7 +308,7 @@ app.get("/verify", async (c) => {
   const token = c.req.query("token");
 
   if (!token) {
-    return c.redirect("/auth/email?error=Invalid or expired link");
+    return emailAuthRedirect(c, "error", "invalid_link");
   }
 
   try {
@@ -293,7 +316,7 @@ app.get("/verify", async (c) => {
     const tokenData = await c.env.STATE.get(`magic_link:${token}`);
 
     if (!tokenData) {
-      return c.redirect("/auth/email?error=This link has expired or already been used");
+      return emailAuthRedirect(c, "error", "link_expired");
     }
 
     const { email } = JSON.parse(tokenData);
@@ -308,7 +331,7 @@ app.get("/verify", async (c) => {
       // Create new user
       const { user: newUser } = await createUser(c.env.DB, email);
       user = newUser;
-      console.log(`[email-auth] Created new user: ${user.id} (${email})`);
+      console.log(`[email-auth] Created new user: ${user.id}`);
     }
 
     // Create session
@@ -323,7 +346,7 @@ app.get("/verify", async (c) => {
       path: "/",
     });
 
-    console.log(`[email-auth] User signed in: ${user.id} (${email})`);
+    console.log(`[email-auth] User signed in: ${user.id}`);
 
     // Redirect to home or the page they were trying to access
     const redirectTo = getCookie(c, "redirect_after_login") || "/";
@@ -332,7 +355,7 @@ app.get("/verify", async (c) => {
     return c.redirect(redirectTo);
   } catch (err) {
     console.error("[email-auth] Failed to verify magic link:", err);
-    return c.redirect("/auth/email?error=Failed to sign in. Please try again.");
+    return emailAuthRedirect(c, "error", "verify_failed");
   }
 });
 
