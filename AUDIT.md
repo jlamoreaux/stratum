@@ -60,7 +60,7 @@ app.route("/ui", uiRouter);              // All UI under /ui prefix
 
 ### Current UI Routes (`src/routes/ui.tsx`)
 
-```
+```text
 GET /ui/                      → Dashboard (list projects)
 GET /ui/projects              → Dashboard (alias)
 GET /ui/projects/:name        → Repo view (files + commits)
@@ -78,7 +78,7 @@ GET /ui/changes/:id           → Change detail
 
 ### Recommended Routing (GitHub-Style)
 
-```
+```text
 GET /                         → Dashboard / Home (was /ui/)
 GET /:owner/:repo             → Repo view (was /ui/projects/:name)
 GET /:owner/:repo/blob/:path  → File viewer (was /ui/projects/:name/files/:path)
@@ -143,19 +143,20 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
 
 **The auth middleware is OPTIONAL** - it sets userId if present but doesn't block unauthenticated requests. This is correct design for supporting public projects.
 
-2. **UI routes don't check permissions** - Looking at `src/routes/ui.tsx`:
+2. **UI routes authorization** ✅ FIXED - UI routes now properly check permissions using `canReadProject()`:
 ```typescript
 app.get("/projects/:name", async (c) => {
   const project = await getProject(c.env.STATE, name);
   if (!project) { return 404; }
-  // No permission check! Returns project regardless of visibility
+  // Now checks permissions with canReadProject
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(<div>Project access denied.</div>, 403);
+  }
   // ...
 });
 ```
 
-**CRITICAL GAP:** The UI routes don't call `canReadProject()`! They bypass the authorization system entirely. This means:
-- Private projects are currently exposed in the UI
-- The API correctly checks permissions, but UI doesn't
+All UI routes (repo view, file viewer, changes, workspaces) now properly gate access using `filterReadableProjects` for lists and `canReadProject` for individual project access.
 
 3. **No way to set project visibility** - Looking at project creation in `src/routes/projects.ts`:
 ```typescript
@@ -256,10 +257,10 @@ interface ProjectEntry {
 
 ### File Viewer (`src/ui/pages/file-viewer.tsx`)
 
-**Current:** Syntax-highlighted code with line numbers
+**Current:** Syntax-highlighted code with line numbers (basic implementation with HTML escaping)
 
 **Missing:**
-- Syntax highlighting (currently just escaped HTML)
+- Advanced syntax highlighting (Shiki/prism.js)
 - Raw file view
 - Copy to clipboard button
 - File history / blame
@@ -337,7 +338,7 @@ Looking at `src/routes/email-auth.tsx`:
 8. **Link orgs to projects** - Add org ownership support
 9. **Implement team permissions** - Teams can access org projects
 10. **Add diff viewer** - Show actual code diffs in changes
-11. **Add syntax highlighting** - Use Shiki or similar for file viewer
+11. **Enhance syntax highlighting** - Use Shiki or similar for file viewer (basic highlighting already implemented)
 
 ### P3 - Polish
 
@@ -355,7 +356,7 @@ Looking at `src/routes/email-auth.tsx`:
 | Basic UI (Hono JSX) | 1c | ✅ Complete |
 | File browser | 1c | ✅ Complete |
 | Change detail | 1c | ✅ Complete |
-| Syntax highlighting | 2.8 | ❌ Not started |
+| Syntax highlighting | 2.8 | 🟡 Basic (line numbers + HTML escape) |
 | Diff viewer | 2.8 | ❌ Not started |
 | OAuth login | 2.1 | ✅ Complete |
 | Email auth | N/A (added later) | ✅ Complete |

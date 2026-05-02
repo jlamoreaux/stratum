@@ -4,6 +4,7 @@ import { listEvalRuns } from "../storage/eval-runs";
 import { getCommitLog, listFilesInRepo, readFileFromRepo } from "../storage/git-ops";
 import { getProvenance } from "../storage/provenance";
 import { getProject, listProjects, listWorkspaces } from "../storage/state";
+import { getGitHubAccessToken } from "../storage/users";
 import type { Env } from "../types";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
 import { ChangesPage } from "../ui/pages/changes";
@@ -118,10 +119,16 @@ app.get("/projects/:name/files/:path{.+}", async (c) => {
   let error = "";
 
   try {
-    const fileContent = await readFileFromRepo(project.remote, project.token, path);
+    // Use user's GitHub OAuth token for private repo access if available
+    const githubToken = userId ? await getGitHubAccessToken(c.env.DB, userId) : null;
+    const token = githubToken ?? project.token;
+    const fileContent = await readFileFromRepo(project.remote, token, path);
     content = fileContent ?? "";
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    // Log error server-side for debugging
+    console.error(`[file-viewer] Error reading file ${path} from ${project.name}:`, errMsg);
+
     const errStr = errMsg.toLowerCase();
     if (
       errStr.includes("401") ||
@@ -138,7 +145,8 @@ app.get("/projects/:name/files/:path{.+}", async (c) => {
     } else if (errStr.includes("binary") || errStr.includes("large") || errStr.includes("size")) {
       error = "Failed to read file: it may be binary or too large";
     } else {
-      error = `Failed to read file: ${errMsg}`;
+      // Use neutral generic message - don't leak internal details
+      error = "Failed to read file: internal error";
     }
   }
 
