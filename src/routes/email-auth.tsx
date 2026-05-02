@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { createSession, deleteSession } from "../storage/sessions";
+import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail } from "../storage/users";
 import type { Env } from "../types";
 
@@ -127,24 +127,24 @@ app.get("/", (c) => {
       </head>
       <body>
         <nav class="nav">
-          <a class="nav-brand" href="/">stratum</a>
+          <a class="nav-brand" href="/">
+            stratum
+          </a>
         </nav>
         <main class="main">
           <div class="auth-container">
             <h1 class="auth-title">Sign in to Stratum</h1>
             <p class="auth-subtitle">Enter your email to receive a magic link</p>
 
-            {error && (
-              <div class="alert alert-error">{error}</div>
-            )}
+            {error && <div class="alert alert-error">{error}</div>}
 
-            {success && (
-              <div class="alert alert-success">{success}</div>
-            )}
+            {success && <div class="alert alert-success">{success}</div>}
 
             <form method="post" action="/auth/email/send">
               <div class="form-group">
-                <label class="form-label" for="email">Email address</label>
+                <label class="form-label" for="email">
+                  Email address
+                </label>
                 <input
                   class="form-input"
                   type="email"
@@ -152,25 +152,36 @@ app.get("/", (c) => {
                   name="email"
                   placeholder="you@example.com"
                   required
-                  autoFocus
                 />
               </div>
-              <button type="submit" class="btn">Send Magic Link</button>
+              <button type="submit" class="btn">
+                Send Magic Link
+              </button>
             </form>
 
             <div class="auth-divider">or</div>
 
-            <a href="/auth/github" class="btn" style={{ background: '#333', display: 'block', textAlign: 'center', textDecoration: 'none' }}>
+            <a
+              href="/auth/github"
+              class="btn"
+              style={{
+                background: "#333",
+                display: "block",
+                textAlign: "center",
+                textDecoration: "none",
+              }}
+            >
               Continue with GitHub
             </a>
 
             <div class="auth-note">
-              <strong>No password required.</strong> We'll send you a secure link to sign in instantly. The link expires in 15 minutes.
+              <strong>No password required.</strong> We'll send you a secure link to sign in
+              instantly. The link expires in 15 minutes.
             </div>
           </div>
         </main>
       </body>
-    </html>
+    </html>,
   );
 });
 
@@ -186,25 +197,27 @@ app.post("/send", async (c) => {
   // Check if email sending is configured
   if (!c.env.EMAIL) {
     console.error("[email-auth] Email sending not configured");
-    return c.redirect("/auth/email?error=Email authentication is not configured. Please contact the administrator.");
+    return c.redirect(
+      "/auth/email?error=Email authentication is not configured. Please contact the administrator.",
+    );
   }
 
   const fromAddress = c.env.EMAIL_FROM_ADDRESS;
   if (!fromAddress) {
     console.error("[email-auth] EMAIL_FROM_ADDRESS secret not set");
-    return c.redirect("/auth/email?error=Email authentication is not fully configured. Please contact the administrator.");
+    return c.redirect(
+      "/auth/email?error=Email authentication is not fully configured. Please contact the administrator.",
+    );
   }
 
   try {
     // Generate magic link token
     const token = crypto.randomUUID();
-    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes
-
     // Store token in KV
     await c.env.STATE.put(
       `magic_link:${token}`,
       JSON.stringify({ email, createdAt: Date.now() }),
-      { expirationTtl: 15 * 60 } // 15 minutes TTL
+      { expirationTtl: 15 * 60 }, // 15 minutes TTL
     );
 
     // Build magic link URL
@@ -213,7 +226,7 @@ app.post("/send", async (c) => {
     const magicLink = `${baseUrl}/auth/email/verify?token=${token}`;
 
     // Send email
-    const emailResult = await c.env.EMAIL.send({
+    await c.env.EMAIL.send({
       to: email,
       from: { email: fromAddress, name: "Stratum" },
       subject: "Sign in to Stratum",
@@ -259,7 +272,7 @@ app.post("/send", async (c) => {
     console.log(`[email-auth] Magic link sent to ${email}`);
 
     return c.redirect(
-      `/auth/email?success=Check your email! We've sent a magic link to ${email}. It expires in 15 minutes.`
+      `/auth/email?success=Check your email! We've sent a magic link to ${email}. It expires in 15 minutes.`,
     );
   } catch (err) {
     console.error("[email-auth] Failed to send magic link:", err);
