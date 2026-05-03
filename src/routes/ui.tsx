@@ -19,6 +19,16 @@ import { ImportProgressCard } from "../ui/components/import-progress";
 
 const app = new Hono<{ Bindings: Env }>();
 
+// Debug middleware to log all UI route requests
+app.use("/*", async (c, next) => {
+  console.log("[DEBUG UI ROUTER] Request received", { 
+    method: c.req.method, 
+    path: c.req.path,
+    url: c.req.url
+  });
+  await next();
+});
+
 // Helper to get current user info
 async function getCurrentUser(c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } }, logger: ReturnType<typeof createLogger>): Promise<{ id: string; email: string; username: string } | null> {
   const userId = c.get("userId");
