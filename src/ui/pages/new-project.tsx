@@ -66,8 +66,8 @@ export const NewProjectPage: FC<NewProjectProps> = ({ user, error }) => {
                 fontFamily: "inherit",
               }}
             >
+              <option value="public" selected>Public (anyone can see it)</option>
               <option value="private">Private (only you can see it)</option>
-              <option value="public">Public (anyone can see it)</option>
             </select>
           </div>
 
@@ -154,8 +154,8 @@ export const NewProjectPage: FC<NewProjectProps> = ({ user, error }) => {
                 fontFamily: "inherit",
               }}
             >
+              <option value="public" selected>Public (anyone can see it)</option>
               <option value="private">Private (only you can see it)</option>
-              <option value="public">Public (anyone can see it)</option>
             </select>
           </div>
 
