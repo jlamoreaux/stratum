@@ -1,21 +1,26 @@
 import { Hono } from "hono";
 import { getChange, listChanges } from "../storage/changes";
 import { listEvalRuns } from "../storage/eval-runs";
-import { getCommitLog, listFilesInRepo } from "../storage/git-ops";
+import { getCommitLog, listFilesInRepo, readFileFromRepo } from "../storage/git-ops";
 import { getProvenance } from "../storage/provenance";
 import { getProject, listProjects, listWorkspaces } from "../storage/state";
+import { getGitHubAccessToken } from "../storage/users";
 import type { Env } from "../types";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
 import { ChangesPage } from "../ui/pages/changes";
+import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { RepoPage } from "../ui/pages/repo";
 import { WorkspacesPage } from "../ui/pages/workspaces";
+import { canReadProject, filterReadableProjects } from "../utils/authz";
 
 const app = new Hono<{ Bindings: Env }>();
 
 // GET /ui/ — Dashboard (list projects)
 app.get("/", async (c) => {
-  const projects = await listProjects(c.env.STATE);
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
   const view = projects.map((p) => ({
     name: p.name,
     remote: p.remote,
@@ -26,7 +31,9 @@ app.get("/", async (c) => {
 
 // Alias: /ui/projects also shows dashboard
 app.get("/projects", async (c) => {
-  const projects = await listProjects(c.env.STATE);
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
   const view = projects.map((p) => ({
     name: p.name,
     remote: p.remote,
@@ -38,6 +45,8 @@ app.get("/projects", async (c) => {
 // GET /ui/projects/:name — Repo view (files + commit log)
 app.get("/projects/:name", async (c) => {
   const { name } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const project = await getProject(c.env.STATE, name);
   if (!project) {
     return c.html(
@@ -45,6 +54,13 @@ app.get("/projects/:name", async (c) => {
         Project '{name}' not found.
       </div>,
       404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
     );
   }
 
@@ -69,9 +85,19 @@ app.get("/projects/:name", async (c) => {
   );
 });
 
-// GET /ui/projects/:name/changes — Changes list
-app.get("/projects/:name/changes", async (c) => {
-  const { name } = c.req.param();
+// GET /ui/projects/:name/files/:path — File viewer
+app.get("/projects/:name/files/:path{.+}", async (c) => {
+  const { name, path } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+
+  if (!path) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">No file path specified.</div>,
+      400,
+    );
+  }
+
   const project = await getProject(c.env.STATE, name);
   if (!project) {
     return c.html(
@@ -79,6 +105,80 @@ app.get("/projects/:name/changes", async (c) => {
         Project '{name}' not found.
       </div>,
       404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
+    );
+  }
+
+  let content = "";
+  let error = "";
+
+  try {
+    // Use user's GitHub OAuth token for private repo access if available
+    const githubToken = userId ? await getGitHubAccessToken(c.env.DB, userId) : null;
+    const token = githubToken ?? project.token;
+    const fileContent = await readFileFromRepo(project.remote, token, path);
+    content = fileContent ?? "";
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // Log error server-side for debugging
+    console.error(`[file-viewer] Error reading file ${path} from ${project.name}:`, errMsg);
+
+    const errStr = errMsg.toLowerCase();
+    if (
+      errStr.includes("401") ||
+      errStr.includes("unauthorized") ||
+      errStr.includes("authentication")
+    ) {
+      error = "Failed to read file: authentication or network error";
+    } else if (
+      errStr.includes("network") ||
+      errStr.includes("fetch") ||
+      errStr.includes("timeout")
+    ) {
+      error = "Failed to read file: network error";
+    } else if (errStr.includes("binary") || errStr.includes("large") || errStr.includes("size")) {
+      error = "Failed to read file: it may be binary or too large";
+    } else {
+      // Use neutral generic message - don't leak internal details
+      error = "Failed to read file: internal error";
+    }
+  }
+
+  return c.html(
+    <FileViewerPage
+      project={{ name: project.name }}
+      filePath={path}
+      content={content}
+      error={error}
+    />,
+  );
+});
+
+// GET /ui/projects/:name/changes — Changes list
+app.get("/projects/:name/changes", async (c) => {
+  const { name } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const project = await getProject(c.env.STATE, name);
+  if (!project) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Project '{name}' not found.
+      </div>,
+      404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
     );
   }
 
@@ -122,6 +222,8 @@ app.get("/changes/:id", async (c) => {
 // GET /ui/projects/:name/workspaces — Workspace list
 app.get("/projects/:name/workspaces", async (c) => {
   const { name } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
   const project = await getProject(c.env.STATE, name);
   if (!project) {
     return c.html(
@@ -129,6 +231,13 @@ app.get("/projects/:name/workspaces", async (c) => {
         Project '{name}' not found.
       </div>,
       404,
+    );
+  }
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project access denied.</div>,
+      403,
     );
   }
 

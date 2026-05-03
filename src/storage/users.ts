@@ -12,6 +12,7 @@ interface UserRow {
   email: string;
   github_id: string | null;
   github_username: string | null;
+  github_access_token: string | null;
   token_hash: string;
   created_at: string;
 }
@@ -113,4 +114,33 @@ export async function upsertGitHubUser(
   const linked = await getUser(db, user.id);
   if (!linked) throw new Error(`User ${user.id} not found after createUser`);
   return linked;
+}
+
+/**
+ * Store GitHub OAuth access token for a user.
+ *
+ * SECURITY NOTE: This stores the token in plaintext. For production, this should
+ * use envelope encryption with a KMS (Key Management Service) before storing.
+ * The token is needed in plaintext form to make API calls to GitHub, so hashing
+ * is not an option - encryption with decryption on-demand is required.
+ *
+ * TODO: Implement envelope encryption using Cloudflare Key Management or similar.
+ */
+export async function setGitHubAccessToken(
+  db: D1Database,
+  userId: string,
+  token: string,
+): Promise<void> {
+  await db
+    .prepare("UPDATE users SET github_access_token = ? WHERE id = ?")
+    .bind(token, userId)
+    .run();
+}
+
+export async function getGitHubAccessToken(db: D1Database, userId: string): Promise<string | null> {
+  const row = await db
+    .prepare("SELECT github_access_token FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ github_access_token: string | null }>();
+  return row?.github_access_token ?? null;
 }

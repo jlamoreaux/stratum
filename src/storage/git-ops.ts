@@ -1,7 +1,7 @@
 import { createPatch } from "diff";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
-import type { Author, CommitLogEntry } from "../types";
+import type { ArtifactsCreateResult, ArtifactsNamespace, Author, CommitLogEntry } from "../types";
 import { MemoryFS } from "./memory-fs";
 
 const DIR = "/";
@@ -289,21 +289,41 @@ export async function getCommitLog(
 }
 
 export async function importFromGitHub(
-  remote: string,
-  token: string,
+  artifacts: ArtifactsNamespace,
+  name: string,
   githubUrl: string,
   branch = "main",
   depth = 10,
-): Promise<void> {
-  const importRes = await fetch(`${remote}/import`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ url: githubUrl, branch, depth }),
-  });
-  if (!importRes.ok) {
-    const detail = await importRes.text().catch(() => "unknown error");
-    throw new Error(`Artifacts import failed (${importRes.status}): ${detail}`);
+  authToken?: string,
+): Promise<ArtifactsCreateResult> {
+  const source: {
+    url: string;
+    branch?: string;
+    depth?: number;
+    auth?: {
+      type: "bearer";
+      token: string;
+    };
+  } = {
+    url: githubUrl,
+    branch,
+    depth,
+  };
+
+  // Add authentication for private repos
+  if (authToken) {
+    source.auth = {
+      type: "bearer",
+      token: authToken,
+    };
   }
+
+  return artifacts.import({
+    source,
+    target: {
+      name,
+    },
+  });
 }
 
 /**
