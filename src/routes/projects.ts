@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "../storage/git-ops";
-import { createImportJob, getImportProgress, updateImportProgress, updateImportStatus, deleteImportJob, cancelImportJob } from "../storage/imports";
+import { createImportJob, getImportProgress, updateImportProgress, updateImportStatus, deleteImportJob, cancelImportJob, isImportCancelled } from "../storage/imports";
 import { listProvenance } from "../storage/provenance";
 import { getProjectByPath, listProjectsByNamespace, setProject } from "../storage/state";
 import type { Env, ProjectEntry, ImportProgress } from "../types";
@@ -387,14 +387,39 @@ async function processImportJob(
   logger: Logger
 ) {
   const { namespace, slug } = project;
+  const artifactsRepoName = `${namespace.replace('@', '')}-${slug}`;
+  
+  // Helper to check for cancellation
+  const checkCancelled = async (): Promise<boolean> => {
+    const isCancelled = await isImportCancelled(env.STATE, namespace, slug, logger);
+    if (isCancelled) {
+      logger.info('Import cancelled by user', { namespace, slug });
+      await updateImportStatus(
+        env.STATE, 
+        namespace, 
+        slug, 
+        "cancelled", 
+        logger,
+        "Import cancelled by user"
+      );
+      // Clean up partial import
+      await deleteImportJob(env.STATE, namespace, slug, logger);
+    }
+    return isCancelled;
+  };
   
   try {
+    // Check cancellation before starting
+    if (await checkCancelled()) return;
+    
     // Update status to cloning
     await updateImportStatus(env.STATE, namespace, slug, "cloning", logger, "Cloning repository");
     
+    // Check cancellation after status update
+    if (await checkCancelled()) return;
+    
     // Perform the actual import
     const depth = 10; // Default depth
-    const artifactsRepoName = `${namespace.replace('@', '')}-${slug}`;
     
     const importResult = await importFromGitHub(
       env.ARTIFACTS,
@@ -406,6 +431,9 @@ async function processImportJob(
     );
     
     if (!importResult.success) {
+      // Check if it was cancelled during the operation
+      if (await checkCancelled()) return;
+      
       await updateImportStatus(
         env.STATE, 
         namespace, 
@@ -417,6 +445,9 @@ async function processImportJob(
       return;
     }
     
+    // Check cancellation before updating project
+    if (await checkCancelled()) return;
+    
     // Update project with actual repo info
     const updatedProject: ProjectEntry = {
       ...project,
@@ -425,6 +456,9 @@ async function processImportJob(
     };
     
     await setProject(env.STATE, updatedProject, logger);
+    
+    // Final cancellation check before completing
+    if (await checkCancelled()) return;
     
     // Mark import as complete
     await updateImportStatus(
@@ -439,14 +473,29 @@ async function processImportJob(
     logger.info('Import completed', { namespace, slug, importId });
   } catch (error) {
     logger.error('Import job failed', error instanceof Error ? error : undefined, { namespace, slug });
-    await updateImportStatus(
-      env.STATE, 
-      namespace, 
-      slug, 
-      "failed", 
-      logger,
-      `Import failed: ${error instanceof Error ? error.message : String(error)}`
-    );
+    
+    // Check if this was a cancellation
+    const isCancelled = await isImportCancelled(env.STATE, namespace, slug, logger);
+    if (isCancelled) {
+      await updateImportStatus(
+        env.STATE, 
+        namespace, 
+        slug, 
+        "cancelled", 
+        logger,
+        "Import cancelled"
+      );
+      await deleteImportJob(env.STATE, namespace, slug, logger);
+    } else {
+      await updateImportStatus(
+        env.STATE, 
+        namespace, 
+        slug, 
+        "failed", 
+        logger,
+        `Import failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 }
 

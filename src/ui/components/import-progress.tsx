@@ -36,6 +36,7 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
   const isActive = ["queued", "cloning", "processing"].includes(status);
   const isComplete = status === "completed";
   const isFailed = status === "failed";
+  const isCancelled = status === "cancelled";
 
   const percent = progress.totalFiles 
     ? Math.round((progress.processedFiles / progress.totalFiles) * 100)
@@ -48,7 +49,8 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
           {isActive && <span class="spinner"></span>}
           {isComplete && <span class="icon-success">✓</span>}
           {isFailed && <span class="icon-error">✗</span>}
-          Import {isComplete ? "Complete" : isFailed ? "Failed" : "in Progress"}
+          {isCancelled && <span class="icon-cancelled">○</span>}
+          Import {isComplete ? "Complete" : isFailed ? "Failed" : isCancelled ? "Cancelled" : "in Progress"}
         </h2>
         <span class={`badge badge-${status}`}>{status}</span>
       </div>
@@ -153,20 +155,20 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
               
               // Update header
               const header = document.querySelector('.import-header h2');
-              if (header && (data.status === 'completed' || data.status === 'failed')) {
+              if (header && (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled')) {
                 if (data.status === 'completed') {
                   header.innerHTML = '<span class="icon-success">✓</span> Import Complete';
-                } else {
+                } else if (data.status === 'failed') {
                   header.innerHTML = '<span class="icon-error">✗</span> Import Failed';
+                } else {
+                  header.innerHTML = '<span class="icon-cancelled">○</span> Import Cancelled';
                 }
               }
               
               // Close connection and reload on completion
-              if (data.status === 'completed' || data.status === 'failed') {
+              if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
                 evtSource.close();
-                if (data.status === 'completed') {
-                  setTimeout(() => window.location.reload(), 2000);
-                }
+                setTimeout(() => window.location.reload(), 2000);
               }
             };
             
