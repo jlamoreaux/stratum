@@ -91,7 +91,7 @@ export const NewProjectPage: FC<NewProjectProps> = ({ user, error }) => {
 
       <div class="card" style={{ marginTop: "1.5rem" }}>
         <h3 style={{ marginTop: 0 }}>Or import from GitHub</h3>
-        <form method="post" action="/api/projects/import" style={{ marginTop: "1rem" }}>
+        <form method="post" action="/api/projects/import" style={{ marginTop: "1rem" }} onsubmit="const name = this.querySelector('[name=name]').value; this.action = '/api/projects/' + name + '/import'; return true;">
           <div style="margin-bottom: 1rem;">
             <label style={{ display: "block", marginBottom: "0.5rem", color: "#888" }}>
               Project Name
