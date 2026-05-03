@@ -102,6 +102,14 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
         </div>
       )}
 
+      {isActive && (
+        <div class="actions-section">
+          <form method="POST" action={`/api/projects/${namespace}/${slug}/import/cancel`} onsubmit="return confirm('Are you sure you want to cancel this import?');">
+            <button type="submit" class="btn btn-danger">Cancel Import</button>
+          </form>
+        </div>
+      )}
+
       {isFailed && (
         <div class="actions-section">
           <form method="POST" action={`/api/projects/${namespace}/${slug}/import/retry`}>

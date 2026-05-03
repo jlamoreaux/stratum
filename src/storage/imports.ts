@@ -150,6 +150,53 @@ export async function updateImportStatus(
   return updateImportProgress(kv, namespace, slug, updates, logger);
 }
 
+export async function cancelImportJob(
+  kv: KVNamespace,
+  namespace: string,
+  slug: string,
+  logger: Logger
+): Promise<Result<ImportProgress, AppError>> {
+  logger.info('Cancelling import job', { namespace, slug });
+  
+  const progressResult = await getImportProgress(kv, namespace, slug, logger);
+  if (!progressResult.success) {
+    return progressResult;
+  }
+  
+  if (!progressResult.data) {
+    return err(new AppError("Import job not found", "NOT_FOUND", 404));
+  }
+  
+  const progress = progressResult.data;
+  
+  // Can only cancel if not already completed/failed/cancelled
+  if (["completed", "failed", "cancelled"].includes(progress.status)) {
+    return err(new AppError(`Cannot cancel import with status: ${progress.status}`, "INVALID_STATE", 400));
+  }
+  
+  return updateImportStatus(
+    kv, 
+    namespace, 
+    slug, 
+    "cancelling", 
+    logger,
+    "Import cancellation requested"
+  );
+}
+
+export async function isImportCancelled(
+  kv: KVNamespace,
+  namespace: string,
+  slug: string,
+  logger: Logger
+): Promise<boolean> {
+  const progressResult = await getImportProgress(kv, namespace, slug, logger);
+  if (!progressResult.success || !progressResult.data) {
+    return false;
+  }
+  return progressResult.data.status === "cancelling";
+}
+
 export async function deleteImportJob(
   kv: KVNamespace,
   namespace: string,

@@ -153,7 +153,7 @@ export interface WorkspaceEntry {
 }
 
 // Import progress tracking
-export type ImportStatus = "queued" | "cloning" | "processing" | "completed" | "failed" | "cancelled";
+export type ImportStatus = "queued" | "cloning" | "processing" | "completed" | "failed" | "cancelled" | "cancelling";
 
 export interface ImportProgress {
   id: string;

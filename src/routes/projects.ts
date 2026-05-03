@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "../storage/git-ops";
-import { createImportJob, getImportProgress, updateImportProgress, updateImportStatus, deleteImportJob } from "../storage/imports";
+import { createImportJob, getImportProgress, updateImportProgress, updateImportStatus, deleteImportJob, cancelImportJob } from "../storage/imports";
 import { listProvenance } from "../storage/provenance";
 import { getProjectByPath, listProjectsByNamespace, setProject } from "../storage/state";
 import type { Env, ProjectEntry, ImportProgress } from "../types";
@@ -792,6 +792,45 @@ app.post("/:namespace/:slug/sync", async (c) => {
     slug,
     importId,
     status: "queued"
+  });
+});
+
+// POST /projects/:namespace/:slug/import/cancel - Cancel ongoing import
+app.post("/:namespace/:slug/import/cancel", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const userId = c.get("userId");
+  const username = c.get("username");
+  if (!userId || !username) return unauthorized("Authentication required");
+
+  const { namespace, slug } = c.req.param();
+  const userNamespace = getUserNamespace(username);
+  
+  if (namespace !== userNamespace) {
+    return forbidden("You can only cancel imports in your own namespace");
+  }
+
+  const cancelResult = await cancelImportJob(c.env.STATE, namespace, slug, logger);
+  
+  if (!cancelResult.success) {
+    if (cancelResult.error.code === 'NOT_FOUND') {
+      return notFound("Import job", `${namespace}/${slug}`);
+    }
+    logger.error('Failed to cancel import', cancelResult.error);
+    return internalError(cancelResult.error.message);
+  }
+
+  logger.info('Import cancellation requested', { namespace, slug });
+  return ok({
+    message: "Import cancellation requested",
+    namespace,
+    slug,
+    status: "cancelling"
   });
 });
 
