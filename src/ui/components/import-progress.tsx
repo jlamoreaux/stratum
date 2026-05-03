@@ -42,6 +42,10 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
     ? Math.round((progress.processedFiles / progress.totalFiles) * 100)
     : status === "cloning" ? 10 : status === "processing" ? 50 : 0;
 
+  // Safely escape for JavaScript string interpolation
+  const safeNamespace = JSON.stringify(namespace).slice(1, -1);
+  const safeSlug = JSON.stringify(slug).slice(1, -1);
+
   return (
     <div class="card import-progress-card" data-import-status={status}>
       <div class="import-header">
@@ -124,7 +128,7 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
         <script dangerouslySetInnerHTML={{
           __html: `
             // Connect to SSE for real-time updates
-            const evtSource = new EventSource('/api/projects/${namespace}/${slug}/import/stream');
+            const evtSource = new EventSource('/api/projects/${safeNamespace}/${safeSlug}/import/stream');
             
             evtSource.onmessage = function(event) {
               const data = JSON.parse(event.data);
@@ -177,7 +181,7 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
               evtSource.close();
               // Fallback to polling
               setInterval(async () => {
-                const res = await fetch('/api/projects/${namespace}/${slug}/import/status');
+                const res = await fetch('/api/projects/${safeNamespace}/${safeSlug}/import/status');
                 if (res.ok) {
                   const data = await res.json();
                   if (data.status === 'completed') {

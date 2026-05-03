@@ -634,6 +634,18 @@ app.get("/:namespace/:slug/import/status", async (c) => {
   });
 
   const { namespace, slug } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+
+  // Check if project exists and user has access
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    return notFound("Project", `${namespace}/${slug}`);
+  }
+
+  if (!canReadProject(projectResult.data, userId, agentOwnerId)) {
+    return forbidden("Project access denied");
+  }
 
   const progressResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
   if (!progressResult.success) {
