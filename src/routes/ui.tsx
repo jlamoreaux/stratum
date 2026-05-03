@@ -61,6 +61,8 @@ app.get("/", async (c) => {
   const projects = filterReadableProjects(allProjectsResult.data, userId, agentOwnerId);
   const view = projects.map((p) => ({
     name: p.name,
+    namespace: p.namespace,
+    slug: p.slug,
     remote: p.remote,
     createdAt: p.createdAt,
     visibility: p.visibility,
@@ -169,7 +171,7 @@ app.get("/p/:name", async (c) => {
   logger.debug("Rendering project page", { name, fileCount: files.length, hasImport: !!importProgress });
   return c.html(
     <RepoPage
-      project={{ name: project.name, remote: project.remote, createdAt: project.createdAt }}
+      project={{ name: project.name, namespace: project.namespace, slug: project.slug, remote: project.remote, createdAt: project.createdAt }}
       files={files}
       log={log}
       readme={readme}
@@ -238,7 +240,7 @@ app.get("/p/:name/changes", async (c) => {
   }));
 
   logger.debug("Rendering changes page", { name, changeCount: view.length });
-  return c.html(<ChangesPage project={name} changes={view} user={userResult} />);
+  return c.html(<ChangesPage project={{ name: project.name, namespace: project.namespace, slug: project.slug }} changes={view} user={userResult} />);
 });
 
 // GET /changes/:id — Change detail
@@ -357,7 +359,9 @@ app.get("/p/:name/workspaces", async (c) => {
     );
   }
 
-  const workspacesResult = await listWorkspaces(c.env.STATE, projectResult.data.id, logger);
+  const project = projectResult.data;
+
+  const workspacesResult = await listWorkspaces(c.env.STATE, project.id, logger);
   if (!workspacesResult.success) {
     logger.error("Failed to list workspaces", workspacesResult.error);
     return c.html(
@@ -375,7 +379,7 @@ app.get("/p/:name/workspaces", async (c) => {
   }));
 
   logger.debug("Rendering workspaces page", { name, workspaceCount: view.length });
-  return c.html(<WorkspacesPage project={name} workspaces={view} user={userResult} />);
+  return c.html(<WorkspacesPage project={{ name: project.name, namespace: project.namespace, slug: project.slug }} workspaces={view} user={userResult} />);
 });
 
 // GET /:namespace/:slug — Repo view with namespace (NEW FORMAT) - MUST BE LAST
@@ -467,7 +471,7 @@ app.get("/:namespace/:slug", async (c) => {
   logger.debug("Rendering project page", { namespace, slug, fileCount: files.length, hasImport: !!importProgress });
   return c.html(
     <RepoPage
-      project={{ name: project.name, remote: project.remote, createdAt: project.createdAt }}
+      project={{ name: project.name, namespace: project.namespace, slug: project.slug, remote: project.remote, createdAt: project.createdAt }}
       files={files}
       log={log}
       readme={readme}

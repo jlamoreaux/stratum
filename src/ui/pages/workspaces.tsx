@@ -2,17 +2,21 @@ import type { FC } from "hono/jsx";
 import { Layout } from "../layout";
 
 interface WorkspacesProps {
-  project: string;
+  project: {
+    name: string;
+    namespace: string;
+    slug: string;
+  };
   workspaces: Array<{ name: string; parent: string; createdAt: string }>;
   user?: { id: string; email: string } | null;
 }
 
 export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, user }) => {
   return (
-    <Layout title={`Workspaces — ${project}`} user={user}>
+    <Layout title={`Workspaces — ${project.name}`} user={user}>
       <div class="page-header">
         <h1>Workspaces</h1>
-        <a class="btn" href={`/p/${project}`}>
+        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
           Back to repo
         </a>
       </div>

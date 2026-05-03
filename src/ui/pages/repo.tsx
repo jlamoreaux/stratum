@@ -4,7 +4,7 @@ import { ImportProgressCard } from "../components/import-progress";
 import type { ImportProgress } from "../../types";
 
 interface RepoProps {
-  project: { name: string; remote: string; createdAt: string };
+  project: { name: string; namespace: string; slug: string; remote: string; createdAt: string };
   files: string[];
   log: Array<{ sha: string; message: string; author: string; timestamp: number }>;
   readme?: string | null;
@@ -17,7 +17,7 @@ export const RepoPage: FC<RepoProps> = ({ project, files, log, readme, user, imp
     <Layout title={project.name} user={user}>
       <div class="page-header">
         <h1>{project.name}</h1>
-        <a class="btn btn-primary" href={`/p/${project.name}/changes`}>
+        <a class="btn btn-primary" href={`/${project.namespace}/${project.slug}/changes`}>
           View changes
         </a>
       </div>

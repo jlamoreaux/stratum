@@ -2,7 +2,11 @@ import type { FC } from "hono/jsx";
 import { Layout } from "../layout";
 
 interface ChangesProps {
-  project: string;
+  project: {
+    name: string;
+    namespace: string;
+    slug: string;
+  };
   changes: Array<{
     id: string;
     workspace: string;
@@ -31,10 +35,10 @@ function statusBadgeClass(status: string): string {
 
 export const ChangesPage: FC<ChangesProps> = ({ project, changes, user }) => {
   return (
-    <Layout title={`Changes — ${project}`} user={user}>
+    <Layout title={`Changes — ${project.name}`} user={user}>
       <div class="page-header">
         <h1>Changes</h1>
-        <a class="btn" href={`/p/${project}`}>
+        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
           Back to repo
         </a>
       </div>
