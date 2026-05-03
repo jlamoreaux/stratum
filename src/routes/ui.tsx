@@ -19,16 +19,6 @@ import { ImportProgressCard } from "../ui/components/import-progress";
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Debug middleware to log all UI route requests
-app.use("/*", async (c, next) => {
-  console.log("[DEBUG UI ROUTER] Request received", { 
-    method: c.req.method, 
-    path: c.req.path,
-    url: c.req.url
-  });
-  await next();
-});
-
 // Helper to get current user info
 async function getCurrentUser(c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } }, logger: ReturnType<typeof createLogger>): Promise<{ id: string; email: string; username: string } | null> {
   const userId = c.get("userId");
@@ -189,114 +179,6 @@ app.get("/p/:name", async (c) => {
   );
 });
 
-// GET /@:namespace/:slug — Repo view with namespace (NEW FORMAT)
-app.get("/@:namespace/:slug", async (c) => {
-  console.log("[DEBUG] /@:namespace/:slug route handler called", { 
-    url: c.req.url, 
-    path: c.req.path,
-    params: c.req.param()
-  });
-  
-  const { namespace, slug } = c.req.param();
-  const fullNamespace = `@${namespace}`;
-  const userId = c.get("userId");
-  const agentOwnerId = c.get("agentOwnerId");
-  
-  console.log("[DEBUG] Extracted values", { namespace, slug, fullNamespace, userId });
-  
-  const logger = createLogger({
-    path: c.req.path,
-    userId,
-    projectName: `${fullNamespace}/${slug}`,
-  });
-
-  const [userResult, projectResult] = await Promise.all([
-    getCurrentUser(c, logger),
-    getProjectByPath(c.env.STATE, fullNamespace, slug, logger),
-  ]);
-  
-  console.log("[DEBUG] Project lookup result", { 
-    success: projectResult.success, 
-    hasData: projectResult.success ? !!projectResult.data : false,
-    error: projectResult.success ? null : projectResult.error?.code 
-  });
-
-  if (!projectResult.success) {
-    logger.warn("Project not found", { namespace: fullNamespace, slug });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{fullNamespace}/{slug}' not found.
-      </div>,
-      404,
-    );
-  }
-  const project = projectResult.data;
-
-  if (!canReadProject(project, userId, agentOwnerId)) {
-    logger.warn("Access denied to project", { namespace: fullNamespace, slug, userId });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Access denied. You don't have permission to view this project.
-      </div>,
-      403,
-    );
-  }
-
-  let files: string[] = [];
-  let log: Array<{ sha: string; message: string; author: string; timestamp: number }> = [];
-  let readme: string | null = null;
-  let importProgress = null;
-
-  // Check for active import
-  const importResult = await getImportProgress(c.env.STATE, fullNamespace, slug, logger);
-  if (importResult.success && importResult.data) {
-    importProgress = importResult.data;
-  }
-
-  try {
-    const [filesResult, logResult] = await Promise.all([
-      listFilesInRepo(project.remote, project.token, logger),
-      getCommitLog(project.remote, project.token, 20, logger),
-    ]);
-    
-    if (filesResult.success) {
-      files = filesResult.data;
-    } else {
-      logger.warn("Failed to list files in repo", { error: filesResult.error });
-    }
-    
-    if (logResult.success) {
-      log = logResult.data;
-    } else {
-      logger.warn("Failed to get commit log", { error: logResult.error });
-    }
-    
-    // Try to read README.md if it exists
-    const readmePath = files.find(f => f.toLowerCase() === "readme.md");
-    if (readmePath) {
-      const readmeResult = await readFileFromRepo(project.remote, project.token, readmePath, logger);
-      if (readmeResult.success) {
-        readme = readmeResult.data;
-      }
-    }
-  } catch (error) {
-    // Repo may be empty or unreachable — render with empty data
-    logger.warn("Error loading repo data", { error: error instanceof Error ? error.message : String(error) });
-  }
-
-  logger.debug("Rendering project page", { namespace: fullNamespace, slug, fileCount: files.length, hasImport: !!importProgress });
-  return c.html(
-    <RepoPage
-      project={{ name: project.name, remote: project.remote, createdAt: project.createdAt }}
-      files={files}
-      log={log}
-      readme={readme}
-      user={userResult}
-      importProgress={importProgress}
-    />,
-  );
-});
-
 // GET /p/:name/changes — Changes list
 app.get("/p/:name/changes", async (c) => {
   const { name } = c.req.param();
@@ -334,9 +216,9 @@ app.get("/p/:name/changes", async (c) => {
     );
   }
 
-  const changesResult = await listChanges(c.env.DB, name, logger);
+  const changesResult = await listChanges(c.env.DB, logger, name);
   if (!changesResult.success) {
-    logger.error("Failed to list changes", changesResult.error, { projectName: name });
+    logger.error("Failed to list changes", changesResult.error);
     return c.html(
       <div style="padding:2rem;font-family:monospace;color:#f87171;">
         Error loading changes. Please try again.
@@ -345,19 +227,15 @@ app.get("/p/:name/changes", async (c) => {
     );
   }
 
-  const view = changesResult.data.map((ch) => {
-    const entry: {
-      id: string;
-      workspace: string;
-      status: string;
-      evalScore?: number;
-      evalPassed?: boolean;
-      createdAt: string;
-    } = { id: ch.id, workspace: ch.workspace, status: ch.status, createdAt: ch.createdAt };
-    if (ch.evalScore !== undefined) entry.evalScore = ch.evalScore;
-    if (ch.evalPassed !== undefined) entry.evalPassed = ch.evalPassed;
-    return entry;
-  });
+  const view = changesResult.data.map((change) => ({
+    id: change.id,
+    project: change.project,
+    workspace: change.workspace,
+    status: change.status,
+    evalScore: change.evalScore,
+    evalPassed: change.evalPassed,
+    createdAt: change.createdAt,
+  }));
 
   logger.debug("Rendering changes page", { name, changeCount: view.length });
   return c.html(<ChangesPage project={name} changes={view} user={userResult} />);
@@ -382,46 +260,68 @@ app.get("/changes/:id", async (c) => {
   if (!changeResult.success) {
     logger.warn("Change not found", { id });
     return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Change '{id}' not found.</div>,
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Change '{id}' not found.
+      </div>,
       404,
     );
   }
   const change = changeResult.data;
 
-  // Check permission on the associated project
   const projectResult = await getProject(c.env.STATE, change.project, logger);
-  if (!projectResult.success || !canReadProject(projectResult.data, userId, agentOwnerId)) {
-    logger.warn("Access denied to change", { changeId: id, project: change.project, userId });
+  if (!projectResult.success) {
+    logger.error("Project not found for change", projectResult.error, { project: change.project });
     return c.html(
       <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Access denied. You don't have permission to view this change.
+        Project not found.
+      </div>,
+      500,
+    );
+  }
+
+  if (!canReadProject(projectResult.data, userId, agentOwnerId)) {
+    logger.warn("Access denied to change", { id, userId });
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Access denied.
       </div>,
       403,
     );
   }
 
-  const [evalRunsResult, provenanceResult] = await Promise.all([
-    listEvalRuns(c.env.DB, id, logger),
-    getProvenance(c.env.DB, id, logger),
-  ]);
-
+  const evalRunsResult = await listEvalRuns(c.env.DB, logger, change.id);
   if (!evalRunsResult.success) {
-    logger.error("Failed to list eval runs", evalRunsResult.error, { changeId: id });
-  }
-  if (!provenanceResult.success) {
-    logger.error("Failed to get provenance", provenanceResult.error, { changeId: id });
+    logger.error("Failed to list eval runs", evalRunsResult.error);
   }
 
-  logger.debug("Rendering change detail page", { changeId: id, project: change.project });
-  return c.html(<ChangeDetailPage 
-    change={change} 
-    evalRuns={evalRunsResult.success ? evalRunsResult.data : []} 
-    provenance={provenanceResult.success ? provenanceResult.data : null} 
-    user={userResult} 
-  />);
+  const evals = evalRunsResult.success ? evalRunsResult.data.map((run) => ({
+    evaluatorType: run.evaluatorType,
+    score: run.score,
+    passed: run.passed,
+    reason: run.reason,
+    ranAt: run.ranAt,
+  })) : [];
+
+  logger.debug("Rendering change detail page", { id });
+  return c.html(
+    <ChangeDetailPage
+      change={{
+        id: change.id,
+        project: change.project,
+        workspace: change.workspace,
+        status: change.status,
+        evalScore: change.evalScore,
+        evalPassed: change.evalPassed,
+        evalReason: change.evalReason,
+        createdAt: change.createdAt,
+      }}
+      evals={evals}
+      user={userResult}
+    />,
+  );
 });
 
-// GET /p/:name/workspaces — Workspace list
+// GET /p/:name/workspaces — Workspaces list
 app.get("/p/:name/workspaces", async (c) => {
   const { name } = c.req.param();
   const userId = c.get("userId");
@@ -446,24 +346,23 @@ app.get("/p/:name/workspaces", async (c) => {
       404,
     );
   }
-  const project = projectResult.data;
 
-  if (!canReadProject(project, userId, agentOwnerId)) {
+  if (!canReadProject(projectResult.data, userId, agentOwnerId)) {
     logger.warn("Access denied to project workspaces", { name, userId });
     return c.html(
       <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Access denied. You don't have permission to view this project.
+        Access denied.
       </div>,
       403,
     );
   }
 
-  const workspacesResult = await listWorkspaces(c.env.STATE, name, logger);
+  const workspacesResult = await listWorkspaces(c.env.STATE, projectResult.data.id, logger);
   if (!workspacesResult.success) {
-    logger.error("Failed to list workspaces", workspacesResult.error, { projectName: name });
+    logger.error("Failed to list workspaces", workspacesResult.error);
     return c.html(
       <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading workspaces. Please try again.
+        Error loading workspaces.
       </div>,
       500,
     );
@@ -477,6 +376,105 @@ app.get("/p/:name/workspaces", async (c) => {
 
   logger.debug("Rendering workspaces page", { name, workspaceCount: view.length });
   return c.html(<WorkspacesPage project={name} workspaces={view} user={userResult} />);
+});
+
+// GET /:namespace/:slug — Repo view with namespace (NEW FORMAT) - MUST BE LAST
+app.get("/:namespace/:slug", async (c) => {
+  const params = c.req.param();
+  const { namespace, slug } = params;
+  
+  // Only handle namespaces that start with @
+  if (!namespace.startsWith('@')) {
+    return c.notFound();
+  }
+  
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const logger = createLogger({
+    path: c.req.path,
+    userId,
+    projectName: `${namespace}/${slug}`,
+  });
+
+  const [userResult, projectResult] = await Promise.all([
+    getCurrentUser(c, logger),
+    getProjectByPath(c.env.STATE, namespace, slug, logger),
+  ]);
+
+  if (!projectResult.success) {
+    logger.warn("Project not found", { namespace, slug });
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Project '{namespace}/{slug}' not found.
+      </div>,
+      404,
+    );
+  }
+  const project = projectResult.data;
+
+  if (!canReadProject(project, userId, agentOwnerId)) {
+    logger.warn("Access denied to project", { namespace, slug, userId });
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Access denied. You don't have permission to view this project.
+      </div>,
+      403,
+    );
+  }
+
+  let files: string[] = [];
+  let log: Array<{ sha: string; message: string; author: string; timestamp: number }> = [];
+  let readme: string | null = null;
+  let importProgress = null;
+
+  // Check for active import
+  const importResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+  if (importResult.success && importResult.data) {
+    importProgress = importResult.data;
+  }
+
+  try {
+    const [filesResult, logResult] = await Promise.all([
+      listFilesInRepo(project.remote, project.token, logger),
+      getCommitLog(project.remote, project.token, 20, logger),
+    ]);
+    
+    if (filesResult.success) {
+      files = filesResult.data;
+    } else {
+      logger.warn("Failed to list files in repo", { error: filesResult.error });
+    }
+    
+    if (logResult.success) {
+      log = logResult.data;
+    } else {
+      logger.warn("Failed to get commit log", { error: logResult.error });
+    }
+    
+    // Try to read README.md if it exists
+    const readmePath = files.find(f => f.toLowerCase() === "readme.md");
+    if (readmePath) {
+      const readmeResult = await readFileFromRepo(project.remote, project.token, readmePath, logger);
+      if (readmeResult.success) {
+        readme = readmeResult.data;
+      }
+    }
+  } catch (error) {
+    // Repo may be empty or unreachable — render with empty data
+    logger.warn("Error loading repo data", { error: error instanceof Error ? error.message : String(error) });
+  }
+
+  logger.debug("Rendering project page", { namespace, slug, fileCount: files.length, hasImport: !!importProgress });
+  return c.html(
+    <RepoPage
+      project={{ name: project.name, remote: project.remote, createdAt: project.createdAt }}
+      files={files}
+      log={log}
+      readme={readme}
+      user={userResult}
+      importProgress={importProgress}
+    />,
+  );
 });
 
 export { app as uiRouter };
