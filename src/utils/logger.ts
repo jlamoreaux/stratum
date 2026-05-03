@@ -33,10 +33,10 @@ export function createLogger(context: LoggerContext = {}): Logger {
   });
 
   return {
-    trace: (msg, meta) => logger.trace(meta || {}, msg),
-    debug: (msg, meta) => logger.debug(meta || {}, msg),
-    info: (msg, meta) => logger.info(meta || {}, msg),
-    warn: (msg, meta) => logger.warn(meta || {}, msg),
+    trace: (msg, meta) => logger.trace(msg, meta),
+    debug: (msg, meta) => logger.debug(msg, meta),
+    info: (msg, meta) => logger.info(msg, meta),
+    warn: (msg, meta) => logger.warn(msg, meta),
     error: (msg, error, meta) => logger.error({ err: error, ...meta }, msg),
     fatal: (msg, error, meta) => logger.fatal({ err: error, ...meta }, msg),
     child: (childContext) => createLogger({ ...context, ...childContext }),
