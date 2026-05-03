@@ -110,15 +110,6 @@ app.get("/ui/changes/:id", (c) => {
   return c.redirect(`/changes/${id}`, 301);
 });
 
-app.use("*", async (c, next) => {
-  console.log("[DEBUG INDEX] Request received", { 
-    method: c.req.method, 
-    path: c.req.path,
-    url: c.req.url
-  });
-  await next();
-});
-
 app.route("/auth", authRouter);
 app.route("/auth/email", emailAuthRouter);
 app.route("/", uiRouter);  // Mount UI at root

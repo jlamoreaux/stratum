@@ -48,7 +48,9 @@ export async function initAndPush(
 ): Promise<Result<string, AppError>> {
   logger.debug("Initializing git repository", { remote, fileCount: Object.keys(files).length });
 
-  const fs = new MemoryFS();
+  const rawFs = new MemoryFS();
+  const fs = rawFs.toNodeFS();
+  
   const initResult = await fromPromise(git.init({ fs, dir: DIR, defaultBranch: "main" }));
   if (!initResult.success) {
     logger.error("Failed to initialize git repository", initResult.error, { remote });
@@ -56,7 +58,8 @@ export async function initAndPush(
   }
 
   for (const [path, content] of Object.entries(files)) {
-    const writeResult = await fs.promises.writeFile(`/${path}`, content);
+    // Use raw fs for writeFile since we need Result handling
+    const writeResult = await rawFs.promises.writeFile(`/${path}`, content);
     if (!writeResult.success) {
       logger.error("Failed to write file to memory FS", writeResult.error, { path, remote });
       return err(writeResult.error);
@@ -93,7 +96,7 @@ export async function cloneRepo(
 ): Promise<Result<{ fs: MemoryFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote });
 
-  const fs = new MemoryFS();
+  const fs = new MemoryFS().toNodeFS();
   const cloneResult = await fromPromise(
     git.clone({
       fs,
@@ -130,11 +133,13 @@ export async function commitAndPush(
 
   const base = dir.endsWith("/") ? dir : `${dir}/`;
   for (const [path, content] of Object.entries(changes)) {
-    const writeResult = await fs.promises.writeFile(`${base}${path}`, content);
-    if (!writeResult.success) {
-      logger.error("Failed to write file to memory FS", writeResult.error, { path, remote });
-      return err(writeResult.error);
+    try {
+      await fs.promises.writeFile(`${base}${path}`, content);
+    } catch (error) {
+      logger.error("Failed to write file to memory FS", error instanceof Error ? error : undefined, { path, remote });
+      return err(new AppError(`Failed to write file: ${path}`, "FS_ERROR", 500));
     }
+    
     const addResult = await fromPromise(git.add({ fs, dir, filepath: path }));
     if (!addResult.success) {
       logger.error("Failed to stage file", addResult.error, { path, remote });
@@ -426,14 +431,15 @@ export async function readFileFromRepo(
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs } = cloneResult.data;
-  const contentResult = await fs.promises.readFile(`/${path}`, { encoding: "utf8" });
-  if (!contentResult.success) {
-    logger.error("Failed to read file from repo", contentResult.error, { remote, path });
-    return err(contentResult.error);
+  
+  try {
+    const content = await fs.promises.readFile(`/${path}`, { encoding: "utf8" });
+    logger.info("Successfully read file from repo", { remote, path });
+    return ok(content as string);
+  } catch (error) {
+    logger.error("Failed to read file from repo", error instanceof Error ? error : undefined, { remote, path });
+    return err(new AppError(`Failed to read file: ${path}`, "FS_ERROR", 500));
   }
-
-  logger.info("Successfully read file from repo", { remote, path });
-  return ok(contentResult.data as string);
 }
 
 export async function listFilesInRepo(
@@ -457,33 +463,35 @@ async function walkDir(
   logger: Logger
 ): Promise<Result<string[], AppError>> {
   const dirPath = base === "/" ? "/" : base;
-  const entriesResult = await fs.promises.readdir(dirPath);
-  if (!entriesResult.success) {
-    logger.error("Failed to read directory", entriesResult.error, { dirPath });
-    return err(entriesResult.error);
-  }
+  
+  try {
+    const entries = await fs.promises.readdir(dirPath);
+    const files: string[] = [];
 
-  const files: string[] = [];
-
-  for (const entry of entriesResult.data) {
-    if (entry === ".git") continue;
-    const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
-    const statResult = await fs.promises.stat(fullPath);
-    if (!statResult.success) {
-      logger.error("Failed to stat file", statResult.error, { fullPath });
-      return err(statResult.error);
+    for (const entry of entries) {
+      if (entry === ".git") continue;
+      const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
+      
+      try {
+        const stat = await fs.promises.stat(fullPath);
+        if (stat.isDirectory()) {
+          const subFilesResult = await walkDir(fs, fullPath, `${prefix}${entry}/`, logger);
+          if (!subFilesResult.success) return err(subFilesResult.error);
+          files.push(...subFilesResult.data);
+        } else {
+          files.push(`${prefix}${entry}`);
+        }
+      } catch (error) {
+        logger.error("Failed to stat file", error instanceof Error ? error : undefined, { fullPath });
+        return err(new AppError(`Failed to stat file: ${fullPath}`, "FS_ERROR", 500));
+      }
     }
 
-    if (statResult.data.isDirectory()) {
-      const subFilesResult = await walkDir(fs, fullPath, `${prefix}${entry}/`, logger);
-      if (!subFilesResult.success) return err(subFilesResult.error);
-      files.push(...subFilesResult.data);
-    } else {
-      files.push(`${prefix}${entry}`);
-    }
+    return ok(files);
+  } catch (error) {
+    logger.error("Failed to read directory", error instanceof Error ? error : undefined, { dirPath });
+    return err(new AppError(`Failed to read directory: ${dirPath}`, "FS_ERROR", 500));
   }
-
-  return ok(files);
 }
 
 export async function getCommitLog(
