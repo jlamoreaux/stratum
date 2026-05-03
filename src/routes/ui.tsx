@@ -4,7 +4,7 @@ import { getImportProgress } from "../storage/imports";
 import { listEvalRuns } from "../storage/eval-runs";
 import { getCommitLog, listFilesInRepo, readFileFromRepo } from "../storage/git-ops";
 import { getProvenance } from "../storage/provenance";
-import { getProject, listProjects, listWorkspaces } from "../storage/state";
+import { getProject, getProjectByPath, listProjects, listWorkspaces } from "../storage/state";
 import { getUser } from "../storage/users";
 import type { Env } from "../types";
 import { canReadProject, filterReadableProjects } from "../utils/authz";
@@ -193,7 +193,7 @@ app.get("/@:namespace/:slug", async (c) => {
 
   const [userResult, projectResult] = await Promise.all([
     getCurrentUser(c, logger),
-    getProject(c.env.STATE, slug, logger), // Temporarily use old lookup
+    getProjectByPath(c.env.STATE, fullNamespace, slug, logger),
   ]);
 
   if (!projectResult.success) {
