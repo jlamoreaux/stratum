@@ -132,7 +132,7 @@ app.get("/p/:name", async (c) => {
   let importProgress = null;
 
   // Check for active import
-  const importResult = await getImportProgress(c.env.STATE, project.namespace || "@legacy", project.slug || project.name, logger);
+  const importResult = await getImportProgress(c.env.DB, project.namespace || "@legacy", project.slug || project.name, logger);
   if (importResult.success && importResult.data) {
     importProgress = importResult.data;
   }
@@ -432,7 +432,7 @@ app.get("/:namespace/:slug", async (c) => {
   let importProgress = null;
 
   // Check for active import
-  const importResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+  const importResult = await getImportProgress(c.env.DB, namespace, slug, logger);
   if (importResult.success && importResult.data) {
     importProgress = importResult.data;
   }

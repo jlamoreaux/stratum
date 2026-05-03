@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it } from "vitest";
-import { rateLimitMiddleware } from "../src/middleware/rate-limit";
-import type { Env } from "../src/types";
+import { rateLimitMiddleware } from "../../src/middleware/rate-limit";
+import type { Env } from "../../src/types";
 
 function makeKV(): KVNamespace {
   const store = new Map<string, string>();

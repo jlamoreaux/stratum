@@ -12,6 +12,7 @@ declare namespace Cloudflare {
 		EMAIL: SendEmail;
 		ANALYTICS: AnalyticsEngineDataset;
 		EVENTS_QUEUE: Queue;
+		IMPORT_QUEUE: Queue;
 		ARTIFACTS: Artifacts;
 		AI: Ai;
 		POSTHOG_HOST: "https://app.posthog.com";
@@ -24,6 +25,7 @@ declare namespace Cloudflare {
 		EMAIL: SendEmail;
 		ANALYTICS: AnalyticsEngineDataset;
 		EVENTS_QUEUE: Queue;
+		IMPORT_QUEUE: Queue;
 		ARTIFACTS: Artifacts;
 		AI: Ai;
 		POSTHOG_HOST: "https://app.posthog.com";

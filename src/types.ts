@@ -53,13 +53,8 @@ interface AnalyticsEngineDataset {
   }): void;
 }
 
-export interface Queue<T = unknown> {
-  send(body: T): Promise<void>;
-}
-
-export interface MessageBatch<T = unknown> {
-  messages: Array<{ body: T; ack(): void; retry(): void }>;
-}
+// Re-export Queue types from Cloudflare
+export type { Queue, Message, MessageBatch } from "@cloudflare/workers-types";
 
 export interface AiBinding {
   run(
@@ -113,6 +108,32 @@ export interface Env {
   AI?: AiBinding;
   MERGE_QUEUE?: DurableObjectNamespace;
   EVENTS_QUEUE?: Queue;
+  IMPORT_QUEUE?: Queue<ImportJobMessage | SyncJobMessage>;
+}
+
+// Import queue message types
+export interface ImportJobMessage {
+  type: "github.import";
+  importId: string;
+  projectId: string;
+  namespace: string;
+  slug: string;
+  githubUrl: string;
+  branch: string;
+  depth: number;
+  timestamp: string;
+}
+
+export interface SyncJobMessage {
+  type: "github.sync";
+  importId: string;
+  projectId: string;
+  namespace: string;
+  slug: string;
+  githubUrl: string;
+  branch: string;
+  depth: number;
+  timestamp: string;
 }
 
 export interface ProjectEntry {
@@ -165,6 +186,12 @@ export interface ImportProgress {
   branch: string;
   startedAt: string;
   completedAt?: string;
+  /**
+   * Version field for optimistic locking.
+   * Incremented on each update to prevent race conditions (TOCTOU).
+   * Used for conflict detection during concurrent updates.
+   */
+  version: number;
   progress: {
     totalFiles?: number;
     processedFiles: number;

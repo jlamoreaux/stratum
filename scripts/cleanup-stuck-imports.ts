@@ -5,69 +5,65 @@
 
 import { getPlatformProxy } from "wrangler";
 
-interface ImportProgress {
-  status: string;
+interface ImportJobRow {
+  id: string;
   namespace: string;
   slug: string;
-  startedAt: string;
-  updatedAt?: string;
+  status: string;
+  started_at: string;
+  updated_at: string;
 }
 
 async function cleanupStuckImports() {
   console.log("🔍 Looking for imports stuck in 'cancelling' status...\n");
-  
+
   const { env } = await getPlatformProxy<{
-    STATE: KVNamespace;
+    DB: D1Database;
   }>({
-    configPath: "./wrangler.jsonc",
+    configPath: "./wrangler.toml",
   });
-  
-  // List all import keys
-  const importPrefix = "import:";
-  const listResult = await env.STATE.list({ prefix: importPrefix });
-  
-  let stuckCount = 0;
-  
-  for (const key of listResult.keys) {
-    try {
-      const value = await env.STATE.get(key.name);
-      if (!value) continue;
-      
-      const progress: ImportProgress = JSON.parse(value);
-      
-      if (progress.status === "cancelling") {
-        stuckCount++;
-        const { namespace, slug } = progress;
-        
-        console.log(`Found stuck import: ${namespace}/${slug}`);
-        console.log(`  Started: ${progress.startedAt}`);
-        console.log(`  Last updated: ${progress.updatedAt || 'unknown'}`);
-        
-        // Update to cancelled status
-        const cancelledProgress = {
-          ...progress,
-          status: "cancelled",
-          message: "Import was cancelled (cleanup script)",
-          completedAt: new Date().toISOString(),
-        };
-        
-        await env.STATE.put(key.name, JSON.stringify(cancelledProgress), {
-          expirationTtl: 86400, // 24 hours
-        });
-        
-        console.log(`  → Updated to 'cancelled' status\n`);
-      }
-    } catch (err) {
-      console.error(`Error processing key ${key.name}:`, err);
+
+  try {
+    // Find imports stuck in cancelling status
+    const { results } = await env.DB.prepare(
+      `SELECT id, namespace, slug, status, started_at, updated_at 
+       FROM import_jobs 
+       WHERE status = 'cancelling'`
+    ).all<ImportJobRow>();
+
+    let stuckCount = 0;
+
+    for (const row of results || []) {
+      stuckCount++;
+      console.log(`Found stuck import: ${row.namespace}/${row.slug}`);
+      console.log(`  ID: ${row.id}`);
+      console.log(`  Started: ${row.started_at}`);
+      console.log(`  Last updated: ${row.updated_at || 'unknown'}`);
+
+      // Update to cancelled status
+      await env.DB.prepare(
+        `UPDATE import_jobs 
+         SET status = 'cancelled', 
+             completed_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      )
+        .bind(row.id)
+        .run();
+
+      console.log(`  → Updated to 'cancelled' status\n`);
     }
+
+    if (stuckCount === 0) {
+      console.log("✅ No stuck imports found!");
+    } else {
+      console.log(`✅ Cleaned up ${stuckCount} stuck import(s)`);
+    }
+  } catch (err) {
+    console.error("Error querying database:", err);
+    process.exit(1);
   }
-  
-  if (stuckCount === 0) {
-    console.log("✅ No stuck imports found!");
-  } else {
-    console.log(`✅ Cleaned up ${stuckCount} stuck import(s)`);
-  }
-  
+
   process.exit(0);
 }
 

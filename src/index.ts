@@ -4,6 +4,7 @@ import { analyticsMiddleware } from "./middleware/analytics";
 import { authMiddleware } from "./middleware/auth";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import type { StratumEvent } from "./queue/events";
+import { handleImportQueue } from "./queue/import-queue";
 import { runTtlSweep } from "./queue/ttl-sweep";
 import { agentsRouter } from "./routes/agents";
 import { authRouter } from "./routes/auth";
@@ -17,7 +18,7 @@ import { usersRouter } from "./routes/users";
 import { workspacesRouter } from "./routes/workspaces";
 import { createSession } from "./storage/sessions";
 import { createUser, getUserByEmail } from "./storage/users";
-import type { Env, MessageBatch } from "./types";
+import type { Env, MessageBatch, ImportJobMessage, SyncJobMessage } from "./types";
 import { CSS } from "./ui/styles";
 import { createLogger } from "./utils/logger";
 export { MergeQueue } from "./queue/merge-queue";
@@ -135,13 +136,35 @@ export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const logger = createLogger({ component: "scheduled" });
-    ctx.waitUntil(Promise.all([runTtlSweep(env, logger), syncAllProjects(env, logger)]));
+    ctx.waitUntil(Promise.all([runTtlSweep(env, logger), syncAllProjects(env)]));
   },
-  async queue(batch: MessageBatch<StratumEvent>, _env: Env): Promise<void> {
+  async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const logger = createLogger({ component: "queue" });
-    for (const msg of batch.messages) {
-      logger.info("Processing queue message", { type: msg.body.type, messageId: msg.id });
-      msg.ack();
+    
+    // Determine which queue this is based on the queue name
+    const queueName = batch.queue;
+    
+    if (queueName === "stratum-imports") {
+      // Handle import queue messages
+      logger.info("Processing import queue batch", { 
+        queue: queueName, 
+        messageCount: batch.messages.length 
+      });
+      await handleImportQueue(batch as MessageBatch<ImportJobMessage | SyncJobMessage>, env);
+    } else if (queueName === "stratum-events") {
+      // Handle events queue messages
+      const eventsBatch = batch as MessageBatch<StratumEvent>;
+      for (const msg of eventsBatch.messages) {
+        logger.info("Processing events queue message", { 
+          type: msg.body.type, 
+          messageId: msg.id 
+        });
+        msg.ack();
+      }
+    } else {
+      // Unknown queue - ack all messages to prevent retries
+      logger.warn("Unknown queue", { queue: queueName });
+      batch.ackAll();
     }
   },
 };

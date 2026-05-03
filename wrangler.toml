@@ -33,8 +33,18 @@ script_name = "stratum"
 binding = "EVENTS_QUEUE"
 queue = "stratum-events"
 
+[[queues.producers]]
+binding = "IMPORT_QUEUE"
+queue = "stratum-imports"
+
 [[queues.consumers]]
 queue = "stratum-events"
+
+[[queues.consumers]]
+queue = "stratum-imports"
+max_batch_size = 1  # Process imports one at a time for resource management
+max_retries = 3     # Retry failed imports up to 3 times
+retry_delay = 30    # Wait 30 seconds between retries
 
 [triggers]
 crons = ["0 6 * * *"]
@@ -96,9 +106,20 @@ script_name = "stratum-staging"
 binding = "EVENTS_QUEUE"
 queue = "stratum-events"
 
-# Note: Only production should consume from the queue
+[[env.staging.queues.producers]]
+binding = "IMPORT_QUEUE"
+queue = "stratum-imports"
+
+# Note: Only production should consume from the queues in production
+# Staging can consume from its own queues for testing
 # [[env.staging.queues.consumers]]
 # queue = "stratum-events"
+# 
+# [[env.staging.queues.consumers]]
+# queue = "stratum-imports"
+# max_batch_size = 1
+# max_retries = 3
+# retry_delay = 30
 
 [[env.staging.send_email]]
 name = "EMAIL"

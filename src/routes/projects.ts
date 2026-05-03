@@ -3,11 +3,13 @@ import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "..
 import { createImportJob, getImportProgress, updateImportProgress, updateImportStatus, deleteImportJob, cancelImportJob, isImportCancelled } from "../storage/imports";
 import { listProvenance } from "../storage/provenance";
 import { getProjectByPath, listProjectsByNamespace, setProject } from "../storage/state";
-import type { Env, ProjectEntry, ImportProgress } from "../types";
+import type { Env, ProjectEntry, ImportProgress, ArtifactsCreateResult } from "../types";
 import { canReadProject, filterReadableProjects } from "../utils/authz";
 import { internalError, badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 import { isStringRecord, isValidGitHubUrl, isValidSlug, slugify } from "../utils/validation";
 import { createLogger } from "../utils/logger";
+import type { Logger } from "../utils/logger";
+import { importRateLimitMiddleware, releaseImportLock } from "../middleware/rate-limit";
 
 const DEFAULT_FILES: Record<string, string> = {
   "README.md": "# My Project\n\nCreated with Stratum.\n",
@@ -215,7 +217,13 @@ app.get("/:namespace/:slug", async (c) => {
 });
 
 // POST /projects/:namespace/:slug/import - Import from GitHub
-app.post("/:namespace/:slug/import", async (c) => {
+// Strict rate limiting: 1 import per minute per user, 1 concurrent import per project
+app.post("/:namespace/:slug/import", importRateLimitMiddleware({
+  importsPerWindow: 1,
+  windowSeconds: 60,
+  maxConcurrentPerProject: 1,
+  projectLockSeconds: 300, // 5 minutes default import timeout
+}), async (c) => {
   const logger = createLogger({
     requestId: crypto.randomUUID(),
     userId: c.get('userId'),
@@ -292,7 +300,7 @@ app.post("/:namespace/:slug/import", async (c) => {
 
     // Create import job FIRST (before creating project)
     const createImportResult = await createImportJob(
-      c.env.STATE,
+      c.env.DB,
       {
         id: importId,
         projectId,
@@ -312,15 +320,21 @@ app.post("/:namespace/:slug/import", async (c) => {
     // Create the project entry immediately (marked as being imported)
     // For now, we'll create a placeholder Artifacts repo
     const artifactsRepoName = `${namespace.replace('@', '')}-${slug}`;
-    let repo;
+    let repo: ArtifactsCreateResult;
     
     try {
       repo = await c.env.ARTIFACTS.create(artifactsRepoName);
     } catch (artifactsError) {
-      // If repo already exists, try to get it
+      // If repo already exists, try to get it and create a token
       const errorMessage = artifactsError instanceof Error ? artifactsError.message : "";
       if (errorMessage.includes("already exists")) {
-        repo = await c.env.ARTIFACTS.get(artifactsRepoName);
+        const existingRepo = await c.env.ARTIFACTS.get(artifactsRepoName);
+        const tokenResult = await existingRepo.createToken("write", 86400 * 30); // 30 days
+        repo = {
+          name: existingRepo.name,
+          remote: existingRepo.remote,
+          token: tokenResult.plaintext,
+        };
       } else {
         throw artifactsError;
       }
@@ -391,19 +405,21 @@ async function processImportJob(
   
   // Helper to check for cancellation
   const checkCancelled = async (): Promise<boolean> => {
-    const isCancelled = await isImportCancelled(env.STATE, namespace, slug, logger);
+    const isCancelled = await isImportCancelled(env.DB, namespace, slug, logger);
     if (isCancelled) {
       logger.info('Import cancelled by user', { namespace, slug });
       await updateImportStatus(
-        env.STATE, 
-        namespace, 
-        slug, 
-        "cancelled", 
+        env.DB,
+        namespace,
+        slug,
+        "cancelled",
         logger,
         "Import cancelled by user"
       );
       // Clean up partial import
-      await deleteImportJob(env.STATE, namespace, slug, logger);
+      await deleteImportJob(env.DB, namespace, slug, logger);
+      // Release the rate limit lock
+      await releaseImportLock(env.STATE, namespace, slug, logger);
     }
     return isCancelled;
   };
@@ -411,16 +427,16 @@ async function processImportJob(
   try {
     // Check cancellation before starting
     if (await checkCancelled()) return;
-    
+
     // Update status to cloning
-    await updateImportStatus(env.STATE, namespace, slug, "cloning", logger, "Cloning repository");
-    
+    await updateImportStatus(env.DB, namespace, slug, "cloning", logger, "Cloning repository");
+
     // Check cancellation after status update
     if (await checkCancelled()) return;
-    
+
     // Perform the actual import
     const depth = 10; // Default depth
-    
+
     const importResult = await importFromGitHub(
       env.ARTIFACTS,
       artifactsRepoName,
@@ -429,73 +445,81 @@ async function processImportJob(
       branch,
       depth
     );
-    
+
     if (!importResult.success) {
       // Check if it was cancelled during the operation
       if (await checkCancelled()) return;
-      
+
       await updateImportStatus(
-        env.STATE, 
-        namespace, 
-        slug, 
-        "failed", 
+        env.DB,
+        namespace,
+        slug,
+        "failed",
         logger,
         `Import failed: ${importResult.error.message}`
       );
+      // Release the rate limit lock on failure
+      await releaseImportLock(env.STATE, namespace, slug, logger);
       return;
     }
-    
+
     // Check cancellation before updating project
     if (await checkCancelled()) return;
-    
+
     // Update project with actual repo info
     const updatedProject: ProjectEntry = {
       ...project,
       remote: importResult.data.remote,
       token: importResult.data.token,
     };
-    
+
     await setProject(env.STATE, updatedProject, logger);
-    
+
     // Final cancellation check before completing
     if (await checkCancelled()) return;
-    
+
     // Mark import as complete
     await updateImportStatus(
-      env.STATE, 
-      namespace, 
-      slug, 
-      "completed", 
+      env.DB,
+      namespace,
+      slug,
+      "completed",
       logger,
       "Import completed successfully"
     );
-    
+
+    // Release the rate limit lock on completion
+    await releaseImportLock(env.STATE, namespace, slug, logger);
+
     logger.info('Import completed', { namespace, slug, importId });
   } catch (error) {
     logger.error('Import job failed', error instanceof Error ? error : undefined, { namespace, slug });
-    
+
     // Check if this was a cancellation
-    const isCancelled = await isImportCancelled(env.STATE, namespace, slug, logger);
+    const isCancelled = await isImportCancelled(env.DB, namespace, slug, logger);
     if (isCancelled) {
       await updateImportStatus(
-        env.STATE, 
-        namespace, 
-        slug, 
-        "cancelled", 
+        env.DB,
+        namespace,
+        slug,
+        "cancelled",
         logger,
         "Import cancelled"
       );
-      await deleteImportJob(env.STATE, namespace, slug, logger);
+      await deleteImportJob(env.DB, namespace, slug, logger);
     } else {
       await updateImportStatus(
-        env.STATE, 
-        namespace, 
-        slug, 
-        "failed", 
+        env.DB,
+        namespace,
+        slug,
+        "failed",
         logger,
         `Import failed: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+
+    // Release the rate limit lock on error
+    await releaseImportLock(env.STATE, namespace, slug, logger);
   }
 }
 
@@ -647,7 +671,7 @@ app.get("/:namespace/:slug/import/status", async (c) => {
     return forbidden("Project access denied");
   }
 
-  const progressResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+  const progressResult = await getImportProgress(c.env.DB, namespace, slug, logger);
   if (!progressResult.success) {
     logger.error('Failed to get import progress', progressResult.error);
     return internalError(progressResult.error.message);
@@ -694,7 +718,7 @@ app.get("/:namespace/:slug/import/stream", async (c) => {
       
       // Send initial status
       const sendStatus = async () => {
-        const progressResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+        const progressResult = await getImportProgress(c.env.DB, namespace, slug, logger);
         if (progressResult.success && progressResult.data) {
           const data = `data: ${JSON.stringify(progressResult.data)}\n\n`;
           controller.enqueue(encoder.encode(data));
@@ -731,7 +755,13 @@ app.get("/:namespace/:slug/import/stream", async (c) => {
 });
 
 // POST /projects/:namespace/:slug/import/retry - Retry failed import
-app.post("/:namespace/:slug/import/retry", async (c) => {
+// Same rate limiting as initial import
+app.post("/:namespace/:slug/import/retry", importRateLimitMiddleware({
+  importsPerWindow: 1,
+  windowSeconds: 60,
+  maxConcurrentPerProject: 1,
+  projectLockSeconds: 300,
+}), async (c) => {
   const logger = createLogger({
     requestId: crypto.randomUUID(),
     userId: c.get('userId'),
@@ -751,7 +781,7 @@ app.post("/:namespace/:slug/import/retry", async (c) => {
   }
 
   // Get existing import progress
-  const progressResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+  const progressResult = await getImportProgress(c.env.DB, namespace, slug, logger);
   if (!progressResult.success) {
     logger.error('Failed to get import progress', progressResult.error);
     return internalError(progressResult.error.message);
@@ -765,7 +795,7 @@ app.post("/:namespace/:slug/import/retry", async (c) => {
 
   // Reset the import job
   const resetResult = await updateImportStatus(
-    c.env.STATE, 
+    c.env.DB, 
     namespace, 
     slug, 
     "queued", 
@@ -827,7 +857,7 @@ app.post("/:namespace/:slug/sync", async (c) => {
   // Create a new import job for the sync
   const importId = generateProjectId();
   const createResult = await createImportJob(
-    c.env.STATE,
+    c.env.DB,
     {
       id: importId,
       projectId: project.id,
@@ -857,7 +887,13 @@ app.post("/:namespace/:slug/sync", async (c) => {
 });
 
 // POST /projects/:namespace/:slug/import/cancel - Cancel ongoing import
-app.post("/:namespace/:slug/import/cancel", async (c) => {
+// More lenient rate limiting: 5 cancels per minute per user
+app.post("/:namespace/:slug/import/cancel", importRateLimitMiddleware({
+  importsPerWindow: 5,
+  windowSeconds: 60,
+  maxConcurrentPerProject: 1,
+  projectLockSeconds: 60, // Shorter lock for cancel operations
+}), async (c) => {
   const logger = createLogger({
     requestId: crypto.randomUUID(),
     userId: c.get('userId'),
@@ -876,7 +912,7 @@ app.post("/:namespace/:slug/import/cancel", async (c) => {
     return forbidden("You can only cancel imports in your own namespace");
   }
 
-  const cancelResult = await cancelImportJob(c.env.STATE, namespace, slug, logger);
+  const cancelResult = await cancelImportJob(c.env.DB, namespace, slug, logger);
   
   if (!cancelResult.success) {
     if (cancelResult.error.code === 'NOT_FOUND') {

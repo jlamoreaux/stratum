@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import app from "../src/index";
-import type { Env, ProjectEntry } from "../src/types";
+import app from "../../src/index";
+import type { Env, ProjectEntry } from "../../src/types";
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(async (_, token: string) => {
