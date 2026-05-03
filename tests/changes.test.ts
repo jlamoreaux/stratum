@@ -75,6 +75,11 @@ vi.mock("../src/evaluation", () => ({
   })),
   CompositeEvaluator: vi.fn().mockImplementation(() => ({
     evaluateAndAggregate: vi.fn(),
+    aggregate: vi.fn().mockReturnValue({
+      score: 1,
+      passed: true,
+      reason: "All evaluators passed.",
+    }),
   })),
 }));
 
@@ -92,26 +97,13 @@ vi.mock("../src/queue/events", () => ({
 }));
 
 vi.mock("../src/storage/users", () => ({
-  getUserByToken: vi.fn(async (_db: unknown, _plaintext: string, _logger: unknown) => {
-    // The token is the second parameter
-  }),
+  getUserByToken: vi.fn(),
 }));
 
 // Need to setup mocks in beforeEach instead
 
 vi.mock("../src/storage/agents", () => ({
-  getAgentByToken: vi.fn(async (_db: unknown, token: string) => {
-    if (token === "stratum_agent_testtoken0000000000000000") {
-      return {
-        id: "agent_test",
-        name: "test-agent",
-        ownerId: "user_test",
-        tokenHash: "hash",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      };
-    }
-    return null;
-  }),
+  getAgentByToken: vi.fn(),
 }));
 
 import { CompositeEvaluator, SecretScanEvaluator, loadPolicy } from "../src/evaluation";
@@ -511,7 +503,7 @@ describe("GET /api/projects/:name/changes", () => {
     expect(body.project).toBe("my-project");
     expect(body.changes).toHaveLength(1);
     expect(body.changes[0]?.id).toBe("chg_abc123");
-    expect(listChanges).toHaveBeenCalledWith(env.DB, "my-project", undefined);
+    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", undefined);
   });
 
   it("filters by status when ?status= is provided", async () => {
@@ -524,7 +516,7 @@ describe("GET /api/projects/:name/changes", () => {
       env,
     );
     expect(res.status).toBe(200);
-    expect(listChanges).toHaveBeenCalledWith(env.DB, "my-project", "open");
+    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", "open");
   });
 
   it("filters by promoted status when ?status= is provided", async () => {
@@ -538,7 +530,7 @@ describe("GET /api/projects/:name/changes", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(listChanges).toHaveBeenCalledWith(env.DB, "my-project", "promoted");
+    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", "promoted");
   });
 
   it("returns 404 when project not found", async () => {
@@ -711,10 +703,12 @@ describe("POST /api/changes/:id/merge", () => {
       "tok_project",
       "https://artifacts.example.com/repos/fix-bug",
       "tok_workspace",
+      expect.any(Object),
       { strategy: "merge" },
     );
     expect(updateChangeStatus).toHaveBeenCalledWith(
       env.DB,
+      expect.any(Object),
       "chg_abc123",
       "merged",
       expect.objectContaining({ mergedAt: expect.any(String) }),
@@ -812,6 +806,7 @@ describe("POST /api/changes/:id/merge", () => {
       "tok_project",
       "https://artifacts.example.com/repos/fix-bug",
       "tok_workspace",
+      expect.any(Object),
       { strategy: "squash" },
     );
   });
@@ -910,6 +905,7 @@ describe("POST /api/changes/:id/reject", () => {
     expect(body.changeId).toBe("chg_abc123");
     expect(updateChangeStatus).toHaveBeenCalledWith(
       env.DB,
+      expect.any(Object),
       "chg_abc123",
       "rejected",
       expect.any(Object),

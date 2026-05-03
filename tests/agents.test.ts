@@ -249,7 +249,7 @@ describe("DELETE /api/agents/:id", () => {
     const body = (await res.json()) as { deleted: boolean; id: string };
     expect(body.deleted).toBe(true);
     expect(body.id).toBe("agt_abc123");
-    expect(deleteAgent).toHaveBeenCalledWith(env.DB, "agt_abc123");
+    expect(deleteAgent).toHaveBeenCalledWith(env.DB, "agt_abc123", expect.any(Object));
   });
 
   it("returns 403 when agent is owned by another user", async () => {

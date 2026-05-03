@@ -139,8 +139,8 @@ describe("POST /api/orgs", () => {
     const body = (await res.json()) as { org: typeof mockOrg };
     expect(body.org.id).toBe("org_abc");
     expect(body.org.slug).toBe("my-org");
-    expect(createOrg).toHaveBeenCalledWith(env.DB, "usr_owner", "My Org", "my-org");
-    expect(addOrgMember).toHaveBeenCalledWith(env.DB, "org_abc", "usr_owner", "admin");
+    expect(createOrg).toHaveBeenCalledWith(env.DB, expect.any(Object), "usr_owner", "My Org", "my-org");
+    expect(addOrgMember).toHaveBeenCalledWith(env.DB, expect.any(Object), "org_abc", "usr_owner", "admin");
   });
 
   it("returns 401 without auth", async () => {
@@ -191,7 +191,7 @@ describe("GET /api/orgs", () => {
     const body = (await res.json()) as { orgs: (typeof mockOrg)[] };
     expect(body.orgs).toHaveLength(1);
     expect(body.orgs[0]?.id).toBe("org_abc");
-    expect(listOrgsForUser).toHaveBeenCalledWith(env.DB, "usr_owner");
+    expect(listOrgsForUser).toHaveBeenCalledWith(env.DB, expect.any(Object), "usr_owner");
   });
 
   it("returns 401 when not authenticated", async () => {
@@ -219,7 +219,7 @@ describe("GET /api/orgs/:slug", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { org: typeof mockOrg };
     expect(body.org.slug).toBe("my-org");
-    expect(getOrgBySlug).toHaveBeenCalledWith(env.DB, "my-org");
+    expect(getOrgBySlug).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-org");
   });
 
   it("returns 404 for unknown slug", async () => {
@@ -267,7 +267,7 @@ describe("POST /api/orgs/:slug/members", () => {
     const body = (await res.json()) as { added: boolean; userId: string };
     expect(body.added).toBe(true);
     expect(body.userId).toBe("usr_other");
-    expect(addOrgMember).toHaveBeenCalledWith(env.DB, "org_abc", "usr_other", "member");
+    expect(addOrgMember).toHaveBeenCalledWith(env.DB, expect.any(Object), "org_abc", "usr_other", "member");
   });
 
   it("returns 403 when caller is not org admin", async () => {
@@ -327,7 +327,7 @@ describe("DELETE /api/orgs/:slug/members/:uid", () => {
     const body = (await res.json()) as { removed: boolean; userId: string };
     expect(body.removed).toBe(true);
     expect(body.userId).toBe("usr_other");
-    expect(removeOrgMember).toHaveBeenCalledWith(env.DB, "org_abc", "usr_other");
+    expect(removeOrgMember).toHaveBeenCalledWith(env.DB, expect.any(Object), "org_abc", "usr_other");
   });
 
   it("returns 403 when caller is not org admin", async () => {
@@ -384,7 +384,7 @@ describe("POST /api/orgs/:slug/teams", () => {
     const body = (await res.json()) as { team: typeof mockTeam };
     expect(body.team.id).toBe("team_abc");
     expect(body.team.slug).toBe("engineers");
-    expect(createTeam).toHaveBeenCalledWith(env.DB, "org_abc", "Engineers", "engineers", "read");
+    expect(createTeam).toHaveBeenCalledWith(env.DB, expect.any(Object), "org_abc", "Engineers", "engineers", "read");
   });
 
   it("returns 403 when caller is not org admin", async () => {
@@ -462,7 +462,7 @@ describe("DELETE /api/orgs/:slug/teams/:id", () => {
     const body = (await res.json()) as { deleted: boolean; id: string };
     expect(body.deleted).toBe(true);
     expect(body.id).toBe("team_abc");
-    expect(deleteTeam).toHaveBeenCalledWith(env.DB, "team_abc");
+    expect(deleteTeam).toHaveBeenCalledWith(env.DB, expect.any(Object), "team_abc");
   });
 
   it("returns 403 when caller is not org admin", async () => {
