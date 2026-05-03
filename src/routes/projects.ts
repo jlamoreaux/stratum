@@ -119,6 +119,18 @@ app.post("/:name/import", async (c) => {
     const { name } = c.req.param();
     if (!isValidSlug(name)) return badRequest("invalid project name");
 
+    // Check if project already exists in our database
+    const existingProjectResult = await getProject(c.env.STATE, name, logger);
+    if (existingProjectResult.success) {
+      logger.info('Project already exists', { projectName: name });
+      // Redirect to existing project if coming from web UI
+      const contentType = c.req.header("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        return c.redirect(`/p/${name}`);
+      }
+      return ok({ name, remote: existingProjectResult.data.remote, source: existingProjectResult.data.githubUrl });
+    }
+
     // Handle both JSON and form data
     let body: { url?: unknown; branch?: unknown; depth?: unknown; visibility?: unknown };
     const contentType = c.req.header("content-type") || "";
@@ -153,6 +165,49 @@ app.post("/:name/import", async (c) => {
 
     const importResult = await importFromGitHub(c.env.ARTIFACTS, name, body.url, logger, branch, depth);
     if (!importResult.success) {
+      // Check if it's an "already exists" error
+      const errorMessage = importResult.error.message || "";
+      if (errorMessage.includes("already exists")) {
+        logger.warn('Artifacts repo already exists, attempting to get existing repo', { name });
+        
+        // Try to get the existing repo from Artifacts
+        try {
+          const existingRepo = await c.env.ARTIFACTS.get(name);
+          
+          // Save to our database
+          const setResult = await setProject(c.env.STATE, {
+            name,
+            remote: existingRepo.remote,
+            token: existingRepo.token,
+            createdAt: new Date().toISOString(),
+            githubUrl: body.url,
+            ...(parseGitHubRepo(body.url) ?? {}),
+            githubDefaultBranch: branch,
+            githubConnectedAt: new Date().toISOString(),
+            githubConnectionStatus: "connected",
+            ownerId: userId,
+            visibility,
+          }, logger);
+          
+          if (!setResult.success) {
+            logger.error('Failed to save existing project to database', setResult.error);
+            return internalError(setResult.error.message);
+          }
+          
+          logger.info('Linked existing Artifacts repo to project', { projectName: name });
+          
+          // Redirect to project page if coming from web UI
+          if (!contentType.includes("application/json")) {
+            return c.redirect(`/p/${name}`);
+          }
+          
+          return ok({ name, remote: existingRepo.remote, source: body.url, visibility });
+        } catch (getError) {
+          logger.error('Failed to get existing Artifacts repo', getError instanceof Error ? getError : undefined);
+          return internalError("Project already exists but cannot be retrieved. Please try a different name.");
+        }
+      }
+      
       logger.error('Failed to import from GitHub', importResult.error, { url: body.url, branch });
       return internalError(importResult.error.message);
     }
@@ -183,7 +238,7 @@ app.post("/:name/import", async (c) => {
     }
 
     logger.info('Project imported from GitHub', { projectName: name, url: body.url, visibility });
-    return created({ name, remote: repo.remote, source: body.url, visibility });
+    return created({ name, remote: importedRepo.remote, source: body.url, visibility });
   } catch (err) {
     logger.error("[import] Error:", err instanceof Error ? err : undefined);
     const message = err instanceof Error ? err.message : String(err);
