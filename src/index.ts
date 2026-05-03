@@ -19,6 +19,7 @@ import { createSession } from "./storage/sessions";
 import { createUser, getUserByEmail } from "./storage/users";
 import type { Env, MessageBatch } from "./types";
 import { CSS } from "./ui/styles";
+import { createLogger } from "./utils/logger";
 export { MergeQueue } from "./queue/merge-queue";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -31,6 +32,8 @@ app.get("/health", (c) => c.json({ status: "ok", service: "stratum" }));
 
 // DEV ONLY: Quick login for local development
 app.get("/dev-login", async (c) => {
+  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  
   try {
     // Only allow in local development
     const url = new URL(c.req.url);
@@ -41,20 +44,31 @@ app.get("/dev-login", async (c) => {
     const email = c.req.query("email") || "dev@example.com";
     
     // Get or create user
-    let user = await getUserByEmail(c.env.DB, email);
-    if (!user) {
-      const result = await createUser(c.env.DB, email);
-      user = result.user;
-      console.log(`[dev-login] Created new user: ${user.id} (${email})`);
+    const userResult = await getUserByEmail(c.env.DB, email, logger);
+    let userId: string;
+    
+    if (!userResult.success) {
+      const createResult = await createUser(c.env.DB, email, logger);
+      if (!createResult.success) {
+        logger.error("Failed to create user", undefined, { email });
+        return c.json({ error: "Failed to create user" }, 500);
+      }
+      userId = createResult.data.user.id;
+      logger.info("Dev login: Created new user", { userId });
     } else {
-      console.log(`[dev-login] Using existing user: ${user.id} (${email})`);
+      userId = userResult.data.id;
+      logger.info("Dev login: Using existing user", { userId });
     }
 
     // Create session
-    const session = await createSession(c.env.DB, user.id);
+    const sessionResult = await createSession(c.env.DB, userId, logger);
+    if (!sessionResult.success) {
+      logger.error("Failed to create session", sessionResult.error, { userId });
+      return c.json({ error: "Failed to create session" }, 500);
+    }
 
     // Set cookie
-    setCookie(c, "stratum_session", session.id, {
+    setCookie(c, "stratum_session", sessionResult.data.id, {
       httpOnly: true,
       secure: true,
       sameSite: "Lax",
@@ -66,8 +80,9 @@ app.get("/dev-login", async (c) => {
     const redirectTo = c.req.query("redirect") || "/";
     return c.redirect(redirectTo);
   } catch (err) {
-    console.error("[dev-login] Error:", err);
-    return c.json({ error: "Dev login failed", details: err instanceof Error ? err.message : String(err) }, 500);
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error("Dev login error", error);
+    return c.json({ error: "Dev login failed", details: error.message }, 500);
   }
 });
 
@@ -108,18 +123,24 @@ app.route("/api", syncRouter);
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((err, c) => {
-  console.error(`[stratum] ${c.req.method} ${c.req.path} — ${err.message}`);
+  const logger = c.get("logger") || createLogger({ path: c.req.path, method: c.req.method });
+  logger.error(`Unhandled error: ${err.message}`, err instanceof Error ? err : undefined, { 
+    path: c.req.path, 
+    method: c.req.method 
+  });
   return c.json({ error: "Internal server error" }, 500);
 });
 
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(Promise.all([runTtlSweep(env), syncAllProjects(env)]));
+    const logger = createLogger({ component: "scheduled" });
+    ctx.waitUntil(Promise.all([runTtlSweep(env, logger), syncAllProjects(env, logger)]));
   },
   async queue(batch: MessageBatch<StratumEvent>, _env: Env): Promise<void> {
+    const logger = createLogger({ component: "queue" });
     for (const msg of batch.messages) {
-      console.log(`[event] ${msg.body.type}`, msg.body);
+      logger.info("Processing queue message", { type: msg.body.type, messageId: msg.id });
       msg.ack();
     }
   },

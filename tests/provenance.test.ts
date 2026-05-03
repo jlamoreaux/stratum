@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { getProvenance, listProvenance, recordProvenance } from "../src/storage/provenance";
+import { Logger } from "../src/utils/logger";
 
 interface StoredRow {
   id: string;
@@ -11,6 +12,16 @@ interface StoredRow {
   eval_score: number | null;
   merged_at: string;
 }
+
+const mockLogger: Logger = {
+  trace: () => {},
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  fatal: () => {},
+  child: () => mockLogger,
+};
 
 function makeD1(): D1Database {
   const rows: StoredRow[] = [];
@@ -79,29 +90,38 @@ describe("recordProvenance", () => {
   });
 
   it("creates a record with correct fields", async () => {
-    const record = await recordProvenance(db, baseOpts);
-    expect(record.commitSha).toBe("abc123def456");
-    expect(record.project).toBe("my-project");
-    expect(record.workspace).toBe("fix-bug");
-    expect(record.changeId).toBe("chg_test001");
-    expect(record.id).toMatch(/^prv_/);
-    expect(record.mergedAt).toBeTruthy();
+    const result = await recordProvenance(db, mockLogger, baseOpts);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.commitSha).toBe("abc123def456");
+      expect(result.data.project).toBe("my-project");
+      expect(result.data.workspace).toBe("fix-bug");
+      expect(result.data.changeId).toBe("chg_test001");
+      expect(result.data.id).toMatch(/^prv_/);
+      expect(result.data.mergedAt).toBeTruthy();
+    }
   });
 
   it("stores optional agentId and evalScore", async () => {
-    const record = await recordProvenance(db, {
+    const result = await recordProvenance(db, mockLogger, {
       ...baseOpts,
       agentId: "agt_xyz",
       evalScore: 0.95,
     });
-    expect(record.agentId).toBe("agt_xyz");
-    expect(record.evalScore).toBe(0.95);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.agentId).toBe("agt_xyz");
+      expect(result.data.evalScore).toBe(0.95);
+    }
   });
 
   it("omits agentId and evalScore when not provided", async () => {
-    const record = await recordProvenance(db, baseOpts);
-    expect(record.agentId).toBeUndefined();
-    expect(record.evalScore).toBeUndefined();
+    const result = await recordProvenance(db, mockLogger, baseOpts);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.agentId).toBeUndefined();
+      expect(result.data.evalScore).toBeUndefined();
+    }
   });
 });
 
@@ -113,16 +133,21 @@ describe("getProvenance", () => {
   });
 
   it("returns record by changeId", async () => {
-    await recordProvenance(db, baseOpts);
-    const record = await getProvenance(db, "chg_test001");
-    expect(record).not.toBeNull();
-    expect(record?.changeId).toBe("chg_test001");
-    expect(record?.commitSha).toBe("abc123def456");
+    await recordProvenance(db, mockLogger, baseOpts);
+    const result = await getProvenance(db, mockLogger, "chg_test001");
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.changeId).toBe("chg_test001");
+      expect(result.data.commitSha).toBe("abc123def456");
+    }
   });
 
-  it("returns null for unknown changeId", async () => {
-    const record = await getProvenance(db, "chg_missing");
-    expect(record).toBeNull();
+  it("returns error for unknown changeId", async () => {
+    const result = await getProvenance(db, mockLogger, "chg_missing");
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.name).toBe("NotFoundError");
+    }
   });
 });
 
@@ -134,42 +159,57 @@ describe("listProvenance", () => {
   });
 
   it("returns records for a project", async () => {
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_001" });
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_002" });
-    const records = await listProvenance(db, "my-project");
-    expect(records).toHaveLength(2);
-    expect(records.every((r) => r.project === "my-project")).toBe(true);
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_001" });
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_002" });
+    const result = await listProvenance(db, mockLogger, "my-project");
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toHaveLength(2);
+      expect(result.data.every((r) => r.project === "my-project")).toBe(true);
+    }
   });
 
   it("does not return records for a different project", async () => {
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_001" });
-    await recordProvenance(db, { ...baseOpts, project: "other-project", changeId: "chg_002" });
-    const records = await listProvenance(db, "my-project");
-    expect(records).toHaveLength(1);
-    expect(records[0]?.changeId).toBe("chg_001");
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_001" });
+    await recordProvenance(db, mockLogger, { ...baseOpts, project: "other-project", changeId: "chg_002" });
+    const result = await listProvenance(db, mockLogger, "my-project");
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]?.changeId).toBe("chg_001");
+    }
   });
 
   it("respects the limit parameter", async () => {
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_001" });
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_002" });
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_003" });
-    const records = await listProvenance(db, "my-project", 2);
-    expect(records).toHaveLength(2);
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_001" });
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_002" });
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_003" });
+    const result = await listProvenance(db, mockLogger, "my-project", 2);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toHaveLength(2);
+    }
   });
 
   it("sorts multiple records by merged_at descending", async () => {
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_001" });
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_001" });
     await new Promise((r) => setTimeout(r, 2));
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_002" });
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_002" });
     await new Promise((r) => setTimeout(r, 2));
-    await recordProvenance(db, { ...baseOpts, changeId: "chg_003" });
-    const records = await listProvenance(db, "my-project");
-    expect(records[0]?.changeId).toBe("chg_003");
-    expect(records[records.length - 1]?.changeId).toBe("chg_001");
+    await recordProvenance(db, mockLogger, { ...baseOpts, changeId: "chg_003" });
+    const result = await listProvenance(db, mockLogger, "my-project");
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data[0]?.changeId).toBe("chg_003");
+      expect(result.data[result.data.length - 1]?.changeId).toBe("chg_001");
+    }
   });
 
   it("returns empty array for project with no records", async () => {
-    const records = await listProvenance(db, "nonexistent-project");
-    expect(records).toHaveLength(0);
+    const result = await listProvenance(db, mockLogger, "nonexistent-project");
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toHaveLength(0);
+    }
   });
 });

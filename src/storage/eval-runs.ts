@@ -1,5 +1,7 @@
 import type { EvalResult } from "../evaluation/types";
 import { newId } from "../utils/ids";
+import type { Logger } from "../utils/logger";
+import { ok, err, type Result } from "../utils/result";
 
 export interface EvalRun {
   id: string;
@@ -48,54 +50,71 @@ function rowToEvalRun(row: EvalRunRow): EvalRun {
 
 export async function recordEvalRuns(
   db: D1Database,
+  logger: Logger,
   changeId: string,
   results: Array<{ evaluatorType: string; result: EvalResult }>,
-): Promise<EvalRun[]> {
-  const stmt = db.prepare(
-    "INSERT INTO eval_runs (id, change_id, evaluator_type, score, passed, reason, issues, ran_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  );
+): Promise<Result<EvalRun[], Error>> {
+  logger.info("Recording eval runs", { changeId, count: results.length });
 
-  const runs: EvalRun[] = [];
-  const statements: D1PreparedStatement[] = [];
+  try {
+    const stmt = db.prepare(
+      "INSERT INTO eval_runs (id, change_id, evaluator_type, score, passed, reason, issues, ran_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
 
-  for (const { evaluatorType, result } of results) {
-    const id = newId("evl");
-    const ranAt = new Date().toISOString();
-    const run: EvalRun = {
-      id,
-      changeId,
-      evaluatorType,
-      score: result.score,
-      passed: result.passed,
-      reason: result.reason,
-      ranAt,
-    };
-    if (result.issues !== undefined) run.issues = result.issues;
-    runs.push(run);
+    const runs: EvalRun[] = [];
+    const statements: D1PreparedStatement[] = [];
 
-    statements.push(
-      stmt.bind(
+    for (const { evaluatorType, result } of results) {
+      const id = newId("evl");
+      const ranAt = new Date().toISOString();
+      const run: EvalRun = {
         id,
         changeId,
         evaluatorType,
-        result.score,
-        result.passed ? 1 : 0,
-        result.reason,
-        result.issues !== undefined ? JSON.stringify(result.issues) : null,
+        score: result.score,
+        passed: result.passed,
+        reason: result.reason,
         ranAt,
-      ),
-    );
-  }
+      };
+      if (result.issues !== undefined) run.issues = result.issues;
+      runs.push(run);
 
-  await db.batch(statements);
-  return runs;
+      statements.push(
+        stmt.bind(
+          id,
+          changeId,
+          evaluatorType,
+          result.score,
+          result.passed ? 1 : 0,
+          result.reason,
+          result.issues !== undefined ? JSON.stringify(result.issues) : null,
+          ranAt,
+        ),
+      );
+    }
+
+    await db.batch(statements);
+    logger.info("Eval runs recorded successfully", { changeId, count: runs.length });
+    return ok(runs);
+  } catch (error) {
+    logger.error("Failed to record eval runs", error instanceof Error ? error : undefined, { changeId, count: results.length });
+    return err(error instanceof Error ? error : new Error(String(error)));
+  }
 }
 
-export async function listEvalRuns(db: D1Database, changeId: string): Promise<EvalRun[]> {
-  const result = await db
-    .prepare("SELECT * FROM eval_runs WHERE change_id = ? ORDER BY ran_at ASC")
-    .bind(changeId)
-    .all<EvalRunRow>();
+export async function listEvalRuns(db: D1Database, logger: Logger, changeId: string): Promise<Result<EvalRun[], Error>> {
+  logger.debug("Listing eval runs", { changeId });
 
-  return result.results.map(rowToEvalRun);
+  try {
+    const result = await db
+      .prepare("SELECT * FROM eval_runs WHERE change_id = ? ORDER BY ran_at ASC")
+      .bind(changeId)
+      .all<EvalRunRow>();
+
+    logger.debug("Eval runs listed", { changeId, count: result.results.length });
+    return ok(result.results.map(rowToEvalRun));
+  } catch (error) {
+    logger.error("Failed to list eval runs", error instanceof Error ? error : undefined, { changeId });
+    return err(error instanceof Error ? error : new Error(String(error)));
+  }
 }

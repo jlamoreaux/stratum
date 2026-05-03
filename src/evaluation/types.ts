@@ -1,3 +1,7 @@
+import type { Logger } from "../utils/logger";
+import type { Result } from "../utils/result";
+import type { AppError } from "../utils/errors";
+
 export interface EvalResult {
   score: number;
   passed: boolean;
@@ -6,7 +10,7 @@ export interface EvalResult {
 }
 
 export interface Evaluator {
-  evaluate(diff: string, policy: EvalPolicy): Promise<EvalResult>;
+  evaluate(diff: string, policy: EvalPolicy, logger: Logger): Promise<Result<EvalResult, AppError>>;
 }
 
 export interface EvalPolicy {

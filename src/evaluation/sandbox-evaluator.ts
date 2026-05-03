@@ -1,6 +1,10 @@
+import type { Logger } from "../utils/logger";
+import type { Result } from "../utils/result";
+import type { AppError } from "../utils/errors";
+import { ExternalServiceError } from "../utils/errors";
+import { ok, err } from "../utils/result";
 import type { SandboxBinding } from "../types";
-import type { EvalPolicy, EvalResult } from "./types";
-import type { Evaluator } from "./types";
+import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
 function parseDiffFiles(diff: string): Map<string, string> {
   const files = new Map<string, string>();
@@ -57,30 +61,38 @@ function parseTestOutput(stdout: string, stderr: string): number | null {
 export class SandboxEvaluator implements Evaluator {
   constructor(private sandbox: SandboxBinding) {}
 
-  async evaluate(diff: string, policy: EvalPolicy): Promise<EvalResult> {
+  async evaluate(diff: string, policy: EvalPolicy, logger: Logger): Promise<Result<EvalResult, AppError>> {
+    logger.debug("Starting sandbox evaluation");
+
     const config = policy.evaluators.find((e) => e.type === "sandbox") as
       | { type: "sandbox"; command?: string; timeoutMs?: number }
       | undefined;
 
     if (!config) {
-      return { score: 1.0, passed: true, reason: "No sandbox evaluator configured" };
+      logger.info("No sandbox evaluator configured");
+      return ok({ score: 1.0, passed: true, reason: "No sandbox evaluator configured" });
     }
 
     const command = config.command ?? "npm test";
     const timeoutMs = config.timeoutMs ?? 60_000;
     const minScore = policy.minScore ?? 0.7;
 
+    logger.debug("Sandbox config", { command, timeoutMs });
+
     const files = parseDiffFiles(diff);
     let sb: Awaited<ReturnType<SandboxBinding["create"]>> | null = null;
 
     try {
       sb = await this.sandbox.create();
+      logger.debug("Sandbox created");
 
       for (const [path, content] of files) {
         await sb.writeFile(path, content);
       }
+      logger.debug("Files written to sandbox", { fileCount: files.size });
 
       const result = await sb.run(command, { timeout: timeoutMs });
+      logger.debug("Sandbox command completed", { exitCode: result.exitCode });
 
       let score: number;
       if (result.exitCode === 0) {
@@ -93,13 +105,16 @@ export class SandboxEvaluator implements Evaluator {
       const passed = score >= minScore;
       const reason = (result.stdout + result.stderr).slice(0, 500).trim();
 
-      return { score, passed, reason };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { score: 0, passed: false, reason: `Sandbox error: ${message}` };
+      logger.info("Sandbox evaluation complete", { score, passed });
+      return ok({ score, passed, reason });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Sandbox evaluation failed", error instanceof Error ? error : new Error(message));
+      return err(new ExternalServiceError("Sandbox", message, error instanceof Error ? error : undefined) as AppError);
     } finally {
       if (sb !== null) {
         await sb.destroy();
+        logger.debug("Sandbox destroyed");
       }
     }
   }

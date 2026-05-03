@@ -4,8 +4,9 @@ import { listProvenance } from "../storage/provenance";
 import { getProject, listProjects, setProject } from "../storage/state";
 import type { Env } from "../types";
 import { canReadProject, filterReadableProjects } from "../utils/authz";
-import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
+import { internalError, badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 import { isStringRecord, isValidGitHubUrl, isValidSlug } from "../utils/validation";
+import { createLogger } from "../utils/logger";
 
 const DEFAULT_FILES: Record<string, string> = {
   "README.md": "# My Project\n\nCreated with Stratum.\n",
@@ -20,6 +21,13 @@ function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
 }
 
 app.post("/", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   if (!userId) return unauthorized("Authentication required");
 
@@ -49,31 +57,61 @@ app.post("/", async (c) => {
     return badRequest("files must be an object of string paths to string contents");
 
   const repo = await c.env.ARTIFACTS.create(body.name);
-  const sha = await initAndPush(repo.remote, repo.token, files, "Initial commit");
+  const initResult = await initAndPush(repo.remote, repo.token, files, "Initial commit", logger);
+  if (!initResult.success) {
+    logger.error('Failed to initialize and push repository', initResult.error);
+    return internalError(initResult.error.message);
+  }
 
-  await setProject(c.env.STATE, {
+  const setResult = await setProject(c.env.STATE, {
     name: body.name,
     remote: repo.remote,
     token: repo.token,
     createdAt: new Date().toISOString(),
     ownerId: userId,
     visibility,
-  });
+  }, logger);
+  if (!setResult.success) {
+    logger.error('Failed to set project', setResult.error);
+    return internalError(setResult.error.message);
+  }
 
-  return created({ name: body.name, remote: repo.remote, commit: sha, visibility });
+  logger.info('Project created', { projectName: body.name, visibility });
+  return created({ name: body.name, remote: repo.remote, commit: initResult.data, visibility });
 });
 
 app.get("/", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
 
-  const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
+  const projectsResult = await listProjects(c.env.STATE, logger);
+  if (!projectsResult.success) {
+    logger.error('Failed to list projects', projectsResult.error);
+    return internalError(projectsResult.error.message);
+  }
+
+  const projects = filterReadableProjects(projectsResult.data, userId, agentOwnerId);
+  logger.info('Projects listed', { count: projects.length });
   return ok({
     projects: projects.map(({ name, remote, createdAt, visibility }) => ({ name, remote, createdAt, visibility })),
   });
 });
 
 app.post("/:name/import", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   try {
     const userId = c.get("userId");
     if (!userId) return unauthorized("Authentication required");
@@ -114,9 +152,13 @@ app.post("/:name/import", async (c) => {
     }
 
     const repo = await c.env.ARTIFACTS.create(name);
-    await importFromGitHub(repo.remote, repo.token, body.url, branch, depth);
+    const importResult = await importFromGitHub(repo.remote, repo.token, body.url, logger, branch, depth);
+    if (!importResult.success) {
+      logger.error('Failed to import from GitHub', importResult.error, { url: body.url, branch });
+      return internalError(importResult.error.message);
+    }
 
-    await setProject(c.env.STATE, {
+    const setResult = await setProject(c.env.STATE, {
       name,
       remote: repo.remote,
       token: repo.token,
@@ -128,59 +170,130 @@ app.post("/:name/import", async (c) => {
       githubConnectionStatus: "connected",
       ownerId: userId,
       visibility,
-    });
+    }, logger);
+    if (!setResult.success) {
+      logger.error('Failed to set project after import', setResult.error);
+      return internalError(setResult.error.message);
+    }
 
     // Redirect to project page if coming from web UI (form submission)
     if (!contentType.includes("application/json")) {
       return c.redirect(`/p/${name}`);
     }
 
+    logger.info('Project imported from GitHub', { projectName: name, url: body.url, visibility });
     return created({ name, remote: repo.remote, source: body.url, visibility });
   } catch (err) {
-    console.error("[import] Error:", err);
+    logger.error("[import] Error:", err instanceof Error ? err : undefined);
     const message = err instanceof Error ? err.message : String(err);
-    return c.json({ error: "Import failed", details: message }, 500);
+    return internalError(message);
   }
 });
 
 app.get("/:name/files", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
   const { name } = c.req.param();
-  const project = await getProject(c.env.STATE, name);
-  if (!project) return notFound("Project", name);
+
+  const projectResult = await getProject(c.env.STATE, name, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", name);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
-  const files = await listFilesInRepo(project.remote, project.token);
-  return ok({ project: name, files });
+  const filesResult = await listFilesInRepo(project.remote, project.token, logger);
+  if (!filesResult.success) {
+    logger.error('Failed to list files in repo', filesResult.error);
+    return internalError(filesResult.error.message);
+  }
+
+  logger.info('Project files listed', { projectName: name, fileCount: filesResult.data.length });
+  return ok({ project: name, files: filesResult.data });
 });
 
 app.get("/:name/log", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
   const { name } = c.req.param();
-  const project = await getProject(c.env.STATE, name);
-  if (!project) return notFound("Project", name);
+
+  const projectResult = await getProject(c.env.STATE, name, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", name);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const depth = Number(c.req.query("depth") ?? 20);
-  const log = await getCommitLog(project.remote, project.token, depth);
-  return ok({ project: name, log });
+  const logResult = await getCommitLog(project.remote, project.token, logger, depth);
+  if (!logResult.success) {
+    logger.error('Failed to get commit log', logResult.error);
+    return internalError(logResult.error.message);
+  }
+
+  logger.info('Commit log retrieved', { projectName: name, depth, commitCount: logResult.data.length });
+  return ok({ project: name, log: logResult.data });
 });
 
 app.get("/:name/provenance", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
   const { name } = c.req.param();
-  const project = await getProject(c.env.STATE, name);
-  if (!project) return notFound("Project", name);
+
+  const projectResult = await getProject(c.env.STATE, name, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", name);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const limitParam = c.req.query("limit");
   const limit = limitParam !== undefined ? Number(limitParam) : undefined;
 
-  const records = await listProvenance(c.env.DB, name, limit);
-  return ok({ project: name, records });
+  const recordsResult = await listProvenance(c.env.DB, logger, name, limit);
+  if (!recordsResult.success) {
+    logger.error('Failed to list provenance', recordsResult.error);
+    return internalError(recordsResult.error.message);
+  }
+
+  logger.info('Provenance listed', { projectName: name, limit, recordCount: recordsResult.data.length });
+  return ok({ project: name, records: recordsResult.data });
 });
 
 export { app as projectsRouter };

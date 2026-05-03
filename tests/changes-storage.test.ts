@@ -1,22 +1,46 @@
 import { describe, expect, it } from "vitest";
 import { getChange, updateChangeStatus } from "../src/storage/changes";
+import { Logger } from "../src/utils/logger";
 
 interface RecordedStatement {
   sql: string;
   bindings: unknown[];
+  method: "run" | "first" | "all";
 }
 
-function makeRecordingD1(calls: RecordedStatement[]): D1Database {
+const mockLogger: Logger = {
+  trace: () => {},
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  fatal: () => {},
+  child: () => mockLogger,
+};
+
+function makeRecordingD1(calls: RecordedStatement[], firstResult?: Record<string, unknown>): D1Database {
   return {
-    prepare: (sql: string) =>
-      ({
-        bind: (...bindings: unknown[]) => ({
-          run: async () => {
-            calls.push({ sql, bindings });
-            return { success: true, meta: {} };
-          },
-        }),
-      }) as unknown as D1PreparedStatement,
+    prepare: (sql: string) => {
+      const stmt = {
+        bind: (...bindings: unknown[]) => {
+          return {
+            run: async () => {
+              calls.push({ sql, bindings, method: "run" });
+              return { success: true, meta: {} };
+            },
+            first: async <T>() => {
+              calls.push({ sql, bindings, method: "first" });
+              return (firstResult ?? null) as T | null;
+            },
+            all: async <T>() => {
+              calls.push({ sql, bindings, method: "all" });
+              return { results: [] as T[], success: true, meta: {} };
+            },
+          };
+        },
+      } as unknown as D1PreparedStatement;
+      return stmt;
+    },
   } as unknown as D1Database;
 }
 
@@ -35,36 +59,52 @@ describe("change storage", () => {
   it("preserves omitted optional fields when updating status", async () => {
     const calls: RecordedStatement[] = [];
 
-    await updateChangeStatus(makeRecordingD1(calls), "chg_abc123", "merged", {
-      mergedAt: "2026-05-02T12:00:00.000Z",
-    });
-
-    expect(calls).toEqual([
+    const result = await updateChangeStatus(
+      makeRecordingD1(calls, { id: "chg_abc123" }),
+      mockLogger,
+      "chg_abc123",
+      "merged",
       {
-        sql: "UPDATE changes SET status = ?, merged_at = ? WHERE id = ?",
-        bindings: ["merged", "2026-05-02T12:00:00.000Z", "chg_abc123"],
-      },
-    ]);
-    expect(calls[0]?.sql).not.toContain("eval_score");
-    expect(calls[0]?.sql).not.toContain("github_pr_url");
+        mergedAt: "2026-05-02T12:00:00.000Z",
+      }
+    );
+
+    expect(result.success).toBe(true);
+    
+    // Find the UPDATE statement call
+    const updateCall = calls.find(c => c.sql.includes("UPDATE changes"));
+    expect(updateCall).toBeDefined();
+    expect(updateCall?.sql).toBe("UPDATE changes SET status = ?, merged_at = ? WHERE id = ?");
+    expect(updateCall?.bindings).toEqual(["merged", "2026-05-02T12:00:00.000Z", "chg_abc123"]);
+    expect(updateCall?.sql).not.toContain("eval_score");
+    expect(updateCall?.sql).not.toContain("github_pr_url");
   });
 
   it("updates provided eval and GitHub metadata fields with id bound last", async () => {
     const calls: RecordedStatement[] = [];
 
-    await updateChangeStatus(makeRecordingD1(calls), "chg_abc123", "promoted", {
-      evalPassed: false,
-      githubOwner: "jlamoreaux",
-      githubRepo: "stratum",
-      githubBranch: "codex/test",
-      githubPrNumber: 6,
-      githubPrUrl: "https://github.com/jlamoreaux/stratum/pull/6",
-      githubPrState: "open",
-      promotedAt: "2026-05-02T13:00:00.000Z",
-      promotedBy: "user_test",
-    });
+    const result = await updateChangeStatus(
+      makeRecordingD1(calls, { id: "chg_abc123" }),
+      mockLogger,
+      "chg_abc123",
+      "promoted",
+      {
+        evalPassed: false,
+        githubOwner: "jlamoreaux",
+        githubRepo: "stratum",
+        githubBranch: "codex/test",
+        githubPrNumber: 6,
+        githubPrUrl: "https://github.com/jlamoreaux/stratum/pull/6",
+        githubPrState: "open",
+        promotedAt: "2026-05-02T13:00:00.000Z",
+        promotedBy: "user_test",
+      }
+    );
 
-    expect(calls[0]).toEqual({
+    expect(result.success).toBe(true);
+    
+    const updateCall = calls.find(c => c.sql.includes("UPDATE changes"));
+    expect(updateCall).toEqual({
       sql: [
         "UPDATE changes SET status = ?",
         "eval_passed = ?",
@@ -90,11 +130,12 @@ describe("change storage", () => {
         "user_test",
         "chg_abc123",
       ],
+      method: "run",
     });
   });
 
   it("maps GitHub promotion metadata from change rows", async () => {
-    const change = await getChange(
+    const result = await getChange(
       makeChangeRowD1({
         id: "chg_abc123",
         project: "my-project",
@@ -115,20 +156,24 @@ describe("change storage", () => {
         promoted_at: "2026-05-02T13:00:00.000Z",
         promoted_by: "user_test",
       }),
+      mockLogger,
       "chg_abc123",
     );
 
-    expect(change).toMatchObject({
-      id: "chg_abc123",
-      status: "promoted",
-      githubOwner: "jlamoreaux",
-      githubRepo: "stratum",
-      githubBranch: "codex/test",
-      githubPrNumber: 6,
-      githubPrUrl: "https://github.com/jlamoreaux/stratum/pull/6",
-      githubPrState: "open",
-      promotedAt: "2026-05-02T13:00:00.000Z",
-      promotedBy: "user_test",
-    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toMatchObject({
+        id: "chg_abc123",
+        status: "promoted",
+        githubOwner: "jlamoreaux",
+        githubRepo: "stratum",
+        githubBranch: "codex/test",
+        githubPrNumber: 6,
+        githubPrUrl: "https://github.com/jlamoreaux/stratum/pull/6",
+        githubPrState: "open",
+        promotedAt: "2026-05-02T13:00:00.000Z",
+        promotedBy: "user_test",
+      });
+    }
   });
 });

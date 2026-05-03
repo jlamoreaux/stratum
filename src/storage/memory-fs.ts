@@ -1,3 +1,7 @@
+import { AppError } from "../utils/errors";
+import type { Logger } from "../utils/logger";
+import { err, ok, type Result } from "../utils/result";
+
 type FileEntry = { kind: "file"; data: Uint8Array; mtimeMs: number };
 type DirEntry = { kind: "dir"; children: Set<string>; mtimeMs: number };
 type Entry = FileEntry | DirEntry;
@@ -5,8 +9,8 @@ type Entry = FileEntry | DirEntry;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-function fsError(code: string, message: string): Error {
-  return Object.assign(new Error(message), { code });
+function fsError(code: string, message: string): AppError {
+  return new AppError(message, code, 500);
 }
 
 class MemoryStats {
@@ -86,39 +90,46 @@ export class MemoryFS {
     return this.entries.get(this.normalize(path));
   }
 
-  private requireEntry(path: string): Entry {
+  private getEntryResult(path: string): Result<Entry, AppError> {
     const entry = this.getEntry(path);
-    if (!entry) throw fsError("ENOENT", `ENOENT: no such file or directory: ${path}`);
-    return entry;
+    if (!entry) return err(fsError("ENOENT", `ENOENT: no such file or directory: ${path}`));
+    return ok(entry);
   }
 
-  private requireDir(path: string): DirEntry {
-    const entry = this.requireEntry(path);
-    if (entry.kind !== "dir") throw fsError("ENOTDIR", `ENOTDIR: not a directory: ${path}`);
-    return entry;
+  private getDirResult(path: string): Result<DirEntry, AppError> {
+    const entryResult = this.getEntryResult(path);
+    if (!entryResult.success) return entryResult;
+    const entry = entryResult.data;
+    if (entry.kind !== "dir") return err(fsError("ENOTDIR", `ENOTDIR: not a directory: ${path}`));
+    return ok(entry);
   }
 
-  async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+  async mkdir(path: string, options?: { recursive?: boolean }): Promise<Result<void, AppError>> {
     const target = this.normalize(path);
-    if (target === "/") return;
+    if (target === "/") return ok(undefined);
     const recursive = options?.recursive === true;
     const parentPath = this.parent(target);
 
     if (!this.entries.has(parentPath)) {
-      if (!recursive) throw fsError("ENOENT", `ENOENT: no such file or directory: ${parentPath}`);
-      await this.mkdir(parentPath, { recursive: true });
+      if (!recursive) return err(fsError("ENOENT", `ENOENT: no such file or directory: ${parentPath}`));
+      const mkdirResult = await this.mkdir(parentPath, { recursive: true });
+      if (!mkdirResult.success) return mkdirResult;
     }
 
-    if (this.entries.has(target)) return;
+    if (this.entries.has(target)) return ok(undefined);
 
     this.entries.set(target, { kind: "dir", children: new Set(), mtimeMs: Date.now() });
-    this.requireDir(parentPath).children.add(this.basename(target));
+    const dirResult = this.getDirResult(parentPath);
+    if (!dirResult.success) return dirResult;
+    dirResult.data.children.add(this.basename(target));
+    return ok(undefined);
   }
 
-  async writeFile(path: string, data: string | Uint8Array | ArrayBuffer): Promise<void> {
+  async writeFile(path: string, data: string | Uint8Array | ArrayBuffer): Promise<Result<void, AppError>> {
     const target = this.normalize(path);
     const parentPath = this.parent(target);
-    await this.mkdir(parentPath, { recursive: true });
+    const mkdirResult = await this.mkdir(parentPath, { recursive: true });
+    if (!mkdirResult.success) return mkdirResult;
 
     const bytes =
       typeof data === "string"
@@ -128,51 +139,70 @@ export class MemoryFS {
           : new Uint8Array(data);
 
     if (this.getEntry(target)?.kind === "dir")
-      throw fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`);
+      return err(fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`));
 
     this.entries.set(target, { kind: "file", data: bytes, mtimeMs: Date.now() });
-    this.requireDir(parentPath).children.add(this.basename(target));
+    const dirResult = this.getDirResult(parentPath);
+    if (!dirResult.success) return dirResult;
+    dirResult.data.children.add(this.basename(target));
+    return ok(undefined);
   }
 
   async readFile(
     path: string,
     options?: string | { encoding?: string },
-  ): Promise<string | Uint8Array> {
-    const entry = this.requireEntry(path);
+  ): Promise<Result<string | Uint8Array, AppError>> {
+    const entryResult = this.getEntryResult(path);
+    if (!entryResult.success) return entryResult;
+    const entry = entryResult.data;
     if (entry.kind !== "file")
-      throw fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`);
+      return err(fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`));
 
     const encoding = typeof options === "string" ? options : options?.encoding;
-    return encoding ? decoder.decode(entry.data) : entry.data;
+    return ok(encoding ? decoder.decode(entry.data) : entry.data);
   }
 
-  async readdir(path: string): Promise<string[]> {
-    return [...this.requireDir(path).children].sort();
+  async readdir(path: string): Promise<Result<string[], AppError>> {
+    const dirResult = this.getDirResult(path);
+    if (!dirResult.success) return dirResult;
+    return ok([...dirResult.data.children].sort());
   }
 
-  async unlink(path: string): Promise<void> {
+  async unlink(path: string): Promise<Result<void, AppError>> {
     const target = this.normalize(path);
-    const entry = this.requireEntry(target);
+    const entryResult = this.getEntryResult(target);
+    if (!entryResult.success) return entryResult;
+    const entry = entryResult.data;
     if (entry.kind !== "file")
-      throw fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`);
+      return err(fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`));
     this.entries.delete(target);
-    this.requireDir(this.parent(target)).children.delete(this.basename(target));
+    const dirResult = this.getDirResult(this.parent(target));
+    if (!dirResult.success) return dirResult;
+    dirResult.data.children.delete(this.basename(target));
+    return ok(undefined);
   }
 
-  async rmdir(path: string): Promise<void> {
+  async rmdir(path: string): Promise<Result<void, AppError>> {
     const target = this.normalize(path);
-    const entry = this.requireDir(target);
+    const entryResult = this.getDirResult(target);
+    if (!entryResult.success) return entryResult;
+    const entry = entryResult.data;
     if (entry.children.size > 0)
-      throw fsError("ENOTEMPTY", `ENOTEMPTY: directory not empty: ${path}`);
+      return err(fsError("ENOTEMPTY", `ENOTEMPTY: directory not empty: ${path}`));
     this.entries.delete(target);
-    this.requireDir(this.parent(target)).children.delete(this.basename(target));
+    const dirResult = this.getDirResult(this.parent(target));
+    if (!dirResult.success) return dirResult;
+    dirResult.data.children.delete(this.basename(target));
+    return ok(undefined);
   }
 
-  async stat(path: string): Promise<MemoryStats> {
-    return new MemoryStats(this.requireEntry(path));
+  async stat(path: string): Promise<Result<MemoryStats, AppError>> {
+    const entryResult = this.getEntryResult(path);
+    if (!entryResult.success) return entryResult;
+    return ok(new MemoryStats(entryResult.data));
   }
 
-  async lstat(path: string): Promise<MemoryStats> {
+  async lstat(path: string): Promise<Result<MemoryStats, AppError>> {
     return this.stat(path);
   }
 }

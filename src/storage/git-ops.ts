@@ -2,6 +2,9 @@ import { createPatch } from "diff";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import type { Author, CommitLogEntry } from "../types";
+import { AppError, ExternalServiceError } from "../utils/errors";
+import type { Logger } from "../utils/logger";
+import { err, fromPromise, ok, type Result } from "../utils/result";
 import { MemoryFS } from "./memory-fs";
 
 const DIR = "/";
@@ -15,9 +18,9 @@ export interface MergeWorkspaceOptions {
   strategy?: MergeStrategy;
 }
 
-export class MergeConflictError extends Error {
+export class MergeConflictError extends AppError {
   constructor(message: string) {
-    super(message);
+    super(message, "MERGE_CONFLICT", 409);
     this.name = "MergeConflictError";
   }
 }
@@ -40,37 +43,77 @@ export async function initAndPush(
   token: string,
   files: Record<string, string>,
   message: string,
+  logger: Logger,
   author: Author = SYSTEM_AUTHOR,
-): Promise<string> {
-  const fs = new MemoryFS();
-  await git.init({ fs, dir: DIR, defaultBranch: "main" });
+): Promise<Result<string, AppError>> {
+  logger.debug("Initializing git repository", { remote, fileCount: Object.keys(files).length });
 
-  for (const [path, content] of Object.entries(files)) {
-    await fs.promises.writeFile(`/${path}`, content);
-    await git.add({ fs, dir: DIR, filepath: path });
+  const fs = new MemoryFS();
+  const initResult = await fromPromise(git.init({ fs, dir: DIR, defaultBranch: "main" }));
+  if (!initResult.success) {
+    logger.error("Failed to initialize git repository", initResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to initialize repository", initResult.error));
   }
 
-  const sha = await git.commit({ fs, dir: DIR, message, author });
-  await git.push({ fs, dir: DIR, http, url: remote, ref: "main", onAuth: makeAuth(token) });
-  return sha;
+  for (const [path, content] of Object.entries(files)) {
+    const writeResult = await fs.promises.writeFile(`/${path}`, content);
+    if (!writeResult.success) {
+      logger.error("Failed to write file to memory FS", writeResult.error, { path, remote });
+      return err(writeResult.error);
+    }
+    const addResult = await fromPromise(git.add({ fs, dir: DIR, filepath: path }));
+    if (!addResult.success) {
+      logger.error("Failed to stage file", addResult.error, { path, remote });
+      return err(new ExternalServiceError("Git", `Failed to stage file: ${path}`, addResult.error));
+    }
+  }
+
+  const commitResult = await fromPromise(git.commit({ fs, dir: DIR, message, author }));
+  if (!commitResult.success) {
+    logger.error("Failed to commit", commitResult.error, { remote, message });
+    return err(new ExternalServiceError("Git", "Failed to commit", commitResult.error));
+  }
+
+  const pushResult = await fromPromise(
+    git.push({ fs, dir: DIR, http, url: remote, ref: "main", onAuth: makeAuth(token) })
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push to remote", pushResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to push to remote", pushResult.error));
+  }
+
+  logger.info("Successfully initialized and pushed repository", { remote, sha: commitResult.data });
+  return ok(commitResult.data);
 }
 
 export async function cloneRepo(
   remote: string,
   token: string,
-): Promise<{ fs: MemoryFS; dir: string }> {
+  logger: Logger,
+): Promise<Result<{ fs: MemoryFS; dir: string }, AppError>> {
+  logger.debug("Cloning repository", { remote });
+
   const fs = new MemoryFS();
-  await git.clone({
-    fs,
-    http,
-    dir: DIR,
-    url: remote,
-    ref: "main",
-    singleBranch: true,
-    depth: 50,
-    onAuth: makeAuth(token),
-  });
-  return { fs, dir: DIR };
+  const cloneResult = await fromPromise(
+    git.clone({
+      fs,
+      http,
+      dir: DIR,
+      url: remote,
+      ref: "main",
+      singleBranch: true,
+      depth: 50,
+      onAuth: makeAuth(token),
+    })
+  );
+
+  if (!cloneResult.success) {
+    logger.error("Failed to clone repository", cloneResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to clone repository", cloneResult.error));
+  }
+
+  logger.info("Successfully cloned repository", { remote });
+  return ok({ fs, dir: DIR });
 }
 
 export async function commitAndPush(
@@ -80,17 +123,41 @@ export async function commitAndPush(
   token: string,
   changes: Record<string, string>,
   message: string,
+  logger: Logger,
   author: Author = SYSTEM_AUTHOR,
-): Promise<string> {
+): Promise<Result<string, AppError>> {
+  logger.debug("Committing and pushing changes", { remote, changeCount: Object.keys(changes).length });
+
   const base = dir.endsWith("/") ? dir : `${dir}/`;
   for (const [path, content] of Object.entries(changes)) {
-    await fs.promises.writeFile(`${base}${path}`, content);
-    await git.add({ fs, dir, filepath: path });
+    const writeResult = await fs.promises.writeFile(`${base}${path}`, content);
+    if (!writeResult.success) {
+      logger.error("Failed to write file to memory FS", writeResult.error, { path, remote });
+      return err(writeResult.error);
+    }
+    const addResult = await fromPromise(git.add({ fs, dir, filepath: path }));
+    if (!addResult.success) {
+      logger.error("Failed to stage file", addResult.error, { path, remote });
+      return err(new ExternalServiceError("Git", `Failed to stage file: ${path}`, addResult.error));
+    }
   }
 
-  const sha = await git.commit({ fs, dir, message, author });
-  await git.push({ fs, dir, http, url: remote, ref: "main", onAuth: makeAuth(token) });
-  return sha;
+  const commitResult = await fromPromise(git.commit({ fs, dir, message, author }));
+  if (!commitResult.success) {
+    logger.error("Failed to commit", commitResult.error, { remote, message });
+    return err(new ExternalServiceError("Git", "Failed to commit", commitResult.error));
+  }
+
+  const pushResult = await fromPromise(
+    git.push({ fs, dir, http, url: remote, ref: "main", onAuth: makeAuth(token) })
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push to remote", pushResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to push to remote", pushResult.error));
+  }
+
+  logger.info("Successfully committed and pushed changes", { remote, sha: commitResult.data });
+  return ok(commitResult.data);
 }
 
 /**
@@ -106,58 +173,98 @@ export async function mergeWorkspaceIntoProject(
   projectToken: string,
   workspaceRemote: string,
   workspaceToken: string,
+  logger: Logger,
   options: MergeWorkspaceOptions = {},
-): Promise<string> {
-  const author = options.author ?? SYSTEM_AUTHOR;
-  const { fs, dir } = await cloneRepo(projectRemote, projectToken);
+): Promise<Result<string, AppError>> {
+  logger.debug("Merging workspace into project", { projectRemote, workspaceRemote, strategy: options.strategy });
 
-  await git.addRemote({ fs, dir, remote: "workspace", url: workspaceRemote });
-  await git.fetch({
-    fs,
-    http,
-    dir,
-    remote: "workspace",
-    ref: "main",
-    singleBranch: true,
-    onAuth: makeAuth(workspaceToken),
-  });
+  const author = options.author ?? SYSTEM_AUTHOR;
+  const cloneResult = await cloneRepo(projectRemote, projectToken, logger);
+  if (!cloneResult.success) return err(cloneResult.error);
+  const { fs, dir } = cloneResult.data;
+
+  const addRemoteResult = await fromPromise(
+    git.addRemote({ fs, dir, remote: "workspace", url: workspaceRemote })
+  );
+  if (!addRemoteResult.success) {
+    logger.error("Failed to add workspace remote", addRemoteResult.error, { projectRemote, workspaceRemote });
+    return err(new ExternalServiceError("Git", "Failed to add workspace remote", addRemoteResult.error));
+  }
+
+  const fetchResult = await fromPromise(
+    git.fetch({
+      fs,
+      http,
+      dir,
+      remote: "workspace",
+      ref: "main",
+      singleBranch: true,
+      onAuth: makeAuth(workspaceToken),
+    })
+  );
+  if (!fetchResult.success) {
+    logger.error("Failed to fetch workspace", fetchResult.error, { workspaceRemote });
+    return err(new ExternalServiceError("Git", "Failed to fetch workspace", fetchResult.error));
+  }
 
   let workspaceSha: string;
-  try {
-    workspaceSha = await git.resolveRef({ fs, dir, ref: "FETCH_HEAD" });
-  } catch {
-    workspaceSha = await git.resolveRef({ fs, dir, ref: "refs/remotes/workspace/main" });
+  const resolveFetchResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
+  if (resolveFetchResult.success) {
+    workspaceSha = resolveFetchResult.data;
+  } else {
+    const resolveRemoteResult = await fromPromise(
+      git.resolveRef({ fs, dir, ref: "refs/remotes/workspace/main" })
+    );
+    if (!resolveRemoteResult.success) {
+      logger.error("Failed to resolve workspace ref", resolveRemoteResult.error, { workspaceRemote });
+      return err(new ExternalServiceError("Git", "Failed to resolve workspace ref", resolveRemoteResult.error));
+    }
+    workspaceSha = resolveRemoteResult.data;
   }
 
   if (options.strategy === "squash") {
-    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author);
+    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author, logger);
   }
 
-  let result: Awaited<ReturnType<typeof git.merge>>;
-  try {
-    result = await git.merge({
+  const mergeResult = await fromPromise(
+    git.merge({
       fs,
       dir,
       ours: "main",
       theirs: workspaceSha,
       author,
       message: "Merge workspace into project",
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`);
+    })
+  );
+
+  if (!mergeResult.success) {
+    const message = mergeResult.error instanceof Error ? mergeResult.error.message : String(mergeResult.error);
+    logger.error("Merge failed", mergeResult.error, { projectRemote, workspaceRemote, message });
+    return err(new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`));
   }
 
-  await git.push({
-    fs,
-    dir,
-    http,
-    url: projectRemote,
-    ref: "main",
-    onAuth: makeAuth(projectToken),
-  });
-  if (!result.oid) throw new Error("Merge produced no commit OID");
-  return result.oid;
+  const pushResult = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: projectRemote,
+      ref: "main",
+      onAuth: makeAuth(projectToken),
+    })
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push merge result", pushResult.error, { projectRemote });
+    return err(new ExternalServiceError("Git", "Failed to push merge result", pushResult.error));
+  }
+
+  if (!mergeResult.data.oid) {
+    logger.error("Merge produced no commit OID", undefined, { projectRemote, workspaceRemote });
+    return err(new ExternalServiceError("Git", "Merge produced no commit OID"));
+  }
+
+  logger.info("Successfully merged workspace into project", { projectRemote, workspaceRemote, sha: mergeResult.data.oid });
+  return ok(mergeResult.data.oid);
 }
 
 async function squashMerge(
@@ -167,9 +274,18 @@ async function squashMerge(
   projectRemote: string,
   projectToken: string,
   author: Author,
-): Promise<string> {
-  const workspaceFiles = await listFilesAtCommit(projectFs, workspaceSha);
-  const projectFiles = await listFilesAtCommit(projectFs, "main");
+  logger: Logger,
+): Promise<Result<string, AppError>> {
+  logger.debug("Performing squash merge", { projectRemote, workspaceSha });
+
+  const workspaceFilesResult = await listFilesAtCommit(projectFs, workspaceSha, logger);
+  if (!workspaceFilesResult.success) return err(workspaceFilesResult.error);
+
+  const projectFilesResult = await listFilesAtCommit(projectFs, "main", logger);
+  if (!projectFilesResult.success) return err(projectFilesResult.error);
+
+  const workspaceFiles = workspaceFilesResult.data;
+  const projectFiles = projectFilesResult.data;
   const workspaceMap = new Map(workspaceFiles);
 
   const changed = workspaceFiles.filter(([path, hash]) => {
@@ -179,131 +295,259 @@ async function squashMerge(
   const deleted = projectFiles.filter(([path]) => !workspaceMap.has(path));
 
   for (const [path] of changed) {
-    const content = await readFileAtCommit(projectFs, workspaceSha, path);
-    await projectFs.promises.writeFile(`${projectDir}/${path}`, content);
-    await git.add({ fs: projectFs, dir: projectDir, filepath: path });
+    const contentResult = await readFileAtCommit(projectFs, workspaceSha, path, logger);
+    if (!contentResult.success) return err(contentResult.error);
+
+    const writeResult = await projectFs.promises.writeFile(`${projectDir}/${path}`, contentResult.data);
+    if (!writeResult.success) {
+      logger.error("Failed to write file during squash merge", writeResult.error, { path, projectRemote });
+      return err(writeResult.error);
+    }
+
+    const addResult = await fromPromise(git.add({ fs: projectFs, dir: projectDir, filepath: path }));
+    if (!addResult.success) {
+      logger.error("Failed to stage file during squash merge", addResult.error, { path, projectRemote });
+      return err(new ExternalServiceError("Git", `Failed to stage file: ${path}`, addResult.error));
+    }
   }
 
   for (const [path] of deleted) {
-    await projectFs.promises.unlink(`${projectDir}/${path}`);
-    await git.remove({ fs: projectFs, dir: projectDir, filepath: path });
+    const unlinkResult = await projectFs.promises.unlink(`${projectDir}/${path}`);
+    if (!unlinkResult.success) {
+      logger.error("Failed to unlink file during squash merge", unlinkResult.error, { path, projectRemote });
+      return err(unlinkResult.error);
+    }
+
+    const removeResult = await fromPromise(git.remove({ fs: projectFs, dir: projectDir, filepath: path }));
+    if (!removeResult.success) {
+      logger.error("Failed to remove file during squash merge", removeResult.error, { path, projectRemote });
+      return err(new ExternalServiceError("Git", `Failed to remove file: ${path}`, removeResult.error));
+    }
   }
 
   const changeCount = changed.length + deleted.length;
   if (changeCount === 0) {
-    return git.resolveRef({ fs: projectFs, dir: projectDir, ref: "main" });
+    const resolveResult = await fromPromise(
+      git.resolveRef({ fs: projectFs, dir: projectDir, ref: "main" })
+    );
+    if (!resolveResult.success) {
+      logger.error("Failed to resolve main ref", resolveResult.error, { projectRemote });
+      return err(new ExternalServiceError("Git", "Failed to resolve main ref", resolveResult.error));
+    }
+    return ok(resolveResult.data);
   }
 
-  const sha = await git.commit({
-    fs: projectFs,
-    dir: projectDir,
-    message: `Squash merge workspace (${changeCount} file${changeCount === 1 ? "" : "s"} changed)`,
-    author,
-  });
+  const commitResult = await fromPromise(
+    git.commit({
+      fs: projectFs,
+      dir: projectDir,
+      message: `Squash merge workspace (${changeCount} file${changeCount === 1 ? "" : "s"} changed)`,
+      author,
+    })
+  );
+  if (!commitResult.success) {
+    logger.error("Failed to commit squash merge", commitResult.error, { projectRemote });
+    return err(new ExternalServiceError("Git", "Failed to commit squash merge", commitResult.error));
+  }
 
-  await git.push({
-    fs: projectFs,
-    dir: projectDir,
-    http,
-    url: projectRemote,
-    ref: "main",
-    onAuth: makeAuth(projectToken),
-  });
+  const pushResult = await fromPromise(
+    git.push({
+      fs: projectFs,
+      dir: projectDir,
+      http,
+      url: projectRemote,
+      ref: "main",
+      onAuth: makeAuth(projectToken),
+    })
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push squash merge", pushResult.error, { projectRemote });
+    return err(new ExternalServiceError("Git", "Failed to push squash merge", pushResult.error));
+  }
 
-  return sha;
+  logger.info("Successfully completed squash merge", { projectRemote, sha: commitResult.data });
+  return ok(commitResult.data);
 }
 
 async function listFilesAtCommit(
   fs: MemoryFS,
   ref: string,
-): Promise<[path: string, oid: string][]> {
+  logger: Logger,
+): Promise<Result<[path: string, oid: string][], AppError>> {
   const files: [string, string][] = [];
-  await git.walk({
-    fs,
-    dir: DIR,
-    trees: [git.TREE({ ref })],
-    map: async (filepath, [entry]) => {
-      if (!entry) return;
-      const type = await entry.type();
-      if (type === "blob") {
-        const oid = await entry.oid();
-        files.push([filepath, oid]);
-      }
-    },
-  });
-  return files;
+  const walkResult = await fromPromise(
+    git.walk({
+      fs,
+      dir: DIR,
+      trees: [git.TREE({ ref })],
+      map: async (filepath, [entry]) => {
+        if (!entry) return;
+        const type = await entry.type();
+        if (type === "blob") {
+          const oid = await entry.oid();
+          files.push([filepath, oid]);
+        }
+      },
+    })
+  );
+
+  if (!walkResult.success) {
+    logger.error("Failed to walk files at commit", walkResult.error, { ref });
+    return err(new ExternalServiceError("Git", `Failed to list files at commit: ${ref}`, walkResult.error));
+  }
+
+  return ok(files);
 }
 
-async function readFileAtCommit(fs: MemoryFS, ref: string, path: string): Promise<string> {
-  const { blob } = await git.readBlob({ fs, dir: DIR, oid: ref, filepath: path });
-  return new TextDecoder().decode(blob);
+async function readFileAtCommit(
+  fs: MemoryFS,
+  ref: string,
+  path: string,
+  logger: Logger
+): Promise<Result<string, AppError>> {
+  const readResult = await fromPromise(git.readBlob({ fs, dir: DIR, oid: ref, filepath: path }));
+  if (!readResult.success) {
+    logger.error("Failed to read file at commit", readResult.error, { ref, path });
+    return err(new ExternalServiceError("Git", `Failed to read file: ${path} at commit: ${ref}`, readResult.error));
+  }
+
+  return ok(new TextDecoder().decode(readResult.data.blob));
 }
 
 export async function readFileFromRepo(
   remote: string,
   token: string,
   path: string,
-): Promise<string> {
-  const { fs } = await cloneRepo(remote, token);
-  const content = await fs.promises.readFile(`/${path}`, { encoding: "utf8" });
-  return content as string;
+  logger: Logger,
+): Promise<Result<string, AppError>> {
+  logger.debug("Reading file from repo", { remote, path });
+
+  const cloneResult = await cloneRepo(remote, token, logger);
+  if (!cloneResult.success) return err(cloneResult.error);
+
+  const { fs } = cloneResult.data;
+  const contentResult = await fs.promises.readFile(`/${path}`, { encoding: "utf8" });
+  if (!contentResult.success) {
+    logger.error("Failed to read file from repo", contentResult.error, { remote, path });
+    return err(contentResult.error);
+  }
+
+  logger.info("Successfully read file from repo", { remote, path });
+  return ok(contentResult.data as string);
 }
 
-export async function listFilesInRepo(remote: string, token: string): Promise<string[]> {
-  const { fs, dir } = await cloneRepo(remote, token);
-  return walkDir(fs, dir, "");
+export async function listFilesInRepo(
+  remote: string,
+  token: string,
+  logger: Logger
+): Promise<Result<string[], AppError>> {
+  logger.debug("Listing files in repo", { remote });
+
+  const cloneResult = await cloneRepo(remote, token, logger);
+  if (!cloneResult.success) return err(cloneResult.error);
+
+  const { fs, dir } = cloneResult.data;
+  return walkDir(fs, dir, "", logger);
 }
 
-async function walkDir(fs: MemoryFS, base: string, prefix: string): Promise<string[]> {
+async function walkDir(
+  fs: MemoryFS,
+  base: string,
+  prefix: string,
+  logger: Logger
+): Promise<Result<string[], AppError>> {
   const dirPath = base === "/" ? "/" : base;
-  const entries = await fs.promises.readdir(dirPath);
+  const entriesResult = await fs.promises.readdir(dirPath);
+  if (!entriesResult.success) {
+    logger.error("Failed to read directory", entriesResult.error, { dirPath });
+    return err(entriesResult.error);
+  }
+
   const files: string[] = [];
 
-  for (const entry of entries) {
+  for (const entry of entriesResult.data) {
     if (entry === ".git") continue;
     const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
-    const stat = await fs.promises.stat(fullPath);
-    if (stat.isDirectory()) {
-      files.push(...(await walkDir(fs, fullPath, `${prefix}${entry}/`)));
+    const statResult = await fs.promises.stat(fullPath);
+    if (!statResult.success) {
+      logger.error("Failed to stat file", statResult.error, { fullPath });
+      return err(statResult.error);
+    }
+
+    if (statResult.data.isDirectory()) {
+      const subFilesResult = await walkDir(fs, fullPath, `${prefix}${entry}/`, logger);
+      if (!subFilesResult.success) return err(subFilesResult.error);
+      files.push(...subFilesResult.data);
     } else {
       files.push(`${prefix}${entry}`);
     }
   }
 
-  return files;
+  return ok(files);
 }
 
 export async function getCommitLog(
   remote: string,
   token: string,
+  logger: Logger,
   depth = 20,
-): Promise<CommitLogEntry[]> {
-  const { fs, dir } = await cloneRepo(remote, token);
-  const commits = await git.log({ fs, dir, depth });
-  return commits.map((c) => ({
+): Promise<Result<CommitLogEntry[], AppError>> {
+  logger.debug("Getting commit log", { remote, depth });
+
+  const cloneResult = await cloneRepo(remote, token, logger);
+  if (!cloneResult.success) return err(cloneResult.error);
+
+  const { fs, dir } = cloneResult.data;
+  const logResult = await fromPromise(git.log({ fs, dir, depth }));
+  if (!logResult.success) {
+    logger.error("Failed to get commit log", logResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to get commit log", logResult.error));
+  }
+
+  const commits = logResult.data.map((c) => ({
     sha: c.oid,
     message: c.commit.message.trim(),
     author: `${c.commit.author.name} <${c.commit.author.email}>`,
     timestamp: c.commit.author.timestamp,
   }));
+
+  logger.info("Successfully retrieved commit log", { remote, commitCount: commits.length });
+  return ok(commits);
 }
 
 export async function importFromGitHub(
   remote: string,
   token: string,
   githubUrl: string,
+  logger: Logger,
   branch = "main",
   depth = 10,
-): Promise<void> {
-  const importRes = await fetch(`${remote}/import`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ url: githubUrl, branch, depth }),
-  });
-  if (!importRes.ok) {
-    const detail = await importRes.text().catch(() => "unknown error");
-    throw new Error(`Artifacts import failed (${importRes.status}): ${detail}`);
+): Promise<Result<void, AppError>> {
+  logger.debug("Importing from GitHub", { remote, githubUrl, branch, depth });
+
+  const importResResult = await fromPromise(
+    fetch(`${remote}/import`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ url: githubUrl, branch, depth }),
+    })
+  );
+
+  if (!importResResult.success) {
+    logger.error("Failed to import from GitHub", importResResult.error, { remote, githubUrl });
+    return err(new ExternalServiceError("Artifacts", "Import request failed", importResResult.error));
   }
+
+  const importRes = importResResult.data;
+  if (!importRes.ok) {
+    const detailResult = await fromPromise(importRes.text());
+    const detail = detailResult.success ? detailResult.data : "unknown error";
+    logger.error("Artifacts import failed", undefined, { status: importRes.status, detail, remote, githubUrl });
+    return err(new ExternalServiceError("Artifacts", `Import failed: ${detail}`, undefined));
+  }
+
+  logger.info("Successfully imported from GitHub", { remote, githubUrl, branch });
+  return ok(undefined);
 }
 
 /**
@@ -346,30 +590,53 @@ export async function getDiffBetweenRepos(
   baseToken: string,
   workspaceRemote: string,
   workspaceToken: string,
-): Promise<string> {
-  const [{ fs: workspaceFs }, { fs: baseFs }] = await Promise.all([
-    cloneRepo(workspaceRemote, workspaceToken),
-    cloneRepo(baseRemote, baseToken),
+  logger: Logger,
+): Promise<Result<string, AppError>> {
+  logger.debug("Getting diff between repos", { baseRemote, workspaceRemote });
+
+  const [workspaceCloneResult, baseCloneResult] = await Promise.all([
+    cloneRepo(workspaceRemote, workspaceToken, logger),
+    cloneRepo(baseRemote, baseToken, logger),
   ]);
 
-  const [workspaceFiles, baseFiles] = await Promise.all([
-    listFilesAtCommit(workspaceFs, "main"),
-    listFilesAtCommit(baseFs, "main"),
+  if (!workspaceCloneResult.success) return err(workspaceCloneResult.error);
+  if (!baseCloneResult.success) return err(baseCloneResult.error);
+
+  const { fs: workspaceFs } = workspaceCloneResult.data;
+  const { fs: baseFs } = baseCloneResult.data;
+
+  const [workspaceFilesResult, baseFilesResult] = await Promise.all([
+    listFilesAtCommit(workspaceFs, "main", logger),
+    listFilesAtCommit(baseFs, "main", logger),
   ]);
+
+  if (!workspaceFilesResult.success) return err(workspaceFilesResult.error);
+  if (!baseFilesResult.success) return err(baseFilesResult.error);
+
+  const workspaceFiles = workspaceFilesResult.data;
+  const baseFiles = baseFilesResult.data;
 
   const baseContent = new Map<string, string>();
   const workspaceContent = new Map<string, string>();
 
   await Promise.all([
     ...baseFiles.map(async ([path]) => {
-      baseContent.set(path, await readFileAtCommit(baseFs, "main", path));
+      const contentResult = await readFileAtCommit(baseFs, "main", path, logger);
+      if (contentResult.success) {
+        baseContent.set(path, contentResult.data);
+      }
     }),
     ...workspaceFiles.map(async ([path]) => {
-      workspaceContent.set(path, await readFileAtCommit(workspaceFs, "main", path));
+      const contentResult = await readFileAtCommit(workspaceFs, "main", path, logger);
+      if (contentResult.success) {
+        workspaceContent.set(path, contentResult.data);
+      }
     }),
   ]);
 
-  return buildUnifiedDiff(baseContent, workspaceContent);
+  const diff = buildUnifiedDiff(baseContent, workspaceContent);
+  logger.info("Successfully generated diff between repos", { baseRemote, workspaceRemote });
+  return ok(diff);
 }
 
 export function buildUnifiedDiff(

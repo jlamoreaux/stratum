@@ -1,5 +1,8 @@
 import type { Change } from "../types";
 import { newId } from "../utils/ids";
+import { Result, ok, err } from "../utils/result";
+import { Logger } from "../utils/logger";
+import { AppError, NotFoundError } from "../utils/errors";
 
 interface ChangeRow {
   id: string;
@@ -48,59 +51,116 @@ function rowToChange(row: ChangeRow): Change {
 
 export async function createChange(
   db: D1Database,
+  logger: Logger,
   opts: {
     project: string;
     workspace: string;
     agentId?: string;
   },
-): Promise<Change> {
+): Promise<Result<Change, AppError>> {
   const id = newId("chg");
   const createdAt = new Date().toISOString();
 
-  await db
-    .prepare(
-      "INSERT INTO changes (id, project, workspace, status, agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(id, opts.project, opts.workspace, "open", opts.agentId ?? null, createdAt)
-    .run();
+  try {
+    await db
+      .prepare(
+        "INSERT INTO changes (id, project, workspace, status, agent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(id, opts.project, opts.workspace, "open", opts.agentId ?? null, createdAt)
+      .run();
 
-  const change: Change = {
-    id,
-    project: opts.project,
-    workspace: opts.workspace,
-    status: "open",
-    createdAt,
-  };
-  if (opts.agentId !== undefined) change.agentId = opts.agentId;
-  return change;
+    const change: Change = {
+      id,
+      project: opts.project,
+      workspace: opts.workspace,
+      status: "open",
+      createdAt,
+    };
+    if (opts.agentId !== undefined) change.agentId = opts.agentId;
+
+    logger.debug("Change created", { changeId: id, project: opts.project, workspace: opts.workspace });
+    return ok(change);
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new AppError(
+          error instanceof Error ? error.message : "Failed to create change",
+          "DATABASE_ERROR",
+          500,
+          { operation: "createChange", project: opts.project }
+        );
+    logger.error("Failed to create change", appError, { project: opts.project, workspace: opts.workspace });
+    return err(appError);
+  }
 }
 
-export async function getChange(db: D1Database, id: string): Promise<Change | null> {
-  const row = await db.prepare("SELECT * FROM changes WHERE id = ?").bind(id).first<ChangeRow>();
+export async function getChange(
+  db: D1Database,
+  logger: Logger,
+  id: string
+): Promise<Result<Change, NotFoundError | AppError>> {
+  try {
+    const row = await db.prepare("SELECT * FROM changes WHERE id = ?").bind(id).first<ChangeRow>();
 
-  return row ? rowToChange(row) : null;
+    if (!row) {
+      const notFoundError = new NotFoundError("Change", id);
+      logger.debug("Change not found", { changeId: id });
+      return err(notFoundError);
+    }
+
+    logger.debug("Change retrieved", { changeId: id });
+    return ok(rowToChange(row));
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new AppError(
+          error instanceof Error ? error.message : "Failed to get change",
+          "DATABASE_ERROR",
+          500,
+          { operation: "getChange", changeId: id }
+        );
+    logger.error("Failed to get change", appError, { changeId: id });
+    return err(appError);
+  }
 }
 
 export async function listChanges(
   db: D1Database,
+  logger: Logger,
   project: string,
   status?: Change["status"],
-): Promise<Change[]> {
-  const result = status
-    ? await db
-        .prepare("SELECT * FROM changes WHERE project = ? AND status = ? ORDER BY created_at DESC")
-        .bind(project, status)
-        .all<ChangeRow>()
-    : await db
-        .prepare("SELECT * FROM changes WHERE project = ? ORDER BY created_at DESC")
-        .bind(project)
-        .all<ChangeRow>();
+): Promise<Result<Change[], AppError>> {
+  try {
+    const result = status
+      ? await db
+          .prepare("SELECT * FROM changes WHERE project = ? AND status = ? ORDER BY created_at DESC")
+          .bind(project, status)
+          .all<ChangeRow>()
+      : await db
+          .prepare("SELECT * FROM changes WHERE project = ? ORDER BY created_at DESC")
+          .bind(project)
+          .all<ChangeRow>();
 
-  return result.results.map(rowToChange);
+    const changes = result.results.map(rowToChange);
+    logger.debug("Changes listed", { project, status, count: changes.length });
+    return ok(changes);
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new AppError(
+          error instanceof Error ? error.message : "Failed to list changes",
+          "DATABASE_ERROR",
+          500,
+          { operation: "listChanges", project, status }
+        );
+    logger.error("Failed to list changes", appError, { project, status });
+    return err(appError);
+  }
 }
 
 export async function updateChangeStatus(
   db: D1Database,
+  logger: Logger,
   id: string,
   status: Change["status"],
   opts?: {
@@ -117,36 +177,60 @@ export async function updateChangeStatus(
     promotedAt?: string;
     promotedBy?: string;
   },
-): Promise<void> {
-  const assignments = ["status = ?"];
-  const bindings: unknown[] = [status];
+): Promise<Result<void, NotFoundError | AppError>> {
+  try {
+    // First check if the change exists
+    const existingRow = await db.prepare("SELECT id FROM changes WHERE id = ?").bind(id).first<{ id: string }>();
+    if (!existingRow) {
+      const notFoundError = new NotFoundError("Change", id);
+      logger.debug("Change not found for update", { changeId: id });
+      return err(notFoundError);
+    }
 
-  const addOptional = (column: string, value: unknown) => {
-    if (value === undefined) return;
-    assignments.push(`${column} = ?`);
-    bindings.push(value);
-  };
+    const assignments = ["status = ?"];
+    const bindings: unknown[] = [status];
 
-  addOptional("eval_score", opts?.evalScore);
-  addOptional(
-    "eval_passed",
-    opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : undefined,
-  );
-  addOptional("eval_reason", opts?.evalReason);
-  addOptional("merged_at", opts?.mergedAt);
-  addOptional("github_owner", opts?.githubOwner);
-  addOptional("github_repo", opts?.githubRepo);
-  addOptional("github_branch", opts?.githubBranch);
-  addOptional("github_pr_number", opts?.githubPrNumber);
-  addOptional("github_pr_url", opts?.githubPrUrl);
-  addOptional("github_pr_state", opts?.githubPrState);
-  addOptional("promoted_at", opts?.promotedAt);
-  addOptional("promoted_by", opts?.promotedBy);
+    const addOptional = (column: string, value: unknown) => {
+      if (value === undefined) return;
+      assignments.push(`${column} = ?`);
+      bindings.push(value);
+    };
 
-  bindings.push(id);
+    addOptional("eval_score", opts?.evalScore);
+    addOptional(
+      "eval_passed",
+      opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : undefined,
+    );
+    addOptional("eval_reason", opts?.evalReason);
+    addOptional("merged_at", opts?.mergedAt);
+    addOptional("github_owner", opts?.githubOwner);
+    addOptional("github_repo", opts?.githubRepo);
+    addOptional("github_branch", opts?.githubBranch);
+    addOptional("github_pr_number", opts?.githubPrNumber);
+    addOptional("github_pr_url", opts?.githubPrUrl);
+    addOptional("github_pr_state", opts?.githubPrState);
+    addOptional("promoted_at", opts?.promotedAt);
+    addOptional("promoted_by", opts?.promotedBy);
 
-  await db
-    .prepare(`UPDATE changes SET ${assignments.join(", ")} WHERE id = ?`)
-    .bind(...bindings)
-    .run();
+    bindings.push(id);
+
+    await db
+      .prepare(`UPDATE changes SET ${assignments.join(", ")} WHERE id = ?`)
+      .bind(...bindings)
+      .run();
+
+    logger.debug("Change status updated", { changeId: id, status, opts });
+    return ok(undefined);
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new AppError(
+          error instanceof Error ? error.message : "Failed to update change status",
+          "DATABASE_ERROR",
+          500,
+          { operation: "updateChangeStatus", changeId: id, status }
+        );
+    logger.error("Failed to update change status", appError, { changeId: id, status });
+    return err(appError);
+  }
 }

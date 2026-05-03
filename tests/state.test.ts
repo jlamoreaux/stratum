@@ -10,6 +10,17 @@ import {
   setWorkspace,
 } from "../src/storage/state";
 import type { ProjectEntry, WorkspaceEntry } from "../src/types";
+import { Logger } from "../src/utils/logger";
+
+const mockLogger: Logger = {
+  trace: () => {},
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  fatal: () => {},
+  child: () => mockLogger,
+};
 
 function makeKV(): KVNamespace {
   const store = new Map<string, string>();
@@ -54,40 +65,60 @@ describe("project state", () => {
     kv = makeKV();
   });
 
-  it("returns null for missing project", async () => {
-    expect(await getProject(kv, "nope")).toBeNull();
+  it("returns error for missing project", async () => {
+    const result = await getProject(kv, "nope", mockLogger);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("NOT_FOUND");
+    }
   });
 
   it("stores and retrieves a project", async () => {
-    await setProject(kv, project);
-    expect(await getProject(kv, project.name)).toEqual(project);
+    await setProject(kv, project, mockLogger);
+    const result = await getProject(kv, project.name, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual(project);
+    }
   });
 
   it("overwrites existing project", async () => {
-    await setProject(kv, project);
+    await setProject(kv, project, mockLogger);
     const updated = { ...project, token: "tok_new" };
-    await setProject(kv, updated);
-    expect((await getProject(kv, project.name))?.token).toBe("tok_new");
+    await setProject(kv, updated, mockLogger);
+    const result = await getProject(kv, project.name, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.token).toBe("tok_new");
+    }
   });
 
   it("deletes a project", async () => {
-    await setProject(kv, project);
-    await deleteProject(kv, project.name);
-    expect(await getProject(kv, project.name)).toBeNull();
+    await setProject(kv, project, mockLogger);
+    await deleteProject(kv, project.name, mockLogger);
+    const result = await getProject(kv, project.name, mockLogger);
+    expect(result.success).toBe(false);
   });
 
   it("lists all projects", async () => {
     const p2 = { ...project, name: "other-project" };
-    await setProject(kv, project);
-    await setProject(kv, p2);
-    const list = await listProjects(kv);
-    expect(list).toHaveLength(2);
-    expect(list.map((p) => p.name)).toContain("my-project");
-    expect(list.map((p) => p.name)).toContain("other-project");
+    await setProject(kv, project, mockLogger);
+    await setProject(kv, p2, mockLogger);
+    const result = await listProjects(kv, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toHaveLength(2);
+      expect(result.data.map((p) => p.name)).toContain("my-project");
+      expect(result.data.map((p) => p.name)).toContain("other-project");
+    }
   });
 
   it("lists empty when no projects", async () => {
-    expect(await listProjects(kv)).toEqual([]);
+    const result = await listProjects(kv, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual([]);
+    }
   });
 });
 
@@ -98,44 +129,63 @@ describe("workspace state", () => {
     kv = makeKV();
   });
 
-  it("returns null for missing workspace", async () => {
-    expect(await getWorkspace(kv, "nope")).toBeNull();
+  it("returns error for missing workspace", async () => {
+    const result = await getWorkspace(kv, "nope", mockLogger);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("NOT_FOUND");
+    }
   });
 
   it("stores and retrieves a workspace", async () => {
-    await setWorkspace(kv, workspace);
-    expect(await getWorkspace(kv, workspace.name)).toEqual(workspace);
+    await setWorkspace(kv, workspace, mockLogger);
+    const result = await getWorkspace(kv, workspace.name, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual(workspace);
+    }
   });
 
   it("deletes a workspace", async () => {
-    await setWorkspace(kv, workspace);
-    await deleteWorkspace(kv, workspace.name);
-    expect(await getWorkspace(kv, workspace.name)).toBeNull();
+    await setWorkspace(kv, workspace, mockLogger);
+    await deleteWorkspace(kv, workspace.name, mockLogger);
+    const result = await getWorkspace(kv, workspace.name, mockLogger);
+    expect(result.success).toBe(false);
   });
 
   it("lists all workspaces", async () => {
     const w2 = { ...workspace, name: "add-feature", parent: "other-project" };
-    await setWorkspace(kv, workspace);
-    await setWorkspace(kv, w2);
-    const all = await listWorkspaces(kv);
-    expect(all).toHaveLength(2);
+    await setWorkspace(kv, workspace, mockLogger);
+    await setWorkspace(kv, w2, mockLogger);
+    const result = await listWorkspaces(kv, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toHaveLength(2);
+    }
   });
 
   it("filters workspaces by parent project", async () => {
     const w2 = { ...workspace, name: "add-feature", parent: "other-project" };
-    await setWorkspace(kv, workspace);
-    await setWorkspace(kv, w2);
-    const filtered = await listWorkspaces(kv, "my-project");
-    expect(filtered).toHaveLength(1);
-    expect(filtered[0]?.name).toBe("fix-bug");
+    await setWorkspace(kv, workspace, mockLogger);
+    await setWorkspace(kv, w2, mockLogger);
+    const result = await listWorkspaces(kv, mockLogger, "my-project");
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]?.name).toBe("fix-bug");
+    }
   });
 
   it("does not mix project and workspace keys", async () => {
-    await setProject(kv, project);
-    await setWorkspace(kv, workspace);
-    const projects = await listProjects(kv);
-    const workspaces = await listWorkspaces(kv);
-    expect(projects).toHaveLength(1);
-    expect(workspaces).toHaveLength(1);
+    await setProject(kv, project, mockLogger);
+    await setWorkspace(kv, workspace, mockLogger);
+    const projectsResult = await listProjects(kv, mockLogger);
+    const workspacesResult = await listWorkspaces(kv, mockLogger);
+    expect(projectsResult.success).toBe(true);
+    expect(workspacesResult.success).toBe(true);
+    if (projectsResult.success && workspacesResult.success) {
+      expect(projectsResult.data).toHaveLength(1);
+      expect(workspacesResult.data).toHaveLength(1);
+    }
   });
 });

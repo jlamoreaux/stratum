@@ -1,5 +1,6 @@
 import YAML from "yaml";
 import { readFileFromRepo } from "../storage/git-ops";
+import type { Logger } from "../utils/logger";
 import type { EvalPolicy } from "./types";
 
 const DEFAULT_POLICY: EvalPolicy = {
@@ -8,11 +9,11 @@ const DEFAULT_POLICY: EvalPolicy = {
   minScore: 0.7,
 };
 
-export async function loadPolicy(remote: string, token: string): Promise<EvalPolicy> {
-  const yamlPolicy = await readAndParsePolicy(remote, token, ".stratum/policy.yaml", "yaml");
+export async function loadPolicy(remote: string, token: string, logger: Logger): Promise<EvalPolicy> {
+  const yamlPolicy = await readAndParsePolicy(remote, token, ".stratum/policy.yaml", "yaml", logger);
   if (yamlPolicy) return yamlPolicy;
 
-  const jsonPolicy = await readAndParsePolicy(remote, token, "stratum.config.json", "json");
+  const jsonPolicy = await readAndParsePolicy(remote, token, "stratum.config.json", "json", logger);
   if (jsonPolicy) return jsonPolicy;
 
   return DEFAULT_POLICY;
@@ -23,9 +24,13 @@ async function readAndParsePolicy(
   token: string,
   path: string,
   format: "json" | "yaml",
+  logger: Logger,
 ): Promise<EvalPolicy | null> {
   try {
-    const content = await readFileFromRepo(remote, token, path);
+    const contentResult = await readFileFromRepo(remote, token, path, logger);
+    if (!contentResult.success) return null;
+    
+    const content = contentResult.data;
     if (content === null || content === undefined) return null;
 
     let parsed: unknown;

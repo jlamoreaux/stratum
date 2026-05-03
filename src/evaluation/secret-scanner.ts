@@ -1,3 +1,7 @@
+import type { Logger } from "../utils/logger";
+import type { Result } from "../utils/result";
+import type { AppError } from "../utils/errors";
+import { ok } from "../utils/result";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
 const SECRET_PATTERNS = [
@@ -10,7 +14,7 @@ const SECRET_PATTERNS = [
 ];
 
 export class SecretScanEvaluator implements Evaluator {
-  async evaluate(diff: string, _policy: EvalPolicy): Promise<EvalResult> {
+  async evaluate(diff: string, _policy: EvalPolicy, logger: Logger): Promise<Result<EvalResult, AppError>> {
     const issues: string[] = [];
 
     const lines = diff.split("\n");
@@ -26,18 +30,20 @@ export class SecretScanEvaluator implements Evaluator {
     });
 
     if (issues.length > 0) {
-      return {
+      logger.warn("Secrets detected in diff", { issueCount: issues.length });
+      return ok({
         score: 0,
         passed: false,
         reason: `Secret detected: ${issues[0]?.split(":")[0] ?? "unknown"}`,
         issues,
-      };
+      });
     }
 
-    return {
+    logger.info("Secret scan complete - no secrets detected");
+    return ok({
       score: 1,
       passed: true,
       reason: "No secrets detected",
-    };
+    });
   }
 }

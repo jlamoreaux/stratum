@@ -1,3 +1,6 @@
+import type { LoggerContext } from './utils/logger';
+export type { LoggerContext };
+
 export interface ArtifactsCreateResult {
   name: string;
   remote: string;
