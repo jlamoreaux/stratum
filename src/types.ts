@@ -25,6 +25,24 @@ export interface ArtifactsNamespace {
   get(name: string): Promise<ArtifactsRepo>;
   list(opts?: Record<string, unknown>): Promise<unknown>;
   delete(name: string): Promise<boolean>;
+  import(params: {
+    source: {
+      url: string;
+      branch?: string;
+      depth?: number;
+      auth?: {
+        type: "bearer";
+        token: string;
+      };
+    };
+    target: {
+      name: string;
+      opts?: {
+        description?: string;
+        readOnly?: boolean;
+      };
+    };
+  }): Promise<ArtifactsCreateResult>;
 }
 
 interface AnalyticsEngineDataset {

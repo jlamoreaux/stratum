@@ -1,7 +1,7 @@
 import { createPatch } from "diff";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
-import type { Author, CommitLogEntry } from "../types";
+import type { ArtifactsNamespace, Author, CommitLogEntry } from "../types";
 import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { err, fromPromise, ok, type Result } from "../utils/result";
@@ -516,38 +516,40 @@ export async function getCommitLog(
 }
 
 export async function importFromGitHub(
-  remote: string,
-  token: string,
+  artifacts: ArtifactsNamespace,
+  name: string,
   githubUrl: string,
   logger: Logger,
   branch = "main",
   depth = 10,
-): Promise<Result<void, AppError>> {
-  logger.debug("Importing from GitHub", { remote, githubUrl, branch, depth });
+): Promise<Result<ArtifactsCreateResult, AppError>> {
+  logger.debug("Importing from GitHub", { name, githubUrl, branch, depth });
 
-  const importResResult = await fromPromise(
-    fetch(`${remote}/import`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ url: githubUrl, branch, depth }),
-    })
-  );
+  try {
+    const result = await artifacts.import({
+      source: {
+        url: githubUrl,
+        branch,
+        depth,
+      },
+      target: {
+        name,
+      },
+    });
 
-  if (!importResResult.success) {
-    logger.error("Failed to import from GitHub", importResResult.error, { remote, githubUrl });
-    return err(new ExternalServiceError("Artifacts", "Import request failed", importResResult.error));
+    logger.info("Successfully imported from GitHub", { name, githubUrl, branch, remote: result.remote });
+    return ok(result);
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new ExternalServiceError(
+          "Artifacts",
+          error instanceof Error ? error.message : "Import failed",
+          error instanceof Error ? error : undefined
+        );
+    logger.error("Failed to import from GitHub", appError, { name, githubUrl, branch });
+    return err(appError);
   }
-
-  const importRes = importResResult.data;
-  if (!importRes.ok) {
-    const detailResult = await fromPromise(importRes.text());
-    const detail = detailResult.success ? detailResult.data : "unknown error";
-    logger.error("Artifacts import failed", undefined, { status: importRes.status, detail, remote, githubUrl });
-    return err(new ExternalServiceError("Artifacts", `Import failed: ${detail}`, undefined));
-  }
-
-  logger.info("Successfully imported from GitHub", { remote, githubUrl, branch });
-  return ok(undefined);
 }
 
 /**

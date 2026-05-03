@@ -46,14 +46,14 @@ app.post("/projects/:name/sync", async (c) => {
   }
 
   logger.info("Starting GitHub import", { name, githubUrl });
-  const importResult = await importFromGitHub(project.remote, project.token, githubUrl, logger);
+  const importResult = await importFromGitHub(c.env.ARTIFACTS, name, githubUrl, logger);
   
   if (!importResult.success) {
     logger.error("GitHub import failed", importResult.error, { name, githubUrl });
     return c.json({ error: "Failed to import from GitHub" }, 500);
   }
 
-  logger.info("GitHub import completed", { name, githubUrl });
+  logger.info("GitHub import completed", { name, githubUrl, remote: importResult.data.remote });
   return ok({ synced: true, project: name, source: githubUrl });
 });
 
@@ -79,7 +79,7 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
     
     try {
       projectLogger.info("Syncing project");
-      const result = await importFromGitHub(project.remote, project.token, project.githubUrl, projectLogger);
+      const result = await importFromGitHub(env.ARTIFACTS, project.name, project.githubUrl, projectLogger);
       if (result.success) {
         synced++;
         projectLogger.info("Project synced successfully");

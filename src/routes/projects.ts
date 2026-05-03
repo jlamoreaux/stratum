@@ -151,17 +151,18 @@ app.post("/:name/import", async (c) => {
       visibility = body.visibility;
     }
 
-    const repo = await c.env.ARTIFACTS.create(name);
-    const importResult = await importFromGitHub(repo.remote, repo.token, body.url, logger, branch, depth);
+    const importResult = await importFromGitHub(c.env.ARTIFACTS, name, body.url, logger, branch, depth);
     if (!importResult.success) {
       logger.error('Failed to import from GitHub', importResult.error, { url: body.url, branch });
       return internalError(importResult.error.message);
     }
 
+    const importedRepo = importResult.data;
+
     const setResult = await setProject(c.env.STATE, {
       name,
-      remote: repo.remote,
-      token: repo.token,
+      remote: importedRepo.remote,
+      token: importedRepo.token,
       createdAt: new Date().toISOString(),
       githubUrl: body.url,
       ...(parseGitHubRepo(body.url) ?? {}),
