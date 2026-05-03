@@ -21,7 +21,7 @@ const app = new Hono<{ Bindings: Env }>();
 async function getCurrentUser(c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } }, logger: ReturnType<typeof createLogger>): Promise<{ id: string; email: string } | null> {
   const userId = c.get("userId");
   if (!userId) return null;
-  const result = await getUser(c.env.DB, logger, userId);
+  const result = await getUser(c.env.DB, userId, logger);
   return result.success ? { id: result.data.id, email: result.data.email } : null;
 }
 
