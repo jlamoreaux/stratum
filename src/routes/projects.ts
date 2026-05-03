@@ -80,7 +80,23 @@ app.post("/:name/import", async (c) => {
   const { name } = c.req.param();
   if (!isValidSlug(name)) return badRequest("invalid project name");
 
-  const body = await c.req.json<{ url?: unknown; branch?: unknown; depth?: unknown; visibility?: unknown }>();
+  // Handle both JSON and form data
+  let body: { url?: unknown; branch?: unknown; depth?: unknown; visibility?: unknown };
+  const contentType = c.req.header("content-type") || "";
+  
+  if (contentType.includes("application/json")) {
+    body = await c.req.json();
+  } else {
+    // Form data
+    const formData = await c.req.parseBody();
+    body = {
+      url: formData.url,
+      branch: formData.branch,
+      depth: formData.depth ? Number(formData.depth) : undefined,
+      visibility: formData.visibility,
+    };
+  }
+
   if (!isValidGitHubUrl(body.url))
     return badRequest("url must be a valid github.com repository URL");
 
@@ -112,6 +128,11 @@ app.post("/:name/import", async (c) => {
     ownerId: userId,
     visibility,
   });
+
+  // Redirect to project page if coming from web UI (form submission)
+  if (!contentType.includes("application/json")) {
+    return c.redirect(`/p/${name}`);
+  }
 
   return created({ name, remote: repo.remote, source: body.url, visibility });
 });
