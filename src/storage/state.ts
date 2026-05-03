@@ -11,19 +11,16 @@ function parseEntry<T>(
   key: string,
   logger: Logger
 ): Result<T, AppError> {
-  console.log("[DEBUG] parseEntry", { key, rawLength: raw.length, rawPreview: raw.substring(0, 100) });
   try {
     const parsed = JSON.parse(raw) as T;
-    console.log("[DEBUG] parseEntry success", { key, parsedKeys: Object.keys(parsed as object) });
     return ok(parsed);
   } catch (error) {
-    console.log("[DEBUG] parseEntry error", { key, error: error instanceof Error ? error.message : String(error) });
-    logger.error(`Failed to parse KV entry for key "${key}" — skipping`, error instanceof Error ? error : undefined);
+    logger.error(`Failed to parse KV entry for key "${key}"`, error instanceof Error ? error : undefined);
     return err(new AppError(
       `Failed to parse KV entry for key "${key}"`,
       "PARSE_ERROR",
       500,
-      { key, raw }
+      { key }
     ));
   }
 }
@@ -50,10 +47,8 @@ export async function getProjectByPath(
   logger: Logger
 ): Promise<Result<ProjectEntry, AppError>> {
   const key = projectKey(namespace, slug);
-  console.log("[DEBUG] getProjectByPath", { namespace, slug, key });
   logger.debug('Fetching project by path', { namespace, slug, key });
   const raw = await kv.get(key);
-  console.log("[DEBUG] KV get result", { key, found: !!raw });
   if (!raw) {
     return err(new AppError(
       `Project '${namespace}/${slug}' not found`,
