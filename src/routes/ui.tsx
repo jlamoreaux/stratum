@@ -181,10 +181,19 @@ app.get("/p/:name", async (c) => {
 
 // GET /@:namespace/:slug — Repo view with namespace (NEW FORMAT)
 app.get("/@:namespace/:slug", async (c) => {
+  console.log("[DEBUG] /@:namespace/:slug route handler called", { 
+    url: c.req.url, 
+    path: c.req.path,
+    params: c.req.param()
+  });
+  
   const { namespace, slug } = c.req.param();
   const fullNamespace = `@${namespace}`;
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
+  
+  console.log("[DEBUG] Extracted values", { namespace, slug, fullNamespace, userId });
+  
   const logger = createLogger({
     path: c.req.path,
     userId,
@@ -195,6 +204,12 @@ app.get("/@:namespace/:slug", async (c) => {
     getCurrentUser(c, logger),
     getProjectByPath(c.env.STATE, fullNamespace, slug, logger),
   ]);
+  
+  console.log("[DEBUG] Project lookup result", { 
+    success: projectResult.success, 
+    hasData: projectResult.success ? !!projectResult.data : false,
+    error: projectResult.success ? null : projectResult.error?.code 
+  });
 
   if (!projectResult.success) {
     logger.warn("Project not found", { namespace: fullNamespace, slug });
