@@ -17,6 +17,25 @@ vi.mock("../src/storage/agents", () => ({
   deleteAgent: vi.fn(),
 }));
 
+vi.mock("../src/utils/logger", () => ({
+  createLogger: vi.fn(() => ({
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: vi.fn(() => ({
+      trace: vi.fn(),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      fatal: vi.fn(),
+    })),
+  })),
+}));
+
 import { createAgent, deleteAgent, getAgent, listAgents } from "../src/storage/agents";
 import { getUserByToken } from "../src/storage/users";
 
@@ -52,9 +71,12 @@ function request(
   });
 }
 
+import { NotFoundError } from "../src/utils/errors";
+
 const mockUser = {
   id: "usr_owner",
   email: "owner@example.com",
+  username: "owner",
   tokenHash: "userhash",
   createdAt: "2026-01-01T00:00:00.000Z",
 };
@@ -77,10 +99,16 @@ describe("POST /api/agents", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
     vi.mocked(createAgent).mockResolvedValue({
-      agent: mockAgent,
-      plaintext: "stratum_agent_deadbeef",
+      success: true,
+      data: {
+        agent: mockAgent,
+        plaintext: "stratum_agent_deadbeef",
+      },
     });
   });
 
@@ -103,6 +131,7 @@ describe("POST /api/agents", () => {
       env.DB,
       "usr_owner",
       "my-agent",
+      expect.any(Object),
       undefined,
       undefined,
       undefined,
@@ -112,8 +141,11 @@ describe("POST /api/agents", () => {
   it("creates agent with optional model field", async () => {
     const agentWithModel = { ...mockAgent, model: "claude-3-5-sonnet" };
     vi.mocked(createAgent).mockResolvedValue({
-      agent: agentWithModel,
-      plaintext: "stratum_agent_deadbeef",
+      success: true,
+      data: {
+        agent: agentWithModel,
+        plaintext: "stratum_agent_deadbeef",
+      },
     });
 
     const res = await app.fetch(
@@ -130,6 +162,7 @@ describe("POST /api/agents", () => {
       env.DB,
       "usr_owner",
       "my-agent",
+      expect.any(Object),
       "claude-3-5-sonnet",
       undefined,
       undefined,
@@ -160,8 +193,14 @@ describe("GET /api/agents", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(listAgents).mockResolvedValue([mockAgent]);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(listAgents).mockResolvedValue({
+      success: true,
+      data: [mockAgent],
+    });
   });
 
   it("lists agents for authenticated user", async () => {
@@ -170,7 +209,7 @@ describe("GET /api/agents", () => {
     const body = (await res.json()) as { agents: (typeof mockAgent)[] };
     expect(body.agents).toHaveLength(1);
     expect(body.agents[0]?.id).toBe("agt_abc123");
-    expect(listAgents).toHaveBeenCalledWith(env.DB, "usr_owner");
+    expect(listAgents).toHaveBeenCalledWith(env.DB, "usr_owner", expect.any(Object));
   });
 
   it("returns 401 when not authenticated", async () => {
@@ -187,9 +226,18 @@ describe("DELETE /api/agents/:id", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(getAgent).mockResolvedValue(mockAgent);
-    vi.mocked(deleteAgent).mockResolvedValue(undefined);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(getAgent).mockResolvedValue({
+      success: true,
+      data: mockAgent,
+    });
+    vi.mocked(deleteAgent).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
   });
 
   it("deletes agent owned by current user", async () => {
@@ -205,7 +253,10 @@ describe("DELETE /api/agents/:id", () => {
   });
 
   it("returns 403 when agent is owned by another user", async () => {
-    vi.mocked(getAgent).mockResolvedValue({ ...mockAgent, ownerId: "usr_other" });
+    vi.mocked(getAgent).mockResolvedValue({
+      success: true,
+      data: { ...mockAgent, ownerId: "usr_other" },
+    });
 
     const res = await app.fetch(
       request("DELETE", "/api/agents/agt_abc123", undefined, userAuthHeader),
@@ -216,7 +267,10 @@ describe("DELETE /api/agents/:id", () => {
   });
 
   it("returns 404 when agent does not exist", async () => {
-    vi.mocked(getAgent).mockResolvedValue(null);
+    vi.mocked(getAgent).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Agent", "agt_missing"),
+    });
 
     const res = await app.fetch(
       request("DELETE", "/api/agents/agt_missing", undefined, userAuthHeader),

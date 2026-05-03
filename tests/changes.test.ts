@@ -25,41 +25,56 @@ vi.mock("../src/evaluation", () => ({
   loadPolicy: vi.fn(),
   DiffEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
-      score: 1,
-      passed: true,
-      reason: "Diff passed all checks.",
+      success: true,
+      data: {
+        score: 1,
+        passed: true,
+        reason: "Diff passed all checks.",
+      },
     }),
   })),
   WebhookEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
-      score: 1,
-      passed: true,
-      reason: "Webhook passed.",
+      success: true,
+      data: {
+        score: 1,
+        passed: true,
+        reason: "Webhook passed.",
+      },
     }),
   })),
   SecretScanEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
-      score: 1,
-      passed: true,
-      reason: "No secrets detected",
+      success: true,
+      data: {
+        score: 1,
+        passed: true,
+        reason: "No secrets detected",
+      },
     }),
   })),
   SandboxEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
-      score: 1,
-      passed: true,
-      reason: "Sandbox passed.",
+      success: true,
+      data: {
+        score: 1,
+        passed: true,
+        reason: "Sandbox passed.",
+      },
     }),
   })),
   LLMEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
-      score: 1,
-      passed: true,
-      reason: "LLM passed.",
+      success: true,
+      data: {
+        score: 1,
+        passed: true,
+        reason: "LLM passed.",
+      },
     }),
   })),
   CompositeEvaluator: vi.fn().mockImplementation(() => ({
-    aggregate: vi.fn(),
+    evaluateAndAggregate: vi.fn(),
   })),
 }));
 
@@ -77,26 +92,12 @@ vi.mock("../src/queue/events", () => ({
 }));
 
 vi.mock("../src/storage/users", () => ({
-  getUserByToken: vi.fn(async (_db: unknown, token: string) => {
-    if (token === "stratum_user_testtoken00000000000000000") {
-      return {
-        id: "user_test",
-        email: "test@example.com",
-        tokenHash: "hash",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      };
-    }
-    if (token === "stratum_user_othertoken000000000000000") {
-      return {
-        id: "user_other",
-        email: "other@example.com",
-        tokenHash: "hash",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      };
-    }
-    return null;
+  getUserByToken: vi.fn(async (_db: unknown, _plaintext: string, _logger: unknown) => {
+    // The token is the second parameter
   }),
 }));
+
+// Need to setup mocks in beforeEach instead
 
 vi.mock("../src/storage/agents", () => ({
   getAgentByToken: vi.fn(async (_db: unknown, token: string) => {
@@ -118,6 +119,8 @@ import { createChange, getChange, listChanges, updateChangeStatus } from "../src
 import { listEvalRuns, recordEvalRuns } from "../src/storage/eval-runs";
 import { getDiffBetweenRepos, mergeWorkspaceIntoProject } from "../src/storage/git-ops";
 import { getProject, getWorkspace } from "../src/storage/state";
+import { getUserByToken } from "../src/storage/users";
+import { getAgentByToken } from "../src/storage/agents";
 
 const USER_AUTH = { Authorization: "Bearer stratum_user_testtoken00000000000000000" };
 const OTHER_USER_AUTH = { Authorization: "Bearer stratum_user_othertoken000000000000000" };
@@ -155,12 +158,18 @@ function request(
   });
 }
 
+import { NotFoundError, AppError } from "../src/utils/errors";
+
 const mockProject = {
+  id: "proj_test123",
   name: "my-project",
+  slug: "my-project",
+  namespace: "user_test",
+  ownerId: "user_test",
+  ownerType: "user" as const,
   remote: "https://artifacts.example.com/repos/my-project",
   token: "tok_project",
   createdAt: "2026-01-01T00:00:00.000Z",
-  ownerId: "user_test",
 };
 
 const mockWorkspace = {
@@ -205,19 +214,52 @@ describe("POST /api/projects/:name/changes", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getProject).mockResolvedValue(mockProject);
-    vi.mocked(getWorkspace).mockResolvedValue(mockWorkspace);
-    vi.mocked(createChange).mockResolvedValue(mockChange);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: {
+        id: "user_test",
+        email: "test@example.com",
+        username: "test",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    vi.mocked(getAgentByToken).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Agent", "test"),
+    });
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: mockProject,
+    });
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: mockWorkspace,
+    });
+    vi.mocked(createChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
     vi.mocked(loadPolicy).mockResolvedValue(mockPolicy);
-    vi.mocked(getDiffBetweenRepos).mockResolvedValue(
-      "diff --git a/src/index.ts b/src/index.ts\n+new line",
-    );
-    vi.mocked(updateChangeStatus).mockResolvedValue(undefined);
-    vi.mocked(recordEvalRuns).mockResolvedValue([]);
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+    });
+    vi.mocked(updateChangeStatus).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
+    vi.mocked(recordEvalRuns).mockResolvedValue({
+      success: true,
+      data: [],
+    });
     vi.mocked(CompositeEvaluator).mockImplementation(
       () =>
         ({
-          aggregate: vi.fn().mockReturnValue(passingEvalResult),
+          evaluateAndAggregate: vi.fn().mockResolvedValue({
+            success: true,
+            data: passingEvalResult,
+          }),
         }) as unknown as CompositeEvaluator,
     );
   });
@@ -286,7 +328,10 @@ describe("POST /api/projects/:name/changes", () => {
     vi.mocked(CompositeEvaluator).mockImplementation(
       () =>
         ({
-          aggregate: vi.fn().mockReturnValue(failingEvalResult),
+          evaluateAndAggregate: vi.fn().mockResolvedValue({
+            success: true,
+            data: failingEvalResult,
+          }),
         }) as unknown as CompositeEvaluator,
     );
 
@@ -317,20 +362,26 @@ describe("POST /api/projects/:name/changes", () => {
       () =>
         ({
           evaluate: vi.fn().mockResolvedValue({
-            score: 0,
-            passed: false,
-            reason: "Secret detected: AWS Access Key",
-            issues: ["AWS Access Key: line 4"],
+            success: true,
+            data: {
+              score: 0,
+              passed: false,
+              reason: "Secret detected: AWS Access Key",
+              issues: ["AWS Access Key: line 4"],
+            },
           }),
         }) as unknown as SecretScanEvaluator,
     );
     vi.mocked(CompositeEvaluator).mockImplementation(
       () =>
         ({
-          aggregate: vi.fn().mockReturnValue({
-            score: 1,
-            passed: true,
-            reason: "All evaluators passed.",
+          evaluateAndAggregate: vi.fn().mockResolvedValue({
+            success: true,
+            data: {
+              score: 1,
+              passed: true,
+              reason: "All evaluators passed.",
+            },
           }),
         }) as unknown as CompositeEvaluator,
     );
@@ -374,7 +425,10 @@ describe("POST /api/projects/:name/changes", () => {
   });
 
   it("returns 404 when project not found", async () => {
-    vi.mocked(getProject).mockResolvedValue(null);
+    vi.mocked(getProject).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Project", "no-such-project"),
+    });
     const res = await app.fetch(
       request("POST", "/api/projects/no-such-project/changes", { workspace: "fix-bug" }, USER_AUTH),
       env,
@@ -393,7 +447,10 @@ describe("POST /api/projects/:name/changes", () => {
   });
 
   it("returns 404 when workspace does not exist", async () => {
-    vi.mocked(getWorkspace).mockResolvedValue(null);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Workspace", "nonexistent"),
+    });
     const res = await app.fetch(
       request("POST", "/api/projects/my-project/changes", { workspace: "nonexistent" }, USER_AUTH),
       env,
@@ -402,7 +459,10 @@ describe("POST /api/projects/:name/changes", () => {
   });
 
   it("returns 400 when workspace does not belong to project", async () => {
-    vi.mocked(getWorkspace).mockResolvedValue({ ...mockWorkspace, parent: "other-project" });
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: { ...mockWorkspace, parent: "other-project" },
+    });
     const res = await app.fetch(
       request("POST", "/api/projects/my-project/changes", { workspace: "fix-bug" }, USER_AUTH),
       env,
@@ -421,8 +481,24 @@ describe("GET /api/projects/:name/changes", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getProject).mockResolvedValue(mockProject);
-    vi.mocked(listChanges).mockResolvedValue([mockChange]);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: {
+        id: "user_test",
+        email: "test@example.com",
+        username: "test",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: mockProject,
+    });
+    vi.mocked(listChanges).mockResolvedValue({
+      success: true,
+      data: [mockChange],
+    });
   });
 
   it("lists changes for a project", async () => {
@@ -439,7 +515,10 @@ describe("GET /api/projects/:name/changes", () => {
   });
 
   it("filters by status when ?status= is provided", async () => {
-    vi.mocked(listChanges).mockResolvedValue([]);
+    vi.mocked(listChanges).mockResolvedValue({
+      success: true,
+      data: [],
+    });
     const res = await app.fetch(
       request("GET", "/api/projects/my-project/changes?status=open", undefined, USER_AUTH),
       env,
@@ -449,7 +528,10 @@ describe("GET /api/projects/:name/changes", () => {
   });
 
   it("filters by promoted status when ?status= is provided", async () => {
-    vi.mocked(listChanges).mockResolvedValue([]);
+    vi.mocked(listChanges).mockResolvedValue({
+      success: true,
+      data: [],
+    });
     const res = await app.fetch(
       request("GET", "/api/projects/my-project/changes?status=promoted", undefined, USER_AUTH),
       env,
@@ -460,7 +542,10 @@ describe("GET /api/projects/:name/changes", () => {
   });
 
   it("returns 404 when project not found", async () => {
-    vi.mocked(getProject).mockResolvedValue(null);
+    vi.mocked(getProject).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Project", "nope"),
+    });
     const res = await app.fetch(
       request("GET", "/api/projects/nope/changes", undefined, USER_AUTH),
       env,
@@ -486,22 +571,41 @@ describe("GET /api/changes/:id", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: {
+        id: "user_test",
+        email: "test@example.com",
+        username: "test",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
   });
 
   it("returns a single change by id", async () => {
-    vi.mocked(getChange).mockResolvedValue(mockChange);
-    vi.mocked(getProject).mockResolvedValue(mockProject);
-    vi.mocked(listEvalRuns).mockResolvedValue([
-      {
-        id: "evl_abc123",
-        changeId: "chg_abc123",
-        evaluatorType: "diff",
-        score: 1,
-        passed: true,
-        reason: "ok",
-        ranAt: "2026-01-01T02:01:00.000Z",
-      },
-    ]);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: mockProject,
+    });
+    vi.mocked(listEvalRuns).mockResolvedValue({
+      success: true,
+      data: [
+        {
+          id: "evl_abc123",
+          changeId: "chg_abc123",
+          evaluatorType: "diff",
+          score: 1,
+          passed: true,
+          reason: "ok",
+          ranAt: "2026-01-01T02:01:00.000Z",
+        },
+      ],
+    });
     const res = await app.fetch(
       request("GET", "/api/changes/chg_abc123", undefined, USER_AUTH),
       env,
@@ -512,9 +616,12 @@ describe("GET /api/changes/:id", () => {
     expect(body.change.project).toBe("my-project");
     expect(body.evalRuns).toHaveLength(1);
   });
-
   it("returns 404 when change not found", async () => {
-    vi.mocked(getChange).mockResolvedValue(null);
+    vi.mocked(getChange).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Change", "chg_missing"),
+    });
+
     const res = await app.fetch(
       request("GET", "/api/changes/chg_missing", undefined, USER_AUTH),
       env,
@@ -523,8 +630,14 @@ describe("GET /api/changes/:id", () => {
   });
 
   it("returns 403 when reading another user's private change", async () => {
-    vi.mocked(getChange).mockResolvedValue(mockChange);
-    vi.mocked(getProject).mockResolvedValue(mockProject);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: mockProject,
+    });
     const res = await app.fetch(
       request("GET", "/api/changes/chg_abc123", undefined, OTHER_USER_AUTH),
       env,
@@ -541,15 +654,40 @@ describe("POST /api/changes/:id/merge", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getProject).mockResolvedValue(mockProject);
-    vi.mocked(getWorkspace).mockResolvedValue(mockWorkspace);
-    vi.mocked(mergeWorkspaceIntoProject).mockResolvedValue("sha_merged");
-    vi.mocked(updateChangeStatus).mockResolvedValue(undefined);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: {
+        id: "user_test",
+        email: "test@example.com",
+        username: "test",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: mockProject,
+    });
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: mockWorkspace,
+    });
+    vi.mocked(mergeWorkspaceIntoProject).mockResolvedValue({
+      success: true,
+      data: "sha_merged",
+    });
+    vi.mocked(updateChangeStatus).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
   });
 
   it("merges an approved change and returns merged=true", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
-    vi.mocked(getChange).mockResolvedValue(approvedChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
@@ -585,7 +723,10 @@ describe("POST /api/changes/:id/merge", () => {
 
   it("merges an accepted change", async () => {
     const acceptedChange: Change = { ...mockChange, status: "accepted" };
-    vi.mocked(getChange).mockResolvedValue(acceptedChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: acceptedChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
@@ -598,7 +739,10 @@ describe("POST /api/changes/:id/merge", () => {
 
   it("returns 401 when unauthenticated", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
-    vi.mocked(getChange).mockResolvedValue(approvedChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
 
     const res = await app.fetch(request("POST", "/api/changes/chg_abc123/merge"), env);
     expect(res.status).toBe(401);
@@ -606,7 +750,10 @@ describe("POST /api/changes/:id/merge", () => {
 
   it("returns 403 when merging another user's project", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
-    vi.mocked(getChange).mockResolvedValue(approvedChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge", undefined, OTHER_USER_AUTH),
@@ -617,7 +764,10 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("returns 400 when change is not accepted", async () => {
-    vi.mocked(getChange).mockResolvedValue(mockChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
@@ -630,7 +780,10 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("merges even non-approved change when ?force=true", async () => {
-    vi.mocked(getChange).mockResolvedValue(mockChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge?force=true", undefined, USER_AUTH),
@@ -644,7 +797,10 @@ describe("POST /api/changes/:id/merge", () => {
 
   it("passes explicit squash strategy to merge implementation", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
-    vi.mocked(getChange).mockResolvedValue(approvedChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge?strategy=squash", undefined, USER_AUTH),
@@ -662,10 +818,14 @@ describe("POST /api/changes/:id/merge", () => {
 
   it("returns 400 when merge implementation reports a conflict", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
-    vi.mocked(getChange).mockResolvedValue(approvedChange);
-    vi.mocked(mergeWorkspaceIntoProject).mockRejectedValue(
-      new Error("Merge failed; workspace may be stale or conflicting"),
-    );
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
+    vi.mocked(mergeWorkspaceIntoProject).mockResolvedValue({
+      success: false,
+      error: new AppError("Merge failed; workspace may be stale or conflicting", "MERGE_CONFLICT", 409),
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
@@ -679,7 +839,10 @@ describe("POST /api/changes/:id/merge", () => {
 
   it("rejects unknown merge strategy", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
-    vi.mocked(getChange).mockResolvedValue(approvedChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/merge?strategy=rebase", undefined, USER_AUTH),
@@ -690,7 +853,10 @@ describe("POST /api/changes/:id/merge", () => {
   });
 
   it("returns 404 when change not found", async () => {
-    vi.mocked(getChange).mockResolvedValue(null);
+    vi.mocked(getChange).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Change", "chg_missing"),
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_missing/merge", undefined, USER_AUTH),
@@ -708,12 +874,31 @@ describe("POST /api/changes/:id/reject", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getProject).mockResolvedValue(mockProject);
-    vi.mocked(updateChangeStatus).mockResolvedValue(undefined);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: {
+        id: "user_test",
+        email: "test@example.com",
+        username: "test",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: mockProject,
+    });
+    vi.mocked(updateChangeStatus).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
   });
 
   it("rejects an open change", async () => {
-    vi.mocked(getChange).mockResolvedValue(mockChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/reject", undefined, USER_AUTH),
@@ -732,14 +917,20 @@ describe("POST /api/changes/:id/reject", () => {
   });
 
   it("returns 401 when unauthenticated", async () => {
-    vi.mocked(getChange).mockResolvedValue(mockChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
 
     const res = await app.fetch(request("POST", "/api/changes/chg_abc123/reject"), env);
     expect(res.status).toBe(401);
   });
 
   it("returns 403 when rejecting another user's project change", async () => {
-    vi.mocked(getChange).mockResolvedValue(mockChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mockChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/reject", undefined, OTHER_USER_AUTH),
@@ -755,7 +946,10 @@ describe("POST /api/changes/:id/reject", () => {
       status: "merged",
       mergedAt: "2026-01-01T03:00:00.000Z",
     };
-    vi.mocked(getChange).mockResolvedValue(mergedChange);
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: mergedChange,
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/reject", undefined, USER_AUTH),
@@ -768,7 +962,10 @@ describe("POST /api/changes/:id/reject", () => {
   });
 
   it("returns 404 when change not found", async () => {
-    vi.mocked(getChange).mockResolvedValue(null);
+    vi.mocked(getChange).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Change", "chg_missing"),
+    });
 
     const res = await app.fetch(
       request("POST", "/api/changes/chg_missing/reject", undefined, USER_AUTH),

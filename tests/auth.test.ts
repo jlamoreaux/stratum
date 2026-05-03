@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import type { Env } from "../src/types";
+import { NotFoundError } from "../src/utils/errors";
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
@@ -58,10 +59,14 @@ describe("authMiddleware", () => {
 
   it("sets userId for valid user token", async () => {
     vi.mocked(getUserByToken).mockResolvedValue({
-      id: "usr_abc",
-      email: "test@example.com",
-      tokenHash: "hash",
-      createdAt: "2026-01-01T00:00:00.000Z",
+      success: true,
+      data: {
+        id: "usr_abc",
+        email: "test@example.com",
+        username: "test",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
     });
 
     const res = await app.fetch(
@@ -71,16 +76,19 @@ describe("authMiddleware", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { userId: string | null };
     expect(body.userId).toBe("usr_abc");
-    expect(getUserByToken).toHaveBeenCalledWith(env.DB, "stratum_user_abc123");
+    expect(getUserByToken).toHaveBeenCalledWith(env.DB, "stratum_user_abc123", expect.any(Object));
   });
 
   it("sets agentId for valid agent token", async () => {
     vi.mocked(getAgentByToken).mockResolvedValue({
-      id: "agt_xyz",
-      name: "my-agent",
-      ownerId: "usr_abc",
-      tokenHash: "hash",
-      createdAt: "2026-01-01T00:00:00.000Z",
+      success: true,
+      data: {
+        id: "agt_xyz",
+        name: "my-agent",
+        ownerId: "usr_abc",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
     });
 
     const res = await app.fetch(
@@ -90,7 +98,7 @@ describe("authMiddleware", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { agentId: string | null };
     expect(body.agentId).toBe("agt_xyz");
-    expect(getAgentByToken).toHaveBeenCalledWith(env.DB, "stratum_agent_xyz123");
+    expect(getAgentByToken).toHaveBeenCalledWith(env.DB, "stratum_agent_xyz123", expect.any(Object));
   });
 
   it("returns 401 for token with unrecognized prefix", async () => {
@@ -104,7 +112,10 @@ describe("authMiddleware", () => {
   });
 
   it("returns 401 when user token not found in DB", async () => {
-    vi.mocked(getUserByToken).mockResolvedValue(null);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("User", "notfound"),
+    });
 
     const res = await app.fetch(
       request("/test", { Authorization: "Bearer stratum_user_notfound" }),
@@ -116,7 +127,10 @@ describe("authMiddleware", () => {
   });
 
   it("returns 401 when agent token not found in DB", async () => {
-    vi.mocked(getAgentByToken).mockResolvedValue(null);
+    vi.mocked(getAgentByToken).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Agent", "notfound"),
+    });
 
     const res = await app.fetch(
       request("/test", { Authorization: "Bearer stratum_agent_notfound" }),

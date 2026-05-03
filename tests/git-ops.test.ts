@@ -37,12 +37,14 @@ describe("MemoryFS walkDir (via manual test)", () => {
 });
 
 async function walkDir(fs: MemoryFS, base: string, prefix: string): Promise<string[]> {
-  const entries = await fs.promises.readdir(base === "/" ? "/" : base);
+  const nodeFS = fs.toNodeFS();
+  const entries = await nodeFS.promises.readdir(base === "/" ? "/" : base);
+  
   const files: string[] = [];
   for (const entry of entries) {
     if (entry === ".git") continue;
     const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
-    const stat = await fs.promises.stat(fullPath);
+    const stat = await nodeFS.promises.stat(fullPath);
     if (stat.isDirectory()) {
       files.push(...(await walkDir(fs, fullPath, `${prefix}${entry}/`)));
     } else {
@@ -58,9 +60,13 @@ describe("commitAndPush path construction", () => {
     const base = "/";
     const path = "src/index.ts";
     const fullPath = `${base.endsWith("/") ? base : `${base}/`}${path}`;
-    await fs.promises.writeFile(fullPath, "content");
-    const result = await fs.promises.readFile("/src/index.ts", { encoding: "utf8" });
-    expect(result).toBe("content");
+    const writeResult = await fs.writeFile(fullPath, "content");
+    expect(writeResult.success).toBe(true);
+    const result = await fs.readFile("/src/index.ts", { encoding: "utf8" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toBe("content");
+    }
   });
 
   it("writeFile path is correct when dir has no trailing slash", async () => {
@@ -68,9 +74,13 @@ describe("commitAndPush path construction", () => {
     const base = "/repo";
     const path = "src/index.ts";
     const fullPath = `${base.endsWith("/") ? base : `${base}/`}${path}`;
-    await fs.promises.writeFile(fullPath, "content");
-    const result = await fs.promises.readFile("/repo/src/index.ts", { encoding: "utf8" });
-    expect(result).toBe("content");
+    const writeResult = await fs.writeFile(fullPath, "content");
+    expect(writeResult.success).toBe(true);
+    const result = await fs.readFile("/repo/src/index.ts", { encoding: "utf8" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toBe("content");
+    }
   });
 });
 

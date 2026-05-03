@@ -210,44 +210,56 @@ export class MemoryFS {
    * Returns a Node.js fs-compatible interface for isomorphic-git
    * This unwraps Result objects and throws errors like standard Node.js fs
    */
-  toNodeFS(): MemoryFS {
-    const nodeFS = Object.create(this);
-    nodeFS.promises = {
-      readFile: async (path: string, options?: string | { encoding?: string }) => {
-        const result = await this.readFile(path, options);
-        if (!result.success) throw result.error;
-        return result.data;
-      },
-      writeFile: async (path: string, data: string | Uint8Array) => {
-        const result = await this.writeFile(path, data);
-        if (!result.success) throw result.error;
-      },
-      unlink: async (path: string) => {
-        const result = await this.unlink(path);
-        if (!result.success) throw result.error;
-      },
-      readdir: async (path: string) => {
-        const result = await this.readdir(path);
-        if (!result.success) throw result.error;
-        return result.data;
-      },
-      mkdir: async (path: string, options?: { recursive?: boolean }) => {
-        const result = await this.mkdir(path, options);
-        if (!result.success) throw result.error;
-      },
-      rmdir: async (path: string) => {
-        const result = await this.rmdir(path);
-        if (!result.success) throw result.error;
-      },
-      stat: async (path: string) => {
-        const result = await this.stat(path);
-        if (!result.success) throw result.error;
-        return result.data;
-      },
-      lstat: async (path: string) => {
-        const result = await this.lstat(path);
-        if (!result.success) throw result.error;
-        return result.data;
+  toNodeFS(): {
+    promises: {
+      readFile: (path: string, options?: string | { encoding?: string }) => Promise<string | Uint8Array>;
+      writeFile: (path: string, data: string | Uint8Array) => Promise<void>;
+      unlink: (path: string) => Promise<void>;
+      readdir: (path: string) => Promise<string[]>;
+      mkdir: (path: string, options?: { recursive?: boolean }) => Promise<void>;
+      rmdir: (path: string) => Promise<void>;
+      stat: (path: string) => Promise<MemoryStats>;
+      lstat: (path: string) => Promise<MemoryStats>;
+    };
+  } {
+    const nodeFS = {
+      promises: {
+        readFile: async (path: string, options?: string | { encoding?: string }) => {
+          const result = await this.readFile(path, options);
+          if (!result.success) throw result.error;
+          return result.data;
+        },
+        writeFile: async (path: string, data: string | Uint8Array) => {
+          const result = await this.writeFile(path, data);
+          if (!result.success) throw result.error;
+        },
+        unlink: async (path: string) => {
+          const result = await this.unlink(path);
+          if (!result.success) throw result.error;
+        },
+        readdir: async (path: string) => {
+          const result = await this.readdir(path);
+          if (!result.success) throw result.error;
+          return result.data;
+        },
+        mkdir: async (path: string, options?: { recursive?: boolean }) => {
+          const result = await this.mkdir(path, options);
+          if (!result.success) throw result.error;
+        },
+        rmdir: async (path: string) => {
+          const result = await this.rmdir(path);
+          if (!result.success) throw result.error;
+        },
+        stat: async (path: string) => {
+          const result = await this.stat(path);
+          if (!result.success) throw result.error;
+          return result.data;
+        },
+        lstat: async (path: string) => {
+          const result = await this.lstat(path);
+          if (!result.success) throw result.error;
+          return result.data;
+        },
       },
     };
     return nodeFS;

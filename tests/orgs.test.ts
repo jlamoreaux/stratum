@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import { orgsRouter } from "../src/routes/orgs";
 import type { Env } from "../src/types";
+import { NotFoundError } from "../src/utils/errors";
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
@@ -83,6 +84,7 @@ function request(
 const mockUser = {
   id: "usr_owner",
   email: "owner@example.com",
+  username: "owner",
   tokenHash: "hash",
   createdAt: "2026-01-01T00:00:00.000Z",
 };
@@ -114,9 +116,18 @@ describe("POST /api/orgs", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(createOrg).mockResolvedValue(mockOrg);
-    vi.mocked(addOrgMember).mockResolvedValue(undefined);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(createOrg).mockResolvedValue({
+      success: true,
+      data: mockOrg,
+    });
+    vi.mocked(addOrgMember).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
   });
 
   it("creates org and auto-adds owner as admin", async () => {
@@ -164,8 +175,14 @@ describe("GET /api/orgs", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(listOrgsForUser).mockResolvedValue([mockOrg]);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(listOrgsForUser).mockResolvedValue({
+      success: true,
+      data: [mockOrg],
+    });
   });
 
   it("lists orgs for current user", async () => {
@@ -191,7 +208,10 @@ describe("GET /api/orgs/:slug", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getOrgBySlug).mockResolvedValue(mockOrg);
+    vi.mocked(getOrgBySlug).mockResolvedValue({
+      success: true,
+      data: mockOrg,
+    });
   });
 
   it("returns org by slug", async () => {
@@ -203,7 +223,10 @@ describe("GET /api/orgs/:slug", () => {
   });
 
   it("returns 404 for unknown slug", async () => {
-    vi.mocked(getOrgBySlug).mockResolvedValue(null);
+    vi.mocked(getOrgBySlug).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Org", "no-such-org"),
+    });
     const res = await app.fetch(request("GET", "/api/orgs/no-such-org"), env);
     expect(res.status).toBe(404);
   });
@@ -217,10 +240,22 @@ describe("POST /api/orgs/:slug/members", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(getOrgBySlug).mockResolvedValue(mockOrg);
-    vi.mocked(isOrgAdmin).mockResolvedValue(true);
-    vi.mocked(addOrgMember).mockResolvedValue(undefined);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(getOrgBySlug).mockResolvedValue({
+      success: true,
+      data: mockOrg,
+    });
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: true,
+    });
+    vi.mocked(addOrgMember).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
   });
 
   it("adds member when caller is org admin", async () => {
@@ -236,7 +271,10 @@ describe("POST /api/orgs/:slug/members", () => {
   });
 
   it("returns 403 when caller is not org admin", async () => {
-    vi.mocked(isOrgAdmin).mockResolvedValue(false);
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: false,
+    });
     const res = await app.fetch(
       request("POST", "/api/orgs/my-org/members", { userId: "usr_other" }, authHeader),
       env,
@@ -262,10 +300,22 @@ describe("DELETE /api/orgs/:slug/members/:uid", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(getOrgBySlug).mockResolvedValue(mockOrg);
-    vi.mocked(isOrgAdmin).mockResolvedValue(true);
-    vi.mocked(removeOrgMember).mockResolvedValue(undefined);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(getOrgBySlug).mockResolvedValue({
+      success: true,
+      data: mockOrg,
+    });
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: true,
+    });
+    vi.mocked(removeOrgMember).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
   });
 
   it("removes member when caller is org admin", async () => {
@@ -281,7 +331,10 @@ describe("DELETE /api/orgs/:slug/members/:uid", () => {
   });
 
   it("returns 403 when caller is not org admin", async () => {
-    vi.mocked(isOrgAdmin).mockResolvedValue(false);
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: false,
+    });
     const res = await app.fetch(
       request("DELETE", "/api/orgs/my-org/members/usr_other", undefined, authHeader),
       env,
@@ -299,10 +352,22 @@ describe("POST /api/orgs/:slug/teams", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(getOrgBySlug).mockResolvedValue(mockOrg);
-    vi.mocked(isOrgAdmin).mockResolvedValue(true);
-    vi.mocked(createTeam).mockResolvedValue(mockTeam);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(getOrgBySlug).mockResolvedValue({
+      success: true,
+      data: mockOrg,
+    });
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: true,
+    });
+    vi.mocked(createTeam).mockResolvedValue({
+      success: true,
+      data: mockTeam,
+    });
   });
 
   it("creates team when caller is org admin", async () => {
@@ -323,7 +388,10 @@ describe("POST /api/orgs/:slug/teams", () => {
   });
 
   it("returns 403 when caller is not org admin", async () => {
-    vi.mocked(isOrgAdmin).mockResolvedValue(false);
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: false,
+    });
     const res = await app.fetch(
       request(
         "POST",
@@ -359,12 +427,30 @@ describe("DELETE /api/orgs/:slug/teams/:id", () => {
     app = makeApp();
     env = makeEnv();
     vi.clearAllMocks();
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(getOrgBySlug).mockResolvedValue(mockOrg);
-    vi.mocked(isOrgAdmin).mockResolvedValue(true);
-    vi.mocked(getTeam).mockResolvedValue(mockTeam);
-    vi.mocked(deleteTeam).mockResolvedValue(undefined);
-    vi.mocked(listTeams).mockResolvedValue([mockTeam]);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(getOrgBySlug).mockResolvedValue({
+      success: true,
+      data: mockOrg,
+    });
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: true,
+    });
+    vi.mocked(getTeam).mockResolvedValue({
+      success: true,
+      data: mockTeam,
+    });
+    vi.mocked(deleteTeam).mockResolvedValue({
+      success: true,
+      data: undefined,
+    });
+    vi.mocked(listTeams).mockResolvedValue({
+      success: true,
+      data: [mockTeam],
+    });
   });
 
   it("deletes team when caller is org admin", async () => {
@@ -380,7 +466,10 @@ describe("DELETE /api/orgs/:slug/teams/:id", () => {
   });
 
   it("returns 403 when caller is not org admin", async () => {
-    vi.mocked(isOrgAdmin).mockResolvedValue(false);
+    vi.mocked(isOrgAdmin).mockResolvedValue({
+      success: true,
+      data: false,
+    });
     const res = await app.fetch(
       request("DELETE", "/api/orgs/my-org/teams/team_abc", undefined, authHeader),
       env,
@@ -390,7 +479,10 @@ describe("DELETE /api/orgs/:slug/teams/:id", () => {
   });
 
   it("returns 404 when team does not exist", async () => {
-    vi.mocked(getTeam).mockResolvedValue(null);
+    vi.mocked(getTeam).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Team", "team_missing"),
+    });
     const res = await app.fetch(
       request("DELETE", "/api/orgs/my-org/teams/team_missing", undefined, authHeader),
       env,
@@ -399,7 +491,10 @@ describe("DELETE /api/orgs/:slug/teams/:id", () => {
   });
 
   it("returns 404 when team belongs to a different org", async () => {
-    vi.mocked(getTeam).mockResolvedValue({ ...mockTeam, orgId: "org_other" });
+    vi.mocked(getTeam).mockResolvedValue({
+      success: true,
+      data: { ...mockTeam, orgId: "org_other" },
+    });
     const res = await app.fetch(
       request("DELETE", "/api/orgs/my-org/teams/team_abc", undefined, authHeader),
       env,

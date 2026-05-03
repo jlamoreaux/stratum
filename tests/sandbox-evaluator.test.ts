@@ -2,6 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { SandboxEvaluator } from "../src/evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../src/evaluation/types";
 import type { SandboxBinding, SandboxInstance } from "../src/types";
+import type { Logger } from "../src/utils/logger";
+
+const mockLogger: Logger = {
+  trace: vi.fn(),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  fatal: vi.fn(),
+  child: vi.fn(() => mockLogger),
+};
 
 function makeMockSandbox(opts: {
   exitCode?: number;
@@ -59,17 +70,23 @@ describe("SandboxEvaluator — exit code behaviour", () => {
   it("exit code 0 → score 1.0, passed: true", async () => {
     const binding = makeMockSandbox({ exitCode: 0, stdout: "ok" });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.score).toBe(1.0);
-    expect(result.passed).toBe(true);
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(1.0);
+      expect(result.data.passed).toBe(true);
+    }
   });
 
   it("exit code 1 with no parseable output → score 0.0, passed: false", async () => {
     const binding = makeMockSandbox({ exitCode: 1, stdout: "something broke" });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.score).toBe(0.0);
-    expect(result.passed).toBe(false);
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0.0);
+      expect(result.data.passed).toBe(false);
+    }
   });
 });
 
@@ -77,39 +94,54 @@ describe("SandboxEvaluator — test output parsing", () => {
   it('"5 passed, 0 failed" → score 1.0', async () => {
     const binding = makeMockSandbox({ exitCode: 0, stdout: "5 passed, 0 failed" });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.score).toBe(1.0);
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(1.0);
+    }
   });
 
   it('"3 passed, 2 failed" → score 0.6, passed: false (minScore 0.7)', async () => {
     const binding = makeMockSandbox({ exitCode: 1, stdout: "3 passed, 2 failed" });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy({ minScore: 0.7 }));
-    expect(result.score).toBeCloseTo(0.6);
-    expect(result.passed).toBe(false);
+    const result = await evaluator.evaluate("", makePolicy({ minScore: 0.7 }), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBeCloseTo(0.6);
+      expect(result.data.passed).toBe(false);
+    }
   });
 
   it('"0 passed, 5 failed" → score 0.0', async () => {
     const binding = makeMockSandbox({ exitCode: 1, stdout: "0 passed, 5 failed" });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.score).toBe(0.0);
-    expect(result.passed).toBe(false);
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0.0);
+      expect(result.data.passed).toBe(false);
+    }
   });
 
   it('"5 passed, 1 failed" → score ~0.833, passed: true (minScore 0.7)', async () => {
     const binding = makeMockSandbox({ exitCode: 1, stdout: "5 passed, 1 failed" });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy({ minScore: 0.7 }));
-    expect(result.score).toBeCloseTo(5 / 6);
-    expect(result.passed).toBe(true);
+    const result = await evaluator.evaluate("", makePolicy({ minScore: 0.7 }), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBeCloseTo(5 / 6);
+      expect(result.data.passed).toBe(true);
+    }
   });
 
   it("exit code 0 with no parseable output → score 1.0", async () => {
     const binding = makeMockSandbox({ exitCode: 0, stdout: "All done." });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.score).toBe(1.0);
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(1.0);
+    }
   });
 });
 
@@ -117,21 +149,21 @@ describe("SandboxEvaluator — error handling", () => {
   it("sandbox.create() throws → returns failed EvalResult without rethrowing", async () => {
     const binding = makeMockSandbox({ createThrows: true });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.score).toBe(0);
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("Sandbox error");
-    expect(result.reason).toContain("Sandbox unavailable");
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("Sandbox unavailable");
+    }
   });
 
   it("run() throws (timeout) → returns failed EvalResult without rethrowing", async () => {
     const binding = makeMockSandbox({ runThrows: true });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.score).toBe(0);
-    expect(result.passed).toBe(false);
-    expect(result.reason).toContain("Sandbox error");
-    expect(result.reason).toContain("Timeout");
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("Timeout");
+    }
   });
 });
 
@@ -147,7 +179,7 @@ describe("SandboxEvaluator — file writing", () => {
     ]);
 
     const evaluator = new SandboxEvaluator(binding);
-    await evaluator.evaluate(diff, makePolicy());
+    await evaluator.evaluate(diff, makePolicy(), mockLogger);
 
     expect(instance.writeFile).toHaveBeenCalledWith("src/foo.ts", expect.any(String));
     expect(instance.writeFile).toHaveBeenCalledWith("src/bar.ts", expect.any(String));
@@ -161,7 +193,7 @@ describe("SandboxEvaluator — destroy lifecycle", () => {
     (binding.create as ReturnType<typeof vi.fn>).mockResolvedValue(instance);
 
     const evaluator = new SandboxEvaluator(binding);
-    await evaluator.evaluate("", makePolicy());
+    await evaluator.evaluate("", makePolicy(), mockLogger);
 
     expect(instance.destroy).toHaveBeenCalledOnce();
   });
@@ -178,7 +210,7 @@ describe("SandboxEvaluator — destroy lifecycle", () => {
     };
 
     const evaluator = new SandboxEvaluator(binding);
-    await evaluator.evaluate("", makePolicy());
+    await evaluator.evaluate("", makePolicy(), mockLogger);
 
     expect(destroyFn).toHaveBeenCalledOnce();
   });
@@ -192,9 +224,12 @@ describe("SandboxEvaluator — feature flag / no-op", () => {
       evaluators: [{ type: "diff" }],
       minScore: 0.7,
     };
-    const result = await evaluator.evaluate("", policy);
-    expect(result.score).toBe(1.0);
-    expect(result.passed).toBe(true);
+    const result = await evaluator.evaluate("", policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(1.0);
+      expect(result.data.passed).toBe(true);
+    }
     expect(binding.create).not.toHaveBeenCalled();
   });
 });
@@ -204,7 +239,10 @@ describe("SandboxEvaluator — reason field", () => {
     const longOutput = "x".repeat(600);
     const binding = makeMockSandbox({ exitCode: 0, stdout: longOutput });
     const evaluator = new SandboxEvaluator(binding);
-    const result = await evaluator.evaluate("", makePolicy());
-    expect(result.reason.length).toBeLessThanOrEqual(500);
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.reason.length).toBeLessThanOrEqual(500);
+    }
   });
 });

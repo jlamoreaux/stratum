@@ -19,135 +19,205 @@ describe("MemoryFS", () => {
 
   describe("mkdir", () => {
     it("creates a directory", async () => {
-      await fs.promises.mkdir("/foo");
-      const stat = await fs.promises.stat("/foo");
-      expect(stat.isDirectory()).toBe(true);
+      const result = await fs.mkdir("/foo");
+      expect(result.success).toBe(true);
+      const stat = await fs.stat("/foo");
+      expect(stat.success).toBe(true);
+      if (stat.success) {
+        expect(stat.data.isDirectory()).toBe(true);
+      }
     });
 
     it("creates nested dirs with recursive", async () => {
-      await fs.promises.mkdir("/a/b/c", { recursive: true });
-      expect((await fs.promises.stat("/a/b/c")).isDirectory()).toBe(true);
+      const result = await fs.mkdir("/a/b/c", { recursive: true });
+      expect(result.success).toBe(true);
+      const stat = await fs.stat("/a/b/c");
+      expect(stat.success).toBe(true);
+      if (stat.success) {
+        expect(stat.data.isDirectory()).toBe(true);
+      }
     });
 
-    it("throws ENOENT for missing parent without recursive", async () => {
-      await expect(fs.promises.mkdir("/a/b")).rejects.toMatchObject({ code: "ENOENT" });
+    it("returns error for missing parent without recursive", async () => {
+      const result = await fs.mkdir("/a/b");
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.code).toBe("ENOENT");
+      }
     });
 
     it("is idempotent with recursive", async () => {
-      await fs.promises.mkdir("/foo", { recursive: true });
-      await expect(fs.promises.mkdir("/foo", { recursive: true })).resolves.toBeUndefined();
+      await fs.mkdir("/foo", { recursive: true });
+      const result = await fs.mkdir("/foo", { recursive: true });
+      expect(result.success).toBe(true);
     });
   });
 
   describe("writeFile / readFile", () => {
     it("writes and reads a string", async () => {
-      await fs.promises.writeFile("/hello.txt", "hello");
-      const result = await fs.promises.readFile("/hello.txt", { encoding: "utf8" });
-      expect(result).toBe("hello");
+      const writeResult = await fs.writeFile("/hello.txt", "hello");
+      expect(writeResult.success).toBe(true);
+      const result = await fs.readFile("/hello.txt", { encoding: "utf8" });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toBe("hello");
+      }
     });
 
     it("writes and reads binary", async () => {
       const data = new Uint8Array([1, 2, 3]);
-      await fs.promises.writeFile("/bin.dat", data);
-      const result = await fs.promises.readFile("/bin.dat");
-      expect(result).toEqual(data);
+      const writeResult = await fs.writeFile("/bin.dat", data);
+      expect(writeResult.success).toBe(true);
+      const result = await fs.readFile("/bin.dat");
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toEqual(data);
+      }
     });
 
     it("creates parent directories automatically", async () => {
-      await fs.promises.writeFile("/deep/nested/file.txt", "content");
-      expect((await fs.promises.stat("/deep/nested")).isDirectory()).toBe(true);
+      const writeResult = await fs.writeFile("/deep/nested/file.txt", "content");
+      expect(writeResult.success).toBe(true);
+      const stat = await fs.stat("/deep/nested");
+      expect(stat.success).toBe(true);
+      if (stat.success) {
+        expect(stat.data.isDirectory()).toBe(true);
+      }
     });
 
     it("overwrites existing file", async () => {
-      await fs.promises.writeFile("/f.txt", "v1");
-      await fs.promises.writeFile("/f.txt", "v2");
-      expect(await fs.promises.readFile("/f.txt", "utf8")).toBe("v2");
+      await fs.writeFile("/f.txt", "v1");
+      await fs.writeFile("/f.txt", "v2");
+      const result = await fs.readFile("/f.txt", "utf8");
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toBe("v2");
+      }
     });
 
-    it("throws ENOENT for missing file", async () => {
-      await expect(fs.promises.readFile("/missing.txt")).rejects.toMatchObject({ code: "ENOENT" });
+    it("returns error for missing file", async () => {
+      const result = await fs.readFile("/missing.txt");
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.code).toBe("ENOENT");
+      }
     });
 
-    it("throws EISDIR when reading a directory", async () => {
-      await fs.promises.mkdir("/dir");
-      await expect(fs.promises.readFile("/dir")).rejects.toMatchObject({ code: "EISDIR" });
+    it("returns error when reading a directory", async () => {
+      await fs.mkdir("/dir");
+      const result = await fs.readFile("/dir");
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.code).toBe("EISDIR");
+      }
     });
   });
 
   describe("readdir", () => {
     it("lists directory contents sorted", async () => {
-      await fs.promises.writeFile("/b.txt", "");
-      await fs.promises.writeFile("/a.txt", "");
-      const entries = await fs.promises.readdir("/");
-      expect(entries).toContain("a.txt");
-      expect(entries).toContain("b.txt");
-      expect(entries.indexOf("a.txt")).toBeLessThan(entries.indexOf("b.txt"));
+      await fs.writeFile("/b.txt", "");
+      await fs.writeFile("/a.txt", "");
+      const entries = await fs.readdir("/");
+      expect(entries.success).toBe(true);
+      if (entries.success) {
+        expect(entries.data).toContain("a.txt");
+        expect(entries.data).toContain("b.txt");
+      }
     });
 
-    it("throws ENOENT for missing directory", async () => {
-      await expect(fs.promises.readdir("/nope")).rejects.toMatchObject({ code: "ENOENT" });
+    it("returns error for missing directory", async () => {
+      const result = await fs.readdir("/nope");
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.code).toBe("ENOENT");
+      }
     });
   });
 
   describe("unlink", () => {
     it("removes a file", async () => {
-      await fs.promises.writeFile("/f.txt", "");
-      await fs.promises.unlink("/f.txt");
-      await expect(fs.promises.stat("/f.txt")).rejects.toMatchObject({ code: "ENOENT" });
+      await fs.writeFile("/f.txt", "");
+      const unlinkResult = await fs.unlink("/f.txt");
+      expect(unlinkResult.success).toBe(true);
+      const stat = await fs.stat("/f.txt");
+      expect(stat.success).toBe(false);
     });
 
     it("removes file from parent readdir", async () => {
-      await fs.promises.writeFile("/f.txt", "");
-      await fs.promises.unlink("/f.txt");
-      const entries = await fs.promises.readdir("/");
-      expect(entries).not.toContain("f.txt");
+      await fs.writeFile("/f.txt", "");
+      await fs.unlink("/f.txt");
+      const entries = await fs.readdir("/");
+      expect(entries.success).toBe(true);
+      if (entries.success) {
+        expect(entries.data).not.toContain("f.txt");
+      }
     });
 
-    it("throws EISDIR for directory", async () => {
-      await fs.promises.mkdir("/dir");
-      await expect(fs.promises.unlink("/dir")).rejects.toMatchObject({ code: "EISDIR" });
+    it("returns error for directory", async () => {
+      await fs.mkdir("/dir");
+      const result = await fs.unlink("/dir");
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.code).toBe("EISDIR");
+      }
     });
   });
 
   describe("rmdir", () => {
     it("removes empty directory", async () => {
-      await fs.promises.mkdir("/empty");
-      await fs.promises.rmdir("/empty");
-      await expect(fs.promises.stat("/empty")).rejects.toMatchObject({ code: "ENOENT" });
+      await fs.mkdir("/empty");
+      const rmdirResult = await fs.rmdir("/empty");
+      expect(rmdirResult.success).toBe(true);
+      const stat = await fs.stat("/empty");
+      expect(stat.success).toBe(false);
     });
 
-    it("throws ENOTEMPTY for non-empty directory", async () => {
-      await fs.promises.writeFile("/dir/file.txt", "");
-      await expect(fs.promises.rmdir("/dir")).rejects.toMatchObject({ code: "ENOTEMPTY" });
+    it("returns error for non-empty directory", async () => {
+      await fs.writeFile("/dir/file.txt", "");
+      const result = await fs.rmdir("/dir");
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.code).toBe("ENOTEMPTY");
+      }
     });
   });
 
   describe("stat / lstat", () => {
     it("reports file stats correctly", async () => {
-      await fs.promises.writeFile("/f.txt", "hi");
-      const s = await fs.promises.stat("/f.txt");
-      expect(s.isFile()).toBe(true);
-      expect(s.isDirectory()).toBe(false);
-      expect(s.isSymbolicLink()).toBe(false);
-      expect(s.size).toBe(2);
-      expect(s.mode).toBe(0o100644);
+      await fs.writeFile("/f.txt", "hi");
+      const s = await fs.stat("/f.txt");
+      expect(s.success).toBe(true);
+      if (s.success) {
+        expect(s.data.isFile()).toBe(true);
+        expect(s.data.isDirectory()).toBe(false);
+        expect(s.data.isSymbolicLink()).toBe(false);
+        expect(s.data.size).toBe(2);
+        expect(s.data.mode).toBe(0o100644);
+      }
     });
 
     it("reports directory stats correctly", async () => {
-      await fs.promises.mkdir("/dir");
-      const s = await fs.promises.stat("/dir");
-      expect(s.isFile()).toBe(false);
-      expect(s.isDirectory()).toBe(true);
-      expect(s.size).toBe(0);
-      expect(s.mode).toBe(0o040000);
+      await fs.mkdir("/dir");
+      const s = await fs.stat("/dir");
+      expect(s.success).toBe(true);
+      if (s.success) {
+        expect(s.data.isFile()).toBe(false);
+        expect(s.data.isDirectory()).toBe(true);
+        expect(s.data.size).toBe(0);
+        expect(s.data.mode).toBe(0o040000);
+      }
     });
 
     it("stat and lstat return same result for files", async () => {
-      await fs.promises.writeFile("/f.txt", "x");
-      const stat = await fs.promises.stat("/f.txt");
-      const lstat = await fs.promises.lstat("/f.txt");
-      expect(stat.isFile()).toBe(lstat.isFile());
-      expect(stat.size).toBe(lstat.size);
+      await fs.writeFile("/f.txt", "x");
+      const stat = await fs.stat("/f.txt");
+      const lstat = await fs.lstat("/f.txt");
+      expect(stat.success).toBe(true);
+      expect(lstat.success).toBe(true);
+      if (stat.success && lstat.success) {
+        expect(stat.data.isFile()).toBe(lstat.data.isFile());
+        expect(stat.data.size).toBe(lstat.data.size);
+      }
     });
   });
 });

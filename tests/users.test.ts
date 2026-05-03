@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import { usersRouter } from "../src/routes/users";
 import type { Env } from "../src/types";
+import { NotFoundError } from "../src/utils/errors";
 
 vi.mock("../src/storage/users", () => ({
   createUser: vi.fn(),
@@ -51,6 +52,7 @@ function request(
 const mockUser = {
   id: "usr_abc123",
   email: "test@example.com",
+  username: "test",
   tokenHash: "somehash",
   createdAt: "2026-01-01T00:00:00.000Z",
 };
@@ -64,8 +66,11 @@ describe("POST /api/users", () => {
     env = makeEnv();
     vi.clearAllMocks();
     vi.mocked(createUser).mockResolvedValue({
-      user: mockUser,
-      plaintext: "stratum_user_deadbeef",
+      success: true,
+      data: {
+        user: mockUser,
+        plaintext: "stratum_user_deadbeef",
+      },
     });
   });
 
@@ -80,7 +85,7 @@ describe("POST /api/users", () => {
     expect(body.user.email).toBe("test@example.com");
     expect(body.token).toBe("stratum_user_deadbeef");
     expect(body.user).not.toHaveProperty("tokenHash");
-    expect(createUser).toHaveBeenCalledWith(env.DB, "test@example.com");
+    expect(createUser).toHaveBeenCalledWith(env.DB, "test@example.com", expect.any(Object));
   });
 
   it("returns 400 for invalid email", async () => {
@@ -113,8 +118,14 @@ describe("GET /api/users/me", () => {
   });
 
   it("returns current user when authenticated", async () => {
-    vi.mocked(getUserByToken).mockResolvedValue(mockUser);
-    vi.mocked(getUser).mockResolvedValue(mockUser);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
+    vi.mocked(getUser).mockResolvedValue({
+      success: true,
+      data: mockUser,
+    });
 
     const res = await app.fetch(
       request("GET", "/api/users/me", undefined, {
@@ -137,7 +148,10 @@ describe("GET /api/users/me", () => {
   });
 
   it("returns 401 when token is invalid", async () => {
-    vi.mocked(getUserByToken).mockResolvedValue(null);
+    vi.mocked(getUserByToken).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("User", "badtoken"),
+    });
     const res = await app.fetch(
       request("GET", "/api/users/me", undefined, {
         Authorization: "Bearer stratum_user_badtoken",

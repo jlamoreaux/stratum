@@ -93,7 +93,7 @@ vi.mock("../src/storage/provenance", () => ({
 }));
 
 // Mock imports storage
-const mockImportProgress: Record<string, unknown> = {};
+const mockImportProgress: Record<string, Record<string, unknown>> = {};
 vi.mock("../src/storage/imports", () => ({
   getImportProgress: vi.fn(async (_kv, namespace: string, slug: string) => {
     const key = `${namespace}:${slug}`;
