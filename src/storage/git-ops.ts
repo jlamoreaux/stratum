@@ -1,13 +1,27 @@
 import { createPatch } from "diff";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
-import type { ArtifactsNamespace, Author, CommitLogEntry } from "../types";
+import type { ArtifactsCreateResult, ArtifactsNamespace, Author, CommitLogEntry } from "../types";
 import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { err, fromPromise, ok, type Result } from "../utils/result";
 import { MemoryFS } from "./memory-fs";
 
 const DIR = "/";
+
+// Node.js-compatible FS interface (returned by MemoryFS.toNodeFS())
+interface NodeFS {
+  promises: {
+    readFile(path: string, options?: { encoding?: string }): Promise<string | Uint8Array>;
+    writeFile(path: string, data: string | Uint8Array): Promise<void>;
+    unlink(path: string): Promise<void>;
+    readdir(path: string): Promise<string[]>;
+    mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+    rmdir(path: string): Promise<void>;
+    stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+    lstat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+  };
+}
 
 const SYSTEM_AUTHOR: Author = { name: "Stratum", email: "system@usestratum.dev" };
 
@@ -93,7 +107,7 @@ export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-): Promise<Result<{ fs: MemoryFS; dir: string }, AppError>> {
+): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote });
 
   const fs = new MemoryFS().toNodeFS();
@@ -116,11 +130,11 @@ export async function cloneRepo(
   }
 
   logger.info("Successfully cloned repository", { remote });
-  return ok({ fs, dir: DIR });
+  return ok({ fs: fs as unknown as NodeFS, dir: DIR });
 }
 
 export async function commitAndPush(
-  fs: MemoryFS,
+  fs: NodeFS,
   dir: string,
   remote: string,
   token: string,
@@ -136,7 +150,8 @@ export async function commitAndPush(
     try {
       await fs.promises.writeFile(`${base}${path}`, content);
     } catch (error) {
-      logger.error("Failed to write file to memory FS", error instanceof Error ? error : undefined, { path, remote });
+      const appError = error instanceof Error ? error : new Error(String(error));
+      logger.error("Failed to write file to memory FS", appError, { path, remote });
       return err(new AppError(`Failed to write file: ${path}`, "FS_ERROR", 500));
     }
     
@@ -273,7 +288,7 @@ export async function mergeWorkspaceIntoProject(
 }
 
 async function squashMerge(
-  projectFs: MemoryFS,
+  projectFs: NodeFS,
   projectDir: string,
   workspaceSha: string,
   projectRemote: string,
@@ -303,10 +318,12 @@ async function squashMerge(
     const contentResult = await readFileAtCommit(projectFs, workspaceSha, path, logger);
     if (!contentResult.success) return err(contentResult.error);
 
-    const writeResult = await projectFs.promises.writeFile(`${projectDir}/${path}`, contentResult.data);
-    if (!writeResult.success) {
-      logger.error("Failed to write file during squash merge", writeResult.error, { path, projectRemote });
-      return err(writeResult.error);
+    try {
+      await projectFs.promises.writeFile(`${projectDir}/${path}`, contentResult.data);
+    } catch (error) {
+      const appError = error instanceof Error ? error : new Error(String(error));
+      logger.error("Failed to write file during squash merge", appError, { path, projectRemote });
+      return err(new AppError(`Failed to write file: ${path}`, "FS_ERROR", 500));
     }
 
     const addResult = await fromPromise(git.add({ fs: projectFs, dir: projectDir, filepath: path }));
@@ -317,10 +334,12 @@ async function squashMerge(
   }
 
   for (const [path] of deleted) {
-    const unlinkResult = await projectFs.promises.unlink(`${projectDir}/${path}`);
-    if (!unlinkResult.success) {
-      logger.error("Failed to unlink file during squash merge", unlinkResult.error, { path, projectRemote });
-      return err(unlinkResult.error);
+    try {
+      await projectFs.promises.unlink(`${projectDir}/${path}`);
+    } catch (error) {
+      const appError = error instanceof Error ? error : new Error(String(error));
+      logger.error("Failed to unlink file during squash merge", appError, { path, projectRemote });
+      return err(new AppError(`Failed to unlink file: ${path}`, "FS_ERROR", 500));
     }
 
     const removeResult = await fromPromise(git.remove({ fs: projectFs, dir: projectDir, filepath: path }));
@@ -375,7 +394,7 @@ async function squashMerge(
 }
 
 async function listFilesAtCommit(
-  fs: MemoryFS,
+  fs: NodeFS,
   ref: string,
   logger: Logger,
 ): Promise<Result<[path: string, oid: string][], AppError>> {
@@ -405,7 +424,7 @@ async function listFilesAtCommit(
 }
 
 async function readFileAtCommit(
-  fs: MemoryFS,
+  fs: NodeFS,
   ref: string,
   path: string,
   logger: Logger
@@ -435,7 +454,7 @@ export async function readFileFromRepo(
   try {
     const content = await fs.promises.readFile(`/${path}`, { encoding: "utf8" });
     logger.info("Successfully read file from repo", { remote, path });
-    return ok(content as string);
+    return ok(typeof content === 'string' ? content : new TextDecoder().decode(content));
   } catch (error) {
     logger.error("Failed to read file from repo", error instanceof Error ? error : undefined, { remote, path });
     return err(new AppError(`Failed to read file: ${path}`, "FS_ERROR", 500));
@@ -457,7 +476,7 @@ export async function listFilesInRepo(
 }
 
 async function walkDir(
-  fs: MemoryFS,
+  fs: NodeFS,
   base: string,
   prefix: string,
   logger: Logger

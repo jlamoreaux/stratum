@@ -28,7 +28,8 @@ async function getCurrentUser(c: { get: (key: "userId") => string | undefined; e
   
   const user = result.data;
   // Generate username from email if missing (for users created before migration)
-  const username = user.username || user.email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+  const emailPart = user.email?.split('@')[0];
+  const username = user.username || (emailPart ? emailPart.toLowerCase().replace(/[^a-z0-9]/g, '') : '');
   
   return { id: user.id, email: user.email, username };
 }
@@ -65,7 +66,7 @@ app.get("/", async (c) => {
     slug: p.slug,
     remote: p.remote,
     createdAt: p.createdAt,
-    visibility: p.visibility,
+    ...(p.visibility !== undefined ? { visibility: p.visibility } : {}),
   }));
 
   logger.debug("Rendering home page", { projectCount: view.length });
@@ -140,7 +141,7 @@ app.get("/p/:name", async (c) => {
   try {
     const [filesResult, logResult] = await Promise.all([
       listFilesInRepo(project.remote, project.token, logger),
-      getCommitLog(project.remote, project.token, 20, logger),
+      getCommitLog(project.remote, project.token, logger, 20),
     ]);
     
     if (filesResult.success) {
@@ -234,8 +235,8 @@ app.get("/p/:name/changes", async (c) => {
     project: change.project,
     workspace: change.workspace,
     status: change.status,
-    evalScore: change.evalScore,
-    evalPassed: change.evalPassed,
+    ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
+    ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
     createdAt: change.createdAt,
   }));
 
@@ -256,7 +257,7 @@ app.get("/changes/:id", async (c) => {
 
   const [userResult, changeResult] = await Promise.all([
     getCurrentUser(c, logger),
-    getChange(c.env.DB, id, logger),
+    getChange(c.env.DB, logger, id),
   ]);
 
   if (!changeResult.success) {
@@ -296,7 +297,8 @@ app.get("/changes/:id", async (c) => {
     logger.error("Failed to list eval runs", evalRunsResult.error);
   }
 
-  const evals = evalRunsResult.success ? evalRunsResult.data.map((run) => ({
+  const evalRuns = evalRunsResult.success ? evalRunsResult.data.map((run) => ({
+    id: run.id,
     evaluatorType: run.evaluatorType,
     score: run.score,
     passed: run.passed,
@@ -312,12 +314,13 @@ app.get("/changes/:id", async (c) => {
         project: change.project,
         workspace: change.workspace,
         status: change.status,
-        evalScore: change.evalScore,
-        evalPassed: change.evalPassed,
-        evalReason: change.evalReason,
+        ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
+        ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
+        ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
         createdAt: change.createdAt,
       }}
-      evals={evals}
+      evalRuns={evalRuns}
+      provenance={null}
       user={userResult}
     />,
   );
@@ -440,7 +443,7 @@ app.get("/:namespace/:slug", async (c) => {
   try {
     const [filesResult, logResult] = await Promise.all([
       listFilesInRepo(project.remote, project.token, logger),
-      getCommitLog(project.remote, project.token, 20, logger),
+      getCommitLog(project.remote, project.token, logger, 20),
     ]);
     
     if (filesResult.success) {

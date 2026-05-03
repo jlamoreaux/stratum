@@ -49,7 +49,7 @@ export class ExternalServiceError extends AppError {
   constructor(
     service: string,
     message: string,
-    public readonly cause?: Error
+    override readonly cause?: Error
   ) {
     super(
       `${service} error: ${message}`,

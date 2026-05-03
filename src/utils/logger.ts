@@ -22,10 +22,7 @@ export interface Logger {
 
 export function createLogger(context: LoggerContext = {}): Logger {
   const logger = pino({
-    level: process.env.LOG_LEVEL || 'info',
-    transport: process.env.NODE_ENV === 'development'
-      ? { target: 'pino-pretty', options: { colorize: true } }
-      : undefined,
+    level: 'info',
     base: {
       service: 'stratum',
       ...context,
@@ -33,10 +30,10 @@ export function createLogger(context: LoggerContext = {}): Logger {
   });
 
   return {
-    trace: (msg, meta) => logger.trace(msg, meta),
-    debug: (msg, meta) => logger.debug(msg, meta),
-    info: (msg, meta) => logger.info(msg, meta),
-    warn: (msg, meta) => logger.warn(msg, meta),
+    trace: (msg, meta) => meta ? logger.trace(meta, msg) : logger.trace(msg),
+    debug: (msg, meta) => meta ? logger.debug(meta, msg) : logger.debug(msg),
+    info: (msg, meta) => meta ? logger.info(meta, msg) : logger.info(msg),
+    warn: (msg, meta) => meta ? logger.warn(meta, msg) : logger.warn(msg),
     error: (msg, error, meta) => logger.error({ err: error, ...meta }, msg),
     fatal: (msg, error, meta) => logger.fatal({ err: error, ...meta }, msg),
     child: (childContext) => createLogger({ ...context, ...childContext }),

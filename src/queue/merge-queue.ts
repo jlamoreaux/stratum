@@ -3,7 +3,7 @@ import { mergeWorkspaceIntoProject } from "../storage/git-ops";
 import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
 import type { Env } from "../types";
-import { Logger } from "../utils/logger";
+import { createLogger, Logger } from "../utils/logger";
 import { err, ok, Result } from "../utils/result";
 import { AppError } from "../utils/errors";
 
@@ -18,8 +18,9 @@ export class MergeQueue {
     this.env = env;
   }
 
-  async merge(changeId: string, logger: Logger): Promise<Result<{ success: boolean; commit?: string; error?: string }, AppError>> {
-    const changeResult = await getChange(this.env.DB, logger, changeId);
+  async merge(changeId: string, logger?: Logger): Promise<Result<{ success: boolean; commit?: string; error?: string }, AppError>> {
+    const log = logger ?? createLogger({ changeId });
+    const changeResult = await getChange(this.env.DB, log, changeId);
     if (!changeResult.success) {
       return err(changeResult.error);
     }
@@ -30,13 +31,13 @@ export class MergeQueue {
     }
 
     try {
-      const projectResult = await getProject(this.env.STATE, change.project, logger);
+      const projectResult = await getProject(this.env.STATE, change.project, log);
       if (!projectResult.success) {
         return err(projectResult.error);
       }
       const project = projectResult.data;
 
-      const workspaceResult = await getWorkspace(this.env.STATE, change.workspace, logger);
+      const workspaceResult = await getWorkspace(this.env.STATE, project.id, change.workspace, log);
       if (!workspaceResult.success) {
         return err(workspaceResult.error);
       }
@@ -47,7 +48,7 @@ export class MergeQueue {
         project.token,
         workspace.remote,
         workspace.token,
-        logger,
+        log,
         { strategy: "merge" }
       );
       
@@ -56,7 +57,7 @@ export class MergeQueue {
       }
       const commit = commitResult.data;
 
-      const updateResult = await updateChangeStatus(this.env.DB, logger, changeId, "merged", {
+      const updateResult = await updateChangeStatus(this.env.DB, log, changeId, "merged", {
         ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
         ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
         ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
@@ -67,7 +68,7 @@ export class MergeQueue {
         return err(updateResult.error);
       }
 
-      await recordProvenance(this.env.DB, logger, {
+      await recordProvenance(this.env.DB, log, {
         commitSha: commit,
         project: change.project,
         workspace: change.workspace,

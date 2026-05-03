@@ -56,7 +56,7 @@ export async function createUser(
     const tokenHash = await hashToken(plaintext);
     
     // Generate username from email (part before @, sanitized)
-    const username = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+    const username = (email.split('@')[0] ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
     await db
       .prepare("INSERT INTO users (id, email, username, token_hash) VALUES (?, ?, ?, ?)")

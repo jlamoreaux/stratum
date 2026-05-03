@@ -76,7 +76,7 @@ app.post("/projects/:name/changes", async (c) => {
     return badRequest("workspace is required");
   }
 
-  const workspaceResult = await getWorkspace(c.env.STATE, body.workspace, logger);
+  const workspaceResult = await getWorkspace(c.env.STATE, project.id, body.workspace, logger);
   if (!workspaceResult.success) {
     if (workspaceResult.error.code === 'NOT_FOUND') {
       return notFound("Workspace", body.workspace);
@@ -108,7 +108,7 @@ app.post("/projects/:name/changes", async (c) => {
     workspace: body.workspace,
   });
 
-  const policy = await loadPolicy(project.remote, project.token);
+  const policy = await loadPolicy(project.remote, project.token, logger);
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -163,16 +163,20 @@ app.post("/projects/:name/changes", async (c) => {
   );
 
   const evalRuns = await Promise.all(
-    evaluators.map(async ({ type, evaluator }) => ({
-      evaluatorType: type,
-      result: await evaluator.evaluate(diff, policy),
-    })),
+    evaluators.map(async ({ type, evaluator }) => {
+      const result = await evaluator.evaluate(diff, policy, logger);
+      return {
+        evaluatorType: type,
+        result: result.success ? result.data : { score: 0, passed: false, reason: result.error.message },
+      };
+    }),
   );
 
   const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
   const aggregateResult = composite.aggregate(
     evalRuns.map(({ result }) => result),
     policy,
+    logger,
   );
   const blockingFailure = evalRuns.find(
     ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
@@ -401,7 +405,7 @@ app.post("/changes/:id/merge", async (c) => {
     });
   }
 
-  const workspaceResult = await getWorkspace(c.env.STATE, change.workspace, logger);
+  const workspaceResult = await getWorkspace(c.env.STATE, project.id, change.workspace, logger);
   if (!workspaceResult.success) {
     if (workspaceResult.error.code === 'NOT_FOUND') {
       return notFound("Workspace", change.workspace);
@@ -565,7 +569,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     return badRequest(`Cannot re-evaluate a ${change.status} change`);
   }
 
-  const workspaceResult = await getWorkspace(c.env.STATE, change.workspace, logger);
+  const workspaceResult = await getWorkspace(c.env.STATE, project.id, change.workspace, logger);
   if (!workspaceResult.success) {
     if (workspaceResult.error.code === 'NOT_FOUND') {
       return badRequest("Change references missing project/workspace");
@@ -575,7 +579,7 @@ app.post("/changes/:id/evaluate", async (c) => {
   }
   const workspace = workspaceResult.data;
 
-  const policy = await loadPolicy(project.remote, project.token);
+  const policy = await loadPolicy(project.remote, project.token, logger);
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -626,16 +630,20 @@ app.post("/changes/:id/evaluate", async (c) => {
   ];
 
   const evalRuns = await Promise.all(
-    evaluators.map(async ({ type, evaluator }) => ({
-      evaluatorType: type,
-      result: await evaluator.evaluate(diff, policy),
-    })),
+    evaluators.map(async ({ type, evaluator }) => {
+      const result = await evaluator.evaluate(diff, policy, logger);
+      return {
+        evaluatorType: type,
+        result: result.success ? result.data : { score: 0, passed: false, reason: result.error.message },
+      };
+    }),
   );
 
   const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
   const aggregateResult = composite.aggregate(
     evalRuns.map(({ result }) => result),
     policy,
+    logger,
   );
   const blockingFailure = evalRuns.find(
     ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,

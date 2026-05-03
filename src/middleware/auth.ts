@@ -61,7 +61,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
     }
 
     if (token.startsWith("stratum_agent_")) {
-      const agentResult = await getAgentByToken(c.env.DB, logger, token);
+      const agentResult = await getAgentByToken(c.env.DB, token, logger);
       if (!agentResult.success) {
         logger.warn("Auth failed - invalid agent token", {
           path: c.req.path,
@@ -97,7 +97,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
         const userResult = await getUser(c.env.DB, sessionResult.data.userId, logger);
         if (userResult.success) {
           // Generate username from email if missing (backward compatibility)
-          const username = userResult.data.username || userResult.data.email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+          const username = userResult.data.username || (userResult.data.email.split('@')[0] ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
           c.set("username", username);
           logger.debug("Auth success - session", { userId: sessionResult.data.userId, username });
         } else {
