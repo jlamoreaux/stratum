@@ -1,12 +1,13 @@
 import { Hono } from "hono";
 import { getCommitLog, importFromGitHub, initAndPush, listFilesInRepo } from "../storage/git-ops";
+import { createImportJob, getImportProgress, updateImportProgress, updateImportStatus, deleteImportJob } from "../storage/imports";
 import { listProvenance } from "../storage/provenance";
-import { getProject, listProjects, setProject } from "../storage/state";
-import { getGitHubAccessToken } from "../storage/users";
-import type { Env } from "../types";
+import { getProjectByPath, listProjectsByNamespace, setProject } from "../storage/state";
+import type { Env, ProjectEntry, ImportProgress } from "../types";
 import { canReadProject, filterReadableProjects } from "../utils/authz";
-import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
-import { isStringRecord, isValidGitHubUrl, isValidSlug } from "../utils/validation";
+import { internalError, badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
+import { isStringRecord, isValidGitHubUrl, isValidSlug, slugify } from "../utils/validation";
+import { createLogger } from "../utils/logger";
 
 const DEFAULT_FILES: Record<string, string> = {
   "README.md": "# My Project\n\nCreated with Stratum.\n",
@@ -14,18 +15,48 @@ const DEFAULT_FILES: Record<string, string> = {
 };
 
 const app = new Hono<{ Bindings: Env }>();
+
 function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
   const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
   if (!match || !match[1] || !match[2]) return null;
   return { owner: match[1], repo: match[2] };
 }
 
-app.post("/", async (c) => {
-  const userId = c.get("userId");
-  if (!userId) return unauthorized("Authentication required");
+// Helper to generate project ID
+function generateProjectId(): string {
+  return crypto.randomUUID();
+}
 
-  const body = await c.req.json<{ name?: unknown; files?: unknown }>();
+// Helper to get user's namespace (username with @ prefix)
+function getUserNamespace(username: string): string {
+  return username.startsWith('@') ? username : `@${username}`;
+}
+
+// POST /projects - Create a new project
+// Body: { name: string, visibility?: "private" | "public", files?: Record<string, string>, seed?: boolean }
+app.post("/", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const userId = c.get("userId");
+  const username = c.get("username");
+  if (!userId || !username) return unauthorized("Authentication required");
+
+  const body = await c.req.json<{ name?: unknown; files?: unknown; visibility?: unknown }>();
   if (!isValidSlug(body.name)) return badRequest("name must be a 1-64 char alphanumeric slug");
+
+  // Validate visibility if provided
+  let visibility: "private" | "public" = "private";
+  if (body.visibility !== undefined) {
+    if (body.visibility !== "private" && body.visibility !== "public") {
+      return badRequest("visibility must be 'private' or 'public'");
+    }
+    visibility = body.visibility;
+  }
 
   const seed = c.req.query("seed") === "true";
   const files =
@@ -40,110 +71,728 @@ app.post("/", async (c) => {
   if (files === null)
     return badRequest("files must be an object of string paths to string contents");
 
-  const repo = await c.env.ARTIFACTS.create(body.name);
-  const sha = await initAndPush(repo.remote, repo.token, files, "Initial commit");
+  const namespace = getUserNamespace(username);
+  const slug = slugify(String(body.name));
+  const projectId = generateProjectId();
 
-  await setProject(c.env.STATE, {
-    name: body.name,
+  // Check if project already exists
+  const existingResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (existingResult.success) {
+    return badRequest(`Project '${slug}' already exists in your namespace`);
+  }
+
+  // Create Artifacts repo with namespaced name
+  const artifactsRepoName = `${namespace.replace('@', '')}-${slug}`;
+  const repo = await c.env.ARTIFACTS.create(artifactsRepoName);
+  
+  const initResult = await initAndPush(repo.remote, repo.token, files, "Initial commit", logger);
+  if (!initResult.success) {
+    logger.error('Failed to initialize and push repository', initResult.error);
+    return internalError(initResult.error.message);
+  }
+
+  const project: ProjectEntry = {
+    id: projectId,
+    name: String(body.name),
+    slug,
+    namespace,
+    ownerId: userId,
+    ownerType: 'user',
     remote: repo.remote,
     token: repo.token,
     createdAt: new Date().toISOString(),
-    ownerId: userId,
-  });
+    visibility,
+  };
 
-  return created({ name: body.name, remote: repo.remote, commit: sha });
+  const setResult = await setProject(c.env.STATE, project, logger);
+  if (!setResult.success) {
+    logger.error('Failed to set project', setResult.error);
+    return internalError(setResult.error.message);
+  }
+
+  logger.info('Project created', { 
+    projectId, 
+    namespace, 
+    slug, 
+    visibility 
+  });
+  
+  return created({ 
+    id: projectId,
+    name: project.name,
+    namespace,
+    slug,
+    path: `/${namespace}/${slug}`,
+    remote: repo.remote, 
+    commit: initResult.data, 
+    visibility 
+  });
 });
 
+// GET /projects - List projects for the authenticated user
 app.get("/", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
+  const username = c.get("username");
   const agentOwnerId = c.get("agentOwnerId");
 
-  const projects = filterReadableProjects(await listProjects(c.env.STATE), userId, agentOwnerId);
+  if (!userId || !username) {
+    return ok({ projects: [] });
+  }
+
+  const namespace = getUserNamespace(username);
+  const projectsResult = await listProjectsByNamespace(c.env.STATE, namespace, logger);
+  
+  if (!projectsResult.success) {
+    logger.error('Failed to list projects', projectsResult.error);
+    return internalError(projectsResult.error.message);
+  }
+
+  const projects = filterReadableProjects(projectsResult.data, userId, agentOwnerId);
+  logger.info('Projects listed', { count: projects.length });
+  
   return ok({
-    projects: projects.map(({ name, remote, createdAt }) => ({ name, remote, createdAt })),
+    projects: projects.map(({ id, name, namespace, slug, remote, createdAt, visibility }) => ({ 
+      id,
+      name, 
+      namespace,
+      slug,
+      path: `/${namespace}/${slug}`,
+      remote, 
+      createdAt, 
+      visibility 
+    })),
   });
 });
 
-app.post("/:name/import", async (c) => {
-  const userId = c.get("userId");
-  if (!userId) return unauthorized("Authentication required");
-
-  const { name } = c.req.param();
-  if (!isValidSlug(name)) return badRequest("invalid project name");
-
-  const body = await c.req.json<{ url?: unknown; branch?: unknown; depth?: unknown }>();
-  if (!isValidGitHubUrl(body.url))
-    return badRequest("url must be a valid github.com repository URL");
-
-  const branch = typeof body.branch === "string" ? body.branch : "main";
-  const depth = typeof body.depth === "number" ? body.depth : 10;
-
-  // Get user's GitHub token for private repo access
-  const githubToken = await getGitHubAccessToken(c.env.DB, userId);
-
-  const repo = await importFromGitHub(
-    c.env.ARTIFACTS,
-    name,
-    body.url,
-    branch,
-    depth,
-    githubToken ?? undefined,
-  );
-
-  await setProject(c.env.STATE, {
-    name,
-    remote: repo.remote,
-    token: repo.token,
-    createdAt: new Date().toISOString(),
-    githubUrl: body.url,
-    ...(parseGitHubRepo(body.url) ?? {}),
-    githubDefaultBranch: branch,
-    githubConnectedAt: new Date().toISOString(),
-    githubConnectionStatus: "connected",
-    ownerId: userId,
+// GET /projects/:namespace/:slug - Get a specific project
+app.get("/:namespace/:slug", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
   });
 
-  return created({ name, remote: repo.remote, source: body.url });
-});
-
-app.get("/:name/files", async (c) => {
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
-  const { name } = c.req.param();
-  const project = await getProject(c.env.STATE, name);
-  if (!project) return notFound("Project", name);
+  const { namespace, slug } = c.req.param();
+
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", `${namespace}/${slug}`);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
-  const files = await listFilesInRepo(project.remote, project.token);
-  return ok({ project: name, files });
+  logger.info('Project retrieved', { namespace, slug });
+  return ok({
+    id: project.id,
+    name: project.name,
+    namespace: project.namespace,
+    slug: project.slug,
+    path: `/${project.namespace}/${project.slug}`,
+    remote: project.remote,
+    createdAt: project.createdAt,
+    visibility: project.visibility,
+    githubUrl: project.githubUrl,
+    githubOwner: project.githubOwner,
+    githubRepo: project.githubRepo,
+    githubDefaultBranch: project.githubDefaultBranch,
+    githubConnectionStatus: project.githubConnectionStatus,
+  });
 });
 
-app.get("/:name/log", async (c) => {
+// POST /projects/:namespace/:slug/import - Import from GitHub
+app.post("/:namespace/:slug/import", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  try {
+    const userId = c.get("userId");
+    const username = c.get("username");
+    if (!userId || !username) return unauthorized("Authentication required");
+
+    const { namespace, slug } = c.req.param();
+    if (!isValidSlug(slug)) return badRequest("invalid project slug");
+
+    const userNamespace = getUserNamespace(username);
+    
+    // For now, users can only import into their own namespace
+    if (namespace !== userNamespace) {
+      return forbidden("You can only import projects into your own namespace");
+    }
+
+    // Check if project already exists
+    const existingProjectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+    if (existingProjectResult.success) {
+      logger.info('Project already exists', { namespace, slug });
+      // Redirect to existing project if coming from web UI
+      const contentType = c.req.header("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        return c.redirect(`/@${namespace.replace('@', '')}/${slug}`);
+      }
+      return ok({ 
+        namespace, 
+        slug, 
+        remote: existingProjectResult.data.remote, 
+        source: existingProjectResult.data.githubUrl 
+      });
+    }
+
+    // Handle both JSON and form data
+    let body: { url?: unknown; branch?: unknown; depth?: unknown; visibility?: unknown };
+    const contentType = c.req.header("content-type") || "";
+    
+    if (contentType.includes("application/json")) {
+      body = await c.req.json();
+    } else {
+      // Form data
+      const formData = await c.req.parseBody();
+      body = {
+        url: formData.url,
+        branch: formData.branch,
+        depth: formData.depth ? Number(formData.depth) : undefined,
+        visibility: formData.visibility,
+      };
+    }
+
+    if (!isValidGitHubUrl(body.url))
+      return badRequest("url must be a valid github.com repository URL");
+
+    const branch = typeof body.branch === "string" ? body.branch : "main";
+
+    // Validate visibility if provided
+    let visibility: "private" | "public" = "private";
+    if (body.visibility !== undefined) {
+      if (body.visibility !== "private" && body.visibility !== "public") {
+        return badRequest("visibility must be 'private' or 'public'");
+      }
+      visibility = body.visibility;
+    }
+
+    // Generate project ID
+    const projectId = generateProjectId();
+    const importId = generateProjectId();
+
+    // Create import job FIRST (before creating project)
+    const createImportResult = await createImportJob(
+      c.env.STATE,
+      {
+        id: importId,
+        projectId,
+        namespace,
+        slug,
+        sourceUrl: body.url,
+        branch,
+      },
+      logger
+    );
+
+    if (!createImportResult.success) {
+      logger.error('Failed to create import job', createImportResult.error);
+      return internalError(createImportResult.error.message);
+    }
+
+    // Create the project entry immediately (marked as being imported)
+    // For now, we'll create a placeholder Artifacts repo
+    const artifactsRepoName = `${namespace.replace('@', '')}-${slug}`;
+    let repo;
+    
+    try {
+      repo = await c.env.ARTIFACTS.create(artifactsRepoName);
+    } catch (artifactsError) {
+      // If repo already exists, try to get it
+      const errorMessage = artifactsError instanceof Error ? artifactsError.message : "";
+      if (errorMessage.includes("already exists")) {
+        repo = await c.env.ARTIFACTS.get(artifactsRepoName);
+      } else {
+        throw artifactsError;
+      }
+    }
+
+    const project: ProjectEntry = {
+      id: projectId,
+      name: slug,
+      slug,
+      namespace,
+      ownerId: userId,
+      ownerType: 'user',
+      remote: repo.remote,
+      token: repo.token,
+      createdAt: new Date().toISOString(),
+      githubUrl: body.url,
+      ...(parseGitHubRepo(body.url) ?? {}),
+      githubDefaultBranch: branch,
+      githubConnectedAt: new Date().toISOString(),
+      githubConnectionStatus: "connected",
+      visibility,
+    };
+
+    const setResult = await setProject(c.env.STATE, project, logger);
+    if (!setResult.success) {
+      logger.error('Failed to set project after import', setResult.error);
+      return internalError(setResult.error.message);
+    }
+
+    // Queue the actual import job for background processing
+    // TODO: This should be queued to a background worker
+    // For now, we'll trigger it asynchronously
+    processImportJob(c.env, project, importId, body.url, branch, logger);
+
+    // Redirect to project page immediately (user will see import progress)
+    if (!contentType.includes("application/json")) {
+      return c.redirect(`/@${namespace.replace('@', '')}/${slug}?import=active`);
+    }
+
+    logger.info('Import queued', { namespace, slug, importId, url: body.url, visibility });
+    return created({ 
+      namespace, 
+      slug, 
+      importId,
+      path: `/${namespace}/${slug}`,
+      status: "queued",
+      source: body.url, 
+      visibility 
+    });
+  } catch (err) {
+    logger.error("[import] Error:", err instanceof Error ? err : undefined);
+    const message = err instanceof Error ? err.message : String(err);
+    return internalError(message);
+  }
+});
+
+// Background import processing (should be moved to a queue worker)
+async function processImportJob(
+  env: Env,
+  project: ProjectEntry,
+  importId: string,
+  githubUrl: string,
+  branch: string,
+  logger: Logger
+) {
+  const { namespace, slug } = project;
+  
+  try {
+    // Update status to cloning
+    await updateImportStatus(env.STATE, namespace, slug, "cloning", logger, "Cloning repository");
+    
+    // Perform the actual import
+    const depth = 10; // Default depth
+    const artifactsRepoName = `${namespace.replace('@', '')}-${slug}`;
+    
+    const importResult = await importFromGitHub(
+      env.ARTIFACTS,
+      artifactsRepoName,
+      githubUrl,
+      logger,
+      branch,
+      depth
+    );
+    
+    if (!importResult.success) {
+      await updateImportStatus(
+        env.STATE, 
+        namespace, 
+        slug, 
+        "failed", 
+        logger,
+        `Import failed: ${importResult.error.message}`
+      );
+      return;
+    }
+    
+    // Update project with actual repo info
+    const updatedProject: ProjectEntry = {
+      ...project,
+      remote: importResult.data.remote,
+      token: importResult.data.token,
+    };
+    
+    await setProject(env.STATE, updatedProject, logger);
+    
+    // Mark import as complete
+    await updateImportStatus(
+      env.STATE, 
+      namespace, 
+      slug, 
+      "completed", 
+      logger,
+      "Import completed successfully"
+    );
+    
+    logger.info('Import completed', { namespace, slug, importId });
+  } catch (error) {
+    logger.error('Import job failed', error instanceof Error ? error : undefined, { namespace, slug });
+    await updateImportStatus(
+      env.STATE, 
+      namespace, 
+      slug, 
+      "failed", 
+      logger,
+      `Import failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+// GET /projects/:namespace/:slug/files - List files in project
+app.get("/:namespace/:slug/files", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
-  const { name } = c.req.param();
-  const project = await getProject(c.env.STATE, name);
-  if (!project) return notFound("Project", name);
+  const { namespace, slug } = c.req.param();
+
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", `${namespace}/${slug}`);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
+  if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
+
+  const filesResult = await listFilesInRepo(project.remote, project.token, logger);
+  if (!filesResult.success) {
+    logger.error('Failed to list files in repo', filesResult.error);
+    return internalError(filesResult.error.message);
+  }
+
+  logger.info('Project files listed', { namespace, slug, fileCount: filesResult.data.length });
+  return ok({ 
+    namespace,
+    slug,
+    path: `/${namespace}/${slug}`,
+    files: filesResult.data 
+  });
+});
+
+// GET /projects/:namespace/:slug/log - Get commit log
+app.get("/:namespace/:slug/log", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const { namespace, slug } = c.req.param();
+
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", `${namespace}/${slug}`);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const depth = Number(c.req.query("depth") ?? 20);
-  const log = await getCommitLog(project.remote, project.token, depth);
-  return ok({ project: name, log });
+  const logResult = await getCommitLog(project.remote, project.token, logger, depth);
+  if (!logResult.success) {
+    logger.error('Failed to get commit log', logResult.error);
+    return internalError(logResult.error.message);
+  }
+
+  logger.info('Commit log retrieved', { namespace, slug, depth, commitCount: logResult.data.length });
+  return ok({ 
+    namespace,
+    slug,
+    path: `/${namespace}/${slug}`,
+    log: logResult.data 
+  });
 });
 
-app.get("/:name/provenance", async (c) => {
+// GET /projects/:namespace/:slug/provenance - Get provenance records
+app.get("/:namespace/:slug/provenance", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
-  const { name } = c.req.param();
-  const project = await getProject(c.env.STATE, name);
-  if (!project) return notFound("Project", name);
+  const { namespace, slug } = c.req.param();
+
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", `${namespace}/${slug}`);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const limitParam = c.req.query("limit");
   const limit = limitParam !== undefined ? Number(limitParam) : undefined;
 
-  const records = await listProvenance(c.env.DB, name, limit);
-  return ok({ project: name, records });
+  // Use project ID for provenance lookup
+  const recordsResult = await listProvenance(c.env.DB, logger, project.id, limit);
+  if (!recordsResult.success) {
+    logger.error('Failed to list provenance', recordsResult.error);
+    return internalError(recordsResult.error.message);
+  }
+
+  logger.info('Provenance listed', { namespace, slug, limit, recordCount: recordsResult.data.length });
+  return ok({ 
+    namespace,
+    slug,
+    path: `/${namespace}/${slug}`,
+    records: recordsResult.data 
+  });
+});
+
+// GET /projects/:namespace/:slug/import/status - Get import progress (for polling)
+app.get("/:namespace/:slug/import/status", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const { namespace, slug } = c.req.param();
+
+  const progressResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+  if (!progressResult.success) {
+    logger.error('Failed to get import progress', progressResult.error);
+    return internalError(progressResult.error.message);
+  }
+
+  if (!progressResult.data) {
+    return notFound("Import job", `${namespace}/${slug}`);
+  }
+
+  return ok(progressResult.data);
+});
+
+// GET /projects/:namespace/:slug/import/stream - SSE endpoint for real-time updates
+app.get("/:namespace/:slug/import/stream", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const { namespace, slug } = c.req.param();
+
+  // Check if project exists and user has access
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    return notFound("Project", `${namespace}/${slug}`);
+  }
+
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  if (!canReadProject(projectResult.data, userId, agentOwnerId)) {
+    return forbidden("Project access denied");
+  }
+
+  // Set up SSE response
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+  c.header("Connection", "keep-alive");
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      
+      // Send initial status
+      const sendStatus = async () => {
+        const progressResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+        if (progressResult.success && progressResult.data) {
+          const data = `data: ${JSON.stringify(progressResult.data)}\n\n`;
+          controller.enqueue(encoder.encode(data));
+          
+          // Close stream if import is complete or failed
+          if (["completed", "failed", "cancelled"].includes(progressResult.data.status)) {
+            controller.close();
+            return false;
+          }
+        }
+        return true;
+      };
+
+      // Send initial status
+      sendStatus();
+
+      // Poll every 2 seconds
+      const interval = setInterval(async () => {
+        const shouldContinue = await sendStatus();
+        if (!shouldContinue) {
+          clearInterval(interval);
+        }
+      }, 2000);
+
+      // Cleanup on close
+      c.req.raw.signal.addEventListener("abort", () => {
+        clearInterval(interval);
+        controller.close();
+      });
+    },
+  });
+
+  return c.body(stream);
+});
+
+// POST /projects/:namespace/:slug/import/retry - Retry failed import
+app.post("/:namespace/:slug/import/retry", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const userId = c.get("userId");
+  const username = c.get("username");
+  if (!userId || !username) return unauthorized("Authentication required");
+
+  const { namespace, slug } = c.req.param();
+  const userNamespace = getUserNamespace(username);
+  
+  if (namespace !== userNamespace) {
+    return forbidden("You can only retry imports in your own namespace");
+  }
+
+  // Get existing import progress
+  const progressResult = await getImportProgress(c.env.STATE, namespace, slug, logger);
+  if (!progressResult.success) {
+    logger.error('Failed to get import progress', progressResult.error);
+    return internalError(progressResult.error.message);
+  }
+
+  if (!progressResult.data) {
+    return notFound("Import job", `${namespace}/${slug}`);
+  }
+
+  const existing = progressResult.data;
+
+  // Reset the import job
+  const resetResult = await updateImportStatus(
+    c.env.STATE, 
+    namespace, 
+    slug, 
+    "queued", 
+    logger,
+    "Import retry requested"
+  );
+
+  if (!resetResult.success) {
+    logger.error('Failed to reset import job', resetResult.error);
+    return internalError(resetResult.error.message);
+  }
+
+  // TODO: Re-queue the import job for processing
+
+  logger.info('Import retry initiated', { namespace, slug });
+  return ok({ 
+    message: "Import retry initiated",
+    namespace,
+    slug,
+    status: "queued"
+  });
+});
+
+// POST /projects/:namespace/:slug/sync - Re-sync with GitHub
+app.post("/:namespace/:slug/sync", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const userId = c.get("userId");
+  const username = c.get("username");
+  if (!userId || !username) return unauthorized("Authentication required");
+
+  const { namespace, slug } = c.req.param();
+  const userNamespace = getUserNamespace(username);
+  
+  if (namespace !== userNamespace) {
+    return forbidden("You can only sync projects in your own namespace");
+  }
+
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", `${namespace}/${slug}`);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+
+  const project = projectResult.data;
+
+  if (!project.githubUrl) {
+    return badRequest("Project is not connected to GitHub");
+  }
+
+  // Create a new import job for the sync
+  const importId = generateProjectId();
+  const createResult = await createImportJob(
+    c.env.STATE,
+    {
+      id: importId,
+      projectId: project.id,
+      namespace,
+      slug,
+      sourceUrl: project.githubUrl,
+      branch: project.githubDefaultBranch || "main",
+    },
+    logger
+  );
+
+  if (!createResult.success) {
+    logger.error('Failed to create sync job', createResult.error);
+    return internalError(createResult.error.message);
+  }
+
+  // TODO: Queue the sync job for processing
+
+  logger.info('Sync initiated', { namespace, slug, importId });
+  return ok({
+    message: "Sync initiated",
+    namespace,
+    slug,
+    importId,
+    status: "queued"
+  });
 });
 
 export { app as projectsRouter };

@@ -11,6 +11,7 @@ interface ChangesProps {
     evalPassed?: boolean;
     createdAt: string;
   }>;
+  user?: { id: string; email: string } | null;
 }
 
 function statusBadgeClass(status: string): string {
@@ -28,12 +29,12 @@ function statusBadgeClass(status: string): string {
   }
 }
 
-export const ChangesPage: FC<ChangesProps> = ({ project, changes }) => {
+export const ChangesPage: FC<ChangesProps> = ({ project, changes, user }) => {
   return (
-    <Layout title={`Changes — ${project}`}>
+    <Layout title={`Changes — ${project}`} user={user}>
       <div class="page-header">
         <h1>Changes</h1>
-        <a class="btn" href={`/ui/projects/${project}`}>
+        <a class="btn" href={`/p/${project}`}>
           Back to repo
         </a>
       </div>
@@ -65,7 +66,7 @@ export const ChangesPage: FC<ChangesProps> = ({ project, changes }) => {
                 </td>
                 <td>{new Date(change.createdAt).toLocaleDateString()}</td>
                 <td>
-                  <a href={`/ui/changes/${change.id}`}>View</a>
+                  <a href={`/changes/${change.id}`}>View</a>
                 </td>
               </tr>
             ))}

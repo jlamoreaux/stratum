@@ -1,10 +1,15 @@
+import type { Logger } from "../utils/logger";
+import { createLogger } from "../utils/logger";
 import type { Env } from "../types";
 import type { WorkspaceEntry } from "../types";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
-export async function runTtlSweep(env: Env): Promise<{ deleted: number }> {
+export async function runTtlSweep(env: Env, logger: Logger = createLogger({ component: "TtlSweep" })): Promise<{ deleted: number }> {
+  logger.info("Starting TTL sweep");
+
   let deleted = 0;
+  let processed = 0;
   let cursor: string | null = null;
 
   while (true) {
@@ -14,6 +19,7 @@ export async function runTtlSweep(env: Env): Promise<{ deleted: number }> {
     const result: KVNamespaceListResult<unknown> = await env.STATE.list(listOpts);
 
     for (const key of result.keys) {
+      processed++;
       try {
         const raw = await env.STATE.get(key.name);
         if (!raw) continue;
@@ -34,13 +40,16 @@ export async function runTtlSweep(env: Env): Promise<{ deleted: number }> {
 
         try {
           await env.ARTIFACTS.delete(workspace.name);
+          logger.debug("Deleted artifact", { workspace: workspace.name });
         } catch {
           // Missing artifact — proceed with KV cleanup
         }
 
         await env.STATE.delete(key.name);
         deleted++;
-      } catch {
+        logger.info("Deleted expired workspace", { workspaceId, workspace: workspace.name, createdAt: workspace.createdAt });
+      } catch (err) {
+        logger.warn("Error processing workspace during sweep", { key: key.name, error: err instanceof Error ? err.message : String(err) });
         // Per-item error — continue sweep
       }
     }
@@ -49,5 +58,6 @@ export async function runTtlSweep(env: Env): Promise<{ deleted: number }> {
     cursor = result.cursor;
   }
 
+  logger.info("TTL sweep completed", { processed, deleted });
   return { deleted };
 }

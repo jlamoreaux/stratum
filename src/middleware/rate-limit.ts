@@ -1,5 +1,8 @@
 import type { MiddlewareHandler } from "hono";
+import { createLogger } from "../utils/logger";
 import type { Env } from "../types";
+
+const logger = createLogger({ component: "RateLimit" });
 
 export function rateLimitMiddleware(opts?: { requestsPerMinute?: number }): MiddlewareHandler<{
   Bindings: Env;
@@ -30,6 +33,12 @@ export function rateLimitMiddleware(opts?: { requestsPerMinute?: number }): Midd
       const count = raw !== null ? Number.parseInt(raw, 10) : 0;
 
       if (count >= limit) {
+        logger.warn("Rate limit exceeded", {
+          identifier: identifier === userId ? `user:${userId}` : identifier === agentId ? `agent:${agentId}` : identifier.slice(0, 8),
+          path: c.req.path,
+          limit,
+          count,
+        });
         return c.json({ error: "Too many requests" }, 429, {
           "Retry-After": String(retryAfter),
           "X-RateLimit-Limit": String(limit),
@@ -39,10 +48,22 @@ export function rateLimitMiddleware(opts?: { requestsPerMinute?: number }): Midd
 
       await c.env.STATE.put(key, String(count + 1), { expirationTtl: 120 });
 
+      const remaining = limit - count - 1;
       c.header("X-RateLimit-Limit", String(limit));
-      c.header("X-RateLimit-Remaining", String(limit - count - 1));
+      c.header("X-RateLimit-Remaining", String(remaining));
       c.header("X-RateLimit-Reset", String(nextMinuteSeconds));
-    } catch {
+
+      logger.debug("Rate limit check passed", {
+        identifier: userId ? `user:${userId}` : agentId ? `agent:${agentId}` : identifier.slice(0, 8),
+        path: c.req.path,
+        limit,
+        remaining,
+      });
+    } catch (err) {
+      logger.warn("Rate limit check failed - allowing request", {
+        error: err instanceof Error ? err.message : String(err),
+        path: c.req.path,
+      });
       // KV unavailable — allow request through
     }
 

@@ -1,3 +1,6 @@
+import type { LoggerContext } from './utils/logger';
+export type { LoggerContext };
+
 export interface ArtifactsCreateResult {
   name: string;
   remote: string;
@@ -113,7 +116,12 @@ export interface Env {
 }
 
 export interface ProjectEntry {
-  name: string;
+  id: string;                          // UUID - stable agent reference
+  name: string;                        // Display name
+  slug: string;                        // URL-safe name
+  namespace: string;                   // @username or org-slug
+  ownerId: string;                     // User/Agent/Org ID
+  ownerType: 'user' | 'org' | 'agent';
   remote: string;
   token: string;
   createdAt: string;
@@ -123,8 +131,17 @@ export interface ProjectEntry {
   githubDefaultBranch?: string;
   githubConnectedAt?: string;
   githubConnectionStatus?: "connected" | "disconnected";
-  ownerId?: string;
   visibility?: "private" | "public";
+}
+
+// Helper to generate full project path
+export function projectPath(project: ProjectEntry): string {
+  return `/${project.namespace}/${project.slug}`;
+}
+
+// Helper to generate Artifacts repo name
+export function artifactsRepoName(project: ProjectEntry): string {
+  return `${project.namespace}-${project.slug}`;
 }
 
 export interface WorkspaceEntry {
@@ -133,6 +150,38 @@ export interface WorkspaceEntry {
   token: string;
   parent: string;
   createdAt: string;
+}
+
+// Import progress tracking
+export type ImportStatus = "queued" | "cloning" | "processing" | "completed" | "failed" | "cancelled";
+
+export interface ImportProgress {
+  id: string;
+  projectId: string;
+  namespace: string;
+  slug: string;
+  status: ImportStatus;
+  sourceUrl: string;
+  branch: string;
+  startedAt: string;
+  completedAt?: string;
+  progress: {
+    totalFiles?: number;
+    processedFiles: number;
+    currentFile?: string;
+    bytesTransferred?: number;
+    totalBytes?: number;
+  };
+  errors: Array<{
+    file: string;
+    error: string;
+    timestamp: string;
+  }>;
+  logs: Array<{
+    message: string;
+    level: "info" | "warn" | "error";
+    timestamp: string;
+  }>;
 }
 
 export interface Author {
@@ -155,6 +204,7 @@ export interface ApiError {
 export interface User {
   id: string;
   email: string;
+  username: string;  // Username for namespace (@username)
   githubId?: string;
   githubUsername?: string;
   tokenHash: string;

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail } from "../storage/users";
+import { createLogger } from "../utils/logger";
 import type { Env } from "../types";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -28,6 +29,18 @@ function emailAuthRedirect(
 ): Response {
   const params = new URLSearchParams({ [kind]: code });
   return c.redirect(`/auth/email?${params.toString()}`);
+}
+
+// Helper function to hash email for logging (privacy)
+function hashEmail(email: string): string {
+  // Simple hash - take first 8 chars of a basic hash
+  let hash = 0;
+  for (let i = 0; i < email.length; i++) {
+    const char = email.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(16).slice(0, 8);
 }
 
 // GET /auth/email - Show login form
@@ -216,22 +229,32 @@ app.get("/", (c) => {
 
 // POST /auth/email/send - Send magic link
 app.post("/send", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const body = await c.req.parseBody();
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
 
   if (!email || !email.includes("@")) {
+    logger.warn("Invalid email provided");
     return emailAuthRedirect(c, "error", "invalid_email");
   }
 
+  const emailHash = hashEmail(email);
+  logger.info("Processing magic link request", { emailHash });
+
   // Check if email sending is configured
   if (!c.env.EMAIL) {
-    console.error("[email-auth] Email sending not configured");
+    logger.error("Email sending not configured");
     return emailAuthRedirect(c, "error", "auth_config_missing");
   }
 
   const fromAddress = c.env.EMAIL_FROM_ADDRESS;
   if (!fromAddress) {
-    console.error("[email-auth] EMAIL_FROM_ADDRESS secret not set");
+    logger.error("EMAIL_FROM_ADDRESS secret not set");
     return emailAuthRedirect(c, "error", "auth_config_incomplete");
   }
 
@@ -294,20 +317,27 @@ app.post("/send", async (c) => {
 </html>`,
     });
 
-    console.log("[email-auth] Magic link sent");
+    logger.info("Magic link sent", { emailHash });
 
     return emailAuthRedirect(c, "success", "email_sent");
   } catch (err) {
-    console.error("[email-auth] Failed to send magic link:", err);
+    logger.error("Failed to send magic link", err instanceof Error ? err : undefined, { emailHash });
     return emailAuthRedirect(c, "error", "send_failed");
   }
 });
 
 // GET /auth/email/verify - Verify magic link and create session
 app.get("/verify", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const token = c.req.query("token");
 
   if (!token) {
+    logger.warn("Missing token in verify request");
     return emailAuthRedirect(c, "error", "invalid_link");
   }
 
@@ -316,26 +346,44 @@ app.get("/verify", async (c) => {
     const tokenData = await c.env.STATE.get(`magic_link:${token}`);
 
     if (!tokenData) {
+      logger.warn("Token not found or expired", { tokenPrefix: token.slice(0, 8) });
       return emailAuthRedirect(c, "error", "link_expired");
     }
 
     const { email } = JSON.parse(tokenData);
+    const emailHash = hashEmail(email);
 
     // Delete the token so it can't be reused
     await c.env.STATE.delete(`magic_link:${token}`);
 
     // Get or create user
-    let user = await getUserByEmail(c.env.DB, email);
+    const userResult = await getUserByEmail(c.env.DB, email, logger);
 
-    if (!user) {
+    let userId: string;
+    if (!userResult.success) {
       // Create new user
-      const { user: newUser } = await createUser(c.env.DB, email);
-      user = newUser;
-      console.log(`[email-auth] Created new user: ${user.id}`);
+      const createResult = await createUser(c.env.DB, email, logger);
+      if (!createResult.success) {
+        logger.error("Failed to create user", undefined, { emailHash });
+        return emailAuthRedirect(c, "error", "verify_failed");
+      }
+      userId = createResult.data.user.id;
+      logger.info("Created new user", { userId, emailHash });
+    } else {
+      userId = userResult.data.id;
+      logger.info("Existing user signed in", { userId, emailHash });
     }
 
     // Create session
-    const session = await createSession(c.env.DB, user.id);
+    const sessionLogger = logger.child({ userId });
+    const sessionResult = await createSession(c.env.DB, userId, sessionLogger);
+
+    if (!sessionResult.success) {
+      sessionLogger.error("Failed to create session");
+      return emailAuthRedirect(c, "error", "verify_failed");
+    }
+
+    const session = sessionResult.data;
 
     // Set session cookie
     setCookie(c, "stratum_session", session.id, {
@@ -346,7 +394,7 @@ app.get("/verify", async (c) => {
       path: "/",
     });
 
-    console.log(`[email-auth] User signed in: ${user.id}`);
+    sessionLogger.info("User signed in via magic link");
 
     // Redirect to home or the page they were trying to access
     const redirectTo = getCookie(c, "redirect_after_login") || "/";
@@ -354,7 +402,7 @@ app.get("/verify", async (c) => {
 
     return c.redirect(redirectTo);
   } catch (err) {
-    console.error("[email-auth] Failed to verify magic link:", err);
+    logger.error("Failed to verify magic link", err instanceof Error ? err : undefined);
     return emailAuthRedirect(c, "error", "verify_failed");
   }
 });

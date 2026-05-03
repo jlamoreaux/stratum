@@ -1,16 +1,24 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createSession, deleteSession } from "../storage/sessions";
-import { setGitHubAccessToken, upsertGitHubUser } from "../storage/users";
+import { upsertGitHubUser } from "../storage/users";
+import { createLogger } from "../utils/logger";
 import type { Env } from "../types";
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/github", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const clientId = c.env.GITHUB_CLIENT_ID;
   const redirectUri = c.env.OAUTH_REDIRECT_URI;
 
   if (!clientId || !c.env.GITHUB_CLIENT_SECRET) {
+    logger.warn("GitHub OAuth not configured");
     return c.json({ error: "GitHub OAuth is not configured" }, 501);
   }
 
@@ -20,39 +28,51 @@ app.get("/github", async (c) => {
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri ?? "",
-    scope: "user:email repo", // Added repo scope for private repository access
+    scope: "user:email",
     state,
   });
 
+  logger.debug("Redirecting to GitHub OAuth");
   return c.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
 });
 
 app.get("/github/callback", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const clientId = c.env.GITHUB_CLIENT_ID;
   const clientSecret = c.env.GITHUB_CLIENT_SECRET;
   const redirectUri = c.env.OAUTH_REDIRECT_URI;
 
   if (!clientId || !clientSecret) {
+    logger.warn("GitHub OAuth not configured");
     return c.json({ error: "GitHub OAuth is not configured" }, 501);
   }
 
   const { code, state, next } = c.req.query();
 
   if (!state) {
+    logger.warn("Missing state parameter");
     return c.json({ error: "Missing state parameter" }, 400);
   }
 
   const stateKey = `oauth_state:${state}`;
   const storedState = await c.env.STATE.get(stateKey);
   if (!storedState) {
+    logger.warn("Invalid or expired state", { statePrefix: state.slice(0, 8) });
     return c.json({ error: "Invalid or expired state" }, 400);
   }
   await c.env.STATE.delete(stateKey);
 
   if (!code) {
+    logger.warn("Missing code parameter");
     return c.json({ error: "Missing code parameter" }, 400);
   }
 
+  logger.debug("Exchanging code for token");
   const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: {
@@ -69,16 +89,19 @@ app.get("/github/callback", async (c) => {
   });
 
   if (!tokenRes.ok) {
+    logger.error("Failed to exchange code for token");
     return c.json({ error: "Failed to exchange code for token" }, 502);
   }
 
   const tokenData = await tokenRes.json<{ access_token?: string; error?: string }>();
   if (!tokenData.access_token) {
+    logger.error("GitHub OAuth error", undefined, { error: tokenData.error });
     return c.json({ error: "GitHub OAuth error" }, 502);
   }
 
   const accessToken = tokenData.access_token;
 
+  logger.debug("Fetching GitHub user data");
   const [userRes, emailsRes] = await Promise.all([
     fetch("https://api.github.com/user", {
       headers: {
@@ -97,6 +120,7 @@ app.get("/github/callback", async (c) => {
   ]);
 
   if (!userRes.ok || !emailsRes.ok) {
+    logger.error("Failed to fetch GitHub user data");
     return c.json({ error: "Failed to fetch GitHub user data" }, 502);
   }
 
@@ -109,20 +133,38 @@ app.get("/github/callback", async (c) => {
     emails[0]?.email;
 
   if (!primaryEmail) {
+    logger.warn("No verified email found on GitHub account", { githubId: githubUser.id });
     return c.json({ error: "No verified email found on GitHub account" }, 422);
   }
 
-  const user = await upsertGitHubUser(c.env.DB, {
-    githubId: String(githubUser.id),
-    email: primaryEmail,
-    username: githubUser.login,
-  });
+  const emailPrefix = primaryEmail.split("@")[0];
+  logger.info("Upserting GitHub user", { githubId: githubUser.id, emailPrefix });
 
-  // Store GitHub access token for private repo access
-  await setGitHubAccessToken(c.env.DB, user.id, accessToken);
+  const userResult = await upsertGitHubUser(
+    c.env.DB,
+    {
+      githubId: String(githubUser.id),
+      email: primaryEmail,
+      username: githubUser.login,
+    },
+    logger
+  );
 
-  const session = await createSession(c.env.DB, user.id);
+  if (!userResult.success) {
+    logger.error("Failed to upsert GitHub user", undefined, { githubId: githubUser.id });
+    return c.json({ error: "Failed to create user" }, 500);
+  }
 
+  const user = userResult.data;
+  const sessionLogger = logger.child({ userId: user.id });
+
+  const sessionResult = await createSession(c.env.DB, user.id, sessionLogger);
+  if (!sessionResult.success) {
+    sessionLogger.error("Failed to create session");
+    return c.json({ error: "Failed to create session" }, 500);
+  }
+
+  const session = sessionResult.data;
   setCookie(c, "stratum_session", session.id, {
     httpOnly: true,
     secure: true,
@@ -130,6 +172,8 @@ app.get("/github/callback", async (c) => {
     maxAge: 2592000,
     path: "/",
   });
+
+  sessionLogger.info("GitHub OAuth successful, session created");
 
   let redirectTo = "/";
   if (next && typeof next === "string") {
@@ -147,13 +191,21 @@ app.get("/github/callback", async (c) => {
 });
 
 app.get("/logout", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const sessionId = getCookie(c, "stratum_session");
 
   if (sessionId) {
-    await deleteSession(c.env.DB, sessionId);
+    logger.debug("Deleting session", { sessionId: sessionId.slice(0, 8) + "..." });
+    await deleteSession(c.env.DB, sessionId, logger);
   }
 
   deleteCookie(c, "stratum_session", { path: "/" });
+  logger.info("User logged out");
 
   return c.redirect("/");
 });

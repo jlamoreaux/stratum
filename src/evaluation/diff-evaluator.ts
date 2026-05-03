@@ -1,3 +1,7 @@
+import type { Logger } from "../utils/logger";
+import type { Result } from "../utils/result";
+import type { AppError } from "../utils/errors";
+import { ok } from "../utils/result";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
 const DEFAULT_MAX_LINES = 500;
@@ -41,10 +45,13 @@ function countFiles(diff: string): number {
 }
 
 export class DiffEvaluator implements Evaluator {
-  async evaluate(diff: string, policy: EvalPolicy): Promise<EvalResult> {
+  async evaluate(diff: string, policy: EvalPolicy, logger: Logger): Promise<Result<EvalResult, AppError>> {
+    logger.debug("Starting diff evaluation");
+
     const config = policy.evaluators.find((e) => e.type === "diff");
     if (!config || config.type !== "diff") {
-      return { score: 1.0, passed: true, reason: "No diff config found, passing by default." };
+      logger.info("No diff config found, passing by default");
+      return ok({ score: 1.0, passed: true, reason: "No diff config found, passing by default." });
     }
 
     const maxLines = config.maxLines ?? DEFAULT_MAX_LINES;
@@ -57,6 +64,8 @@ export class DiffEvaluator implements Evaluator {
     const addedPaths = parseAddedFilePaths(diff);
     const changedLines = countChangedLines(diff);
     const fileCount = countFiles(diff);
+
+    logger.debug("Diff stats", { changedLines, fileCount, addedPaths: addedPaths.length });
 
     if (changedLines > maxLines) {
       violations.push(`Changed lines (${changedLines}) exceeds maxLines (${maxLines})`);
@@ -88,8 +97,11 @@ export class DiffEvaluator implements Evaluator {
       violations.length === 0 ? "Diff passed all checks." : `Diff failed: ${violations.join("; ")}`;
 
     if (violations.length > 0) {
-      return { score, passed, reason, issues: violations };
+      logger.info("Diff evaluation found violations", { violationCount: violations.length, score });
+      return ok({ score, passed, reason, issues: violations });
     }
-    return { score, passed, reason };
+
+    logger.info("Diff evaluation complete", { score, passed });
+    return ok({ score, passed, reason });
   }
 }

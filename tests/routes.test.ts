@@ -8,6 +8,7 @@ vi.mock("../src/storage/users", () => ({
       return {
         id: "user_test",
         email: "test@example.com",
+        username: "testuser",
         tokenHash: "hash",
         createdAt: "2026-01-01T00:00:00.000Z",
       };
@@ -16,6 +17,28 @@ vi.mock("../src/storage/users", () => ({
       return {
         id: "user_other",
         email: "other@example.com",
+        username: "otheruser",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+    }
+    return null;
+  }),
+  getUser: vi.fn(async (_, userId: string) => {
+    if (userId === "user_test") {
+      return {
+        id: "user_test",
+        email: "test@example.com",
+        username: "testuser",
+        tokenHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+    }
+    if (userId === "user_other") {
+      return {
+        id: "user_other",
+        email: "other@example.com",
+        username: "otheruser",
         tokenHash: "hash",
         createdAt: "2026-01-01T00:00:00.000Z",
       };
@@ -161,8 +184,10 @@ describe("POST /api/projects", () => {
       env,
     );
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { name: string; commit: string };
+    const body = (await res.json()) as { name: string; namespace: string; slug: string; commit: string };
     expect(body.name).toBe("my-project");
+    expect(body.namespace).toBe("@testuser");
+    expect(body.slug).toBe("my-project");
     expect(body.commit).toBe("sha_init");
   });
 

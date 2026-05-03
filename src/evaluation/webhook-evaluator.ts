@@ -1,3 +1,8 @@
+import type { Logger } from "../utils/logger";
+import type { Result } from "../utils/result";
+import type { AppError } from "../utils/errors";
+import { ExternalServiceError } from "../utils/errors";
+import { ok, err } from "../utils/result";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
 async function computeHmacSha256(secret: string, body: string): Promise<string> {
@@ -16,10 +21,13 @@ async function computeHmacSha256(secret: string, body: string): Promise<string> 
 }
 
 export class WebhookEvaluator implements Evaluator {
-  async evaluate(diff: string, policy: EvalPolicy): Promise<EvalResult> {
+  async evaluate(diff: string, policy: EvalPolicy, logger: Logger): Promise<Result<EvalResult, AppError>> {
+    logger.debug("Starting webhook evaluation");
+
     const config = policy.evaluators.find((e) => e.type === "webhook");
     if (!config || config.type !== "webhook") {
-      return { score: 0, passed: false, reason: "Webhook: no configuration found." };
+      logger.warn("No webhook configuration found");
+      return ok({ score: 0, passed: false, reason: "Webhook: no configuration found." });
     }
 
     const timeoutMs = config.timeoutMs ?? 10000;
@@ -35,6 +43,8 @@ export class WebhookEvaluator implements Evaluator {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      logger.debug("Sending webhook request", { url: config.url, timeoutMs });
+
       const response = await fetch(config.url, {
         method: "POST",
         headers,
@@ -43,14 +53,17 @@ export class WebhookEvaluator implements Evaluator {
       });
 
       if (!response.ok) {
-        return { score: 0, passed: false, reason: `Webhook failed: HTTP ${response.status}` };
+        logger.error("Webhook evaluation failed", new Error(`HTTP ${response.status}`));
+        return ok({ score: 0, passed: false, reason: `Webhook failed: HTTP ${response.status}` });
       }
 
       const json = (await response.json()) as { score: number; passed: boolean; reason: string };
-      return { score: json.score, passed: json.passed, reason: json.reason };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { score: 0, passed: false, reason: `Webhook failed: ${message}` };
+      logger.info("Webhook evaluation complete", { score: json.score, passed: json.passed });
+      return ok({ score: json.score, passed: json.passed, reason: json.reason });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Webhook evaluation failed", error instanceof Error ? error : new Error(message));
+      return err(new ExternalServiceError("Webhook", message, error instanceof Error ? error : undefined) as AppError);
     } finally {
       clearTimeout(timer);
     }

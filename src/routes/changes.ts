@@ -19,6 +19,10 @@ import { getProject, getWorkspace } from "../storage/state";
 import type { Change, Env } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
 import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
+import { createLogger } from "../utils/logger";
+import { ok as okResult, err as errResult } from "../utils/result";
+import { AppError } from "../utils/errors";
+import type { Logger } from "../utils/logger";
 
 const app = new Hono<{ Bindings: Env }>();
 function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
@@ -35,12 +39,19 @@ class UnavailableEvaluator implements Evaluator {
     private reason: string,
   ) {}
 
-  async evaluate(_diff: string, _policy: EvalPolicy): Promise<EvalResult> {
-    return { score: 0, passed: false, reason: `${this.evaluatorType} unavailable: ${this.reason}` };
+  async evaluate(_diff: string, _policy: EvalPolicy, _logger: Logger): Promise<{ success: true; data: EvalResult } | { success: false; error: AppError }> {
+    return okResult({ score: 0, passed: false, reason: `${this.evaluatorType} unavailable: ${this.reason}` });
   }
 }
 
 app.post("/projects/:name/changes", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentId = c.get("agentId");
   const agentOwnerId = c.get("agentOwnerId");
@@ -48,8 +59,16 @@ app.post("/projects/:name/changes", async (c) => {
 
   const { name: projectName } = c.req.param();
 
-  const project = await getProject(c.env.STATE, projectName);
-  if (!project) return notFound("Project", projectName);
+  const projectResult = await getProject(c.env.STATE, projectName, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", projectName);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return badRequest(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canWriteProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const body = await c.req.json<{ workspace?: unknown }>().catch(() => ({ workspace: undefined }));
@@ -57,18 +76,30 @@ app.post("/projects/:name/changes", async (c) => {
     return badRequest("workspace is required");
   }
 
-  const workspace = await getWorkspace(c.env.STATE, body.workspace);
-  if (!workspace) return notFound("Workspace", body.workspace);
+  const workspaceResult = await getWorkspace(c.env.STATE, body.workspace, logger);
+  if (!workspaceResult.success) {
+    if (workspaceResult.error.code === 'NOT_FOUND') {
+      return notFound("Workspace", body.workspace);
+    }
+    logger.error('Failed to get workspace', workspaceResult.error);
+    return badRequest(workspaceResult.error.message);
+  }
+  const workspace = workspaceResult.data;
 
   if (workspace.parent !== projectName) {
     return badRequest(`Workspace '${body.workspace}' does not belong to project '${projectName}'`);
   }
 
-  const change = await createChange(c.env.DB, {
+  const changeResult = await createChange(c.env.DB, logger, {
     project: projectName,
     workspace: body.workspace,
     ...(agentId !== undefined ? { agentId } : {}),
   });
+  if (!changeResult.success) {
+    logger.error('Failed to create change', changeResult.error);
+    return badRequest(changeResult.error.message);
+  }
+  const change = changeResult.data;
 
   await publishEvent(c.env.EVENTS_QUEUE, {
     type: "change.created",
@@ -79,12 +110,18 @@ app.post("/projects/:name/changes", async (c) => {
 
   const policy = await loadPolicy(project.remote, project.token);
 
-  const diff = await getDiffBetweenRepos(
+  const diffResult = await getDiffBetweenRepos(
     project.remote,
     project.token,
     workspace.remote,
     workspace.token,
+    logger,
   );
+  if (!diffResult.success) {
+    logger.error('Failed to get diff between repos', diffResult.error);
+    return badRequest(diffResult.error.message);
+  }
+  const diff = diffResult.data;
 
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
@@ -116,8 +153,9 @@ app.post("/projects/:name/changes", async (c) => {
             },
           ];
         default:
-          console.warn(
+          logger.warn(
             `Unknown evaluator type "${(cfg as { type: string }).type}" in policy for project ${projectName}`,
+            { evaluatorType: (cfg as { type: string }).type, projectName }
           );
           return [];
       }
@@ -154,12 +192,21 @@ app.post("/projects/:name/changes", async (c) => {
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
 
-  await recordEvalRuns(c.env.DB, change.id, evalRuns);
-  await updateChangeStatus(c.env.DB, change.id, newStatus, {
+  const recordResult = await recordEvalRuns(c.env.DB, logger, change.id, evalRuns);
+  if (!recordResult.success) {
+    logger.error('Failed to record eval runs', recordResult.error);
+    return badRequest(recordResult.error.message);
+  }
+
+  const updateResult = await updateChangeStatus(c.env.DB, logger, change.id, newStatus, {
     evalScore: evalResult.score,
     evalPassed: evalResult.passed,
     evalReason: evalResult.reason,
   });
+  if (!updateResult.success) {
+    logger.error('Failed to update change status', updateResult.error);
+    return badRequest(updateResult.error.message);
+  }
 
   await publishEvent(c.env.EVENTS_QUEUE, {
     type: "change.evaluated",
@@ -176,16 +223,38 @@ app.post("/projects/:name/changes", async (c) => {
     evalReason: evalResult.reason,
   };
 
-  return created({ change: updatedChange, eval: evalResult, evalRuns });
+  logger.info('Change created and evaluated', { 
+    changeId: change.id, 
+    project: projectName, 
+    workspace: body.workspace,
+    status: newStatus,
+    evalScore: evalResult.score 
+  });
+  return created({ change: updatedChange, eval: evalResult, evalRuns: recordResult.data });
 });
 
 app.get("/projects/:name/changes", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
   const { name: projectName } = c.req.param();
 
-  const project = await getProject(c.env.STATE, projectName);
-  if (!project) return notFound("Project", projectName);
+  const projectResult = await getProject(c.env.STATE, projectName, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", projectName);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return badRequest(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
 
   const statusParam = c.req.query("status");
@@ -203,24 +272,68 @@ app.get("/projects/:name/changes", async (c) => {
       ? (statusParam as Change["status"])
       : undefined;
 
-  const changes = await listChanges(c.env.DB, projectName, status);
-  return ok({ project: projectName, changes });
+  const changesResult = await listChanges(c.env.DB, logger, projectName, status);
+  if (!changesResult.success) {
+    logger.error('Failed to list changes', changesResult.error);
+    return badRequest(changesResult.error.message);
+  }
+
+  logger.info('Changes listed', { project: projectName, status, count: changesResult.data.length });
+  return ok({ project: projectName, changes: changesResult.data });
 });
 
 app.get("/changes/:id", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   const agentOwnerId = c.get("agentOwnerId");
   const { id } = c.req.param();
-  const change = await getChange(c.env.DB, id);
-  if (!change) return notFound("Change", id);
-  const project = await getProject(c.env.STATE, change.project);
-  if (!project) return notFound("Project", change.project);
+
+  const changeResult = await getChange(c.env.DB, logger, id);
+  if (!changeResult.success) {
+    if (changeResult.error.code === 'NOT_FOUND') {
+      return notFound("Change", id);
+    }
+    logger.error('Failed to get change', changeResult.error);
+    return badRequest(changeResult.error.message);
+  }
+  const change = changeResult.data;
+
+  const projectResult = await getProject(c.env.STATE, change.project, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", change.project);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return badRequest(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canReadProject(project, userId, agentOwnerId)) return forbidden("Project access denied");
-  const evalRuns = await listEvalRuns(c.env.DB, id);
-  return ok({ change, evalRuns });
+
+  const evalRunsResult = await listEvalRuns(c.env.DB, logger, id);
+  if (!evalRunsResult.success) {
+    logger.error('Failed to list eval runs', evalRunsResult.error);
+    return badRequest(evalRunsResult.error.message);
+  }
+
+  logger.info('Change retrieved', { changeId: id });
+  return ok({ change, evalRuns: evalRunsResult.data });
 });
 
 app.post("/changes/:id/merge", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   if (!userId) return unauthorized("Only authenticated users can trigger merges directly");
 
@@ -232,11 +345,26 @@ app.post("/changes/:id/merge", async (c) => {
     return badRequest("strategy must be 'merge' or 'squash'");
   }
 
-  const change = await getChange(c.env.DB, id);
-  if (!change) return notFound("Change", id);
+  const changeResult = await getChange(c.env.DB, logger, id);
+  if (!changeResult.success) {
+    if (changeResult.error.code === 'NOT_FOUND') {
+      return notFound("Change", id);
+    }
+    logger.error('Failed to get change', changeResult.error);
+    return badRequest(changeResult.error.message);
+  }
+  const change = changeResult.data;
 
-  const project = await getProject(c.env.STATE, change.project);
-  if (!project) return notFound("Project", change.project);
+  const projectResult = await getProject(c.env.STATE, change.project, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", change.project);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return badRequest(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canWriteProject(project, userId)) return forbidden("Project access denied");
 
   if (!MERGEABLE_STATUSES.includes(change.status) && !force) {
@@ -263,6 +391,7 @@ app.post("/changes/:id/merge", async (c) => {
       commit: result.commit ?? "",
     });
 
+    logger.info('Change merged via queue', { changeId: id, project: change.project, commit: result.commit });
     return ok({
       merged: true,
       changeId: id,
@@ -272,32 +401,43 @@ app.post("/changes/:id/merge", async (c) => {
     });
   }
 
-  const workspace = await getWorkspace(c.env.STATE, change.workspace);
-  if (!workspace) return notFound("Workspace", change.workspace);
-
-  let commit: string;
-  try {
-    commit = await mergeWorkspaceIntoProject(
-      project.remote,
-      project.token,
-      workspace.remote,
-      workspace.token,
-      { strategy },
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return badRequest(message);
+  const workspaceResult = await getWorkspace(c.env.STATE, change.workspace, logger);
+  if (!workspaceResult.success) {
+    if (workspaceResult.error.code === 'NOT_FOUND') {
+      return notFound("Workspace", change.workspace);
+    }
+    logger.error('Failed to get workspace', workspaceResult.error);
+    return badRequest(workspaceResult.error.message);
   }
+  const workspace = workspaceResult.data;
+
+  const mergeResult = await mergeWorkspaceIntoProject(
+    project.remote,
+    project.token,
+    workspace.remote,
+    workspace.token,
+    logger,
+    { strategy },
+  );
+  if (!mergeResult.success) {
+    logger.error('Failed to merge workspace into project', mergeResult.error);
+    return badRequest(mergeResult.error.message);
+  }
+  const commit = mergeResult.data;
 
   const mergedAt = new Date().toISOString();
-  await updateChangeStatus(c.env.DB, id, "merged", {
+  const updateResult = await updateChangeStatus(c.env.DB, logger, id, "merged", {
     ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
     ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
     ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
     mergedAt,
   });
+  if (!updateResult.success) {
+    logger.error('Failed to update change status to merged', updateResult.error);
+    return badRequest(updateResult.error.message);
+  }
 
-  await recordProvenance(c.env.DB, {
+  const provenanceResult = await recordProvenance(c.env.DB, logger, {
     commitSha: commit,
     project: change.project,
     workspace: change.workspace,
@@ -305,6 +445,10 @@ app.post("/changes/:id/merge", async (c) => {
     ...(change.agentId !== undefined ? { agentId: change.agentId } : {}),
     ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
   });
+  if (!provenanceResult.success) {
+    logger.error('Failed to record provenance', provenanceResult.error);
+    // Don't fail the request if provenance recording fails
+  }
 
   await publishEvent(c.env.EVENTS_QUEUE, {
     type: "change.merged",
@@ -313,6 +457,7 @@ app.post("/changes/:id/merge", async (c) => {
     commit,
   });
 
+  logger.info('Change merged', { changeId: id, project: change.project, workspace: change.workspace, commit });
   return ok({
     merged: true,
     changeId: id,
@@ -323,27 +468,53 @@ app.post("/changes/:id/merge", async (c) => {
 });
 
 app.post("/changes/:id/reject", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   if (!userId) return unauthorized("Only authenticated users can reject changes");
 
   const { id } = c.req.param();
 
-  const change = await getChange(c.env.DB, id);
-  if (!change) return notFound("Change", id);
+  const changeResult = await getChange(c.env.DB, logger, id);
+  if (!changeResult.success) {
+    if (changeResult.error.code === 'NOT_FOUND') {
+      return notFound("Change", id);
+    }
+    logger.error('Failed to get change', changeResult.error);
+    return badRequest(changeResult.error.message);
+  }
+  const change = changeResult.data;
 
-  const project = await getProject(c.env.STATE, change.project);
-  if (!project) return notFound("Project", change.project);
+  const projectResult = await getProject(c.env.STATE, change.project, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", change.project);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return badRequest(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canWriteProject(project, userId)) return forbidden("Project access denied");
 
   if (change.status === "merged") {
     return badRequest("Cannot reject a merged change");
   }
 
-  await updateChangeStatus(c.env.DB, id, "rejected", {
+  const updateResult = await updateChangeStatus(c.env.DB, logger, id, "rejected", {
     ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
     ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
     ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
   });
+  if (!updateResult.success) {
+    logger.error('Failed to update change status to rejected', updateResult.error);
+    return badRequest(updateResult.error.message);
+  }
 
   await publishEvent(c.env.EVENTS_QUEUE, {
     type: "change.rejected",
@@ -351,30 +522,74 @@ app.post("/changes/:id/reject", async (c) => {
     project: change.project,
   });
 
+  logger.info('Change rejected', { changeId: id, project: change.project });
   return ok({ rejected: true, changeId: id });
 });
 
 app.post("/changes/:id/evaluate", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   if (!userId) return unauthorized("Only authenticated users can run evaluations");
+
   const { id } = c.req.param();
-  const change = await getChange(c.env.DB, id);
-  if (!change) return notFound("Change", id);
-  const project = await getProject(c.env.STATE, change.project);
-  if (!project) return notFound("Project", change.project);
+
+  const changeResult = await getChange(c.env.DB, logger, id);
+  if (!changeResult.success) {
+    if (changeResult.error.code === 'NOT_FOUND') {
+      return notFound("Change", id);
+    }
+    logger.error('Failed to get change', changeResult.error);
+    return badRequest(changeResult.error.message);
+  }
+  const change = changeResult.data;
+
+  const projectResult = await getProject(c.env.STATE, change.project, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", change.project);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return badRequest(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canWriteProject(project, userId)) return forbidden("Project access denied");
+
   if (change.status === "merged" || change.status === "rejected" || change.status === "promoted") {
     return badRequest(`Cannot re-evaluate a ${change.status} change`);
   }
-  const workspace = await getWorkspace(c.env.STATE, change.workspace);
-  if (!workspace) return badRequest("Change references missing project/workspace");
+
+  const workspaceResult = await getWorkspace(c.env.STATE, change.workspace, logger);
+  if (!workspaceResult.success) {
+    if (workspaceResult.error.code === 'NOT_FOUND') {
+      return badRequest("Change references missing project/workspace");
+    }
+    logger.error('Failed to get workspace', workspaceResult.error);
+    return badRequest(workspaceResult.error.message);
+  }
+  const workspace = workspaceResult.data;
+
   const policy = await loadPolicy(project.remote, project.token);
-  const diff = await getDiffBetweenRepos(
+
+  const diffResult = await getDiffBetweenRepos(
     project.remote,
     project.token,
     workspace.remote,
     workspace.token,
+    logger,
   );
+  if (!diffResult.success) {
+    logger.error('Failed to get diff between repos', diffResult.error);
+    return badRequest(diffResult.error.message);
+  }
+  const diff = diffResult.data;
+
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
     ...policy.evaluators.flatMap((cfg): Array<{ type: string; evaluator: Evaluator }> => {
@@ -409,12 +624,14 @@ app.post("/changes/:id/evaluate", async (c) => {
       }
     }),
   ];
+
   const evalRuns = await Promise.all(
     evaluators.map(async ({ type, evaluator }) => ({
       evaluatorType: type,
       result: await evaluator.evaluate(diff, policy),
     })),
   );
+
   const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
   const aggregateResult = composite.aggregate(
     evalRuns.map(({ result }) => result),
@@ -435,36 +652,78 @@ app.post("/changes/:id/evaluate", async (c) => {
               : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
           issues: aggregateResult.issues,
         };
-  await recordEvalRuns(c.env.DB, id, evalRuns);
-  await updateChangeStatus(c.env.DB, id, evalResult.passed ? "accepted" : "needs_changes", {
+
+  const recordResult = await recordEvalRuns(c.env.DB, logger, id, evalRuns);
+  if (!recordResult.success) {
+    logger.error('Failed to record eval runs', recordResult.error);
+    return badRequest(recordResult.error.message);
+  }
+
+  const updateResult = await updateChangeStatus(c.env.DB, logger, id, evalResult.passed ? "accepted" : "needs_changes", {
     evalScore: evalResult.score,
     evalPassed: evalResult.passed,
     evalReason: evalResult.reason,
   });
-  return ok({ changeId: id, eval: evalResult, evalRuns });
+  if (!updateResult.success) {
+    logger.error('Failed to update change status', updateResult.error);
+    return badRequest(updateResult.error.message);
+  }
+
+  logger.info('Change re-evaluated', { changeId: id, evalScore: evalResult.score, passed: evalResult.passed });
+  return ok({ changeId: id, eval: evalResult, evalRuns: recordResult.data });
 });
 
 app.post("/changes/:id/github-pr", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get('userId'),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
   const userId = c.get("userId");
   if (!userId) return unauthorized("Authentication required");
+
   const { id } = c.req.param();
-  const change = await getChange(c.env.DB, id);
-  if (!change) return notFound("Change", id);
+
+  const changeResult = await getChange(c.env.DB, logger, id);
+  if (!changeResult.success) {
+    if (changeResult.error.code === 'NOT_FOUND') {
+      return notFound("Change", id);
+    }
+    logger.error('Failed to get change', changeResult.error);
+    return badRequest(changeResult.error.message);
+  }
+  const change = changeResult.data;
+
   if (change.status !== "accepted" && change.status !== "promoted") {
     return badRequest("Change must be accepted before promotion");
   }
-  const project = await getProject(c.env.STATE, change.project);
-  if (!project) return notFound("Project", change.project);
+
+  const projectResult = await getProject(c.env.STATE, change.project, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === 'NOT_FOUND') {
+      return notFound("Project", change.project);
+    }
+    logger.error('Failed to get project', projectResult.error);
+    return badRequest(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
   if (!canWriteProject(project, userId)) return forbidden("Project access denied");
   if (!project?.githubUrl) return badRequest("Project is not connected to GitHub");
+
   const repo = parseGitHubRepo(project.githubUrl);
   if (!repo) return badRequest("Project githubUrl is invalid");
+
   const body = await c.req
     .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
     .catch(() => ({}) as { title?: string; body?: string; base?: string; draft?: boolean });
+
   const branch = `stratum/${change.id}`;
   const prBody =
     `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
+
   const ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
     method: "POST",
     headers: {
@@ -480,10 +739,16 @@ app.post("/changes/:id/github-pr", async (c) => {
       draft: body.draft ?? true,
     }),
   });
-  if (!ghRes.ok) return badRequest(`GitHub PR creation failed (${ghRes.status})`);
+
+  if (!ghRes.ok) {
+    logger.error('GitHub PR creation failed', undefined, { status: ghRes.status, changeId: id });
+    return badRequest(`GitHub PR creation failed (${ghRes.status})`);
+  }
+
   const pr = (await ghRes.json()) as { number: number; html_url: string; state: string };
   const promotedAt = new Date().toISOString();
-  await updateChangeStatus(c.env.DB, id, "promoted", {
+
+  const updateResult = await updateChangeStatus(c.env.DB, logger, id, "promoted", {
     ...(change.evalScore !== undefined ? { evalScore: change.evalScore } : {}),
     ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
     ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
@@ -495,6 +760,16 @@ app.post("/changes/:id/github-pr", async (c) => {
     githubPrState: pr.state,
     promotedAt,
     promotedBy: userId,
+  });
+  if (!updateResult.success) {
+    logger.error('Failed to update change status to promoted', updateResult.error);
+    return badRequest(updateResult.error.message);
+  }
+
+  logger.info('Change promoted to GitHub PR', { 
+    changeId: id, 
+    prNumber: pr.number, 
+    repo: `${repo.owner}/${repo.repo}` 
   });
   return ok({
     changeId: id,

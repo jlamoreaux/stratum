@@ -2,24 +2,47 @@ import type { FC } from "hono/jsx";
 import { Layout } from "../layout";
 
 interface HomeProps {
-  projects: Array<{ name: string; remote: string; createdAt: string }>;
+  projects: Array<{ name: string; remote: string; createdAt: string; visibility?: string }>;
+  user?: { id: string; email: string } | null;
 }
 
-export const HomePage: FC<HomeProps> = ({ projects }) => {
+export const HomePage: FC<HomeProps> = ({ projects, user }) => {
   return (
-    <Layout title="Dashboard">
+    <Layout title="Dashboard" user={user}>
       <div class="page-header">
         <h1>Dashboard</h1>
+        {user && (
+          <a class="btn btn-primary" href="/new">
+            New Project
+          </a>
+        )}
       </div>
       {projects.length === 0 ? (
         <div class="empty-state">
-          <p>No projects yet. Create one via the API.</p>
+          {user ? (
+            <>
+              <p>No projects yet.</p>
+              <a href="/new" class="btn btn-primary" style={{ marginTop: "1rem", display: "inline-block" }}>
+                Create your first project
+              </a>
+            </>
+          ) : (
+            <>
+              <p>No public projects available.</p>
+              <a href="/auth/email" class="btn btn-primary" style={{ marginTop: "1rem", display: "inline-block" }}>
+                Sign in to see your projects
+              </a>
+            </>
+          )}
         </div>
       ) : (
         <div class="card-grid">
           {projects.map((project) => (
-            <a class="card card-link" href={`/ui/projects/${project.name}`} key={project.name}>
-              <div class="card-title">{project.name}</div>
+            <a class="card card-link" href={`/p/${project.name}`} key={project.name}>
+              <div class="card-title">
+                {project.name}
+                {project.visibility === "public" && <span class="badge badge-public">public</span>}
+              </div>
               <div class="card-meta">{new Date(project.createdAt).toLocaleDateString()}</div>
             </a>
           ))}

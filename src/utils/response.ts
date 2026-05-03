@@ -1,4 +1,6 @@
+import { AppError, NotFoundError, ValidationError, AuthError, ForbiddenError } from "./errors";
 import type { ApiError } from "../types";
+import type { Logger } from "./logger";
 
 export function ok<T>(data: T, status = 200): Response {
   return Response.json(data, { status });
@@ -26,6 +28,53 @@ export function forbidden(message: string): Response {
 
 export function internalError(message: string): Response {
   return error(message, 500);
+}
+
+/**
+ * Creates an error response from an AppError, including the error code.
+ */
+export function appError(error: AppError): Response {
+  const body: ApiError = {
+    error: error.message,
+    code: error.code,
+  };
+  return Response.json(body, { status: error.statusCode });
+}
+
+/**
+ * Handles a Result error and returns an appropriate response.
+ * Optionally logs the error with the provided logger.
+ */
+export function handleError(
+  error: Error,
+  logger?: Logger,
+  context?: Record<string, unknown>
+): Response {
+  if (logger) {
+    logger.error("Request error", error, context);
+  }
+
+  if (error instanceof NotFoundError) {
+    return appError(error);
+  }
+
+  if (error instanceof ValidationError) {
+    return appError(error);
+  }
+
+  if (error instanceof AuthError) {
+    return appError(error);
+  }
+
+  if (error instanceof ForbiddenError) {
+    return appError(error);
+  }
+
+  if (error instanceof AppError) {
+    return appError(error);
+  }
+
+  return internalError(error.message);
 }
 
 function error(message: string, status: number): Response {

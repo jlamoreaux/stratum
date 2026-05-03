@@ -1,4 +1,7 @@
 import { newId } from "../utils/ids";
+import { Result, ok, err } from "../utils/result";
+import { Logger } from "../utils/logger";
+import { NotFoundError, AppError } from "../utils/errors";
 
 export interface ProvenanceRecord {
   id: string;
@@ -38,6 +41,7 @@ function rowToRecord(row: ProvenanceRow): ProvenanceRecord {
 
 export async function recordProvenance(
   db: D1Database,
+  logger: Logger,
   opts: {
     commitSha: string;
     project: string;
@@ -46,60 +50,112 @@ export async function recordProvenance(
     agentId?: string;
     evalScore?: number;
   },
-): Promise<ProvenanceRecord> {
-  const id = newId("prv");
-  const mergedAt = new Date().toISOString();
+): Promise<Result<ProvenanceRecord, AppError>> {
+  try {
+    const id = newId("prv");
+    const mergedAt = new Date().toISOString();
 
-  await db
-    .prepare(
-      "INSERT INTO provenance (id, commit_sha, project, workspace, change_id, agent_id, eval_score, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(
+    await db
+      .prepare(
+        "INSERT INTO provenance (id, commit_sha, project, workspace, change_id, agent_id, eval_score, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        id,
+        opts.commitSha,
+        opts.project,
+        opts.workspace,
+        opts.changeId,
+        opts.agentId ?? null,
+        opts.evalScore ?? null,
+        mergedAt,
+      )
+      .run();
+
+    const record: ProvenanceRecord = {
       id,
-      opts.commitSha,
-      opts.project,
-      opts.workspace,
-      opts.changeId,
-      opts.agentId ?? null,
-      opts.evalScore ?? null,
+      commitSha: opts.commitSha,
+      project: opts.project,
+      workspace: opts.workspace,
+      changeId: opts.changeId,
       mergedAt,
-    )
-    .run();
+    };
+    if (opts.agentId !== undefined) record.agentId = opts.agentId;
+    if (opts.evalScore !== undefined) record.evalScore = opts.evalScore;
 
-  const record: ProvenanceRecord = {
-    id,
-    commitSha: opts.commitSha,
-    project: opts.project,
-    workspace: opts.workspace,
-    changeId: opts.changeId,
-    mergedAt,
-  };
-  if (opts.agentId !== undefined) record.agentId = opts.agentId;
-  if (opts.evalScore !== undefined) record.evalScore = opts.evalScore;
-  return record;
+    logger.debug("Provenance recorded", { provenanceId: id, changeId: opts.changeId, commitSha: opts.commitSha });
+    return ok(record);
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new AppError(
+          error instanceof Error ? error.message : "Failed to record provenance",
+          "DATABASE_ERROR",
+          500,
+          { operation: "recordProvenance", changeId: opts.changeId, commitSha: opts.commitSha }
+        );
+    logger.error("Failed to record provenance", appError, { changeId: opts.changeId, commitSha: opts.commitSha });
+    return err(appError);
+  }
 }
 
 export async function getProvenance(
   db: D1Database,
+  logger: Logger,
   changeId: string,
-): Promise<ProvenanceRecord | null> {
-  const row = await db
-    .prepare("SELECT * FROM provenance WHERE change_id = ?")
-    .bind(changeId)
-    .first<ProvenanceRow>();
+): Promise<Result<ProvenanceRecord, NotFoundError | AppError>> {
+  try {
+    const row = await db
+      .prepare("SELECT * FROM provenance WHERE change_id = ?")
+      .bind(changeId)
+      .first<ProvenanceRow>();
 
-  return row ? rowToRecord(row) : null;
+    if (!row) {
+      const notFoundError = new NotFoundError("Provenance", changeId);
+      logger.debug("Provenance not found", { changeId });
+      return err(notFoundError);
+    }
+
+    logger.debug("Provenance retrieved", { changeId, provenanceId: row.id });
+    return ok(rowToRecord(row));
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new AppError(
+          error instanceof Error ? error.message : "Failed to get provenance",
+          "DATABASE_ERROR",
+          500,
+          { operation: "getProvenance", changeId }
+        );
+    logger.error("Failed to get provenance", appError, { changeId });
+    return err(appError);
+  }
 }
 
 export async function listProvenance(
   db: D1Database,
+  logger: Logger,
   project: string,
   limit = 50,
-): Promise<ProvenanceRecord[]> {
-  const result = await db
-    .prepare("SELECT * FROM provenance WHERE project = ? ORDER BY merged_at DESC LIMIT ?")
-    .bind(project, limit)
-    .all<ProvenanceRow>();
+): Promise<Result<ProvenanceRecord[], AppError>> {
+  try {
+    const result = await db
+      .prepare("SELECT * FROM provenance WHERE project = ? ORDER BY merged_at DESC LIMIT ?")
+      .bind(project, limit)
+      .all<ProvenanceRow>();
 
-  return result.results.map(rowToRecord);
+    const records = result.results.map(rowToRecord);
+    logger.debug("Provenance listed", { project, limit, count: records.length });
+    return ok(records);
+  } catch (error) {
+    const appError = error instanceof AppError
+      ? error
+      : new AppError(
+          error instanceof Error ? error.message : "Failed to list provenance",
+          "DATABASE_ERROR",
+          500,
+          { operation: "listProvenance", project, limit }
+        );
+    logger.error("Failed to list provenance", appError, { project, limit });
+    return err(appError);
+  }
 }
