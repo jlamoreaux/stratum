@@ -10,6 +10,8 @@ import { AppError } from "../utils/errors";
 
 const IMPORT_PREFIX = "import:";
 const IMPORT_TTL_SECONDS = 24 * 60 * 60; // 24 hours
+const MAX_LOGS = 100; // Prevent unbounded growth
+const MAX_ERRORS = 50; // Prevent unbounded growth
 
 function importKey(namespace: string, slug: string): string {
   return `${IMPORT_PREFIX}${namespace}:${slug}`;
@@ -108,10 +110,10 @@ export async function updateImportProgress(
       ...existing.progress,
       ...updates.progress,
     },
-    // Append new logs
-    logs: [...existing.logs, ...(updates.logs || [])],
-    // Append new errors
-    errors: [...existing.errors, ...(updates.errors || [])],
+    // Append new logs with limit to prevent unbounded growth
+    logs: [...existing.logs, ...(updates.logs || [])].slice(-MAX_LOGS),
+    // Append new errors with limit
+    errors: [...existing.errors, ...(updates.errors || [])].slice(-MAX_ERRORS),
   };
 
   try {
