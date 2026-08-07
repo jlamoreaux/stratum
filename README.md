@@ -365,16 +365,19 @@ For the authoritative, current state see [docs/CURRENT_CAPABILITIES.md](docs/CUR
 open items are tracked in [docs/REMAINING_WORK.md](docs/REMAINING_WORK.md).
 
 ### Phase 0 ✅
+
 - Basic fork/commit/merge loop on Artifacts
 - GitHub import
 
 ### Phase 1 ✅
+
 - Persistent storage (D1)
 - Authentication (OAuth + API tokens + email)
 - Evaluation engine (diff, webhook, secret scanning)
 - Basic web UI
 
 ### Phase 2 ✅
+
 - LLM evaluator via AI Gateway
 - Sandbox execution
 - Event-driven evaluation pipeline
@@ -383,6 +386,7 @@ open items are tracked in [docs/REMAINING_WORK.md](docs/REMAINING_WORK.md).
 - Provenance tracking
 
 ### Phase 3 ✅
+
 - Organizations and teams
 - CLI tool (`@stratum/cli`) — built at full parity, not yet published to npm
 - Reference agent integration
@@ -390,6 +394,7 @@ open items are tracked in [docs/REMAINING_WORK.md](docs/REMAINING_WORK.md).
 - Issue tracker
 
 ### Phase 4 (Current)
+
 - ✅ Security & durability hardening (audit trail, backup/restore, deletion jobs)
 - 📋 Stratum Cloud (managed offering)
 - 📋 Billing and multi-tenancy
