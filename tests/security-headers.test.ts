@@ -32,10 +32,20 @@ describe("SEC-7: security headers", () => {
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(res.headers.get("X-Frame-Options")).toBe("DENY");
     expect(res.headers.get("Referrer-Policy")).toBe("strict-origin-when-cross-origin");
-    expect(res.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+    const csp = res.headers.get("Content-Security-Policy");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("base-uri 'self'");
   });
 
-  it("ships no script-src directive (inline UI handlers must keep working)", async () => {
+  it("restricts form targets and framing without touching scripts", async () => {
+    const res = await app.fetch(new Request("http://localhost/health"), makeEnv());
+    const csp = res.headers.get("Content-Security-Policy");
+    expect(csp).toContain("form-action 'self'");
+    expect(csp).toContain("frame-src 'none'");
+  });
+
+  it("ships no script-src directive (inline UI handlers must keep working; issue #161)", async () => {
     const res = await app.fetch(new Request("http://localhost/health"), makeEnv());
     expect(res.headers.get("Content-Security-Policy")).not.toContain("script-src");
   });
