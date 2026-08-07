@@ -50,6 +50,17 @@ describe("SEC-7: security headers", () => {
     expect(res.headers.get("Content-Security-Policy")).not.toContain("script-src");
   });
 
+  it("applies the same CSP to 500 error responses (error boundary parity)", async () => {
+    // GET / renders the dashboard, which throws under the bare test env and hits
+    // the error boundary — the 500 must carry the identical hardened policy.
+    const res = await app.fetch(new Request("http://localhost/"), makeEnv());
+    expect(res.status).toBe(500);
+    const csp = res.headers.get("Content-Security-Policy");
+    expect(csp).toContain("form-action 'self'");
+    expect(csp).toContain("frame-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
+  });
+
   it("sets HSTS only over HTTPS", async () => {
     const httpRes = await app.fetch(new Request("http://localhost/health"), makeEnv());
     expect(httpRes.headers.get("Strict-Transport-Security")).toBeNull();
