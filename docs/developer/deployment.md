@@ -383,18 +383,24 @@ Monitor via Cloudflare Dashboard:
 
 ### Code Rollback
 
-Cloudflare keeps previous Worker versions, so a rollback re-points production at
+Cloudflare keeps previous Worker versions, so a rollback re-points the Worker at
 a prior version — no rebuild or redeploy needed.
+
+> **Worker-code only.** `wrangler rollback` reverts the deployed **code**, not the
+> database. It does **not** undo an applied D1 migration or restore data — if the
+> bad version also ran a migration, roll the schema/data back separately (see
+> **Database Rollback**). Always pass an explicit `--env` so you act on the
+> intended environment.
 
 ```bash
 # Find the version to roll back to (lists the 10 most recent deployments + IDs)
-npx wrangler deployments list                 # production
-npx wrangler deployments list --env=staging   # staging
+npx wrangler deployments list --env=production
+npx wrangler deployments list --env=staging
 
 # Roll back to the previous version (prompts to confirm)…
-npx wrangler rollback --message "reason for rollback"
+npx wrangler rollback --env=production --message "reason for rollback"
 # …or roll back to a specific version by ID
-npx wrangler rollback <version-id> --message "reason for rollback"
+npx wrangler rollback <version-id> --env=production --message "reason for rollback"
 ```
 
 Or via git: revert the offending commit and push — this triggers a fresh forward
@@ -408,10 +414,18 @@ and no `wrangler d1 migrations rollback`. To reverse a schema change:
 1. Write a **new** migration that undoes it (e.g. drop the added column/table).
    Note SQLite's limited `ALTER TABLE DROP COLUMN` support — a table rebuild may
    be required.
-2. Apply it forward: `npx wrangler d1 migrations apply stratum --remote`.
-3. If the bad migration **destroyed or corrupted data**, a forward "undo" only
-   fixes the schema — restore the data from the most recent backup via the
-   [backup/restore runbook](../runbooks/backup-restore.md).
+2. **Validate on staging first.** Apply the corrective migration to staging and
+   confirm the schema/app are healthy before touching production:
+   `npx wrangler d1 migrations apply stratum-staging --env=staging --remote`.
+3. **Back up and verify before the production migration.** Trigger a backup
+   (`POST /api/admin/backup`) and verify it via the restore-plan check in the
+   [backup/restore runbook](../runbooks/backup-restore.md), then apply forward:
+   `npx wrangler d1 migrations apply stratum --env=production --remote`.
+4. If the bad migration **destroyed or corrupted data**, a forward "undo" only
+   fixes the schema — you must restore the data. Restore a **verified,
+   last-known-good** backup (⚠️ *not* necessarily the most recent — a backup taken
+   after the corruption contains it). Restore it into a fresh/staging instance and
+   validate the data **before** promoting to production, per the runbook.
 
 ### Emergency Procedures
 
