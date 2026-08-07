@@ -349,13 +349,27 @@ wrangler tail --format pretty | grep "ERROR"
 
 ### Health Checks
 
-```bash
-# Check service health
-curl https://your-instance.workers.dev/health
+Two endpoints, with different jobs:
 
-# Expected response
-{"status": "ok", "service": "stratum"}
+```bash
+# Liveness ping — static, does not touch the data plane. Use for uptime monitors.
+curl https://your-instance.workers.dev/health
+# {"status": "ok", "service": "stratum"}
+
+# Deep health — checks D1 (incl. load-bearing schema), KV, queue, and artifacts.
+# Used by the deploy smoke tests: returns HTTP 503 on any critical failure.
+curl -i https://your-instance.workers.dev/api/health
 ```
+
+`/api/health` severity model:
+
+- **`unhealthy` → HTTP 503**: any *critical* dependency (database, KV, artifacts) is down, or the
+  database is reachable but missing a load-bearing table (unapplied migrations — the #118 failure
+  mode). Deploy smoke tests gate on this, so a broken data plane fails the deploy instead of
+  shipping green.
+- **`degraded` → HTTP 200**: only the non-critical queue is down (async delivery degrades; the app
+  still serves).
+- **`healthy` → HTTP 200**: all checks pass.
 
 ### Metrics
 
