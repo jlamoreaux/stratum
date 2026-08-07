@@ -1,7 +1,4 @@
-// @ts-nocheck — reads the filesystem (node:fs/path); the repo's tsconfig is
-// Workers-only (no @types/node), matching the smoke tests' convention.
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+/// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
 import { CRITICAL_TABLES } from "../src/routes/health";
 
@@ -11,14 +8,24 @@ import { CRITICAL_TABLES } from "../src/routes/health";
  * `/api/health` 503 on every healthy deploy — the opposite of the intent. We
  * derive the real table set from migrations/ (the schema source of truth) and
  * assert every critical table exists there.
+ *
+ * The SQL is loaded via Vite's raw glob (not node:fs) so the test stays fully
+ * type-checked under the Workers tsconfig — no @ts-nocheck, no @types/node.
  */
+const migrationSql = import.meta.glob("../migrations/*.sql", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
 function tablesDefinedInMigrations(): Set<string> {
-  const dir = join(__dirname, "..", "migrations");
   const names = new Set<string>();
   const createTable = /CREATE TABLE (?:IF NOT EXISTS )?["'`]?([a-z_]+)/gi;
-  for (const file of readdirSync(dir).filter((f) => f.endsWith(".sql"))) {
-    const sql = readFileSync(join(dir, file), "utf8");
-    for (const m of sql.matchAll(createTable)) names.add(m[1].toLowerCase());
+  for (const sql of Object.values(migrationSql)) {
+    for (const match of sql.matchAll(createTable)) {
+      const table = match[1];
+      if (table) names.add(table.toLowerCase());
+    }
   }
   return names;
 }
