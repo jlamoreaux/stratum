@@ -31,7 +31,23 @@ export const BACKUP_TABLES: readonly string[] = [
   "sync_history",
   "issues",
   "audit_log",
+  "deletion_jobs",
   "commit_metrics",
+];
+
+/**
+ * D1 tables intentionally NOT backed up, with the reason each is safe to omit.
+ * Every table created by a migration must be in `BACKUP_TABLES` or here —
+ * `tests/backup-coverage.test.ts` enforces that so a new table holding real
+ * user data can't be silently dropped from every backup.
+ */
+export const BACKUP_EXCLUDED_TABLES: readonly string[] = [
+  // Ephemeral, single-use, short-TTL login tokens (stored hashed). They expire
+  // in minutes, so a backup would only ever hold dead rows — nothing to restore.
+  "magic_links",
+  // The backup orchestrator's own per-repo rotation cursor. It describes backup
+  // progress, not user data; restoring it into a fresh DB would be meaningless.
+  "backup_state",
 ];
 
 const PAGE_SIZE = 500;
