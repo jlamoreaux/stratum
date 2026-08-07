@@ -399,8 +399,9 @@ npx wrangler deployments list --env=staging
 
 # Roll back to the previous version (prompts to confirm)…
 npx wrangler rollback --env=production --message "reason for rollback"
-# …or roll back to a specific version by ID
-npx wrangler rollback <version-id> --env=production --message "reason for rollback"
+# …or roll back to a specific version by ID (quote it — bash reads <…> as redirection)
+VERSION_ID="paste-the-ID-from-the-list-above"
+npx wrangler rollback "$VERSION_ID" --env=production --message "reason for rollback"
 ```
 
 Or via git: revert the offending commit and push — this triggers a fresh forward
