@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import { setCookie } from "hono/cookie";
-import { runBackup } from "./backup/run-backup";
 import { githubWebhookRouter } from "./github/webhooks";
 import { analyticsMiddleware } from "./middleware/analytics";
 import { authMiddleware } from "./middleware/auth";
@@ -8,11 +7,9 @@ import { configGuardMiddleware } from "./middleware/config-guard";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
-import { sweepDeletionJobs } from "./queue/deletion-runner";
-import { handleEventQueue, sweepStaleEvents } from "./queue/event-consumer";
+import { handleEventQueue } from "./queue/event-consumer";
 import type { EventQueueMessage } from "./queue/events";
 import { handleImportQueue } from "./queue/import-queue";
-import { runTtlSweep } from "./queue/ttl-sweep";
 import { agentsRouter } from "./routes/agents";
 import { auditRouter } from "./routes/audit";
 import { authRouter } from "./routes/auth";
@@ -33,12 +30,13 @@ import { restoreRouter } from "./routes/restore";
 import { reviewsRouter } from "./routes/reviews";
 import { sessionRouter } from "./routes/sessions";
 import { signupRouter } from "./routes/signup";
-import { syncAllProjects, syncRouter } from "./routes/sync";
+import { syncRouter } from "./routes/sync";
 import { syncManagementRouter } from "./routes/sync-management";
 import { uiRouter } from "./routes/ui";
 import { usersRouter } from "./routes/users";
 import { webhooksRouter } from "./routes/webhooks";
 import { workspacesRouter } from "./routes/workspaces";
+import { runScheduledJobs } from "./scheduled";
 import { createSession } from "./storage/sessions";
 import { createUser, getUserByEmail } from "./storage/users";
 import type { Env, ImportJobMessage, MessageBatch, SyncJobMessage } from "./types";
@@ -198,20 +196,7 @@ export default {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     const logger = createLogger({ component: "scheduled" });
-    if (event.cron === "*/5 * * * *") {
-      ctx.waitUntil(sweepStaleEvents(env, logger));
-      // Authoritative deletion driver: re-drives unfinished deletion jobs with
-      // stale heartbeats (the enqueue at request time is only an optimization).
-      ctx.waitUntil(sweepDeletionJobs(env, logger));
-      return;
-    }
-    ctx.waitUntil(
-      Promise.all([
-        runTtlSweep(env, logger),
-        syncAllProjects(env),
-        runBackup(env, logger, new Date().toISOString()),
-      ]),
-    );
+    runScheduledJobs(event.cron, env, logger, (promise) => ctx.waitUntil(promise));
   },
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const logger = createLogger({ component: "queue" });

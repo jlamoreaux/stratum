@@ -95,10 +95,12 @@ max_batch_size = 1  # Process imports one at a time for resource management
 max_retries = 3     # Retry failed imports up to 3 times
 retry_delay = 30    # Wait 30 seconds between retries
 
+# "0 4 * * *"   — daily backup, on its OWN trigger so the ~15-min invocation
+#                 budget is never shared with (and starved by) the sync/TTL work
 # "0 6 * * *"   — daily housekeeping: workspace TTL sweep + auto-sync
 # "*/5 * * * *" — event outbox sweep: re-enqueue stale pending events
 [triggers]
-crons = ["0 6 * * *", "*/5 * * * *"]
+crons = ["0 4 * * *", "0 6 * * *", "*/5 * * * *"]
 
 # Email Sending — configure via: wrangler email sending enable yourdomain.com
 [[send_email]]
@@ -216,7 +218,7 @@ max_retries = 3
 retry_delay = 30
 
 [env.production.triggers]
-crons = ["0 6 * * *", "*/5 * * * *"]
+crons = ["0 4 * * *", "0 6 * * *", "*/5 * * * *"]
 
 [[env.production.send_email]]
 name = "EMAIL"
