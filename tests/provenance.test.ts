@@ -30,8 +30,12 @@ function makeD1() {
           return this;
         },
         async run() {
-          if (this._sql.startsWith("INSERT INTO provenance")) {
+          if (/^INSERT( OR IGNORE)? INTO provenance/i.test(this._sql)) {
             const b = this._binds;
+            // Model the (change_id, commit_sha) unique index: OR IGNORE is a no-op
+            // when a row already exists for the same merge commit.
+            const dupe = rows.some((r) => r.change_id === b[5] && r.commit_sha === b[1]);
+            if (dupe) return { success: true, meta: { changes: 0 } };
             rows.push({
               id: b[0],
               commit_sha: b[1],
@@ -45,10 +49,21 @@ function makeD1() {
               prompt_hash: b[9] ?? null,
               merged_at: b[10],
             });
+            return { success: true, meta: { changes: 1 } };
           }
-          return { success: true };
+          return { success: true, meta: { changes: 0 } };
         },
         async all() {
+          if (this._sql.toUpperCase().includes("PROJECT_ID = ? OR")) {
+            const [projectId, projectName] = this._binds;
+            return {
+              results: rows.filter(
+                (r) =>
+                  r.project_id === projectId ||
+                  (r.project_id === null && r.project === projectName),
+              ),
+            };
+          }
           const project = this._binds[0];
           return { results: rows.filter((r) => r.project === project) };
         },
@@ -88,6 +103,29 @@ describe("provenance model + prompt hash", () => {
     }
   });
 
+  it("dedups a duplicate merge: two records for one (change, commit) → one row", async () => {
+    const db = makeD1();
+    const opts = {
+      commitSha: "same_commit",
+      project: "proj-3",
+      workspace: "ws",
+      changeId: "chg_dupe",
+    };
+    // Two concurrent mergers both reach recordProvenance for the same merge commit.
+    const first = await recordProvenance(db, logger, opts);
+    const second = await recordProvenance(db, logger, opts);
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true); // the loser is tolerated, not an error
+
+    const read = await listProvenance(db, logger, "proj-3");
+    expect(read.success && read.data).toHaveLength(1); // exactly one provenance row
+
+    // A re-merge after a revert has a DIFFERENT commit sha → still recorded.
+    await recordProvenance(db, logger, { ...opts, commitSha: "remerge_commit" });
+    const after = await listProvenance(db, logger, "proj-3");
+    expect(after.success && after.data).toHaveLength(2);
+  });
+
   it("leaves model and prompt hash undefined for a user-authored merge", async () => {
     const db = makeD1();
     await recordProvenance(db, logger, {
@@ -102,5 +140,43 @@ describe("provenance model + prompt hash", () => {
       expect(read.data[0]?.model).toBeUndefined();
       expect(read.data[0]?.promptHash).toBeUndefined();
     }
+  });
+
+  it("scopes by project_id so same-named projects don't cross tenants", async () => {
+    const db = makeD1();
+    await recordProvenance(db, logger, {
+      commitSha: "aaa",
+      project: "acme",
+      projectId: "proj_A",
+      workspace: "ws",
+      changeId: "chg_a",
+    });
+    await recordProvenance(db, logger, {
+      commitSha: "bbb",
+      project: "acme",
+      projectId: "proj_B",
+      workspace: "ws",
+      changeId: "chg_b",
+    });
+
+    const a = await listProvenance(db, logger, "acme", 50, { projectId: "proj_A" });
+    expect(a.success && a.data.map((r) => r.changeId)).toEqual(["chg_a"]);
+    const b = await listProvenance(db, logger, "acme", 50, { projectId: "proj_B" });
+    expect(b.success && b.data.map((r) => r.changeId)).toEqual(["chg_b"]);
+  });
+
+  it("finds a stamped project's provenance when scoped by id (regression: the caller passes id)", async () => {
+    const db = makeD1();
+    await recordProvenance(db, logger, {
+      commitSha: "ccc",
+      project: "acme",
+      projectId: "proj_A",
+      workspace: "ws",
+      changeId: "chg_a",
+    });
+    // Before the fix, the route passed project.id into a `WHERE project = ?`
+    // (name) query, so this returned empty. Scoped by project_id it resolves.
+    const read = await listProvenance(db, logger, "acme", 50, { projectId: "proj_A" });
+    expect(read.success && read.data).toHaveLength(1);
   });
 });

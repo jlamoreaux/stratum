@@ -15,9 +15,11 @@ import { runTtlSweep } from "./queue/ttl-sweep";
 import { agentsRouter } from "./routes/agents";
 import { auditRouter } from "./routes/audit";
 import { authRouter } from "./routes/auth";
+import { backfillRouter } from "./routes/backfill";
 import { backupRouter } from "./routes/backup";
 import { bulkImportRouter } from "./routes/bulk-import";
 import { changesRouter } from "./routes/changes";
+import { deletionJobsRouter } from "./routes/deletion-jobs";
 import { emailAuthRouter } from "./routes/email-auth";
 import { gitHttpRouter } from "./routes/git-http";
 import { healthRouter } from "./routes/health";
@@ -26,6 +28,7 @@ import { loginRouter } from "./routes/login";
 import { metricsRouter } from "./routes/metrics";
 import { orgsRouter } from "./routes/orgs";
 import { projectsRouter } from "./routes/projects";
+import { restoreRouter } from "./routes/restore";
 import { reviewsRouter } from "./routes/reviews";
 import { sessionRouter } from "./routes/sessions";
 import { signupRouter } from "./routes/signup";
@@ -125,6 +128,9 @@ app.route("/api/admin/metrics", metricsRouter);
 // Admin audit trail endpoint
 app.route("/api/admin/audit", auditRouter);
 app.route("/api/admin/backup", backupRouter);
+app.route("/api/admin/restore", restoreRouter);
+app.route("/api/admin/deletion-jobs", deletionJobsRouter);
+app.route("/api/admin/backfill-project-id", backfillRouter);
 
 // Redirects from old /ui/* URLs to new paths (backward compatibility)
 app.get("/ui", (c) => c.redirect("/", 301));

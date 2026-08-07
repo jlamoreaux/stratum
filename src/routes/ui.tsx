@@ -465,7 +465,9 @@ app.get("/p/:name/changes", async (c) => {
     );
   }
 
-  const changesResult = await listChanges(c.env.DB, logger, name);
+  const changesResult = await listChanges(c.env.DB, logger, name, undefined, {
+    projectId: project.id,
+  });
   if (!changesResult.success) {
     logger.error("Failed to list changes", changesResult.error);
     return c.html(
@@ -719,7 +721,9 @@ app.get("/:namespace/:slug/changes", async (c) => {
     );
   }
 
-  const changesResult = await listChanges(c.env.DB, logger, project.name);
+  const changesResult = await listChanges(c.env.DB, logger, project.name, undefined, {
+    projectId: project.id,
+  });
   if (!changesResult.success) {
     logger.error("Failed to list changes", changesResult.error);
     return c.html(
@@ -861,6 +865,7 @@ app.get("/:namespace/:slug/issues", async (c) => {
     logger,
     project.name,
     filter === "all" ? undefined : filter,
+    { projectId: project.id },
   );
   if (!issuesResult.success) {
     logger.error("Failed to list issues", issuesResult.error);
@@ -913,7 +918,9 @@ app.get("/:namespace/:slug/issues/:number", async (c) => {
     return c.html(issuePageError(400), 400);
   }
 
-  const issueResult = await getIssueByNumber(c.env.DB, logger, project.name, number);
+  const issueResult = await getIssueByNumber(c.env.DB, logger, project.name, number, {
+    projectId: project.id,
+  });
   if (!issueResult.success) {
     return c.html(
       <div style="padding:2rem;font-family:monospace;color:#f87171;">
