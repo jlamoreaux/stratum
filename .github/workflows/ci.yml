@@ -123,8 +123,8 @@ jobs:
           STAGING_URL: ${{ steps.deploy.outputs.url }}
         run: |
           set -e
-          echo "→ Testing health endpoint: $STAGING_URL/health"
-          curl -sfS --retry 5 --retry-delay 5 "$STAGING_URL/health"
+          echo "→ Testing health endpoint: $STAGING_URL/api/health"
+          curl -sfS --retry 5 --retry-delay 5 "$STAGING_URL/api/health"
           echo "✓ Health check passed"
 
   # ========================================================================
@@ -187,8 +187,8 @@ jobs:
           PRODUCTION_URL: ${{ steps.deploy.outputs.url }}
         run: |
           set -e
-          echo "→ Testing health endpoint: $PRODUCTION_URL/health"
-          curl -sfS --retry 5 --retry-delay 5 "$PRODUCTION_URL/health"
+          echo "→ Testing health endpoint: $PRODUCTION_URL/api/health"
+          curl -sfS --retry 5 --retry-delay 5 "$PRODUCTION_URL/api/health"
           echo "✓ Health check passed"
 
       - name: Smoke test - Critical paths

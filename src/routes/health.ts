@@ -48,7 +48,20 @@ async function measureLatency<T>(
 }
 
 /**
- * Check D1 database connectivity
+ * Load-bearing tables whose absence means the schema is broken or unmigrated
+ * (a missing `events` outbox table was the root of the #118 production incident).
+ * Intentionally a minimal set of long-stable core tables — NOT the full schema,
+ * which lives in `migrations/` and must not be duplicated here. Every entry must
+ * be a real D1 table (projects/orgs live in KV, not D1); `health.test.ts` asserts
+ * this against `migrations/` so a bogus name can't silently 503 every deploy.
+ */
+export const CRITICAL_TABLES = ["users", "sessions", "changes", "events"] as const;
+
+/**
+ * Check D1 database connectivity and that the load-bearing schema is present.
+ * A shallow `SELECT 1` verifies the binding is reachable but not that migrations
+ * ran, so we also assert the critical tables exist — this is what turns an
+ * unmigrated production database into a failed (503) health check.
  */
 async function checkDatabase(db: D1Database): Promise<HealthCheckResult> {
   const result = await measureLatency(async () => {
@@ -57,6 +70,17 @@ async function checkDatabase(db: D1Database): Promise<HealthCheckResult> {
       .all<{ health_check: number }>();
     if (!results || results.length === 0 || !results[0] || results[0].health_check !== 1) {
       throw new Error("Unexpected query result");
+    }
+
+    const placeholders = CRITICAL_TABLES.map(() => "?").join(", ");
+    const { results: tableRows } = await db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN (${placeholders})`)
+      .bind(...CRITICAL_TABLES)
+      .all<{ name: string }>();
+    const present = new Set((tableRows ?? []).map((row) => row.name));
+    const missing = CRITICAL_TABLES.filter((table) => !present.has(table));
+    if (missing.length > 0) {
+      throw new Error(`Missing tables: ${missing.join(", ")}`);
     }
   });
 
@@ -173,10 +197,16 @@ app.get("/", async (c) => {
     ),
   ]);
 
-  // Determine overall health status
+  // Determine overall health status. Database, KV, and artifacts are critical:
+  // the app cannot serve requests without them, so any critical failure is
+  // `unhealthy` (503) — this is what lets a deploy smoke test fail on a broken
+  // data plane. The queue is non-critical (async delivery degrades but the app
+  // still serves), so a queue-only failure is `degraded` (200).
+  const criticalChecks = [database, kv, artifacts];
   const errors = [database, kv, queue, artifacts].filter((check) => check.status === "error");
+  const hasCriticalError = criticalChecks.some((check) => check.status === "error");
   let overallStatus: HealthCheckResponse["status"] = "healthy";
-  if (errors.length === 4) {
+  if (hasCriticalError) {
     overallStatus = "unhealthy";
   } else if (errors.length > 0) {
     overallStatus = "degraded";
