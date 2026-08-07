@@ -4,6 +4,7 @@ import { runBackup } from "./backup/run-backup";
 import { githubWebhookRouter } from "./github/webhooks";
 import { analyticsMiddleware } from "./middleware/analytics";
 import { authMiddleware } from "./middleware/auth";
+import { configGuardMiddleware } from "./middleware/config-guard";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
@@ -49,6 +50,7 @@ export { RepoDO } from "./queue/repo-do";
 const app = new Hono<{ Bindings: Env }>();
 
 app.use("*", securityHeadersMiddleware);
+app.use("*", configGuardMiddleware);
 app.use("*", analyticsMiddleware);
 app.use("*", authMiddleware);
 app.use("*", csrfMiddleware);

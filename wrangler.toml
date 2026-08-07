@@ -228,6 +228,10 @@ POSTHOG_HOST = "https://app.posthog.com"
 # inert in production — and so wrangler stops warning about the missing override.
 DEV_LOGIN_ENABLED = "false"
 # RepoDO fast-forward path (ADR 004); default off until staging numbers justify it.
+# To enable in prod you MUST also add a [[env.production.r2_buckets]] REPO_OBJECTS
+# binding (staging has one) — without it the fast path throws "REPO_OBJECTS not
+# bound" at merge time and workspace staging silently no-ops. The config-guard
+# middleware logs an error if this is set "true" with no bucket bound.
 REPO_DO_ENABLED = "false"
 # Production OAuth callbacks. The matching callback URLs must also be registered
 # in the GitHub and Google OAuth app settings.
