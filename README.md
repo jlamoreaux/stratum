@@ -49,10 +49,11 @@ Stratum is a GitHub alternative where both humans and AI agents are first-class 
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| Organizations | 🚧 | Basic support (in progress) |
-| Teams | 🚧 | Team-based permissions |
-| CLI Tool | 🚧 | `@stratum/cli` built (`cli/`), not yet published to npm |
-| Bidirectional GitHub Sync | 📋 | Planned |
+| Organizations | ✅ | Org-owned projects, members, and role-based access |
+| Teams | ✅ | Team-based write permissions within an org |
+| Issue Tracker | ✅ | Per-project issues, auto-close on linked-change merge |
+| Bidirectional GitHub Sync | ✅ | Inbound webhooks + outbound PR promotion |
+| CLI Tool | 🚧 | `@stratum/cli` at full API parity; install from `cli/` (not yet published to npm) |
 
 **Legend:** ✅ Working | 🚧 In Progress | 📋 Planned
 
@@ -360,19 +361,23 @@ Before changing `[[artifacts]]` / `[[env.staging.artifacts]]` namespace values i
 
 ## Development Roadmap
 
-See [docs/stratum-master-plan-v2.md](docs/stratum-master-plan-v2.md) for the full implementation plan.
+For the authoritative, current state see [docs/CURRENT_CAPABILITIES.md](docs/CURRENT_CAPABILITIES.md);
+open items are tracked in [docs/REMAINING_WORK.md](docs/REMAINING_WORK.md).
 
 ### Phase 0 ✅
+
 - Basic fork/commit/merge loop on Artifacts
 - GitHub import
 
-### Phase 1 ✅ (Current)
+### Phase 1 ✅
+
 - Persistent storage (D1)
 - Authentication (OAuth + API tokens + email)
 - Evaluation engine (diff, webhook, secret scanning)
 - Basic web UI
 
-### Phase 2 (Next)
+### Phase 2 ✅
+
 - LLM evaluator via AI Gateway
 - Sandbox execution
 - Event-driven evaluation pipeline
@@ -380,17 +385,19 @@ See [docs/stratum-master-plan-v2.md](docs/stratum-master-plan-v2.md) for the ful
 - Durable Object merge queue
 - Provenance tracking
 
-### Phase 3
+### Phase 3 ✅
+
 - Organizations and teams
-- CLI tool (`@stratum/cli`)
+- CLI tool (`@stratum/cli`) — built at full parity, not yet published to npm
 - Reference agent integration
 - Bidirectional GitHub sync
 - Issue tracker
 
-### Phase 4
-- Stratum Cloud (managed offering)
-- Load testing and hardening
-- Billing and multi-tenancy
+### Phase 4 (Current)
+
+- ✅ Security & durability hardening (audit trail, backup/restore, deletion jobs)
+- 📋 Stratum Cloud (managed offering)
+- 📋 Billing and multi-tenancy
 
 ## Contributing
 
