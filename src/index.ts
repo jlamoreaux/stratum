@@ -27,6 +27,7 @@ import { loginRouter } from "./routes/login";
 import { metricsRouter } from "./routes/metrics";
 import { orgsRouter } from "./routes/orgs";
 import { projectsRouter } from "./routes/projects";
+import { restoreRouter } from "./routes/restore";
 import { reviewsRouter } from "./routes/reviews";
 import { sessionRouter } from "./routes/sessions";
 import { signupRouter } from "./routes/signup";
@@ -126,6 +127,7 @@ app.route("/api/admin/metrics", metricsRouter);
 // Admin audit trail endpoint
 app.route("/api/admin/audit", auditRouter);
 app.route("/api/admin/backup", backupRouter);
+app.route("/api/admin/restore", restoreRouter);
 app.route("/api/admin/deletion-jobs", deletionJobsRouter);
 
 // Redirects from old /ui/* URLs to new paths (backward compatibility)
