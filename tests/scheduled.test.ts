@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { jobsForCron, runScheduledJobs } from "../src/scheduled";
+import { type JobRunners, jobsForCron, runScheduledJobs } from "../src/scheduled";
 import type { Env } from "../src/types";
 import type { Logger } from "../src/utils/logger";
+
+// Stub runners that resolve immediately, so the dispatch is exercised without
+// executing (and failing) the real backup/sync/sweep jobs against a mock env.
+const noopRunners: JobRunners = {
+  "event-sweep": () => Promise.resolve(),
+  "deletion-sweep": () => Promise.resolve(),
+  backup: () => Promise.resolve(),
+  "ttl-sweep": () => Promise.resolve(),
+  "project-sync": () => Promise.resolve(),
+};
 
 describe("jobsForCron", () => {
   it("runs the backup ALONE on its dedicated 0 4 trigger", () => {
@@ -26,21 +36,23 @@ describe("jobsForCron", () => {
 });
 
 describe("runScheduledJobs", () => {
-  it("registers one waitUntil per job for the cron", () => {
+  function collect(cron: string): Promise<unknown>[] {
     const scheduled: Promise<unknown>[] = [];
-    // Empty deps: the 0 4 branch only calls runBackup, which we don't await here —
-    // we assert the dispatch registers exactly one promise, not the job's result.
-    runScheduledJobs("0 4 * * *", {} as Env, {} as Logger, (p) => {
-      scheduled.push(p);
-      // swallow the (expected) rejection from running against an empty env
-      p.catch(() => {});
-    });
-    expect(scheduled).toHaveLength(1);
+    runScheduledJobs(cron, {} as Env, {} as Logger, (p) => scheduled.push(p), noopRunners);
+    return scheduled;
+  }
+
+  it("registers one waitUntil for the backup-only cron", () => {
+    expect(collect("0 4 * * *")).toHaveLength(1);
+  });
+
+  it("registers a SEPARATE waitUntil per job (not one batched Promise.all)", () => {
+    // The 06:00 cron has two jobs; each must be its own waitUntil so one failing
+    // job can't reject the other — a single Promise.all would show up as length 1.
+    expect(collect("0 6 * * *")).toHaveLength(2);
   });
 
   it("registers nothing for an unknown cron", () => {
-    const scheduled: Promise<unknown>[] = [];
-    runScheduledJobs("@bogus", {} as Env, {} as Logger, (p) => scheduled.push(p));
-    expect(scheduled).toHaveLength(0);
+    expect(collect("@bogus")).toHaveLength(0);
   });
 });

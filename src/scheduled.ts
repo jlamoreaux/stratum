@@ -33,7 +33,9 @@ export function jobsForCron(cron: string): ScheduledJob[] {
   }
 }
 
-const JOB_RUNNERS: Record<ScheduledJob, (env: Env, logger: Logger) => Promise<unknown>> = {
+export type JobRunners = Record<ScheduledJob, (env: Env, logger: Logger) => Promise<unknown>>;
+
+const JOB_RUNNERS: JobRunners = {
   "event-sweep": (env, logger) => sweepStaleEvents(env, logger),
   "deletion-sweep": (env, logger) => sweepDeletionJobs(env, logger),
   backup: (env, logger) => runBackup(env, logger, new Date().toISOString()),
@@ -44,15 +46,17 @@ const JOB_RUNNERS: Record<ScheduledJob, (env: Env, logger: Logger) => Promise<un
 /**
  * Dispatch the jobs for a cron event. Each job is registered independently with
  * `waitUntil` (rather than a single `Promise.all`) so one failing job cannot
- * reject the others. `waitUntil` is injected so this stays unit-testable.
+ * reject the others. `waitUntil` and `runners` are injected so this stays
+ * unit-testable without executing the real jobs.
  */
 export function runScheduledJobs(
   cron: string,
   env: Env,
   logger: Logger,
   waitUntil: (promise: Promise<unknown>) => void,
+  runners: JobRunners = JOB_RUNNERS,
 ): void {
   for (const job of jobsForCron(cron)) {
-    waitUntil(JOB_RUNNERS[job](env, logger));
+    waitUntil(runners[job](env, logger));
   }
 }
