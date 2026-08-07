@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { type EventActor, emitEvent } from "../queue/events";
 import { getChange } from "../storage/changes";
+import { isTargetDeleting } from "../storage/deletion";
 import {
   type IssueStatus,
   createIssue,
@@ -27,6 +28,10 @@ const app = new Hono<{ Bindings: Env }>();
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_BODY_LENGTH = 20_000;
+
+/** Default + hard cap for the paginated issues listing (bounds the response). */
+const DEFAULT_ISSUES_PAGE = 100;
+const MAX_ISSUES_PAGE = 500;
 
 interface RouteContext {
   env: Env;
@@ -78,6 +83,12 @@ app.post("/:namespace/:slug/issues", async (c) => {
   // Anyone who can read the project can open issues against it.
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
     return notFound("Project", `${project.namespace}/${project.slug}`);
+  }
+
+  // Refuse opening an issue while the project is being deleted — it resurrects a
+  // row the cascade removed and wedges the job. Best-effort; verifier re-run backs it.
+  if (await isTargetDeleting(c.env, project, logger)) {
+    return c.json({ error: "Project is being deleted", code: "TARGET_DELETING" }, 409);
   }
 
   let body: { title?: unknown; body?: unknown; linkedChangeId?: unknown };
@@ -163,7 +174,18 @@ app.get("/:namespace/:slug/issues", async (c) => {
   const status: IssueStatus | undefined =
     statusParam === "open" || statusParam === "closed" ? statusParam : undefined;
 
-  const issuesResult = await listIssues(c.env.DB, logger, project.name, status);
+  // Bound the response so a project with thousands of issues can't return them
+  // all at once. Client may request fewer via ?limit=, capped at the max.
+  const requested = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(requested) && requested > 0
+      ? Math.min(requested, MAX_ISSUES_PAGE)
+      : DEFAULT_ISSUES_PAGE;
+
+  const issuesResult = await listIssues(c.env.DB, logger, project.name, status, {
+    projectId: project.id,
+    limit,
+  });
   if (!issuesResult.success) {
     return internalError(issuesResult.error.message);
   }
@@ -194,7 +216,9 @@ app.get("/:namespace/:slug/issues/:number", async (c) => {
   const number = parseIssueNumber(c.req.param("number"));
   if (number === null) return badRequest("Invalid issue number");
 
-  const issueResult = await getIssueByNumber(c.env.DB, logger, project.name, number);
+  const issueResult = await getIssueByNumber(c.env.DB, logger, project.name, number, {
+    projectId: project.id,
+  });
   if (!issueResult.success) {
     if (issueResult.error.code === "NOT_FOUND") return notFound("Issue", `#${number}`);
     return internalError(issueResult.error.message);
@@ -268,13 +292,18 @@ app.patch("/:namespace/:slug/issues/:number", async (c) => {
     }
   }
 
-  const before = await getIssueByNumber(c.env.DB, logger, project.name, number);
+  const before = await getIssueByNumber(c.env.DB, logger, project.name, number, {
+    projectId: project.id,
+  });
   if (!before.success) {
     if (before.error.code === "NOT_FOUND") return notFound("Issue", `#${number}`);
     return internalError(before.error.message);
   }
 
-  const updateResult = await updateIssue(c.env.DB, logger, project.name, number, updates);
+  const updateResult = await updateIssue(c.env.DB, logger, project.name, number, {
+    ...updates,
+    projectId: project.id,
+  });
   if (!updateResult.success) {
     if (updateResult.error.code === "NOT_FOUND") return notFound("Issue", `#${number}`);
     return internalError(updateResult.error.message);
@@ -322,7 +351,9 @@ app.post("/:namespace/:slug/issues/:number/close", async (c) => {
   const number = parseIssueNumber(c.req.param("number"));
   if (number === null) return badRequest("Invalid issue number");
 
-  const before = await getIssueByNumber(c.env.DB, logger, project.name, number);
+  const before = await getIssueByNumber(c.env.DB, logger, project.name, number, {
+    projectId: project.id,
+  });
   if (!before.success) {
     if (before.error.code === "NOT_FOUND") return notFound("Issue", `#${number}`);
     return internalError(before.error.message);
@@ -332,6 +363,7 @@ app.post("/:namespace/:slug/issues/:number/close", async (c) => {
   const updateResult = await updateIssue(c.env.DB, logger, project.name, number, {
     status: newStatus,
     actorId: userId,
+    projectId: project.id,
   });
   if (!updateResult.success) {
     return internalError(updateResult.error.message);
