@@ -34,6 +34,10 @@ vi.mock("../src/storage/state", () => ({
   getWorkspace: vi.fn(),
 }));
 
+vi.mock("../src/storage/deletion", () => ({
+  isTargetDeleting: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock("../src/evaluation", () => ({
   loadPolicy: vi.fn(),
   DiffEvaluator: vi.fn().mockImplementation(() => ({
@@ -137,6 +141,7 @@ import {
   listChanges,
   updateChangeStatus,
 } from "../src/storage/changes";
+import { isTargetDeleting } from "../src/storage/deletion";
 import { listEvalRuns, recordEvalRuns } from "../src/storage/eval-runs";
 import {
   batchMergeStagedTrees,
@@ -348,6 +353,18 @@ describe("POST /api/projects/:name/changes", () => {
           aggregate: vi.fn().mockReturnValue(passingEvalResult),
         }) as unknown as CompositeEvaluator,
     );
+  });
+
+  it("409s when the project is being deleted (no change created)", async () => {
+    vi.mocked(isTargetDeleting).mockResolvedValueOnce(true);
+    const res = await app.fetch(
+      request("POST", "/api/projects/my-project/changes", { workspace: "fix-bug" }, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("TARGET_DELETING");
+    expect(vi.mocked(createChange)).not.toHaveBeenCalled();
   });
 
   it("creates a change, runs evaluators, and returns accepted status when eval passes", async () => {
@@ -690,7 +707,10 @@ describe("GET /api/projects/:name/changes", () => {
     expect(body.project).toBe("my-project");
     expect(body.changes).toHaveLength(1);
     expect(body.changes[0]?.id).toBe("chg_abc123");
-    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", undefined);
+    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", undefined, {
+      projectId: mockProject.id,
+      limit: 100,
+    });
   });
 
   it("filters by status when ?status= is provided", async () => {
@@ -703,7 +723,10 @@ describe("GET /api/projects/:name/changes", () => {
       env,
     );
     expect(res.status).toBe(200);
-    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", "open");
+    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", "open", {
+      projectId: mockProject.id,
+      limit: 100,
+    });
   });
 
   it("filters by promoted status when ?status= is provided", async () => {
@@ -717,7 +740,10 @@ describe("GET /api/projects/:name/changes", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", "promoted");
+    expect(listChanges).toHaveBeenCalledWith(env.DB, expect.any(Object), "my-project", "promoted", {
+      projectId: mockProject.id,
+      limit: 100,
+    });
   });
 
   it("returns 404 when project not found", async () => {
