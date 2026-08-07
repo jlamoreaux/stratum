@@ -24,6 +24,7 @@ import {
   updateChangeStatus,
 } from "../storage/changes";
 import { type CostSample, getChangeCostSummary, recordCosts } from "../storage/costs";
+import { isTargetDeleting } from "../storage/deletion";
 import { listEvalRuns, recordEvalRuns } from "../storage/eval-runs";
 import {
   MergeConflictError,
@@ -126,6 +127,10 @@ function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
 
 const MERGEABLE_STATUSES: Change["status"][] = ["approved", "accepted", "promoted"];
 
+/** Default + hard cap for the paginated changes listing (bounds the response). */
+const DEFAULT_CHANGES_PAGE = 100;
+const MAX_CHANGES_PAGE = 500;
+
 /**
  * Success response for endpoints that the change-detail UI posts to with plain HTML forms.
  * Browsers send a form content type; API/CLI/agent callers send JSON or no body at all,
@@ -223,6 +228,13 @@ app.post("/projects/:name/changes", async (c) => {
 
   if (!(await canWriteProject(c.env.DB, project, userId, agentOwnerId)))
     return forbidden("Project access denied");
+
+  // Refuse writes while the project (or its owner) is being deleted — otherwise a
+  // new change resurrects rows the cascade is removing and wedges the job as
+  // `incomplete`. Best-effort (TOCTOU); the verifier re-run is the durable backstop.
+  if (await isTargetDeleting(c.env, project, logger)) {
+    return c.json({ error: "Project is being deleted", code: "TARGET_DELETING" }, 409);
+  }
 
   const body = await c.req.json<{ workspace?: unknown }>().catch(() => ({ workspace: undefined }));
   if (typeof body.workspace !== "string" || !body.workspace.trim()) {
@@ -512,7 +524,18 @@ app.get("/projects/:name/changes", async (c) => {
       ? (statusParam as Change["status"])
       : undefined;
 
-  const changesResult = await listChanges(c.env.DB, logger, projectName, status);
+  // Bound the response so a project with thousands of changes can't return them
+  // all in one payload. Client may request fewer via ?limit=, capped at the max.
+  const requested = Number(c.req.query("limit"));
+  const limit =
+    Number.isInteger(requested) && requested > 0
+      ? Math.min(requested, MAX_CHANGES_PAGE)
+      : DEFAULT_CHANGES_PAGE;
+
+  const changesResult = await listChanges(c.env.DB, logger, projectName, status, {
+    projectId: project.id,
+    limit,
+  });
   if (!changesResult.success) {
     logger.error("Failed to list changes", changesResult.error);
     return badRequest(changesResult.error.message);

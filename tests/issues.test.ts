@@ -50,6 +50,32 @@ describe("issue storage", () => {
     expect(otherProject.number).toBe(1);
   });
 
+  it("numbers independently per project_id for same-named projects (no collision)", async () => {
+    const { db } = makeIssuesD1();
+    // Two projects share the name "acme" but have distinct canonical ids. Under
+    // the old per-name numbering + UNIQUE(project, number) this would collide;
+    // per project_id each gets its own sequence and (project_id, number) is unique.
+    const a1 = await seedIssue(db, { project: "acme", projectId: "proj_A" });
+    const b1 = await seedIssue(db, { project: "acme", projectId: "proj_B" });
+    const a2 = await seedIssue(db, { project: "acme", projectId: "proj_A" });
+
+    expect(a1.number).toBe(1);
+    expect(b1.number).toBe(1);
+    expect(a2.number).toBe(2);
+  });
+
+  it("continues from legacy NULL-project_id issues instead of restarting at 1", async () => {
+    const { db } = makeIssuesD1();
+    // A pre-migration issue: no project_id, numbered by name.
+    const legacy = await seedIssue(db, { project: "acme" });
+    expect(legacy.number).toBe(1);
+
+    // The first stamped issue for that project counts the legacy row via the name
+    // fallback, so it is #2 — not a colliding #1.
+    const stamped = await seedIssue(db, { project: "acme", projectId: "proj_A" });
+    expect(stamped.number).toBe(2);
+  });
+
   it("round-trips issues through getIssueByNumber", async () => {
     const { db } = makeIssuesD1();
     await seedIssue(db, { body: "Details here", linkedChangeId: "chg_1" });
@@ -210,5 +236,57 @@ describe("autoCloseLinkedIssues", () => {
       autoCloseLinkedIssues(env, makeMergedEvent("chg_nope"), mockLogger),
     ).resolves.toBeUndefined();
     expect(emittedEvents).toHaveLength(0);
+  });
+});
+
+describe("issue tenant isolation (project_id-scoped reads)", () => {
+  it("does not return a same-named project's issue in another namespace", async () => {
+    const { db } = makeIssuesD1();
+    // Two projects share the name "acme" but have distinct canonical ids; each
+    // gets its own number sequence (migration 035), so isolation comes from
+    // project_id on both the numbering AND the read.
+    await seedIssue(db, { project: "acme", projectId: "proj_A", title: "A's issue" });
+    await seedIssue(db, { project: "acme", projectId: "proj_B", title: "B's issue" });
+
+    const aOnly = await listIssues(db, mockLogger, "acme", undefined, { projectId: "proj_A" });
+    const bOnly = await listIssues(db, mockLogger, "acme", undefined, { projectId: "proj_B" });
+    expect(aOnly.success && aOnly.data.map((i) => i.title)).toEqual(["A's issue"]);
+    expect(bOnly.success && bOnly.data.map((i) => i.title)).toEqual(["B's issue"]);
+  });
+
+  it("getIssueByNumber scoped by project_id returns each tenant's OWN issue, never the other's", async () => {
+    const { db } = makeIssuesD1();
+    // Per-project-id numbering (035): each same-named project gets its own #1.
+    const a = await seedIssue(db, { project: "acme", projectId: "proj_A", title: "A#1" });
+    const b = await seedIssue(db, { project: "acme", projectId: "proj_B", title: "B#1" });
+    expect(a.number).toBe(1);
+    expect(b.number).toBe(1); // independent sequence, not a shared 2
+
+    const forA = await getIssueByNumber(db, mockLogger, "acme", 1, { projectId: "proj_A" });
+    const forB = await getIssueByNumber(db, mockLogger, "acme", 1, { projectId: "proj_B" });
+    // Each project resolves its OWN #1 — the scoped read never crosses tenants.
+    expect(forA.success && forA.data.title).toBe("A#1");
+    expect(forB.success && forB.data.title).toBe("B#1");
+  });
+
+  it("legacy rows with NULL project_id remain reachable via the name fallback", async () => {
+    const { db } = makeIssuesD1();
+    await seedIssue(db, { project: "legacy" }); // no projectId → project_id NULL
+
+    const found = await getIssueByNumber(db, mockLogger, "legacy", 1, { projectId: "proj_new" });
+    expect(found.success).toBe(true);
+  });
+
+  it("bounds the result with a limit when one is given", async () => {
+    const { db } = makeIssuesD1();
+    await seedIssue(db, { project: "acme", projectId: "proj_A" });
+    await seedIssue(db, { project: "acme", projectId: "proj_A" });
+    await seedIssue(db, { project: "acme", projectId: "proj_A" });
+
+    const capped = await listIssues(db, mockLogger, "acme", undefined, {
+      projectId: "proj_A",
+      limit: 2,
+    });
+    expect(capped.success && capped.data).toHaveLength(2);
   });
 });
