@@ -233,6 +233,18 @@ function createFormData(data: Record<string, string>): FormData {
   return formData;
 }
 
+// Magic-link verification is now a same-origin POST (the GET only renders a
+// confirm page — login-CSRF protection), so consume/login goes through here.
+// A real browser sends Origin on the form POST; default to same-origin so the
+// endpoint's CSRF guard admits it. Pass a foreign origin to exercise rejection.
+function verifyReq(token: string, origin: string | null = "http://localhost"): Request {
+  return request("/auth/email/verify", {
+    method: "POST",
+    body: createFormData({ token }),
+    ...(origin ? { headers: { Origin: origin } } : {}),
+  });
+}
+
 async function extractMagicLinkToken(_env: Env): Promise<string | null> {
   const first = magicStore.keys().next();
   return first.done ? null : (first.value as string);
@@ -743,7 +755,7 @@ describe("Auth Signup/Login Integration Tests", () => {
         );
 
         expect(res.status).toBe(302);
-        expect(res.headers.get("location")).toContain("success=email_sent");
+        expect(res.headers.get("location")).toContain("success=login_link_sent");
 
         expect(env.EMAIL?.send).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -764,7 +776,7 @@ describe("Auth Signup/Login Integration Tests", () => {
         });
       });
 
-      it("login fails if email not found", async () => {
+      it("does NOT reveal whether the email exists (enumeration-safe uniform response)", async () => {
         const formData = createFormData({
           email: "nonexistent@example.com",
         });
@@ -777,9 +789,13 @@ describe("Auth Signup/Login Integration Tests", () => {
           env,
         );
 
+        // Same success response an existing account gets — no email_not_found —
+        // but no link is minted or sent for the missing account.
         expect(res.status).toBe(302);
-        expect(res.headers.get("location")).toContain("error=email_not_found");
+        expect(res.headers.get("location")).toContain("success=login_link_sent");
+        expect(res.headers.get("location")).not.toContain("email_not_found");
         expect(env.EMAIL?.send).not.toHaveBeenCalled();
+        expect(await extractMagicLinkToken(env)).toBeNull();
       });
 
       it("rate limiting works on login endpoint", async () => {
@@ -800,7 +816,7 @@ describe("Auth Signup/Login Integration Tests", () => {
           );
 
           expect(res.status).toBe(302);
-          expect(res.headers.get("location")).toContain("success=email_sent");
+          expect(res.headers.get("location")).toContain("success=login_link_sent");
         }
 
         const formData = createFormData({ email });
@@ -873,7 +889,7 @@ describe("Auth Signup/Login Integration Tests", () => {
 
         magicStore.set(token, tokenData);
 
-        const res = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res = await app.fetch(verifyReq(token), env);
 
         expect(res.status).toBe(302);
         expect(res.headers.get("location")).toBe("/welcome");
@@ -912,7 +928,7 @@ describe("Auth Signup/Login Integration Tests", () => {
 
         magicStore.set(token, tokenData);
 
-        const res = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res = await app.fetch(verifyReq(token), env);
 
         expect(res.status).toBe(302);
         expect(res.headers.get("location")).toBe("/");
@@ -925,6 +941,31 @@ describe("Auth Signup/Login Integration Tests", () => {
         expect(setCookieHeader).toContain("stratum_session");
       });
 
+      it("rejects a cross-site (foreign Origin) verify POST and preserves the token (login CSRF)", async () => {
+        const { createUser } = await import("../src/storage/users");
+        await createUser(env.DB, "victim@example.com", {} as unknown as Logger, "victimuser");
+        const token = "valid-login-token-csrf";
+        magicStore.set(token, {
+          email: "victim@example.com",
+          intent: "login",
+          createdAt: Date.now(),
+          rememberMe: false,
+        });
+
+        // An attacker's auto-submitting form on another origin must be rejected
+        // BEFORE the token is consumed — otherwise it logs the victim into the
+        // attacker's account.
+        const attack = await app.fetch(verifyReq(token, "https://evil.example"), env);
+        expect(attack.status).toBe(403);
+        expect(attack.headers.get("set-cookie")).toBeNull();
+        // Token untouched, so the real same-origin flow still works.
+        expect(magicStore.has(token)).toBe(true);
+
+        const legit = await app.fetch(verifyReq(token), env);
+        expect(legit.status).toBe(302);
+        expect(magicStore.has(token)).toBe(false);
+      });
+
       it("rejects missing token", async () => {
         const res = await app.fetch(request("/auth/email/verify"), env);
 
@@ -933,10 +974,29 @@ describe("Auth Signup/Login Integration Tests", () => {
       });
 
       it("rejects invalid token", async () => {
-        const res = await app.fetch(request("/auth/email/verify?token=invalid-token"), env);
+        const res = await app.fetch(verifyReq("invalid-token"), env);
 
         expect(res.status).toBe(302);
         expect(res.headers.get("location")).toContain("error=link_expired");
+      });
+
+      it("GET renders a confirm page and does NOT consume the token (login-CSRF guard)", async () => {
+        const token = "get-should-not-consume";
+        magicStore.set(token, {
+          email: "x@example.com",
+          intent: "login",
+          createdAt: Date.now(),
+        });
+
+        const res = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+
+        // A raw GET must not log anyone in: 200 confirm page, no session, token intact.
+        expect(res.status).toBe(200);
+        expect(res.headers.get("set-cookie")).toBeNull();
+        const html = await res.text();
+        expect(html).toContain('method="POST"');
+        expect(html).toContain(token);
+        expect(magicStore.has(token)).toBe(true);
       });
 
       it("rejects expired token", async () => {
@@ -953,7 +1013,7 @@ describe("Auth Signup/Login Integration Tests", () => {
         // consume finds nothing and reports the link expired.
         void tokenData;
 
-        const res = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res = await app.fetch(verifyReq(token), env);
 
         expect(res.status).toBe(302);
         expect(res.headers.get("location")).toContain("error=link_expired");
@@ -974,12 +1034,12 @@ describe("Auth Signup/Login Integration Tests", () => {
         magicStore.set(token, tokenData);
 
         // First use - should succeed
-        const res1 = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res1 = await app.fetch(verifyReq(token), env);
         expect(res1.status).toBe(302);
         expect(res1.headers.get("location")).toBe("/");
 
         // Second use - should fail (token deleted)
-        const res2 = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res2 = await app.fetch(verifyReq(token), env);
         expect(res2.status).toBe(302);
         expect(res2.headers.get("location")).toContain("error=link_expired");
       });
@@ -1000,7 +1060,7 @@ describe("Auth Signup/Login Integration Tests", () => {
         const { createUser } = await import("../src/storage/users");
         await createUser(env.DB, "other@example.com", {} as unknown as Logger, "raceuser");
 
-        const res = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res = await app.fetch(verifyReq(token), env);
 
         expect(res.status).toBe(302);
         expect(res.headers.get("location")).toContain("error=username_taken");
@@ -1022,7 +1082,7 @@ describe("Auth Signup/Login Integration Tests", () => {
         const { createUser } = await import("../src/storage/users");
         await createUser(env.DB, "raceemail@example.com", {} as unknown as Logger, "otheruser");
 
-        const res = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res = await app.fetch(verifyReq(token), env);
 
         expect(res.status).toBe(302);
         // Should redirect to home since user now exists (treats as login)
@@ -1040,7 +1100,7 @@ describe("Auth Signup/Login Integration Tests", () => {
 
         magicStore.set(token, tokenData);
 
-        const res = await app.fetch(request(`/auth/email/verify?token=${token}`), env);
+        const res = await app.fetch(verifyReq(token), env);
 
         expect(res.status).toBe(302);
         expect(res.headers.get("location")).toContain("error=invalid_link");
