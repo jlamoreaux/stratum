@@ -383,28 +383,35 @@ Monitor via Cloudflare Dashboard:
 
 ### Code Rollback
 
-```bash
-# Rollback to previous version
-git log --oneline
+Cloudflare keeps previous Worker versions, so a rollback re-points production at
+a prior version — no rebuild or redeploy needed.
 
-# Deploy previous commit
-npx wrangler deploy --version <previous-version>
+```bash
+# Find the version to roll back to (lists the 10 most recent deployments + IDs)
+npx wrangler deployments list                 # production
+npx wrangler deployments list --env=staging   # staging
+
+# Roll back to the previous version (prompts to confirm)…
+npx wrangler rollback --message "reason for rollback"
+# …or roll back to a specific version by ID
+npx wrangler rollback <version-id> --message "reason for rollback"
 ```
 
-Or via GitHub Actions:
-1. Revert the commit
-2. Push to trigger new deployment
+Or via git: revert the offending commit and push — this triggers a fresh forward
+deploy of the reverted code (slower than `wrangler rollback`, but re-runs CI).
 
 ### Database Rollback
 
-⚠️ **Caution:** Data loss possible
+⚠️ **Caution:** D1 migrations are **forward-only** — there is no down-migration
+and no `wrangler d1 migrations rollback`. To reverse a schema change:
 
-```bash
-# If migration needs rollback
-# 1. Create rollback migration
-# 2. Apply rollback
-npx wrangler d1 migrations apply stratum --remote
-```
+1. Write a **new** migration that undoes it (e.g. drop the added column/table).
+   Note SQLite's limited `ALTER TABLE DROP COLUMN` support — a table rebuild may
+   be required.
+2. Apply it forward: `npx wrangler d1 migrations apply stratum --remote`.
+3. If the bad migration **destroyed or corrupted data**, a forward "undo" only
+   fixes the schema — restore the data from the most recent backup via the
+   [backup/restore runbook](../runbooks/backup-restore.md).
 
 ### Emergency Procedures
 
