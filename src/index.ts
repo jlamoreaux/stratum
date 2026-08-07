@@ -6,7 +6,7 @@ import { analyticsMiddleware } from "./middleware/analytics";
 import { authMiddleware } from "./middleware/auth";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
-import { securityHeadersMiddleware } from "./middleware/security-headers";
+import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
 import { sweepDeletionJobs } from "./queue/deletion-runner";
 import { handleEventQueue, sweepStaleEvents } from "./queue/event-consumer";
 import type { EventQueueMessage } from "./queue/events";
@@ -186,11 +186,9 @@ app.onError((err, c) => {
     method: c.req.method,
   });
   // Belt-and-suspenders: the middleware registers headers before next(), but the
-  // error boundary builds a fresh response, so re-assert the full set here.
-  c.header("X-Content-Type-Options", "nosniff");
-  c.header("X-Frame-Options", "DENY");
-  c.header("Referrer-Policy", "strict-origin-when-cross-origin");
-  c.header("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'self'");
+  // error boundary builds a fresh response, so re-assert the full set here via the
+  // shared helper (keeps the 500's CSP identical to the middleware's).
+  setHtmlSecurityHeaders(c);
   return c.json({ error: "Internal server error" }, 500);
 });
 
