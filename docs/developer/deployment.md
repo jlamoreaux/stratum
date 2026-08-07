@@ -51,7 +51,8 @@ Backups also read these optional vars (see the
 `BACKUP_ENCRYPTION_SECRET` (set in production — encrypts backup blobs),
 `BACKUP_RETENTION` (runs to keep, default 14), `MAX_REPOS_PER_RUN` (default 25),
 `MAX_BACKUP_BYTES` (per-repo budget, default 128 MiB). The daily backup runs on
-the `0 6 * * *` cron.
+its own `0 4 * * *` cron — isolated from the `0 6 * * *` housekeeping so a slow
+project sync can't starve it of the invocation budget.
 
 ### Staging
 

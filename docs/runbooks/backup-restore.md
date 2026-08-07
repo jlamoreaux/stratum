@@ -53,7 +53,9 @@ tokens, and a bucket lifecycle policy that matches your retention expectations.
 | `MAX_REPOS_PER_RUN` | Repos snapshotted per run. | 25 |
 | `MAX_BACKUP_BYTES` | Per-repo object budget; larger repos are skipped, not failed. | 128 MiB |
 
-The daily run fires from the `0 6 * * *` cron (production and default configs).
+The daily run fires from its own `0 4 * * *` cron (production and default
+configs) — deliberately separate from the `0 6 * * *` housekeeping so a slow
+project sync can't starve the backup of its ~15-minute invocation budget.
 Staging has no backup cron by design — validate there via the manual endpoint.
 
 ## Triggering and verifying a run
