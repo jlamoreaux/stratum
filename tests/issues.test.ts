@@ -242,8 +242,9 @@ describe("autoCloseLinkedIssues", () => {
 describe("issue tenant isolation (project_id-scoped reads)", () => {
   it("does not return a same-named project's issue in another namespace", async () => {
     const { db } = makeIssuesD1();
-    // Two projects share the name "acme" but have distinct canonical ids. Numbers
-    // are still name-sequenced (shared), so isolation must come from project_id.
+    // Two projects share the name "acme" but have distinct canonical ids; each
+    // gets its own number sequence (migration 035), so isolation comes from
+    // project_id on both the numbering AND the read.
     await seedIssue(db, { project: "acme", projectId: "proj_A", title: "A's issue" });
     await seedIssue(db, { project: "acme", projectId: "proj_B", title: "B's issue" });
 
@@ -253,16 +254,19 @@ describe("issue tenant isolation (project_id-scoped reads)", () => {
     expect(bOnly.success && bOnly.data.map((i) => i.title)).toEqual(["B's issue"]);
   });
 
-  it("getIssueByNumber scoped by project_id won't cross to a same-named tenant", async () => {
+  it("getIssueByNumber scoped by project_id returns each tenant's OWN issue, never the other's", async () => {
     const { db } = makeIssuesD1();
-    await seedIssue(db, { project: "acme", projectId: "proj_A" }); // number 1
-    await seedIssue(db, { project: "acme", projectId: "proj_B" }); // number 2
+    // Per-project-id numbering (035): each same-named project gets its own #1.
+    const a = await seedIssue(db, { project: "acme", projectId: "proj_A", title: "A#1" });
+    const b = await seedIssue(db, { project: "acme", projectId: "proj_B", title: "B#1" });
+    expect(a.number).toBe(1);
+    expect(b.number).toBe(1); // independent sequence, not a shared 2
 
-    const found = await getIssueByNumber(db, mockLogger, "acme", 1, { projectId: "proj_A" });
-    expect(found.success).toBe(true);
-    // Number 1 belongs to proj_A; proj_B must not see it.
-    const crossed = await getIssueByNumber(db, mockLogger, "acme", 1, { projectId: "proj_B" });
-    expect(crossed.success).toBe(false);
+    const forA = await getIssueByNumber(db, mockLogger, "acme", 1, { projectId: "proj_A" });
+    const forB = await getIssueByNumber(db, mockLogger, "acme", 1, { projectId: "proj_B" });
+    // Each project resolves its OWN #1 — the scoped read never crosses tenants.
+    expect(forA.success && forA.data.title).toBe("A#1");
+    expect(forB.success && forB.data.title).toBe("B#1");
   });
 
   it("legacy rows with NULL project_id remain reachable via the name fallback", async () => {
