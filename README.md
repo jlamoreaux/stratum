@@ -10,14 +10,21 @@ below use `https://your-instance.workers.dev` as a placeholder for your deployme
 
 ## What is Stratum?
 
-Stratum is a GitHub alternative where both humans and AI agents are first-class citizens. It provides:
+Stratum is the **governance layer for AI-written code** — the control plane that decides
+what agent output is allowed to merge, wherever your code lives. Humans and AI agents are
+both first-class citizens, with different powers by design:
 
-- **Git repository hosting** via Cloudflare Artifacts (fast, serverless Git)
-- **Workspace forking** - Create isolated branches for changes
-- **Evaluation-gated merges** - Automated code review before merging
-- **Agent identities** - Register and authenticate AI agents
-- **Provenance tracking** - Know which AI model made what change
-- **Read-only web UI** - Browse repos, changes, and evaluation results
+- **Evaluation-gated merges** - Policy-as-code (`.stratum/policy.yaml`) blocks merges on
+  secret scans, diff rules, sandboxed tests, external CI, and LLM review
+- **Provenance & cost tracking** - Every merged commit records which agent, model, and
+  prompt produced it, its evaluation score, and what it cost (LLM tokens, sandbox time)
+- **Agent identities with a hard invariant** - Agents authenticate as themselves and can
+  never approve work; approvals are a human gate
+- **Any agent, any editor** - REST API, CLI, and MCP server: Claude Code, Cursor, Copilot,
+  or your own agents all speak to the same gate. No editor subscription required
+- **Two ways to run it** - As a **layer over GitHub** (keep your repos and PRs; eval
+  verdicts land as PR comments and commit statuses) or as a **standalone forge** (Git
+  hosting on Cloudflare Artifacts, workspace forking, issues, orgs, server-rendered UI)
 
 ## Features
 
@@ -54,6 +61,7 @@ Stratum is a GitHub alternative where both humans and AI agents are first-class 
 | Issue Tracker | ✅ | Per-project issues, auto-close on linked-change merge |
 | Bidirectional GitHub Sync | ✅ | Inbound webhooks + outbound PR promotion |
 | CLI Tool | 🚧 | `@stratum/cli` at full API parity; install from `cli/` (not yet published to npm) |
+| MCP Server | 🚧 | `@stratum/mcp` — any MCP-capable agent or editor can drive the eval-gated change flow; install from `mcp/` (not yet published to npm) |
 
 **Legend:** ✅ Working | 🚧 In Progress | 📋 Planned
 
@@ -335,7 +343,7 @@ See [Deployment Guide](docs/developer/deployment.md) for detailed instructions.
 
 - **Authorization**: Project-level access control is minimal; auth middleware resolves users but doesn't enforce ownership on all routes
 - **Merge semantics**: Squash merge only; true merge commits not yet supported
-- **Diff accuracy**: Current diff format shows full file rewrites rather than precise hunks
+- **Diff limits**: Diffs are hunk-level with unified and split views, but binary files are not diffed and very large files are rendered whole
 - **Scale**: Git operations run in-memory; large repos will hit Worker limits
 
 See [CURRENT_CAPABILITIES.md](docs/CURRENT_CAPABILITIES.md) for more details.
