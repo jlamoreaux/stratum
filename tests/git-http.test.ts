@@ -3,6 +3,8 @@ import app from "../src/index";
 import { isGitHttpPath } from "../src/routes/git-http";
 import { freshRepoToken } from "../src/storage/git-ops";
 import type { Env, ProjectEntry } from "../src/types";
+import { AppError } from "../src/utils/errors";
+import { err } from "../src/utils/result";
 
 // Real `artifactsRepoNameFromRemote` + `extractTokenSecret` (pure) are kept so
 // the tests exercise the genuine URL validation; only `freshRepoToken` (which
@@ -999,8 +1001,10 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     const text = await res.text();
     expect(text).toContain("non-fast-forward");
     expect(vi.mocked(createChangeWithEvaluation)).not.toHaveBeenCalled();
-    // The pack never landed as a change, so the empty fork must not leak.
+    // The pack never landed as a change, so the empty fork must not leak —
+    // both the Artifacts repo and the workspace KV entry go.
     expect(vi.mocked(env.ARTIFACTS.delete)).toHaveBeenCalledWith("push-abcd1234");
+    expect(await env.STATE.get("workspace:proj_1:push-abcd1234")).toBeNull();
   });
 
   it("treats a sideband success reply with 'Counting objects' progress as success (regression)", async () => {
@@ -1076,6 +1080,13 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
           headers: { "Content-Type": "application/x-git-receive-pack-result" },
         }),
     );
+    // Pre-seed the fork's KV entry (createWorkspaceFork is mocked, so the
+    // real registration never runs) to prove cleanup leaves BOTH resources.
+    await seedWorkspace(
+      env,
+      "push-abcd1234",
+      "https://acct.artifacts.cloudflare.net/git/@owner/push-abcd1234.git",
+    );
     const res = await app.fetch(
       req("/@owner/repo.git/git-receive-pack", {
         method: "POST",
@@ -1086,6 +1097,7 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     );
     expect(res.status).toBe(200);
     expect(vi.mocked(env.ARTIFACTS.delete)).not.toHaveBeenCalled();
+    expect(await env.STATE.get("workspace:proj_1:push-abcd1234")).not.toBeNull();
     expect(vi.mocked(createChangeWithEvaluation)).not.toHaveBeenCalled();
   });
 
@@ -1093,14 +1105,13 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     const env = gatedEnv();
     await seedProject(env);
     stubFetch(() => upstreamPushOk());
-    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce({
-      success: false,
-      error: Object.assign(new Error("record eval runs failed"), {
-        code: "DATABASE_ERROR",
-        statusCode: 500,
-        context: { changeId: "chg_stuck1" },
-      }),
-    } as never);
+    // A real AppError (not a shape-alike cast) so the test binds to the same
+    // context contract createChangeWithEvaluation actually produces.
+    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce(
+      err(new AppError("record eval runs failed", "DATABASE_ERROR", 500, {
+        changeId: "chg_stuck1",
+      })),
+    );
     const res = await app.fetch(
       req("/@owner/repo.git/git-receive-pack", {
         method: "POST",
@@ -1170,13 +1181,9 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     const env = gatedEnv();
     await seedProject(env);
     stubFetch(() => upstreamPushOk());
-    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce({
-      success: false,
-      error: Object.assign(new Error("db unavailable"), {
-        code: "DATABASE_ERROR",
-        statusCode: 400,
-      }),
-    } as never);
+    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce(
+      err(new AppError("db unavailable", "DATABASE_ERROR", 400)),
+    );
     const res = await app.fetch(
       req("/@owner/repo.git/git-receive-pack", {
         method: "POST",

@@ -26,13 +26,16 @@ real Artifacts).
   until validated against real Artifacts), a single-ref push to the project's
   configured default branch (`sourceDefaultBranch` → `githubDefaultBranch` →
   `main`) on the **project** URL is routed through the change gate:
-  the pack lands on a fresh server-managed workspace fork (whose `main` sits at
-  the project tip, so the client's old-oid lines up and the remote's own
-  fast-forward check stays truthful), then the shared change-flow service
+  the pack lands on a fresh server-managed workspace fork (a full-repository
+  fork whose default branch sits at the project tip; the original ref and
+  old-oid are forwarded unchanged, so the client's old-oid lines up and the
+  remote's own fast-forward check stays truthful), then the shared change-flow
+  service
   (`src/services/change-flow.ts` — the same pipeline the REST route runs)
   creates and synchronously evaluates a change. The client receives a
   **truthful `ng`** carrying the change id and eval verdict, with detail on the
-  side-band: `main` does not move until the change is approved and merged, and
+  side-band: the default branch does not move until the change is approved and
+  merged, and
   answering `ok` would corrupt the client's remote-tracking ref. Multi-ref
   pushes, deletions, and non-default refs keep the in-protocol refusal; a pack
   the workspace remote itself rejects is relayed verbatim. Evaluation runs
