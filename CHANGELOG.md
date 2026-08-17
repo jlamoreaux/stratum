@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same pipeline as the REST route (now extracted to
   `src/services/change-flow.ts`); the client gets a truthful per-ref `ng`
   carrying the change id and eval verdict — main only moves through the merge
-  gate. On on staging, off in production until validated end-to-end.
+  gate. On staging, off in production until validated end-to-end.
 - `.stratum/policy.yaml` for this repository — the dogfood merge policy (diff
   limits, LLM review at 0.6, one human approval, fresh-base required,
   force-merge denied).

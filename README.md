@@ -414,7 +414,7 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 Key areas needing work:
 
 1. **Authorization**: Enforce project-level access control
-2. **Diff accuracy**: Produce real unified diffs instead of full-file comparisons
+2. **Diff depth**: Per-line intra-hunk highlighting and binary-file diffs (hunk-level unified/split views ship already)
 3. **Merge semantics**: Handle conflicts properly, support true merges
 4. **Scale**: Move git operations off the Worker to Containers or a backend service
 

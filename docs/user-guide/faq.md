@@ -93,15 +93,15 @@ planned but not built.
 
 Honestly, several:
 
-- **Diff accuracy**: diffs are currently shown as full-file rewrites rather than
-  precise hunks. This affects both the diff viewer and what evaluators see; real
-  unified diffs are pending.
+- **Diff limits**: diffs are hunk-level with unified and side-by-side views,
+  but binary files are not diffed and very large files are rendered whole.
 - **Scale**: git operations run in-memory inside a Worker, so very large
   repositories will hit Worker limits. Moving git ops off the Worker is on the
   roadmap.
 - **Squash-only merges**: true merge commits are not yet supported.
-- **Push to project remotes is not supported yet** (`403`) — push to workspace
-  remotes and open a change. Gated project-push is designed but deferred.
+- **Push to project remotes doesn't move `main` directly** — the push is
+  rejected in-protocol with the reason (and, where gated push is enabled, opens
+  an eval-gated change instead). Push to workspace remotes for direct writes.
 - **Authorization** is still minimal in places; project-level access control is
   not enforced on every route.
 - **Evaluation runs synchronously** at change creation — there's no async
@@ -111,10 +111,12 @@ See `docs/CURRENT_CAPABILITIES.md` for the authoritative, current state.
 
 ## Can I use plain `git` with Stratum?
 
-Yes, over smart HTTP with your API key as the HTTP Basic password:
-`git clone https://x:<key>@<host>/@ns/slug.git` for projects (read), and
+Yes, over smart HTTP with your API key as the HTTP Basic password (enter it at
+the prompt or store it with a git credential helper — don't embed it in the
+URL): `git clone https://<host>/@ns/slug.git` for projects (read), and
 `.../@ns/slug/workspaces/<name>.git` for workspaces (read **and** `git push`).
-Pushing to the project URL is refused so the evaluation gate can't be bypassed.
+A push to the project URL is rejected in-protocol so the evaluation gate can't
+be bypassed.
 SSH transport is not supported (Workers have no raw TCP listener).
 
 ## What do I need to self-host?

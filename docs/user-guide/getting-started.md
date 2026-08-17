@@ -46,6 +46,7 @@ the API:
 ```bash
 curl -X POST https://app.usestratum.dev/api/projects \
   -H "Authorization: Bearer stratum_user_xxxxx" \
+  -H "Content-Type: application/json" \
   -d '{"name": "my-project", "visibility": "private"}'
 ```
 
@@ -61,6 +62,7 @@ jobs, so large repositories don't block the request:
 ```bash
 curl -X POST https://app.usestratum.dev/api/projects/@you/my-project/import \
   -H "Authorization: Bearer stratum_user_xxxxx" \
+  -H "Content-Type: application/json" \
   -d '{"url": "https://github.com/your-org/your-repo", "branch": "main"}'
 ```
 
@@ -282,6 +284,7 @@ npm — install it from the `cli/` directory of the repo:
 ```bash
 git clone https://github.com/stratum-eng/stratum.git
 cd stratum/cli && npm install && npm run build
+npm link   # puts the `stratum` binary on your PATH
 
 stratum login --host https://app.usestratum.dev --key stratum_user_xxxxx
 # or: export STRATUM_HOST=... STRATUM_API_KEY=...   (env overrides the config file)
@@ -304,7 +307,7 @@ Claude Code:
 
 ```bash
 export STRATUM_API_KEY=stratum_user_xxxxx
-claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- stratum-mcp
+claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- node /path/to/stratum/mcp/dist/index.js
 ```
 
 Any MCP client (stdio):
@@ -313,7 +316,8 @@ Any MCP client (stdio):
 {
   "mcpServers": {
     "stratum": {
-      "command": "stratum-mcp",
+      "command": "node",
+      "args": ["/path/to/stratum/mcp/dist/index.js"],
       "env": { "STRATUM_API_KEY": "stratum_user_..." }
     }
   }
@@ -328,23 +332,28 @@ provenance is recorded.
 ### Plain git over smart HTTP
 
 Stratum projects and workspaces are real git remotes. Authenticate with your API
-key as the HTTP Basic password (username is ignored):
+key as the HTTP Basic password (username is ignored) — when prompted, or via a
+[git credential helper](https://git-scm.com/docs/gitcredentials). Don't embed
+the key in the URL: it ends up in shell history and `.git/config`.
 
 ```bash
-# Clone a project (read)
-git clone https://x:stratum_user_xxxxx@app.usestratum.dev/@you/my-project.git
+# Clone a project (read) — enter your API key at the password prompt
+git clone https://app.usestratum.dev/@you/my-project.git
 
 # Clone AND push to a workspace (read + write)
-git clone https://x:stratum_user_xxxxx@app.usestratum.dev/@you/my-project/workspaces/fix-n-plus-one.git
+git clone https://app.usestratum.dev/@you/my-project/workspaces/fix-n-plus-one.git
 cd fix-n-plus-one
 # ...edit, commit...
 git push
 ```
 
-Note the asymmetry: **pushing to the project URL is not yet supported** — it
-returns `403`, because a direct push to a protected ref would bypass the
-evaluation gate. Push to a **workspace** remote instead, then open a change as
-usual. Gated project-push (push-opens-a-change semantics) is planned.
+Note the asymmetry: a push to the **project** URL does not update `main`
+directly — a direct push to a protected ref would bypass the evaluation gate.
+The push is answered in-protocol: each ref reports `remote rejected` with the
+reason, and on instances with gated push enabled, a single-ref push to `main`
+lands your commits on a server-managed workspace and opens an eval-gated
+change whose id is streamed back in the push output. Otherwise, push to a
+**workspace** remote and open a change as usual.
 
 ## Where to go next
 
