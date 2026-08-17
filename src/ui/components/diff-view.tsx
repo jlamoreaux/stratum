@@ -57,12 +57,120 @@ const lineClass: Record<DiffFile["lines"][number]["kind"], string> = {
   hunk: "diff-line diff-hunk",
 };
 
+export type SplitRow =
+  | { kind: "hunk"; text: string }
+  | {
+      kind: "pair";
+      left: string | null;
+      right: string | null;
+      leftKind: "del" | "context";
+      rightKind: "add" | "context";
+    };
+
+/** Drop the unified-diff marker (+ / - / leading space) for side-by-side cells. */
+function stripMarker(text: string): string {
+  return text.startsWith("+") || text.startsWith("-") || text.startsWith(" ")
+    ? text.slice(1)
+    : text;
+}
+
+/**
+ * Pair a file's unified-diff lines into side-by-side rows. Unified diffs list a
+ * segment's deletions before its additions, so buffered del/add runs are zipped
+ * together at each context/hunk boundary; the longer run leaves empty cells on
+ * the other side.
+ */
+export function buildSplitRows(lines: DiffFile["lines"]): SplitRow[] {
+  const rows: SplitRow[] = [];
+  let dels: string[] = [];
+  let adds: string[] = [];
+
+  const flush = () => {
+    const count = Math.max(dels.length, adds.length);
+    for (let i = 0; i < count; i++) {
+      rows.push({
+        kind: "pair",
+        left: dels[i] ?? null,
+        right: adds[i] ?? null,
+        leftKind: "del",
+        rightKind: "add",
+      });
+    }
+    dels = [];
+    adds = [];
+  };
+
+  for (const line of lines) {
+    switch (line.kind) {
+      case "del":
+        dels.push(stripMarker(line.text));
+        break;
+      case "add":
+        adds.push(stripMarker(line.text));
+        break;
+      case "hunk":
+        flush();
+        rows.push({ kind: "hunk", text: line.text });
+        break;
+      case "context": {
+        flush();
+        const text = stripMarker(line.text);
+        rows.push({
+          kind: "pair",
+          left: text,
+          right: text,
+          leftKind: "context",
+          rightKind: "context",
+        });
+        break;
+      }
+    }
+  }
+  flush();
+  return rows;
+}
+
+const SplitTable: FC<{ file: DiffFile }> = ({ file }) => (
+  <table class="diff-split">
+    <tbody>
+      {buildSplitRows(file.lines).map((row, index) =>
+        row.kind === "hunk" ? (
+          <tr key={index}>
+            <td class="diff-cell diff-hunk" colspan={2}>
+              {row.text}
+            </td>
+          </tr>
+        ) : (
+          <tr key={index}>
+            <td class={row.leftKind === "del" ? "diff-cell diff-del" : "diff-cell"}>
+              {row.left ?? ""}
+            </td>
+            <td class={row.rightKind === "add" ? "diff-cell diff-add" : "diff-cell"}>
+              {row.right ?? ""}
+            </td>
+          </tr>
+        ),
+      )}
+    </tbody>
+  </table>
+);
+
+/**
+ * The unified/split toggle is a hidden checkbox + CSS sibling selectors — the
+ * switch is instant and needs no client-side JavaScript, keeping the UI's
+ * server-rendered-only invariant. Both views are rendered; CSS shows one.
+ */
 export const DiffView: FC<{ files: DiffFile[] }> = ({ files }) => {
   if (files.length === 0) {
     return <p class="diff-empty">No changes between the workspace and the project.</p>;
   }
   return (
     <div class="diff-view">
+      <input type="checkbox" id="diff-split-toggle" class="diff-split-toggle" />
+      <label for="diff-split-toggle" class="diff-split-label">
+        <span class="diff-label-unified">Switch to split view</span>
+        <span class="diff-label-split">Switch to unified view</span>
+      </label>
       {files.map((file) => (
         <details class="diff-file" key={file.path} open={files.length <= 5}>
           <summary class="diff-file-header">
@@ -80,6 +188,7 @@ export const DiffView: FC<{ files: DiffFile[] }> = ({ files }) => {
               </span>
             ))}
           </pre>
+          <SplitTable file={file} />
         </details>
       ))}
     </div>

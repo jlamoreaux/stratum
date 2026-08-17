@@ -550,6 +550,34 @@ a:hover { text-decoration: underline; }
 .diff-del { background: rgba(248, 113, 113, 0.12); color: #f5c2c2; }
 .diff-hunk { color: #7cb7ff; background: #14181f; }
 
+/* Unified/split toggle: hidden checkbox + sibling selectors, no client JS.
+   The instant client-side switch (vs. GitHub's full reload) is deliberate. */
+.diff-split-toggle { position: absolute; opacity: 0; pointer-events: none; }
+.diff-split-label {
+  align-self: flex-end; cursor: pointer; user-select: none;
+  font-size: 0.8rem; color: #7cb7ff; border: 1px solid #2a2a2a;
+  border-radius: 6px; padding: 0.25rem 0.6rem; background: #181818;
+}
+.diff-split-label:hover { border-color: #7cb7ff; }
+.diff-split-toggle:focus-visible ~ .diff-split-label { outline: 2px solid #7cb7ff; outline-offset: 2px; }
+.diff-label-split { display: none; }
+.diff-split-toggle:checked ~ .diff-split-label .diff-label-unified { display: none; }
+.diff-split-toggle:checked ~ .diff-split-label .diff-label-split { display: inline; }
+
+/* Split view: hidden until the toggle is checked, then replaces unified. */
+.diff-split { display: none; }
+.diff-split-toggle:checked ~ .diff-file .diff-file-body { display: none; }
+.diff-split-toggle:checked ~ .diff-file .diff-split {
+  display: table; width: 100%; table-layout: fixed; border-collapse: collapse;
+  font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; line-height: 1.5;
+  background: #0d0d0d;
+}
+.diff-cell {
+  width: 50%; padding: 0 0.75rem; white-space: pre-wrap; word-break: break-all;
+  vertical-align: top; border-left: 1px solid #1c1c1c;
+}
+.diff-cell:first-child { border-left: none; }
+
 /* Settings */
 .settings-help { font-size: 0.85rem; color: #888; }
 .settings-token-reveal { border: 1px solid #2d4f2d; background: #101a10; }
