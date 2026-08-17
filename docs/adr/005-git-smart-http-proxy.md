@@ -2,9 +2,10 @@
 
 ## Status
 
-Partially accepted — **clone/fetch (slice 1) and workspace push (slice 2a)
-implemented**; the **gated default-branch push (slice 2b / Phase B) remains
-deferred**.
+Accepted — **clone/fetch (slice 1), workspace push (slice 2a), and the gated
+default-branch push (slice 2b) are implemented**; slice 2b ships behind
+`GIT_PUSH_GATED_ENABLED` (staging on, production off until validated against
+real Artifacts).
 
 - **Slice 1 — clone/fetch.** Authenticated `git-upload-pack` proxy: a project is
   a git remote for `git clone` / `git fetch` at `/@ns/slug.git`
@@ -121,10 +122,14 @@ funnels it through the existing change → eval → merge-queue pipeline, so a
 `git push` produces exactly the same artifacts as `stratum commit` followed by a
 change:
 
-- Push to the project's default branch → create (or update) a change against an
-  auto-named workspace, run evaluation, and either fast-forward or enqueue on the
-  `MergeQueue` per existing policy. A rejected eval surfaces to the client as a
-  non-zero `git push` exit with the reason in the sideband progress stream.
+- Push to the project's default branch → land the pack on a fresh auto-named
+  workspace fork, create a change, and run evaluation synchronously. The client
+  always receives a truthful per-ref `ng` carrying the change id and eval
+  verdict (with detail in the sideband progress stream): the default branch
+  only moves through the merge gate — under this repo's policy that includes a
+  human approval (`requiredApprovals: 1`). Answering `ok` by merging directly
+  when policy allows it (eval passed, zero required approvals) remains open
+  under #115.
 - Push to `refs/heads/<workspace>` → commit straight to that workspace ref
   (the workspace-commit path), no gate, matching `stratum commit`.
 

@@ -5,6 +5,8 @@ import {
   encodePktLine,
   encodeSideband,
   parseReceivePackRequest,
+  parseReportStatus,
+  sanitizeStatusText,
   wantsSideband,
 } from "../src/utils/git-protocol";
 
@@ -120,6 +122,121 @@ describe("encodeSideband", () => {
   });
 });
 
+describe("sanitizeStatusText", () => {
+  it("flattens newlines so text cannot smuggle extra pkt-lines", () => {
+    expect(sanitizeStatusText("line one\nng refs/heads/main injected\r\nline three")).toBe(
+      "line one ng refs/heads/main injected line three",
+    );
+  });
+
+  it("caps length so encodePktLine cannot overflow", () => {
+    const long = sanitizeStatusText("x".repeat(100_000));
+    expect(long.length).toBeLessThanOrEqual(513); // cap + ellipsis
+    expect(() => encodePktLine(`ng refs/heads/main ${long}\n`)).not.toThrow();
+  });
+
+  it("leaves ordinary text alone", () => {
+    expect(sanitizeStatusText("gated: change chg_1 created")).toBe("gated: change chg_1 created");
+  });
+});
+
+describe("parseReportStatus", () => {
+  it("parses a plain successful report", () => {
+    const body = concat(pktLine("unpack ok\n"), pktLine("ok refs/heads/main\n"), FLUSH_PKT);
+    const result = parseReportStatus(body);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.unpack).toBe("ok");
+      expect(result.data.results).toEqual([{ ref: "refs/heads/main", ok: true }]);
+    }
+  });
+
+  it("parses a plain rejection with the reason", () => {
+    const body = concat(
+      pktLine("unpack ok\n"),
+      pktLine("ng refs/heads/main non-fast-forward\n"),
+      FLUSH_PKT,
+    );
+    const result = parseReportStatus(body);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.results).toEqual([
+        { ref: "refs/heads/main", ok: false, reason: "non-fast-forward" },
+      ]);
+    }
+  });
+
+  it("ignores band-2 progress — 'Counting objects' contains 'ng ' and must not read as a verdict", () => {
+    const status = concat(pktLine("unpack ok\n"), pktLine("ok refs/heads/main\n"), FLUSH_PKT);
+    const body = concat(
+      encodeSideband(2, encoder.encode("Counting objects: 100% (3/3), done.\n")),
+      encodeSideband(1, status),
+      FLUSH_PKT,
+    );
+    const result = parseReportStatus(body);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.unpack).toBe("ok");
+      expect(result.data.results.every((r) => r.ok)).toBe(true);
+    }
+  });
+
+  it("surfaces a sideband-wrapped rejection", () => {
+    const status = concat(
+      pktLine("unpack ok\n"),
+      pktLine("ng refs/heads/main hook declined\n"),
+      FLUSH_PKT,
+    );
+    const body = concat(encodeSideband(1, status), FLUSH_PKT);
+    const result = parseReportStatus(body);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.results[0]).toEqual({
+        ref: "refs/heads/main",
+        ok: false,
+        reason: "hook declined",
+      });
+    }
+  });
+
+  it("reports a failed unpack verbatim", () => {
+    const body = concat(pktLine("unpack index-pack failed\n"), FLUSH_PKT);
+    const result = parseReportStatus(body);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.unpack).toBe("index-pack failed");
+  });
+
+  it("rejects a body without an unpack line", () => {
+    const body = concat(pktLine("ok refs/heads/main\n"), FLUSH_PKT);
+    const result = parseReportStatus(body);
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects garbage framing and empty bodies", () => {
+    expect(parseReportStatus(encoder.encode("zzzz not a pkt")).success).toBe(false);
+    expect(parseReportStatus(new Uint8Array(0)).success).toBe(false);
+    expect(parseReportStatus(FLUSH_PKT).success).toBe(false);
+  });
+
+  it("round-trips buildReportStatus output, both framings", () => {
+    for (const sideband of [false, true]) {
+      const body = buildReportStatus({
+        unpack: "ok",
+        results: [{ ref: "refs/heads/main", ok: false, reason: "gated" }],
+        messages: ["review the change"],
+        sideband,
+      });
+      const result = parseReportStatus(body);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.results).toEqual([
+          { ref: "refs/heads/main", ok: false, reason: "gated" },
+        ]);
+      }
+    }
+  });
+});
+
 describe("buildReportStatus", () => {
   it("without sideband: plain pkt-line status section", () => {
     const body = buildReportStatus({
@@ -153,5 +270,28 @@ describe("buildReportStatus", () => {
     expect(text).toContain("ok refs/heads/main\n");
     expect(text).toContain("ng refs/heads/dev no\n");
     expect(text.endsWith("0000")).toBe(true);
+  });
+
+  it("sanitizes reasons and messages: no injected lines, no pkt-line overflow", () => {
+    const body = buildReportStatus({
+      unpack: "ok",
+      results: [
+        {
+          ref: "refs/heads/main",
+          ok: false,
+          reason: `bad\nok refs/heads/main\n${"y".repeat(80_000)}`,
+        },
+      ],
+      messages: ["multi\nline\nmessage"],
+      sideband: true,
+    });
+    const parsed = parseReportStatus(body);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      // Still exactly one ng result — the embedded "ok refs/heads/main" line
+      // was flattened into the reason text, not parsed as a second verdict.
+      expect(parsed.data.results).toHaveLength(1);
+      expect(parsed.data.results[0]?.ok).toBe(false);
+    }
   });
 });

@@ -135,6 +135,18 @@ export interface ReportStatus {
   sideband: boolean;
 }
 
+// Reasons and messages can carry arbitrary upstream/evaluator text. pkt-line
+// framing is line-oriented with a 16-bit length, so an embedded newline would
+// smuggle extra protocol lines and an oversized payload would make
+// encodePktLine throw mid-response. Flatten and bound at the encoding boundary.
+const MAX_STATUS_TEXT_CHARS = 512;
+
+/** Collapse newlines and cap length so text is safe inside one pkt-line. */
+export function sanitizeStatusText(text: string): string {
+  const flat = text.replace(/[\r\n]+/g, " ").trim();
+  return flat.length > MAX_STATUS_TEXT_CHARS ? `${flat.slice(0, MAX_STATUS_TEXT_CHARS)}…` : flat;
+}
+
 /**
  * Build a git-receive-pack result body carrying report-status (and optional
  * progress messages when side-band-64k was negotiated — without side-band there
@@ -145,7 +157,9 @@ export function buildReportStatus(report: ReportStatus): Uint8Array {
   for (const result of report.results) {
     statusLines.push(
       encodePktLine(
-        result.ok ? `ok ${result.ref}\n` : `ng ${result.ref} ${result.reason ?? "rejected"}\n`,
+        result.ok
+          ? `ok ${result.ref}\n`
+          : `ng ${result.ref} ${sanitizeStatusText(result.reason ?? "rejected")}\n`,
       ),
     );
   }
@@ -156,7 +170,7 @@ export function buildReportStatus(report: ReportStatus): Uint8Array {
 
   const parts: Uint8Array[] = [];
   for (const message of report.messages ?? []) {
-    parts.push(encodeSideband(2, encoder.encode(`${message}\n`)));
+    parts.push(encodeSideband(2, encoder.encode(`${sanitizeStatusText(message)}\n`)));
   }
   parts.push(encodeSideband(1, status));
   parts.push(FLUSH_PKT);
@@ -165,4 +179,103 @@ export function buildReportStatus(report: ReportStatus): Uint8Array {
 
 export function wantsSideband(capabilities: string[]): boolean {
   return capabilities.includes("side-band-64k");
+}
+
+/** Split a buffer into pkt-line payloads, tolerating interleaved flush-pkts. */
+function readPktLines(body: Uint8Array): Result<Uint8Array[], AppError> {
+  const lines: Uint8Array[] = [];
+  let offset = 0;
+  while (offset < body.byteLength) {
+    if (offset + 4 > body.byteLength) {
+      return err(new AppError("truncated pkt-line header", "GIT_PROTOCOL", 502));
+    }
+    const lengthHex = decoder.decode(body.subarray(offset, offset + 4));
+    if (!/^[0-9a-f]{4}$/.test(lengthHex)) {
+      return err(new AppError("malformed pkt-line length", "GIT_PROTOCOL", 502));
+    }
+    const length = Number.parseInt(lengthHex, 16);
+    if (length === 0) {
+      offset += 4; // flush-pkt: section boundary, keep reading
+      continue;
+    }
+    if (length < 4 || offset + length > body.byteLength) {
+      return err(new AppError("pkt-line length out of range", "GIT_PROTOCOL", 502));
+    }
+    lines.push(body.subarray(offset + 4, offset + length));
+    offset += length;
+  }
+  return ok(lines);
+}
+
+export interface ParsedReportStatus {
+  /** "ok" or the unpack error description. */
+  unpack: string;
+  results: Array<{ ref: string; ok: boolean; reason?: string }>;
+}
+
+/**
+ * Parse a git-receive-pack result body into its report-status, handling both
+ * plain and side-band-64k framing. Only band 1 carries the status stream;
+ * bands 2/3 are free-form progress/error text and are deliberately ignored —
+ * substring-scanning the whole body would misread progress like
+ * "Counting objects" (or any text containing "ng ") as a ref verdict.
+ */
+export function parseReportStatus(body: Uint8Array): Result<ParsedReportStatus, AppError> {
+  const framesResult = readPktLines(body);
+  if (!framesResult.success) return framesResult;
+  const frames = framesResult.data;
+  if (frames.length === 0) {
+    return err(new AppError("empty receive-pack result", "GIT_PROTOCOL", 502));
+  }
+
+  // Sideband framing iff every frame leads with a band byte (1-3); a plain
+  // status stream leads with ASCII text ("unpack …"), which can't collide.
+  const isSideband = frames.every((f) => {
+    const band = f[0];
+    return band !== undefined && band >= 1 && band <= 3;
+  });
+  let statusFrames: Uint8Array[];
+  if (isSideband) {
+    const band1 = concat(frames.filter((f) => f[0] === 1).map((f) => f.subarray(1)));
+    const inner = readPktLines(band1);
+    if (!inner.success) return inner;
+    statusFrames = inner.data;
+  } else {
+    statusFrames = frames;
+  }
+
+  const lines = statusFrames.map((f) => {
+    const text = decoder.decode(f);
+    return text.endsWith("\n") ? text.slice(0, -1) : text;
+  });
+
+  const first = lines[0];
+  if (first === undefined || !first.startsWith("unpack ")) {
+    return err(new AppError("receive-pack result missing unpack status", "GIT_PROTOCOL", 502));
+  }
+  const unpack = first.slice("unpack ".length);
+
+  const results: ParsedReportStatus["results"] = [];
+  for (const line of lines.slice(1)) {
+    if (line.startsWith("ok ")) {
+      results.push({ ref: line.slice("ok ".length), ok: true });
+    } else if (line.startsWith("ng ")) {
+      const rest = line.slice("ng ".length);
+      const space = rest.indexOf(" ");
+      results.push(
+        space >= 0
+          ? { ref: rest.slice(0, space), ok: false, reason: rest.slice(space + 1) }
+          : { ref: rest, ok: false },
+      );
+    } else {
+      return err(
+        new AppError(
+          `unexpected receive-pack status line: ${line.slice(0, 80)}`,
+          "GIT_PROTOCOL",
+          502,
+        ),
+      );
+    }
+  }
+  return ok({ unpack, results });
 }

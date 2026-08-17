@@ -7,11 +7,16 @@ import {
   extractTokenSecret,
   freshRepoToken,
 } from "../storage/git-ops";
-import { getProjectByPath, getWorkspace } from "../storage/state";
+import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
 import { getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
-import { buildReportStatus, parseReceivePackRequest, wantsSideband } from "../utils/git-protocol";
+import {
+  buildReportStatus,
+  parseReceivePackRequest,
+  parseReportStatus,
+  wantsSideband,
+} from "../utils/git-protocol";
 import { createLogger } from "../utils/logger";
 
 /**
@@ -219,10 +224,10 @@ async function proxyUpstream(
 }
 
 /**
- * Guidance streamed to a pushing client (as `remote:` lines) when it pushes to
- * the project URL. The gated default-branch push (slice 2b, #115) will replace
- * the rejection with the change/eval pipeline; until then the refusal happens
- * in-protocol so `git push` fails legibly instead of with an opaque HTTP 403.
+ * Guidance streamed to a pushing client (as `remote:` lines) when its push to
+ * the project URL cannot be gated (flag off, multi-ref, delete, non-default
+ * ref). The refusal happens in-protocol so `git push` fails legibly instead of
+ * with an opaque HTTP error.
  */
 function pushGuidance(namespace: string, slug: string): string[] {
   return [
@@ -492,24 +497,64 @@ async function forwardPackToWorkspace(
     return null;
   }
   const responseBody = new Uint8Array(await upstream.arrayBuffer());
-  // The receive-pack result carries only status protocol (no pack data), so a
-  // byte-level scan is a faithful success check whether or not it is
-  // sideband-wrapped: success = an "unpack ok" with no "ng " ref lines.
-  const text = new TextDecoder().decode(responseBody);
-  const pushOk = text.includes("unpack ok") && !text.includes("ng ");
+  // Parse the report-status properly rather than substring-scanning the body:
+  // sideband progress text ("Counting objects…", or anything containing "ng ")
+  // is not a ref verdict, and misreading it would tell the pusher their pack
+  // failed after it had already landed. An unparseable reply fails closed.
+  const report = parseReportStatus(responseBody);
+  if (!report.success) {
+    logger.error("Gated push: unparseable workspace report-status", report.error);
+    return { ok: false, body: responseBody };
+  }
+  const pushOk = report.data.unpack === "ok" && report.data.results.every((r) => r.ok);
   return { ok: pushOk, body: responseBody };
+}
+
+/**
+ * Best-effort teardown of the server-managed fork when a gated push dies
+ * before its change exists: nothing references the workspace yet, so leaving
+ * it would leak an Artifacts repo + KV entry per failed push. Failures are
+ * logged with enough coordinates to find the orphan by hand.
+ */
+async function cleanupPushWorkspace(
+  env: Env,
+  projectId: string,
+  workspaceName: string,
+  remote: string,
+  logger: ReturnType<typeof createLogger>,
+): Promise<void> {
+  const repoName = artifactsRepoNameFromRemote(remote);
+  if (repoName) {
+    await env.ARTIFACTS.delete(repoName).catch((error: unknown) => {
+      logger.warn("Gated push cleanup: could not delete Artifacts fork", {
+        repoName,
+        remote,
+        workspaceName,
+        projectId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  const deleteResult = await deleteWorkspace(env.STATE, projectId, workspaceName, logger);
+  if (!deleteResult.success) {
+    logger.warn("Gated push cleanup: could not delete workspace entry", {
+      workspaceName,
+      projectId,
+      error: deleteResult.error.message,
+    });
+  }
 }
 
 // POST /@:namespace/:slug.git/git-receive-pack — push to the project ref.
 //
-// With GIT_PUSH_GATED_ENABLED, a single-ref push to refs/heads/main is routed
-// through the change gate (ADR 005 slice 2b): the pack lands on a fresh
-// server-managed workspace fork, a change is created and evaluated, and the
-// client gets a truthful per-ref `ng` — main does NOT move until the change is
-// approved and merged, so reporting `ok` would corrupt the client's
-// remote-tracking ref. The change id and eval verdict stream back as sideband
-// messages. Everything else (flag off, multi-ref, deletes, non-default refs)
-// is refused in-protocol as before.
+// With GIT_PUSH_GATED_ENABLED, a single-ref push to the project's default
+// branch is routed through the change gate (ADR 005 slice 2b): the pack lands
+// on a fresh server-managed workspace fork, a change is created and evaluated,
+// and the client gets a truthful per-ref `ng` — the default branch does NOT
+// move until the change is approved and merged, so reporting `ok` would
+// corrupt the client's remote-tracking ref. The change id and eval verdict
+// stream back as sideband messages. Everything else (flag off, multi-ref,
+// deletes, non-default refs) is refused in-protocol as before.
 gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   const logger = createLogger({ requestId: crypto.randomUUID(), path: c.req.path, method: "POST" });
   const result = await authorizeProject(c, "write", logger);
@@ -544,22 +589,28 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
     );
 
   const gatedEnabled = c.env.GIT_PUSH_GATED_ENABLED === "true";
+  // Same default-branch resolution the merge/sync paths use — a repo imported
+  // with a `master` or `trunk` default must gate pushes to THAT ref, not to a
+  // literal refs/heads/main it doesn't have.
+  const defaultBranch = project.sourceDefaultBranch || project.githubDefaultBranch || "main";
+  const defaultRef = `refs/heads/${defaultBranch}`;
   const command = commands[0];
   const isGateablePush =
     gatedEnabled &&
     commands.length === 1 &&
     command !== undefined &&
-    command.ref === "refs/heads/main" &&
+    command.ref === defaultRef &&
     command.newOid !== ZERO_OID;
 
   if (!isGateablePush) {
     logger.info("Refusing project push in-protocol", {
       gatedEnabled,
+      defaultRef,
       refs: commands.map((cmd) => cmd.ref),
     });
     return refuseAll(
       gatedEnabled
-        ? "only a single push to refs/heads/main can be gated — push other refs to a workspace remote"
+        ? `only a single push to ${defaultRef} can be gated — push other refs to a workspace remote`
         : "project pushes are gated — push to a workspace remote and open a change",
       pushGuidance(namespace, slug),
     );
@@ -593,13 +644,18 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
 
   const forwarded = await forwardPackToWorkspace(c, forkResult.data.remote, body, logger);
   if (forwarded === null) {
+    // No change exists yet, so the fresh fork has no owner-visible value —
+    // tear it down rather than leaking one per failed push.
+    await cleanupPushWorkspace(c.env, project.id, forkedName, forkResult.data.remote, logger);
     return refuseAll("upstream git error while landing the pack — try again", []);
   }
   if (!forwarded.ok) {
     // Artifacts rejected the pack (non-fast-forward, corrupt pack, …). Its own
     // report-status is the truthful outcome; relay it verbatim — the upstream
     // negotiated the same capabilities we were sent, so the framing matches.
+    // The empty fork is torn down: the pack never landed, nothing references it.
     logger.warn("Gated push rejected by workspace remote", { workspaceName: forkedName });
+    await cleanupPushWorkspace(c.env, project.id, forkedName, forkResult.data.remote, logger);
     return receivePackResult(forwarded.body);
   }
 
@@ -630,7 +686,7 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
       `Change ${change.id} created from this push (workspace '${forkedName}').`,
       `Evaluation ${evalResult.passed ? "PASSED" : "FAILED"}: ${evalResult.reason}`,
       `Review and merge: /changes/${change.id}`,
-      "main is updated by the merge gate, not the push — your local branch is unchanged.",
+      `'${defaultBranch}' is updated by the merge gate, not the push — your local branch is unchanged.`,
     ],
   );
 });

@@ -13,7 +13,12 @@ import { getAgent } from "../storage/agents";
 import { createChange, updateChangeStatus } from "../storage/changes";
 import { type CostSample, recordCosts } from "../storage/costs";
 import { recordEvalRuns } from "../storage/eval-runs";
-import { freshRepoToken, getCommitLog, getDiffBetweenRepos } from "../storage/git-ops";
+import {
+  artifactsRepoNameFromRemote,
+  freshRepoToken,
+  getCommitLog,
+  getDiffBetweenRepos,
+} from "../storage/git-ops";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import { setWorkspace } from "../storage/state";
 import { type Change, type Env, type ProjectEntry, getArtifactsRepoName } from "../types";
@@ -120,6 +125,59 @@ export function buildEvaluators(
   return evaluators;
 }
 
+export interface EvaluationRun {
+  evaluatorType: string;
+  result: EvalResult;
+}
+
+/**
+ * Run every evaluator over a diff and aggregate the verdict, applying the
+ * blocking secret-scan override (a failed secret scan fails the aggregate and
+ * caps its score regardless of policy weighting). Shared by change creation
+ * and the re-evaluate route so the two verdicts can't drift.
+ */
+export async function runEvaluation(
+  evaluators: Array<{ type: string; evaluator: Evaluator }>,
+  diff: string,
+  policy: EvalPolicy,
+  logger: Logger,
+): Promise<{ evalRuns: EvaluationRun[]; evalResult: EvalResult }> {
+  const evalRuns = await Promise.all(
+    evaluators.map(async ({ type, evaluator }) => {
+      const result = await evaluator.evaluate(diff, policy, logger);
+      return {
+        evaluatorType: type,
+        result: result.success
+          ? result.data
+          : { score: 0, passed: false, reason: result.error.message },
+      };
+    }),
+  );
+
+  const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
+  const aggregateResult = composite.aggregate(
+    evalRuns.map(({ result }) => result),
+    policy,
+    logger,
+  );
+  const blockingFailure = evalRuns.find(
+    ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
+  );
+  const evalResult =
+    blockingFailure === undefined
+      ? aggregateResult
+      : {
+          score: Math.min(aggregateResult.score, blockingFailure.result.score),
+          passed: false,
+          reason:
+            aggregateResult.reason === blockingFailure.result.reason
+              ? blockingFailure.result.reason
+              : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
+          issues: aggregateResult.issues,
+        };
+  return { evalRuns, evalResult };
+}
+
 type RecordedEvalRuns = Extract<
   Awaited<ReturnType<typeof recordEvalRuns>>,
   { success: true }
@@ -142,8 +200,9 @@ export interface ChangeCreationOutcome {
  * already authorized the actor for project write and verified the workspace
  * belongs to the project and the project is not being deleted.
  *
- * Errors carry statusCode 500 for infrastructure failures (token minting) and
- * 400 otherwise, so HTTP front doors can map them faithfully.
+ * Errors preserve the underlying failure's statusCode (5xx for infrastructure
+ * — D1 writes, token minting — 4xx otherwise) so HTTP front doors can map them
+ * faithfully; once the change row exists, its id rides in the error context.
  */
 export async function createChangeWithEvaluation(
   env: Env,
@@ -193,7 +252,16 @@ export async function createChangeWithEvaluation(
   });
   if (!changeResult.success) {
     logger.error("Failed to create change", changeResult.error);
-    return err(new AppError(changeResult.error.message, changeResult.error.code, 400));
+    // Preserve the storage layer's statusCode: a D1 failure is a 500, not the
+    // caller's fault — flattening it to 400 misleads clients into retrying
+    // with "fixed" input.
+    return err(
+      new AppError(
+        changeResult.error.message,
+        changeResult.error.code,
+        changeResult.error.statusCode,
+      ),
+    );
   }
   const change = changeResult.data;
 
@@ -220,10 +288,18 @@ export async function createChangeWithEvaluation(
     freshRepoToken(env.ARTIFACTS, workspaceRemote, "read", logger),
   ]);
   if (!projectReadToken.success) {
-    return err(new AppError(projectReadToken.error.message, projectReadToken.error.code, 500));
+    return err(
+      new AppError(projectReadToken.error.message, projectReadToken.error.code, 500, {
+        changeId: change.id,
+      }),
+    );
   }
   if (!workspaceReadToken.success) {
-    return err(new AppError(workspaceReadToken.error.message, workspaceReadToken.error.code, 500));
+    return err(
+      new AppError(workspaceReadToken.error.message, workspaceReadToken.error.code, 500, {
+        changeId: change.id,
+      }),
+    );
   }
 
   const policy = await loadPolicy(project.remote, projectReadToken.data, logger);
@@ -237,7 +313,9 @@ export async function createChangeWithEvaluation(
   );
   if (!diffResult.success) {
     logger.error("Failed to get diff between repos", diffResult.error);
-    return err(new AppError(diffResult.error.message, diffResult.error.code, 400));
+    return err(
+      new AppError(diffResult.error.message, diffResult.error.code, 400, { changeId: change.id }),
+    );
   }
   // workspaceOid === workspaceSha (same evaluated tip): #133 pins evaluatedSha +
   // tree oid for content-addressing, #115 pins workspaceHeadSha for the merge.
@@ -249,47 +327,16 @@ export async function createChangeWithEvaluation(
   } = diffResult.data;
 
   const evaluators = buildEvaluators(env, policy, projectName, logger);
-
-  const evalRuns = await Promise.all(
-    evaluators.map(async ({ type, evaluator }) => {
-      const result = await evaluator.evaluate(diff, policy, logger);
-      return {
-        evaluatorType: type,
-        result: result.success
-          ? result.data
-          : { score: 0, passed: false, reason: result.error.message },
-      };
-    }),
-  );
-
-  const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
-  const aggregateResult = composite.aggregate(
-    evalRuns.map(({ result }) => result),
-    policy,
-    logger,
-  );
-  const blockingFailure = evalRuns.find(
-    ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
-  );
-  const evalResult =
-    blockingFailure === undefined
-      ? aggregateResult
-      : {
-          score: Math.min(aggregateResult.score, blockingFailure.result.score),
-          passed: false,
-          reason:
-            aggregateResult.reason === blockingFailure.result.reason
-              ? blockingFailure.result.reason
-              : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
-          issues: aggregateResult.issues,
-        };
+  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
 
   const recordResult = await recordEvalRuns(env.DB, logger, change.id, evalRuns);
   if (!recordResult.success) {
     logger.error("Failed to record eval runs", recordResult.error);
-    return err(new AppError(recordResult.error.message, "DATABASE_ERROR", 400));
+    return err(
+      new AppError(recordResult.error.message, "DATABASE_ERROR", 500, { changeId: change.id }),
+    );
   }
 
   // Best-effort cost tracking: the diff clones both repos, evaluators self-report.
@@ -314,7 +361,16 @@ export async function createChangeWithEvaluation(
   });
   if (!updateResult.success) {
     logger.error("Failed to update change status", updateResult.error);
-    return err(new AppError(updateResult.error.message, updateResult.error.code, 400));
+    return err(
+      new AppError(
+        updateResult.error.message,
+        updateResult.error.code,
+        updateResult.error.statusCode,
+        {
+          changeId: change.id,
+        },
+      ),
+    );
   }
 
   await emitEvent(
@@ -403,8 +459,29 @@ export async function createWorkspaceFork(
     logger,
   );
   if (!setResult.success) {
-    logger.error("Failed to set workspace", setResult.error);
-    return err(new AppError(setResult.error.message, setResult.error.code, 400));
+    // The fork exists but was never registered — deleting it here stops each
+    // failed push from leaking an Artifacts repo. Log the coordinates either
+    // way so a failed delete leaves a findable orphan, not a silent one.
+    logger.error("Failed to register pushed workspace; removing orphaned fork", setResult.error, {
+      remote,
+      workspaceName,
+      projectId: project.id,
+    });
+    const orphanRepoName = artifactsRepoNameFromRemote(remote);
+    if (orphanRepoName) {
+      await env.ARTIFACTS.delete(orphanRepoName).catch((error: unknown) => {
+        logger.warn("Could not delete orphaned workspace fork", {
+          repoName: orphanRepoName,
+          remote,
+          workspaceName,
+          projectId: project.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+    return err(
+      new AppError(setResult.error.message, setResult.error.code, setResult.error.statusCode),
+    );
   }
 
   const actorEvent: EventActor = actor.agentId
@@ -413,7 +490,13 @@ export async function createWorkspaceFork(
   await emitEvent(
     env.DB,
     env.EVENTS_QUEUE,
-    { type: "workspace.created", project: project.name, workspace: workspaceName },
+    // Canonical `namespace/slug` (guaranteed by the guard above), matching the
+    // change.* events this flow emits — not the mutable display name.
+    {
+      type: "workspace.created",
+      project: `${project.namespace}/${project.slug}`,
+      workspace: workspaceName,
+    },
     actorEvent,
     logger,
     project.id,

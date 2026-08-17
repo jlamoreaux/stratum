@@ -99,7 +99,8 @@ function makeKV(): KVNamespace {
 
 function makeEnv(): Env {
   return {
-    ARTIFACTS: {} as unknown as Env["ARTIFACTS"],
+    // `delete` is real-ish so gated-push cleanup paths can run and be asserted.
+    ARTIFACTS: { delete: vi.fn(async () => {}) } as unknown as Env["ARTIFACTS"],
     STATE: makeKV(),
     DB: {} as D1Database,
   } as Env;
@@ -975,12 +976,14 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     expect(vi.mocked(createWorkspaceFork)).not.toHaveBeenCalled();
   });
 
-  it("relays the workspace remote's own rejection verbatim (non-fast-forward)", async () => {
+  it("relays the workspace remote's own rejection verbatim and cleans up the fork", async () => {
     const env = gatedEnv();
     await seedProject(env);
+    // Correctly framed report-status: "unpack ok\n" (14=0x000e) and the 40-byte
+    // (0x0028) ng line — the handler now PARSES this instead of substring-scanning.
     stubFetch(
       () =>
-        new Response("0027unpack ok\n002bng refs/heads/main non-fast-forward\n0000", {
+        new Response("000eunpack ok\n0028ng refs/heads/main non-fast-forward\n0000", {
           status: 200,
           headers: { "Content-Type": "application/x-git-receive-pack-result" },
         }),
@@ -996,6 +999,119 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     const text = await res.text();
     expect(text).toContain("non-fast-forward");
     expect(vi.mocked(createChangeWithEvaluation)).not.toHaveBeenCalled();
+    // The pack never landed as a change, so the empty fork must not leak.
+    expect(vi.mocked(env.ARTIFACTS.delete)).toHaveBeenCalledWith("push-abcd1234");
+  });
+
+  it("treats a sideband success reply with 'Counting objects' progress as success (regression)", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    // Sideband-framed success: band-2 progress whose text contains "ng "
+    // ("Counting objects…") plus a band-1 status stream. The old substring
+    // scan misread this as a rejection after the pack had already landed.
+    function pkt(payload: Uint8Array): Uint8Array {
+      const header = new TextEncoder().encode(
+        (payload.byteLength + 4).toString(16).padStart(4, "0"),
+      );
+      const out = new Uint8Array(payload.byteLength + 4);
+      out.set(header, 0);
+      out.set(payload, 4);
+      return out;
+    }
+    function band(b: number, text: string): Uint8Array {
+      const data = new TextEncoder().encode(text);
+      const framed = new Uint8Array(data.byteLength + 1);
+      framed[0] = b;
+      framed.set(data, 1);
+      return pkt(framed);
+    }
+    const status = "000eunpack ok\n0017ok refs/heads/main\n0000";
+    const statusBytes = new TextEncoder().encode(status);
+    const statusFrame = new Uint8Array(statusBytes.byteLength + 1);
+    statusFrame[0] = 1;
+    statusFrame.set(statusBytes, 1);
+    const bodyParts = [
+      band(2, "Counting objects: 100% (3/3), done.\n"),
+      pkt(statusFrame),
+      new TextEncoder().encode("0000"),
+    ];
+    const total = bodyParts.reduce((n, p) => n + p.byteLength, 0);
+    const upstreamBody = new Uint8Array(total);
+    let off = 0;
+    for (const p of bodyParts) {
+      upstreamBody.set(p, off);
+      off += p.byteLength;
+    }
+    stubFetch(
+      () =>
+        new Response(upstreamBody, {
+          status: 200,
+          headers: { "Content-Type": "application/x-git-receive-pack-result" },
+        }),
+    );
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const text = await res.text();
+    // The pack landed → the change flow ran and reported its id.
+    expect(text).toContain("chg_push1");
+    expect(vi.mocked(createChangeWithEvaluation)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(env.ARTIFACTS.delete)).not.toHaveBeenCalled();
+  });
+
+  it("cleans up the fork when the upstream transport fails", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    stubFetch(() => new Response("boom", { status: 500 }));
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("upstream git error");
+    expect(vi.mocked(env.ARTIFACTS.delete)).toHaveBeenCalledWith("push-abcd1234");
+    expect(vi.mocked(createChangeWithEvaluation)).not.toHaveBeenCalled();
+  });
+
+  it("gates the push against the project's actual default branch, not literal main", async () => {
+    const env = gatedEnv();
+    await seedProject(env, { sourceDefaultBranch: "trunk" });
+    const fetchMock = stubFetch(() => upstreamPushOk());
+
+    // A push to refs/heads/main is NOT the default branch here → refused, named.
+    const mainRes = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    expect(await mainRes.text()).toContain("only a single push to refs/heads/trunk");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A push to refs/heads/trunk IS gated.
+    const trunkRes = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: pushBody([`${OID_A} ${OID_B} refs/heads/trunk\0report-status`]),
+      }),
+      env,
+    );
+    const text = await trunkRes.text();
+    expect(text).toContain("ng refs/heads/trunk");
+    expect(text).toContain("chg_push1");
+    expect(vi.mocked(createChangeWithEvaluation)).toHaveBeenCalledTimes(1);
   });
 
   it("preserves the workspace pointer when change creation fails after the pack landed", async () => {
@@ -1020,6 +1136,8 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     const text = await res.text();
     expect(text).toContain("change creation failed");
     expect(text).toContain("push-abcd1234");
+    // The pack DID land: the workspace holds the user's commits and must survive.
+    expect(vi.mocked(env.ARTIFACTS.delete)).not.toHaveBeenCalled();
   });
 
   it("flag off → the plain in-protocol refusal, no fork", async () => {

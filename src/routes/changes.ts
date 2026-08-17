@@ -1,5 +1,5 @@
 import { type Context, Hono } from "hono";
-import { CompositeEvaluator, loadPolicy } from "../evaluation";
+import { loadPolicy } from "../evaluation";
 import type { EvalPolicy } from "../evaluation/types";
 import { runPostMergeCheck } from "../merge/post-merge";
 import { checkMergeProtection } from "../merge/protection";
@@ -9,6 +9,7 @@ import {
   buildEvaluators,
   createChangeWithEvaluation,
   resolveProjectHead,
+  runEvaluation,
 } from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
 import {
@@ -1236,40 +1237,7 @@ app.post("/changes/:id/evaluate", async (c) => {
   } = diffResult.data;
 
   const evaluators = buildEvaluators(c.env, policy, change.project, logger);
-
-  const evalRuns = await Promise.all(
-    evaluators.map(async ({ type, evaluator }) => {
-      const result = await evaluator.evaluate(diff, policy, logger);
-      return {
-        evaluatorType: type,
-        result: result.success
-          ? result.data
-          : { score: 0, passed: false, reason: result.error.message },
-      };
-    }),
-  );
-
-  const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
-  const aggregateResult = composite.aggregate(
-    evalRuns.map(({ result }) => result),
-    policy,
-    logger,
-  );
-  const blockingFailure = evalRuns.find(
-    ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
-  );
-  const evalResult =
-    blockingFailure === undefined
-      ? aggregateResult
-      : {
-          score: Math.min(aggregateResult.score, blockingFailure.result.score),
-          passed: false,
-          reason:
-            aggregateResult.reason === blockingFailure.result.reason
-              ? blockingFailure.result.reason
-              : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
-          issues: aggregateResult.issues,
-        };
+  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
 
   const recordResult = await recordEvalRuns(c.env.DB, logger, id, evalRuns);
   if (!recordResult.success) {
