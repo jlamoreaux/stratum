@@ -1,23 +1,17 @@
 import { type Context, Hono } from "hono";
-import {
-  CompositeEvaluator,
-  DiffEvaluator,
-  LLMEvaluator,
-  SandboxEvaluator,
-  SecretScanEvaluator,
-  WebhookEvaluator,
-  loadPolicy,
-} from "../evaluation";
-import type { EvalPolicy, EvalResult } from "../evaluation/types";
-import type { Evaluator } from "../evaluation/types";
+import { CompositeEvaluator, loadPolicy } from "../evaluation";
+import type { EvalPolicy } from "../evaluation/types";
 import { runPostMergeCheck } from "../merge/post-merge";
 import { checkMergeProtection } from "../merge/protection";
-import { type EventActor, emitEvent } from "../queue/events";
+import { emitEvent } from "../queue/events";
 import type { MergeOutcome } from "../queue/merge-queue";
-import { getAgent } from "../storage/agents";
+import {
+  buildEvaluators,
+  createChangeWithEvaluation,
+  resolveProjectHead,
+} from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
 import {
-  createChange,
   getChange,
   getChangesByIds,
   listChanges,
@@ -41,11 +35,9 @@ import {
   parseStagedTree,
 } from "../storage/git-ops";
 import { recordProvenance } from "../storage/provenance";
-import { readRepoSnapshot } from "../storage/repo-snapshot";
 import { getProject, getWorkspace } from "../storage/state";
 import type { Change, Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
-import type { AppError } from "../utils/errors";
 import { newId } from "../utils/ids";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
@@ -58,7 +50,6 @@ import {
   ok,
   unauthorized,
 } from "../utils/response";
-import { ok as okResult } from "../utils/result";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -149,25 +140,6 @@ function okOrFormRedirect<T>(c: Context<{ Bindings: Env }>, changeId: string, da
   return ok(data);
 }
 
-/** Current project HEAD: cheap KV snapshot first, single-commit clone as fallback. */
-async function resolveProjectHead(
-  env: Env,
-  project: ProjectEntry,
-  logger: Logger,
-): Promise<string | null> {
-  if (project.namespace && project.slug) {
-    const snapshotResult = await readRepoSnapshot(env.STATE, project, logger);
-    if (snapshotResult.success) {
-      const sha = snapshotResult.data?.commits[0]?.sha;
-      if (sha) return sha;
-    }
-  }
-  const readToken = await freshRepoToken(env.ARTIFACTS, project.remote, "read", logger);
-  if (!readToken.success) return null;
-  const logResult = await getCommitLog(project.remote, readToken.data, logger, 1);
-  return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
-}
-
 /**
  * Resolve a workspace's current tip commit sha, or null if it can't be read.
  * Workspaces have no KV snapshot fast-path, so this clones the workspace remote.
@@ -182,25 +154,6 @@ async function resolveWorkspaceTip(
   if (!readToken.success) return null;
   const logResult = await getCommitLog(workspaceRemote, readToken.data, logger, 1);
   return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
-}
-
-class UnavailableEvaluator implements Evaluator {
-  constructor(
-    private evaluatorType: string,
-    private reason: string,
-  ) {}
-
-  async evaluate(
-    _diff: string,
-    _policy: EvalPolicy,
-    _logger: Logger,
-  ): Promise<{ success: true; data: EvalResult } | { success: false; error: AppError }> {
-    return okResult({
-      score: 0,
-      passed: false,
-      reason: `${this.evaluatorType} unavailable: ${this.reason}`,
-    });
-  }
 }
 
 app.post("/projects/:name/changes", async (c) => {
@@ -259,231 +212,23 @@ app.post("/projects/:name/changes", async (c) => {
     return badRequest(`Workspace '${body.workspace}' does not belong to project '${projectName}'`);
   }
 
-  const baseSha = await resolveProjectHead(c.env, project, logger);
-
-  // Snapshot the authoring agent's model + prompt hash at creation, so
-  // provenance records the model that did the work rather than the agent's
-  // current (possibly later-changed) registration.
-  let agentModel: string | undefined;
-  let agentPromptHash: string | undefined;
-  if (agentId !== undefined) {
-    const agentResult = await getAgent(c.env.DB, agentId, logger);
-    if (agentResult.success) {
-      agentModel = agentResult.data.model;
-      agentPromptHash = agentResult.data.promptHash;
-    } else {
-      // Best effort: provenance metadata must not block change creation. Log so a
-      // persistent lookup failure is visible rather than silently dropping the
-      // model/prompt snapshot.
-      logger.warn("Could not load agent for provenance snapshot; continuing without it", {
-        agentId,
-        error: agentResult.error.message,
-      });
-    }
-  }
-
-  const changeResult = await createChange(c.env.DB, logger, {
-    project: projectName,
-    projectId: project.id,
-    workspace: body.workspace,
-    ...(agentId !== undefined ? { agentId } : {}),
-    ...(baseSha !== null ? { baseSha } : {}),
-    ...(agentModel !== undefined ? { agentModel } : {}),
-    ...(agentPromptHash !== undefined ? { agentPromptHash } : {}),
-  });
-  if (!changeResult.success) {
-    logger.error("Failed to create change", changeResult.error);
-    return badRequest(changeResult.error.message);
-  }
-  const change = changeResult.data;
-
-  const actor: EventActor = agentId
-    ? { type: "agent", id: agentId }
-    : { type: "user", ...(userId !== undefined ? { id: userId } : {}) };
-
-  await emitEvent(
-    c.env.DB,
-    c.env.EVENTS_QUEUE,
-    {
-      type: "change.created",
-      project: projectName,
-      changeId: change.id,
-      workspace: body.workspace,
+  const outcome = await createChangeWithEvaluation(c.env, logger, {
+    project,
+    projectName,
+    workspaceName: body.workspace,
+    workspaceRemote: workspace.remote,
+    actor: {
+      ...(userId !== undefined ? { userId } : {}),
+      ...(agentId !== undefined ? { agentId } : {}),
     },
-    actor,
-    logger,
-    project.id,
-  );
-
-  const [projectReadToken, workspaceReadToken] = await Promise.all([
-    freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger),
-    freshRepoToken(c.env.ARTIFACTS, workspace.remote, "read", logger),
-  ]);
-  if (!projectReadToken.success) return internalError(projectReadToken.error.message);
-  if (!workspaceReadToken.success) return internalError(workspaceReadToken.error.message);
-
-  const policy = await loadPolicy(project.remote, projectReadToken.data, logger);
-
-  const diffResult = await getDiffBetweenRepos(
-    project.remote,
-    projectReadToken.data,
-    workspace.remote,
-    workspaceReadToken.data,
-    logger,
-  );
-  if (!diffResult.success) {
-    logger.error("Failed to get diff between repos", diffResult.error);
-    return badRequest(diffResult.error.message);
-  }
-  // workspaceOid === workspaceSha (same evaluated tip): #133 pins evaluatedSha +
-  // tree oid for content-addressing, #115 pins workspaceHeadSha for the merge.
-  const {
-    diff,
-    workspaceOid: evaluatedSha,
-    workspaceTreeOid: evaluatedTreeOid,
-    workspaceSha: workspaceHeadSha,
-  } = diffResult.data;
-
-  const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
-    { type: "secret_scan", evaluator: new SecretScanEvaluator() },
-  ];
-
-  evaluators.push(
-    ...policy.evaluators.flatMap((cfg): Array<{ type: string; evaluator: Evaluator }> => {
-      switch (cfg.type) {
-        case "diff":
-          return [{ type: "diff", evaluator: new DiffEvaluator() }];
-        case "webhook":
-          return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
-        case "llm":
-          if (c.env.AI) return [{ type: "llm", evaluator: new LLMEvaluator(c.env.AI) }];
-          return [
-            {
-              type: "llm",
-              evaluator: new UnavailableEvaluator("llm", "AI binding is not configured"),
-            },
-          ];
-        case "sandbox":
-          if (c.env.SANDBOX) {
-            return [{ type: "sandbox", evaluator: new SandboxEvaluator(c.env.SANDBOX) }];
-          }
-          return [
-            {
-              type: "sandbox",
-              evaluator: new UnavailableEvaluator("sandbox", "SANDBOX binding is not configured"),
-            },
-          ];
-        default:
-          logger.warn(
-            `Unknown evaluator type "${(cfg as { type: string }).type}" in policy for project ${projectName}`,
-            { evaluatorType: (cfg as { type: string }).type, projectName },
-          );
-          return [];
-      }
-    }),
-  );
-
-  const evalRuns = await Promise.all(
-    evaluators.map(async ({ type, evaluator }) => {
-      const result = await evaluator.evaluate(diff, policy, logger);
-      return {
-        evaluatorType: type,
-        result: result.success
-          ? result.data
-          : { score: 0, passed: false, reason: result.error.message },
-      };
-    }),
-  );
-
-  const composite = new CompositeEvaluator(evaluators.map(({ evaluator }) => evaluator));
-  const aggregateResult = composite.aggregate(
-    evalRuns.map(({ result }) => result),
-    policy,
-    logger,
-  );
-  const blockingFailure = evalRuns.find(
-    ({ evaluatorType, result }) => evaluatorType === "secret_scan" && !result.passed,
-  );
-  const evalResult =
-    blockingFailure === undefined
-      ? aggregateResult
-      : {
-          score: Math.min(aggregateResult.score, blockingFailure.result.score),
-          passed: false,
-          reason:
-            aggregateResult.reason === blockingFailure.result.reason
-              ? blockingFailure.result.reason
-              : `${blockingFailure.result.reason} ${aggregateResult.reason}`,
-          issues: aggregateResult.issues,
-        };
-
-  const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
-
-  const recordResult = await recordEvalRuns(c.env.DB, logger, change.id, evalRuns);
-  if (!recordResult.success) {
-    logger.error("Failed to record eval runs", recordResult.error);
-    return badRequest(recordResult.error.message);
-  }
-
-  // Best-effort cost tracking: the diff clones both repos, evaluators self-report.
-  const createCostSamples: CostSample[] = [
-    { kind: "git_ops", quantity: 2 },
-    ...evalRuns.flatMap(({ result }) => result.costs ?? []),
-  ];
-  await recordCosts(
-    c.env.DB,
-    logger,
-    { project: projectName, projectId: project.id, changeId: change.id, workspace: body.workspace },
-    createCostSamples,
-  );
-
-  const updateResult = await updateChangeStatus(c.env.DB, logger, change.id, newStatus, {
-    evalScore: evalResult.score,
-    evalPassed: evalResult.passed,
-    evalReason: evalResult.reason,
-    evaluatedSha,
-    evaluatedTreeOid,
-    ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
   });
-  if (!updateResult.success) {
-    logger.error("Failed to update change status", updateResult.error);
-    return badRequest(updateResult.error.message);
+  if (!outcome.success) {
+    return outcome.error.statusCode >= 500
+      ? internalError(outcome.error.message)
+      : badRequest(outcome.error.message);
   }
-
-  await emitEvent(
-    c.env.DB,
-    c.env.EVENTS_QUEUE,
-    {
-      type: "change.evaluated",
-      project: projectName,
-      changeId: change.id,
-      score: evalResult.score,
-      passed: evalResult.passed,
-    },
-    { type: "system" },
-    logger,
-    project.id,
-  );
-
-  const updatedChange: Change = {
-    ...change,
-    status: newStatus,
-    evalScore: evalResult.score,
-    evalPassed: evalResult.passed,
-    evalReason: evalResult.reason,
-    evaluatedSha,
-    evaluatedTreeOid,
-    ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
-  };
-
-  logger.info("Change created and evaluated", {
-    changeId: change.id,
-    project: projectName,
-    workspace: body.workspace,
-    status: newStatus,
-    evalScore: evalResult.score,
-  });
-  return created({ change: updatedChange, eval: evalResult, evalRuns: recordResult.data });
+  const { change: updatedChange, evalResult, evalRuns: recordedRuns } = outcome.data;
+  return created({ change: updatedChange, eval: evalResult, evalRuns: recordedRuns });
 });
 
 app.get("/projects/:name/changes", async (c) => {
@@ -1490,40 +1235,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     workspaceSha: workspaceHeadSha,
   } = diffResult.data;
 
-  const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
-    { type: "secret_scan", evaluator: new SecretScanEvaluator() },
-    ...policy.evaluators.flatMap((cfg): Array<{ type: string; evaluator: Evaluator }> => {
-      switch (cfg.type) {
-        case "diff":
-          return [{ type: "diff", evaluator: new DiffEvaluator() }];
-        case "webhook":
-          return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
-        case "llm":
-          return c.env.AI
-            ? [{ type: "llm", evaluator: new LLMEvaluator(c.env.AI) }]
-            : [
-                {
-                  type: "llm",
-                  evaluator: new UnavailableEvaluator("llm", "AI binding is not configured"),
-                },
-              ];
-        case "sandbox":
-          return c.env.SANDBOX
-            ? [{ type: "sandbox", evaluator: new SandboxEvaluator(c.env.SANDBOX) }]
-            : [
-                {
-                  type: "sandbox",
-                  evaluator: new UnavailableEvaluator(
-                    "sandbox",
-                    "SANDBOX binding is not configured",
-                  ),
-                },
-              ];
-        default:
-          return [];
-      }
-    }),
-  ];
+  const evaluators = buildEvaluators(c.env, policy, change.project, logger);
 
   const evalRuns = await Promise.all(
     evaluators.map(async ({ type, evaluator }) => {

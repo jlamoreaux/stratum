@@ -1,0 +1,29 @@
+# Stratum's own merge policy — the dogfood configuration this repo runs under
+# when hosted on a Stratum instance (layer mode over GitHub, or as source of
+# truth). Inert on GitHub itself. The secret scan is always on and blocking and
+# needs no entry here.
+evaluators:
+  # Structural sanity: a Stratum change should be a reviewable unit, not a dump.
+  - type: diff
+    maxLines: 5000
+    maxFiles: 200
+  # LLM review as a gate, not a rubber stamp. An unparseable verdict fails
+  # closed; the diff window covers all but the largest changes.
+  - type: llm
+    threshold: 0.6
+    maxDiffChars: 48000
+
+requireAll: true
+minScore: 0.6
+
+merge:
+  # Approvals are a human gate; agents (including the ones building this repo)
+  # can never approve their own work.
+  requiredApprovals: 1
+  # The always-on secret scan must have passed on the evaluated revision.
+  requiredEvaluators: ["secret_scan"]
+  # No force-merge escape hatch on this repo. Deleting this line keeps force
+  # denied (deny-by-default); it is spelled out so the intent is explicit.
+  allowForce: false
+  # A change evaluated against a stale base must re-evaluate before merging.
+  requireFreshBase: true

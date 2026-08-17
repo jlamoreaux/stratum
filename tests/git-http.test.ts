@@ -20,6 +20,31 @@ const OTHER_TOKEN = "stratum_user_other000000000000000000";
 const AGENT_TOKEN = "stratum_agent_agent00000000000000000";
 const INVALID_TOKEN = "stratum_user_invalid0000000000000000";
 
+// The gated-push handler calls the change-flow service; mock its two entry
+// points so these tests exercise the wire protocol, not the eval pipeline
+// (which has its own suite via the REST route).
+vi.mock("../src/services/change-flow", async (importActual) => {
+  const actual = await importActual<typeof import("../src/services/change-flow")>();
+  return {
+    ...actual,
+    createWorkspaceFork: vi.fn(async () => ({
+      success: true,
+      data: {
+        name: "push-abcd1234",
+        remote: "https://acct.artifacts.cloudflare.net/git/@owner/push-abcd1234.git",
+      },
+    })),
+    createChangeWithEvaluation: vi.fn(async () => ({
+      success: true,
+      data: {
+        change: { id: "chg_push1", status: "accepted" },
+        evalResult: { score: 0.9, passed: true, reason: "clean" },
+        evalRuns: [],
+      },
+    })),
+  };
+});
+
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(async (_db: unknown, token: string) => {
     if (token === OWNER_TOKEN)
@@ -410,22 +435,121 @@ describe("git smart-HTTP proxy — upstream proxy (Task 3)", () => {
   });
 });
 
-describe("git smart-HTTP proxy — receive-pack rejection (Task 4)", () => {
-  it("POST git-receive-pack → 403 naming stratum commit, no upstream call", async () => {
+describe("git smart-HTTP proxy — receive-pack in-protocol rejection (Task 4)", () => {
+  const OID_A = "a".repeat(40);
+  const OID_B = "b".repeat(40);
+
+  function pktLine(payload: string): Uint8Array {
+    const data = new TextEncoder().encode(payload);
+    const header = new TextEncoder().encode((data.byteLength + 4).toString(16).padStart(4, "0"));
+    const out = new Uint8Array(data.byteLength + 4);
+    out.set(header, 0);
+    out.set(data, 4);
+    return out;
+  }
+
+  function pushBody(caps: string): Uint8Array {
+    const line = pktLine(`${OID_A} ${OID_B} refs/heads/main\0${caps}`);
+    const flush = new TextEncoder().encode("0000");
+    const out = new Uint8Array(line.byteLength + flush.byteLength);
+    out.set(line, 0);
+    out.set(flush, line.byteLength);
+    return out;
+  }
+
+  it("POST git-receive-pack → 200 report-status with per-ref ng, pack never forwarded", async () => {
     const env = makeEnv();
-    await seedProject(env, { visibility: "public" });
+    await seedProject(env);
     const fetchMock = stubFetch(() => okUpstream());
-    const res = await app.fetch(req("/@owner/repo.git/git-receive-pack", { method: "POST" }), env);
-    expect(res.status).toBe(403);
-    expect(await res.text()).toContain("stratum commit");
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: pushBody("report-status"),
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/x-git-receive-pack-result");
+    const text = await res.text();
+    expect(text).toContain("unpack ok\n");
+    expect(text).toContain("ng refs/heads/main");
+    expect(text).toContain("gated");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("info/refs?service=git-receive-pack → 403", async () => {
+  it("sideband push gets remote guidance messages naming the workspace remote", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    stubFetch(() => okUpstream());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: pushBody("report-status side-band-64k"),
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("workspaces/<ws>.git");
+    expect(text).toContain("ng refs/heads/main");
+  });
+
+  it("push requires write: anonymous → 401 challenge, non-writer → 404", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    stubFetch(() => okUpstream());
+    const anon = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", { method: "POST", body: pushBody("") }),
+      env,
+    );
+    expect(anon.status).toBe(401);
+    const other = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OTHER_TOKEN),
+        body: pushBody("report-status"),
+      }),
+      env,
+    );
+    expect(other.status).toBe(404);
+  });
+
+  it("malformed push body → 400, not a synthesized report", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    stubFetch(() => okUpstream());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: "zzzz garbage",
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("info/refs?service=git-receive-pack advertises for a writer (write-scoped proxy)", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await app.fetch(
+      req("/@owner/repo.git/info/refs?service=git-receive-pack", { headers: basic(OWNER_TOKEN) }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("service=git-receive-pack");
+    expect(vi.mocked(freshRepoToken).mock.calls[0]?.[2]).toBe("write");
+  });
+
+  it("info/refs?service=git-receive-pack challenges the anonymous caller", async () => {
     const env = makeEnv();
     await seedProject(env, { visibility: "public" });
+    stubFetch(() => okUpstream());
     const res = await app.fetch(req("/@owner/repo.git/info/refs?service=git-receive-pack"), env);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
   });
 });
 
@@ -714,5 +838,204 @@ describe("git smart-HTTP proxy — workspace write ownership (S1)", () => {
     stubFetch(() => okUpstream());
     const res = await app.fetch(req(WS_UPLOAD_ADV, { headers: basic(OTHER_TOKEN) }), env);
     expect(res.status).toBe(200);
+  });
+});
+
+// ── Gated push (ADR 005 slice 2b, GIT_PUSH_GATED_ENABLED) ────────────────────
+
+import { createChangeWithEvaluation, createWorkspaceFork } from "../src/services/change-flow";
+
+describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
+  const OID_A = "a".repeat(40);
+  const OID_B = "b".repeat(40);
+  const ZEROS = "0".repeat(40);
+
+  function pktLine(payload: string): Uint8Array {
+    const data = new TextEncoder().encode(payload);
+    const header = new TextEncoder().encode((data.byteLength + 4).toString(16).padStart(4, "0"));
+    const out = new Uint8Array(data.byteLength + 4);
+    out.set(header, 0);
+    out.set(data, 4);
+    return out;
+  }
+
+  function pushBody(lines: string[]): Uint8Array {
+    const parts = lines.map((l) => pktLine(l));
+    const flush = new TextEncoder().encode("0000");
+    const total = parts.reduce((n, p) => n + p.byteLength, 0) + flush.byteLength;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.byteLength;
+    }
+    out.set(flush, off);
+    return out;
+  }
+
+  const MAIN_PUSH = pushBody([`${OID_A} ${OID_B} refs/heads/main\0report-status`]);
+
+  function gatedEnv(): Env {
+    return { ...makeEnv(), GIT_PUSH_GATED_ENABLED: "true" } as Env;
+  }
+
+  function upstreamPushOk(): Response {
+    return new Response("000eunpack ok\n0000", {
+      status: 200,
+      headers: { "Content-Type": "application/x-git-receive-pack-result" },
+    });
+  }
+
+  it("routes a main push through fork → land pack → change, answering a truthful ng", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    const fetchMock = stubFetch(() => upstreamPushOk());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // Truthful outcome: main did not move, so the ref reports ng…
+    expect(text).toContain("ng refs/heads/main");
+    // …but the reason carries the created change and its verdict.
+    expect(text).toContain("chg_push1");
+    expect(text).toContain("eval passed");
+
+    // The pack was forwarded to the fork's receive-pack, not the project's.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://acct.artifacts.cloudflare.net/git/@owner/push-abcd1234.git/git-receive-pack",
+    );
+    expect(vi.mocked(createWorkspaceFork)).toHaveBeenCalledTimes(1);
+    const forkArgs = vi.mocked(createWorkspaceFork).mock.calls[0]?.[2];
+    expect(forkArgs?.workspaceName).toMatch(/^push-[0-9a-f-]{8}$/);
+    expect(forkArgs?.actor.userId).toBe("user_owner");
+
+    const changeArgs = vi.mocked(createChangeWithEvaluation).mock.calls[0]?.[2];
+    expect(changeArgs?.projectName).toBe("@owner/repo");
+    expect(changeArgs?.workspaceRemote).toContain("push-abcd1234");
+  });
+
+  it("an agent push carries the agent identity into the change flow", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    stubFetch(() => upstreamPushOk());
+    await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(AGENT_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const changeArgs = vi.mocked(createChangeWithEvaluation).mock.calls[0]?.[2];
+    expect(changeArgs?.actor.agentId).toBe("agent_1");
+    expect(changeArgs?.actor.userId).toBeUndefined();
+  });
+
+  it("refuses multi-ref pushes even with the flag on", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    const fetchMock = stubFetch(() => upstreamPushOk());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: pushBody([
+          `${OID_A} ${OID_B} refs/heads/main\0report-status`,
+          `${OID_A} ${OID_B} refs/heads/dev`,
+        ]),
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("only a single push to refs/heads/main");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(vi.mocked(createWorkspaceFork)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a ref deletion even with the flag on", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    stubFetch(() => upstreamPushOk());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: pushBody([`${OID_A} ${ZEROS} refs/heads/main\0report-status`]),
+      }),
+      env,
+    );
+    expect(await res.text()).toContain("only a single push to refs/heads/main");
+    expect(vi.mocked(createWorkspaceFork)).not.toHaveBeenCalled();
+  });
+
+  it("relays the workspace remote's own rejection verbatim (non-fast-forward)", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    stubFetch(
+      () =>
+        new Response("0027unpack ok\n002bng refs/heads/main non-fast-forward\n0000", {
+          status: 200,
+          headers: { "Content-Type": "application/x-git-receive-pack-result" },
+        }),
+    );
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("non-fast-forward");
+    expect(vi.mocked(createChangeWithEvaluation)).not.toHaveBeenCalled();
+  });
+
+  it("preserves the workspace pointer when change creation fails after the pack landed", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    stubFetch(() => upstreamPushOk());
+    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce({
+      success: false,
+      error: Object.assign(new Error("db unavailable"), {
+        code: "DATABASE_ERROR",
+        statusCode: 400,
+      }),
+    } as never);
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("change creation failed");
+    expect(text).toContain("push-abcd1234");
+  });
+
+  it("flag off → the plain in-protocol refusal, no fork", async () => {
+    const env = makeEnv(); // no GIT_PUSH_GATED_ENABLED
+    await seedProject(env);
+    stubFetch(() => upstreamPushOk());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("project pushes are gated");
+    expect(vi.mocked(createWorkspaceFork)).not.toHaveBeenCalled();
   });
 });

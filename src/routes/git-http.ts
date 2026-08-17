@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import { createChangeWithEvaluation, createWorkspaceFork } from "../services/change-flow";
 import { getAgentByToken } from "../storage/agents";
+import { isTargetDeleting } from "../storage/deletion";
 import {
   artifactsRepoNameFromRemote,
   extractTokenSecret,
@@ -9,15 +11,20 @@ import { getProjectByPath, getWorkspace } from "../storage/state";
 import { getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
+import { buildReportStatus, parseReceivePackRequest, wantsSideband } from "../utils/git-protocol";
 import { createLogger } from "../utils/logger";
 
 /**
  * Git smart-HTTP proxy (ADR 005).
  *
  * Lets a Stratum project be used as a git remote. Two surfaces:
- *  - Project URL `/@ns/slug.git` — clone/fetch (read). Pushing to the project
- *    URL is refused (`pushNotSupported`); the gated `push → change → eval →
- *    merge` path is a separate slice (Phase B / #115).
+ *  - Project URL `/@ns/slug.git` — clone/fetch (read). A push to the default
+ *    branch is routed through the change gate when GIT_PUSH_GATED_ENABLED
+ *    (ADR 005 slice 2b): pack lands on a server-managed workspace fork, a
+ *    change is created + evaluated, and the client gets a truthful per-ref
+ *    `ng` carrying the change id (main only moves through the merge gate).
+ *    With the flag off — and for multi-ref/delete/non-default pushes — the
+ *    push is refused in-protocol with sideband guidance.
  *  - Workspace URL `/@ns/slug/workspaces/<ws>.git` — clone/fetch (read) AND
  *    `git push` (write), proxied verbatim to the workspace's Artifacts fork.
  *    The client clones the workspace, so ref/old-oid semantics line up and
@@ -123,6 +130,7 @@ function parseBasicToken(header: string | undefined): string | null {
 
 interface Identity {
   userId?: string;
+  agentId?: string;
   agentOwnerId?: string;
 }
 
@@ -143,7 +151,7 @@ async function authenticate(
     return result.success ? { userId: result.data.id } : null;
   }
   const result = await getAgentByToken(c.env.DB, token, logger);
-  return result.success ? { agentOwnerId: result.data.ownerId } : null;
+  return result.success ? { agentId: result.data.id, agentOwnerId: result.data.ownerId } : null;
 }
 
 function basicAuthHeader(artifactsToken: string): string {
@@ -210,11 +218,18 @@ async function proxyUpstream(
   return new Response(upstream.body, { status: 200, headers: responseHeaders });
 }
 
-function pushNotSupported(): Response {
-  return new Response(
-    "push over git is not yet supported — use 'stratum commit' or the change flow\n",
-    { status: 403, headers: { "Content-Type": "text/plain" } },
-  );
+/**
+ * Guidance streamed to a pushing client (as `remote:` lines) when it pushes to
+ * the project URL. The gated default-branch push (slice 2b, #115) will replace
+ * the rejection with the change/eval pipeline; until then the refusal happens
+ * in-protocol so `git push` fails legibly instead of with an opaque HTTP 403.
+ */
+function pushGuidance(namespace: string, slug: string): string[] {
+  return [
+    "Pushes to a project's protected refs are gated by Stratum's change flow.",
+    `Push to a workspace remote instead: /${namespace}/${slug}/workspaces/<ws>.git`,
+    "then open a change (stratum change create) to run evaluations and merge.",
+  ];
 }
 
 /** Strip a trailing `.git` so both `/@ns/slug.git` and `/@ns/slug` resolve. */
@@ -223,13 +238,15 @@ function normalizeSlug(slug: string): string {
 }
 
 /**
- * Resolve + authorize a project for a read, applying the no-leak truth table.
- * Returns the project on success, or a `Response` to return as-is.
+ * Resolve + authorize a project for a read (clone/fetch) or write (push),
+ * applying the no-leak truth table. Returns the project on success, or a
+ * `Response` to return as-is.
  */
-async function authorizeRead(
+async function authorizeProject(
   c: { req: { header(name: string): string | undefined; param(name: string): string }; env: Env },
+  scope: "read" | "write",
   logger: ReturnType<typeof createLogger>,
-): Promise<ProjectEntry | Response> {
+): Promise<{ project: ProjectEntry; identity: Identity | null } | Response> {
   const namespace = c.req.param("namespace");
   const slug = normalizeSlug(c.req.param("slug"));
 
@@ -251,8 +268,11 @@ async function authorizeRead(
   }
 
   const project = projectResult.data;
-  const canRead = await canReadProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId);
-  if (!canRead) {
+  const allowed =
+    scope === "write"
+      ? await canWriteProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId)
+      : await canReadProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId);
+  if (!allowed) {
     return isAnonymous ? authChallenge() : gitNotFound();
   }
 
@@ -265,7 +285,7 @@ async function authorizeRead(
     return gitUnavailable("project");
   }
 
-  return project;
+  return { project, identity };
 }
 
 const gitUnavailable = (resource: "project" | "workspace"): Response =>
@@ -276,7 +296,7 @@ const gitUnavailable = (resource: "project" | "workspace"): Response =>
 
 /**
  * Resolve + authorize a workspace for clone/fetch (read) or push (write),
- * applying the same no-leak truth table as `authorizeRead`. Returns the
+ * applying the same no-leak truth table as `authorizeProject`. Returns the
  * workspace's Artifacts remote on success, or a `Response` to return as-is.
  */
 async function authorizeWorkspace(
@@ -393,37 +413,227 @@ export const gitHttpRouter = new Hono<{ Bindings: Env }>();
 gitHttpRouter.get("/:namespace/:slug/info/refs", async (c) => {
   const logger = createLogger({ requestId: crypto.randomUUID(), path: c.req.path, method: "GET" });
   const service = c.req.query("service");
-  if (service === RECEIVE_PACK) return pushNotSupported();
-  if (service !== UPLOAD_PACK) {
-    return new Response("only the smart-HTTP git-upload-pack service is supported\n", {
+  const scope = service === RECEIVE_PACK ? "write" : service === UPLOAD_PACK ? "read" : null;
+  if (!scope) {
+    return new Response("unsupported git service\n", {
       status: 400,
       headers: { "Content-Type": "text/plain" },
     });
   }
 
-  const result = await authorizeRead(c, logger);
+  // The receive-pack advertisement is proxied (write-authorized) so `git push`
+  // proceeds to the RPC below, where the outcome is delivered in-protocol
+  // instead of as an opaque HTTP error at the advertise step.
+  const result = await authorizeProject(c, scope, logger);
   if (result instanceof Response) return result;
 
-  const upstreamUrl = `${result.remote}/info/refs?service=${UPLOAD_PACK}`;
-  return proxyUpstream(c, result.remote, "read", upstreamUrl, "GET", undefined, logger);
+  const upstreamUrl = `${result.project.remote}/info/refs?service=${service}`;
+  return proxyUpstream(c, result.project.remote, scope, upstreamUrl, "GET", undefined, logger);
 });
 
 // POST /@:namespace/:slug.git/git-upload-pack — clone/fetch RPC
 gitHttpRouter.post("/:namespace/:slug/git-upload-pack", async (c) => {
   const logger = createLogger({ requestId: crypto.randomUUID(), path: c.req.path, method: "POST" });
-  const result = await authorizeRead(c, logger);
+  const result = await authorizeProject(c, "read", logger);
   if (result instanceof Response) return result;
 
   const body = await readCappedBody(c, logger);
   if (body instanceof Response) return body;
-  const upstreamUrl = `${result.remote}/${UPLOAD_PACK}`;
-  return proxyUpstream(c, result.remote, "read", upstreamUrl, "POST", body, logger);
+  const upstreamUrl = `${result.project.remote}/${UPLOAD_PACK}`;
+  return proxyUpstream(c, result.project.remote, "read", upstreamUrl, "POST", body, logger);
 });
 
+const ZERO_OID = "0".repeat(40);
+
+/** The report-status Content-Type git expects on the receive-pack reply. */
+function receivePackResult(body: Uint8Array): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "application/x-git-receive-pack-result" },
+  });
+}
+
+/**
+ * Forward a buffered receive-pack request to a workspace fork's remote and
+ * return the buffered upstream result, or null on transport failure. The
+ * response is buffered (not streamed) because the gated flow must inspect the
+ * outcome before deciding what to tell the client.
+ */
+async function forwardPackToWorkspace(
+  c: { req: { header(name: string): string | undefined }; env: Env },
+  workspaceRemote: string,
+  body: ArrayBuffer,
+  logger: ReturnType<typeof createLogger>,
+): Promise<{ ok: boolean; body: Uint8Array } | null> {
+  const tokenResult = await freshRepoToken(c.env.ARTIFACTS, workspaceRemote, "write", logger);
+  if (!tokenResult.success) {
+    logger.error("Failed to mint Artifacts token for gated push", tokenResult.error);
+    return null;
+  }
+  const headers: Record<string, string> = { Authorization: basicAuthHeader(tokenResult.data) };
+  for (const name of ["Git-Protocol", "Content-Type", "Content-Encoding"]) {
+    const value = c.req.header(name);
+    if (value) headers[name] = value;
+  }
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${workspaceRemote}/${RECEIVE_PACK}`, {
+      method: "POST",
+      headers,
+      body,
+      redirect: "manual",
+    });
+  } catch (error) {
+    logger.error("Gated push upstream fetch failed", error instanceof Error ? error : undefined);
+    return null;
+  }
+  if (upstream.status < 200 || upstream.status >= 300) {
+    logger.error("Gated push upstream returned non-2xx", undefined, { status: upstream.status });
+    return null;
+  }
+  const responseBody = new Uint8Array(await upstream.arrayBuffer());
+  // The receive-pack result carries only status protocol (no pack data), so a
+  // byte-level scan is a faithful success check whether or not it is
+  // sideband-wrapped: success = an "unpack ok" with no "ng " ref lines.
+  const text = new TextDecoder().decode(responseBody);
+  const pushOk = text.includes("unpack ok") && !text.includes("ng ");
+  return { ok: pushOk, body: responseBody };
+}
+
 // POST /@:namespace/:slug.git/git-receive-pack — push to the project ref.
-// Refused: the gated push path (open a change + eval + merge) is a separate
-// slice (#115 / ADR 005 Phase B). Push to a workspace URL instead.
-gitHttpRouter.post("/:namespace/:slug/git-receive-pack", () => pushNotSupported());
+//
+// With GIT_PUSH_GATED_ENABLED, a single-ref push to refs/heads/main is routed
+// through the change gate (ADR 005 slice 2b): the pack lands on a fresh
+// server-managed workspace fork, a change is created and evaluated, and the
+// client gets a truthful per-ref `ng` — main does NOT move until the change is
+// approved and merged, so reporting `ok` would corrupt the client's
+// remote-tracking ref. The change id and eval verdict stream back as sideband
+// messages. Everything else (flag off, multi-ref, deletes, non-default refs)
+// is refused in-protocol as before.
+gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
+  const logger = createLogger({ requestId: crypto.randomUUID(), path: c.req.path, method: "POST" });
+  const result = await authorizeProject(c, "write", logger);
+  if (result instanceof Response) return result;
+  const { project, identity } = result;
+
+  const body = await readCappedBody(c, logger);
+  if (body instanceof Response) return body;
+
+  const parsed = parseReceivePackRequest(new Uint8Array(body));
+  if (!parsed.success) {
+    logger.warn("Malformed receive-pack request", { error: parsed.error.message });
+    return new Response(`${parsed.error.message}\n`, {
+      status: 400,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+
+  const { commands, capabilities } = parsed.data;
+  const sideband = wantsSideband(capabilities);
+  const namespace = c.req.param("namespace");
+  const slug = normalizeSlug(c.req.param("slug"));
+
+  const refuseAll = (reason: string, messages: string[]): Response =>
+    receivePackResult(
+      buildReportStatus({
+        unpack: "ok",
+        results: commands.map((cmd) => ({ ref: cmd.ref, ok: false, reason })),
+        messages,
+        sideband,
+      }),
+    );
+
+  const gatedEnabled = c.env.GIT_PUSH_GATED_ENABLED === "true";
+  const command = commands[0];
+  const isGateablePush =
+    gatedEnabled &&
+    commands.length === 1 &&
+    command !== undefined &&
+    command.ref === "refs/heads/main" &&
+    command.newOid !== ZERO_OID;
+
+  if (!isGateablePush) {
+    logger.info("Refusing project push in-protocol", {
+      gatedEnabled,
+      refs: commands.map((cmd) => cmd.ref),
+    });
+    return refuseAll(
+      gatedEnabled
+        ? "only a single push to refs/heads/main can be gated — push other refs to a workspace remote"
+        : "project pushes are gated — push to a workspace remote and open a change",
+      pushGuidance(namespace, slug),
+    );
+  }
+
+  if (await isTargetDeleting(c.env, project, logger)) {
+    return refuseAll("project is being deleted", []);
+  }
+
+  // Land the pack on a fresh server-managed workspace fork. The fork's main is
+  // at the project tip, so the client's old-oid (computed against the project
+  // advertisement) lines up and Artifacts' own ref check stays truthful.
+  const workspaceName = `push-${crypto.randomUUID().slice(0, 8)}`;
+  const actor = {
+    ...(identity?.userId !== undefined ? { userId: identity.userId } : {}),
+    ...(identity?.agentId !== undefined ? { agentId: identity.agentId } : {}),
+    ...(identity?.agentOwnerId !== undefined ? { agentOwnerId: identity.agentOwnerId } : {}),
+  };
+  const forkResult = await createWorkspaceFork(c.env, logger, {
+    project,
+    workspaceName,
+    actor,
+  });
+  if (!forkResult.success) {
+    logger.error("Gated push could not fork workspace", forkResult.error);
+    return refuseAll(`could not create workspace for push: ${forkResult.error.message}`, []);
+  }
+
+  // The service's returned name is authoritative from here on.
+  const forkedName = forkResult.data.name;
+
+  const forwarded = await forwardPackToWorkspace(c, forkResult.data.remote, body, logger);
+  if (forwarded === null) {
+    return refuseAll("upstream git error while landing the pack — try again", []);
+  }
+  if (!forwarded.ok) {
+    // Artifacts rejected the pack (non-fast-forward, corrupt pack, …). Its own
+    // report-status is the truthful outcome; relay it verbatim — the upstream
+    // negotiated the same capabilities we were sent, so the framing matches.
+    logger.warn("Gated push rejected by workspace remote", { workspaceName: forkedName });
+    return receivePackResult(forwarded.body);
+  }
+
+  const outcome = await createChangeWithEvaluation(c.env, logger, {
+    project,
+    projectName: `${namespace}/${slug}`,
+    workspaceName: forkedName,
+    workspaceRemote: forkResult.data.remote,
+    actor,
+  });
+  if (!outcome.success) {
+    logger.error("Gated push change creation failed", outcome.error);
+    return refuseAll(
+      `pack landed in workspace ${forkedName} but change creation failed: ${outcome.error.message}`,
+      [`Your commits are safe in workspace '${forkedName}' — open a change from it manually.`],
+    );
+  }
+
+  const { change, evalResult } = outcome.data;
+  logger.info("Gated push created change", {
+    changeId: change.id,
+    workspaceName: forkedName,
+    evalPassed: evalResult.passed,
+  });
+  return refuseAll(
+    `gated: change ${change.id} created (eval ${evalResult.passed ? "passed" : "failed"}) — review and merge in Stratum`,
+    [
+      `Change ${change.id} created from this push (workspace '${forkedName}').`,
+      `Evaluation ${evalResult.passed ? "PASSED" : "FAILED"}: ${evalResult.reason}`,
+      `Review and merge: /changes/${change.id}`,
+      "main is updated by the merge gate, not the push — your local branch is unchanged.",
+    ],
+  );
+});
 
 // ── Workspace URLs: /@:namespace/:slug/workspaces/:workspace.git ─────────────
 // Clone/fetch (read) and push (write), proxied verbatim to the workspace fork.

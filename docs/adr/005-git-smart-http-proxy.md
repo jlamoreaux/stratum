@@ -20,14 +20,26 @@ deferred**.
   the client clones the workspace, ref/old-oid semantics line up and Artifacts'
   report-status is the truthful outcome — no pkt-line parsing or report-status
   synthesis needed. A streaming body cap bounds push size.
-- **Slice 2b — gated default-branch push (deferred, Phase B).** Pushing to the
-  **project** URL (`/@ns/slug.git`) is still refused (`403`). Routing a push
-  through the change → eval → MergeQueue gate requires: pinning the evaluated sha
-  and **merging by sha** (not the fork's mutable tip — TOCTOU/gate-bypass);
-  durable async eval (a queue + sweeper + dedupe, not `waitUntil`); idempotent
-  change creation under concurrent pushes (a DB uniqueness constraint); and
-  Gerrit-style `refs/for/main` → `ok` semantics with synthesized report-status.
-  Tracked in #115.
+- **Slice 2b — gated default-branch push (implemented, staging-flagged).**
+  Behind `GIT_PUSH_GATED_ENABLED` ("true" on staging, "false" in production
+  until validated against real Artifacts), a single-ref push to
+  `refs/heads/main` on the **project** URL is routed through the change gate:
+  the pack lands on a fresh server-managed workspace fork (whose `main` sits at
+  the project tip, so the client's old-oid lines up and the remote's own
+  fast-forward check stays truthful), then the shared change-flow service
+  (`src/services/change-flow.ts` — the same pipeline the REST route runs)
+  creates and synchronously evaluates a change. The client receives a
+  **truthful `ng`** carrying the change id and eval verdict, with detail on the
+  side-band: `main` does not move until the change is approved and merged, and
+  answering `ok` would corrupt the client's remote-tracking ref. Multi-ref
+  pushes, deletions, and non-default refs keep the in-protocol refusal; a pack
+  the workspace remote itself rejects is relayed verbatim. Evaluation runs
+  synchronously inside the push request — the same latency contract as
+  `POST /changes` — so the durable async-eval queue is an optimization, not a
+  prerequisite. Remaining for #115: answer `ok` by actually merging when policy
+  allows it (eval passed, zero required approvals) and change-per-push
+  idempotency under concurrent identical pushes (today each push opens its own
+  workspace + change, which is safe but can duplicate).
 
 ## Context
 
