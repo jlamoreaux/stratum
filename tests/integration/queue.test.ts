@@ -474,7 +474,9 @@ describe("Queue Processing Integration Tests", () => {
   });
 
   describe("Sync Job Processing", () => {
-    it("should process a valid sync job", async () => {
+    // Generous timeout: the full queue round-trip is fast locally but has
+    // blown the default 5s budget on contended CI runners.
+    it("should process a valid sync job", { timeout: 20_000 }, async () => {
       const { importFromGitHub } = await import("../../src/storage/git-ops");
       vi.mocked(importFromGitHub).mockResolvedValue({
         success: true,
