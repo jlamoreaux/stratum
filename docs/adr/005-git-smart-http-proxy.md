@@ -33,9 +33,9 @@ real Artifacts).
   service
   (`src/services/change-flow.ts` — the same pipeline the REST route runs)
   creates and synchronously evaluates a change. The client receives a
-  **truthful `ng`** carrying the change id and eval verdict, with detail on the
-  side-band: the default branch does not move until the change is approved and
-  merged, and
+  **truthful `ng`** carrying the change id and eval verdict, with side-band
+  detail when the client negotiated it: the default branch does not move until
+  the change is approved and merged, and
   answering `ok` would corrupt the client's remote-tracking ref. Multi-ref
   pushes, deletions, and non-default refs keep the in-protocol refusal; a pack
   the workspace remote itself rejects is relayed verbatim. Evaluation runs
