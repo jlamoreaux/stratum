@@ -1,56 +1,239 @@
 openapi: 3.1.0
 info:
   title: Stratum API
-  description: A code collaboration platform for the AI engineering era
+  description: |
+    A code collaboration platform for the AI engineering era.
+
+    This specification is generated from the route code (`src/index.ts` and
+    `src/routes/*.ts`) and covers every `/api/*` route, the root health check,
+    and the GitHub webhook receiver.
+
+    Not covered here:
+    - HTML page routes (`/`, `/p/*`, `/changes/*`, `/auth/*`, `/dev-login`, `/ui.css`, ...).
+    - The git smart-HTTP endpoints (`/@{namespace}/{slug}/info/refs`,
+      `git-upload-pack`, `git-receive-pack`) — documented separately in
+      `docs/adr/005`.
+
+    Authentication: most endpoints accept a Stratum API token (user or agent)
+    as a `Authorization: Bearer <token>` header. Browser requests may instead be
+    authenticated by the `stratum_session` cookie. Read endpoints on projects
+    with `visibility: public` also accept anonymous requests. Admin endpoints
+    additionally accept an `X-Admin-API-Key` header.
+
+    Several form-friendly endpoints return a `302` redirect instead of JSON when
+    the request body is form-encoded rather than `application/json`; this spec
+    documents the JSON behaviour.
   version: 1.0.0
 
 servers:
   - url: https://your-instance.workers.dev
     description: Production
 
+security:
+  - bearerAuth: []
+
+tags:
+  - name: health
+    description: Liveness and dependency health checks
+  - name: projects
+    description: Project creation, metadata, files, and history
+  - name: imports
+    description: Importing repositories from GitHub/GitLab/Bitbucket
+  - name: sync
+    description: Keeping imported projects in sync with their source repository
+  - name: workspaces
+    description: Workspace (fork) lifecycle and commits
+  - name: changes
+    description: Changes (evaluated merge proposals) and merge operations
+  - name: reviews
+    description: Human review verdicts and comments on changes
+  - name: issues
+    description: Project issues
+  - name: webhooks
+    description: Outbound project webhooks
+  - name: orgs
+    description: Organizations, members, and teams
+  - name: users
+    description: The authenticated user's account
+  - name: agents
+    description: Agent registration and tokens
+  - name: bulk-import
+    description: Importing many repositories at once
+  - name: github
+    description: Inbound GitHub webhook receiver
+  - name: admin
+    description: Administrator-only operations (metrics, audit, backup, restore, deletion jobs)
+
 paths:
   /health:
     get:
-      summary: Health check
+      operationId: rootHealth
+      tags: [health]
+      summary: Basic health check
+      security: []
       responses:
-        '200':
-          description: OK
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: stratum }
+
+  /api/health:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Comprehensive health check of all system dependencies
+      security: []
+      responses:
+        "200":
+          description: Healthy or degraded (queue-only failure)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthCheckResponse"
+        "503":
+          description: Unhealthy — a critical dependency (database, KV, artifacts) failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthCheckResponse"
+
+  /api/health/simple:
+    get:
+      operationId: healthSimple
+      tags: [health]
+      summary: Simple liveness check
+      security: []
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: stratum }
+                  timestamp: { type: string, format: date-time }
 
   /api/projects:
-    get:
-      summary: List projects
-      responses:
-        '200':
-          description: List of projects
     post:
-      summary: Create project
+      operationId: createProject
+      tags: [projects]
+      summary: Create a project
+      description: |
+        Creates a project (and its backing Artifacts git repo) in the caller's
+        namespace, or in an organization's namespace when `org` is given (the
+        caller needs org write access). Also accepts form-encoded bodies.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [name]
               properties:
                 name:
                   type: string
+                  description: 1-64 char alphanumeric slug
+                visibility:
+                  type: string
+                  enum: [private, public]
+                  default: private
+                files:
+                  type: object
+                  additionalProperties: { type: string }
+                  description: Initial file map (path -> contents). Defaults to a single `.gitkeep`, or starter files when `seed` is true.
+                seed:
+                  type: boolean
+                  description: Seed the repo with default starter files
+                org:
+                  type: string
+                  description: Organization slug to own the project
       responses:
-        '201':
+        "201":
           description: Project created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, namespace, slug]
+                properties:
+                  id: { type: string, format: uuid }
+                  name: { type: string }
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+                  remote: { type: string }
+                  commit:
+                    type: string
+                    description: SHA of the initial commit
+                  visibility: { type: string, enum: [private, public] }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Organization not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listProjects
+      tags: [projects]
+      summary: List projects in the caller's namespace
+      description: Returns an empty list for unauthenticated callers. Results are filtered to projects the caller can read.
+      responses:
+        "200":
+          description: Projects the caller can read
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects]
+                properties:
+                  projects:
+                    type: array
+                    items: { $ref: "#/components/schemas/Project" }
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/projects/{namespace}/{slug}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: getProject
+      tags: [projects]
+      summary: Get a project
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: Project details
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
     delete:
+      operationId: deleteProject
+      tags: [projects]
       summary: Delete project (owner-only, cascading, async)
-      parameters:
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: slug
-          in: path
-          required: true
-          schema:
-            type: string
+      description: |
+        Owner-only. Requires a confirm token that EXACTLY equals
+        `@namespace/slug`. Enqueues a durable deletion job; a repeated request
+        while a cascade is in flight returns the same in-flight job.
+        Non-owners receive a 404 (existence is not disclosed).
       requestBody:
         required: true
         content:
@@ -63,28 +246,1952 @@ paths:
                   type: string
                   description: Must exactly equal "@namespace/slug".
       responses:
-        '202':
+        "202":
           description: Deletion enqueued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeletionAccepted" }
+        "400":
+          description: Confirmation mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not found or not the owner
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/delete:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: deleteProjectForm
+      tags: [projects]
+      summary: Delete project (form-friendly alias of DELETE)
+      description: Same semantics as `DELETE /api/projects/{namespace}/{slug}` for HTML forms that cannot send DELETE.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string }
+      responses:
+        "202":
+          description: Deletion enqueued (JSON callers)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeletionAccepted" }
+        "302":
+          description: Redirect to home (form callers)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/projects/{namespace}/{slug}/import:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: importProject
+      tags: [imports]
+      summary: Import a repository from GitHub/GitLab/Bitbucket
+      description: |
+        Creates the project and queues a background import. Rate limited
+        (3 imports/minute per user, 1 concurrent import per project). Imports
+        are only allowed into the caller's own namespace. If the project
+        already exists with an incomplete import, the import is re-triggered
+        and a 200 is returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  description: Repository URL (GitHub, GitLab, or Bitbucket)
+                branch:
+                  type: string
+                  default: main
+                depth:
+                  type: integer
+                  description: Clone depth
+                visibility:
+                  type: string
+                  enum: [private, public]
+                  default: private
+      responses:
+        "201":
+          description: Import queued
           content:
             application/json:
               schema:
                 type: object
-                required: [status, jobId]
                 properties:
-                  status:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  importId: { type: string }
+                  path: { type: string }
+                  status: { type: string, example: queued }
+                  source: { type: string }
+                  visibility: { type: string, enum: [private, public] }
+        "200":
+          description: Project already exists (incomplete imports are re-triggered)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  remote: { type: string }
+                  source: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          description: Import rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/import/status:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: getImportStatus
+      tags: [imports]
+      summary: Get import progress (for polling)
+      description: Also detects and recovers imports stalled for more than 5 minutes.
+      responses:
+        "200":
+          description: Import progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportProgress" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/import/stream:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: streamImportStatus
+      tags: [imports]
+      summary: Import progress as Server-Sent Events
+      description: Emits an `ImportProgress` JSON object as an SSE `data:` line every 2 seconds until the import completes, fails, or is cancelled.
+      responses:
+        "200":
+          description: SSE stream of import progress
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/projects/{namespace}/{slug}/import/retry:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: retryImport
+      tags: [imports]
+      summary: Retry a failed import
+      description: Rate limited like the initial import. Only allowed in the caller's own namespace.
+      responses:
+        "200":
+          description: Retry initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  namespace: { type: string }
+                  slug: { type: string }
+                  status: { type: string, example: queued }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/import/cancel:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: cancelImport
+      tags: [imports]
+      summary: Cancel an ongoing import
+      responses:
+        "200":
+          description: Cancellation requested or completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  namespace: { type: string }
+                  slug: { type: string }
+                  status: { type: string, enum: [cancelled, cancelling] }
+        "400":
+          description: Import is not in a cancellable state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/files:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: listProjectFiles
+      tags: [projects]
+      summary: List files in the project repository
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: File listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+                  files:
+                    type: array
+                    items: { type: string }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/content:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: getFileContent
+      tags: [projects]
+      summary: Get file content by path
+      security: [{ bearerAuth: [] }, {}]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: File path within the repository
+      responses:
+        "200":
+          description: File content, or a marker for binary/oversized files
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [namespace, slug, path, kind]
+                properties:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+                  kind:
                     type: string
-                    example: deleting
-                  jobId:
+                    description: '"content" when `value` carries the text; other kinds (e.g. binary/too-large) omit `value`.'
+                  value:
                     type: string
-                    example: del_abc123
-        '400':
-          description: Confirmation mismatch
-        '404':
-          description: Not found or not the owner
+                    description: Present only when kind is "content"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/log:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: getCommitLog
+      tags: [projects]
+      summary: Get the project's commit log
+      security: [{ bearerAuth: [] }, {}]
+      parameters:
+        - name: depth
+          in: query
+          schema: { type: integer, default: 20 }
+          description: Number of commits to return
+      responses:
+        "200":
+          description: Commit log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+                  log:
+                    type: array
+                    items: { $ref: "#/components/schemas/CommitLogEntry" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/provenance:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: listProvenance
+      tags: [projects]
+      summary: List provenance records (which agent/model produced each merged commit)
+      security: [{ bearerAuth: [] }, {}]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Provenance records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+                  records:
+                    type: array
+                    items: { $ref: "#/components/schemas/ProvenanceRecord" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/activity:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: listActivity
+      tags: [projects]
+      summary: Project activity feed (domain events)
+      security: [{ bearerAuth: [] }, {}]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Activity events, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/ActivityEvent" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/sync:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: syncProject
+      tags: [sync]
+      summary: Re-sync the project with its source repository
+      description: |
+        Checks the source remote (GitHub/GitLab/Bitbucket) for new commits and,
+        when updates exist, queues a background sync. Only allowed in the
+        caller's own namespace.
+      responses:
+        "200":
+          description: Sync initiated, or already up to date
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  namespace: { type: string }
+                  slug: { type: string }
+                  importId: { type: string }
+                  status: { type: string, example: queued }
+                  hasUpdates: { type: boolean }
+                  commitsBehind: { type: integer }
+                  latestCommit: { type: string }
+                  lastSyncedCommit: { type: string }
+        "400":
+          description: Not connected to a remote, unsupported provider, or a sync is already in progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/sync/status:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: getSyncStatus
+      tags: [sync]
+      summary: Get sync status for a project
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: Sync status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SyncStatus" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/sync/settings:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: updateSyncSettings
+      tags: [sync]
+      summary: Update sync settings (auto-sync, frequency)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                autoSyncEnabled: { type: boolean }
+                syncFrequency:
+                  type: integer
+                  description: Minutes between auto-syncs
+      responses:
+        "200":
+          description: Settings saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  autoSyncEnabled: { type: boolean }
+                  syncFrequency: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/sync/history:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: getSyncHistory
+      tags: [sync]
+      summary: Get sync history for a project
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Sync history entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      description: Recorded sync run (trigger, status, synced commit, timings)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/projects/{namespace}/{slug}/sync/stream:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: streamSyncStatus
+      tags: [sync]
+      summary: Sync status as Server-Sent Events
+      description: Emits the sync-status object every 2 seconds until the sync succeeds or fails; the stream self-closes after 5 minutes.
+      responses:
+        "200":
+          description: SSE stream of sync status
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/projects/conflicts/{id}/resolve:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: Conflict id returned by a merge that failed with MERGE_CONFLICT
+    post:
+      operationId: resolveConflict
+      tags: [sync, changes]
+      summary: Resolve a recorded merge conflict
+      description: |
+        Applies a resolution strategy to a conflict previously recorded by a
+        failed merge and commits the result to the project. Requires project
+        write access.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy]
+              properties:
+                strategy:
+                  type: string
+                  enum: [accept-project, accept-workspace, manual]
+                resolutions:
+                  type: array
+                  description: Required for the manual strategy
+                  items:
+                    type: object
+                    required: [file, content]
+                    properties:
+                      file: { type: string }
+                      content: { type: string }
+      responses:
+        "200":
+          description: Conflict resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: resolved }
+                  commitSha: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          description: Conflict not found or already resolved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Resolution failed to apply (or invalid file path)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: Failed to mint repository tokens
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/projects/{namespace}/{slug}/webhooks:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: createWebhook
+      tags: [webhooks]
+      summary: Create an outbound webhook
+      description: |
+        Requires project write access. The webhook `secret` is returned only on
+        creation; receivers verify the `X-Stratum-Signature` header with it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+                events:
+                  type: string
+                  description: |
+                    "*" (default) or a comma-separated subset of:
+                    change.created, change.evaluated, change.merged,
+                    change.rejected, change.reverted, change.commented,
+                    change.reviewed, project.created, project.imported,
+                    workspace.created, sync.completed, issue.opened, issue.closed
+      responses:
+        "201":
+          description: Webhook created (includes the secret, shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhook: { $ref: "#/components/schemas/Webhook" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listWebhooks
+      tags: [webhooks]
+      summary: List webhooks (secrets omitted)
+      description: Requires project write access — webhook URLs are sensitive.
+      responses:
+        "200":
+          description: Webhooks without secrets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items: { $ref: "#/components/schemas/Webhook" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/webhooks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: deleteWebhook
+      tags: [webhooks]
+      summary: Delete a webhook
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  id: { type: string }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/webhooks/{id}/deliveries:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: listWebhookDeliveries
+      tags: [webhooks]
+      summary: List recent webhook deliveries
+      responses:
+        "200":
+          description: Delivery log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deliveries:
+                    type: array
+                    items: { $ref: "#/components/schemas/WebhookDelivery" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/webhooks/{id}/toggle:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: toggleWebhook
+      tags: [webhooks]
+      summary: Enable or disable a webhook (flips the current state)
+      responses:
+        "200":
+          description: New state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  active: { type: boolean }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/webhooks/{id}/delete:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: deleteWebhookForm
+      tags: [webhooks]
+      summary: Delete a webhook (form-friendly alias)
+      responses:
+        "302":
+          description: Redirect back to the project's webhooks page
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/projects/{namespace}/{slug}/issues:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: createIssue
+      tags: [issues]
+      summary: Open an issue
+      description: Anyone who can read the project can open issues. Also accepts form bodies (which redirect on success).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, maxLength: 200 }
+                body: { type: string, maxLength: 20000 }
+                linkedChangeId:
+                  type: string
+                  description: Must reference a change in this project
+      responses:
+        "201":
+          description: Issue created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  issue: { $ref: "#/components/schemas/Issue" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/TargetDeleting"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listIssues
+      tags: [issues]
+      summary: List issues
+      security: [{ bearerAuth: [] }, {}]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [open, closed] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, maximum: 500 }
+      responses:
+        "200":
+          description: Issues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  issues:
+                    type: array
+                    items: { $ref: "#/components/schemas/Issue" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/issues/{number}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: number
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      operationId: getIssue
+      tags: [issues]
+      summary: Issue detail
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: Issue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  issue: { $ref: "#/components/schemas/Issue" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      operationId: updateIssue
+      tags: [issues]
+      summary: Edit, close, or reopen an issue
+      description: Requires project write access. Users only (agent tokens cannot edit issues).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 200 }
+                body: { type: string, maxLength: 20000 }
+                status: { type: string, enum: [open, closed] }
+                linkedChangeId:
+                  type: [string, "null"]
+                  description: Set to null or "" to unlink
+      responses:
+        "200":
+          description: Updated issue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  issue: { $ref: "#/components/schemas/Issue" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/issues/{number}/close:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: number
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    post:
+      operationId: toggleIssueClosed
+      tags: [issues]
+      summary: Toggle an issue open/closed (form-friendly)
+      description: Flips the issue's status and redirects to the issue page.
+      responses:
+        "302":
+          description: Redirect to the issue page
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/projects/{name}/changes:
+    parameters:
+      - $ref: "#/components/parameters/ProjectName"
+    post:
+      operationId: createChange
+      tags: [changes]
+      summary: Create a change from a workspace and evaluate it
+      description: |
+        Diffs the workspace against the project, runs the project's evaluator
+        policy (secret scan always; diff/webhook/llm/sandbox per policy), records
+        eval runs, and sets the change status to `accepted` or `needs_changes`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspace]
+              properties:
+                workspace: { type: string }
+      responses:
+        "201":
+          description: Change created and evaluated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  change: { $ref: "#/components/schemas/Change" }
+                  eval: { $ref: "#/components/schemas/EvalResult" }
+                  evalRuns:
+                    type: array
+                    items: { $ref: "#/components/schemas/EvalRun" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/TargetDeleting"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listChanges
+      tags: [changes]
+      summary: List changes for a project
+      security: [{ bearerAuth: [] }, {}]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, needs_changes, accepted, approved, promoted, merged, rejected]
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, maximum: 500 }
+      responses:
+        "200":
+          description: Changes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { type: string }
+                  changes:
+                    type: array
+                    items: { $ref: "#/components/schemas/Change" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/projects/{name}/changes/merge-batch:
+    parameters:
+      - $ref: "#/components/parameters/ProjectName"
+    post:
+      operationId: mergeBatch
+      tags: [changes]
+      summary: Merge many changes into the project in one request
+      description: |
+        Batched server-side merge (ADR 004): resolves and policy-gates every
+        change, then merges the eligible ones onto the project head with a
+        single push. At most 80 changes per request. Requires the RepoDO
+        backend to be enabled. `force` is deny-by-default and must be allowed
+        by the project policy (`merge.allowForce: true`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [changeIds]
+              properties:
+                changeIds:
+                  type: array
+                  maxItems: 80
+                  items: { type: string }
+                force: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Batch outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  merged:
+                    type: array
+                    items: { type: string }
+                  conflicted:
+                    type: array
+                    items: { type: string }
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        changeId: { type: string }
+                        reason: { type: string }
+                  timings:
+                    type: object
+                    properties:
+                      resolveMs: { type: number }
+                      batchMs: { type: number }
+                      persistMs: { type: number }
+                      serverMs: { type: number }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/changes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ChangeId"
+    get:
+      operationId: getChange
+      tags: [changes]
+      summary: Get a change with its eval runs and cost summary
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: Change detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  change: { $ref: "#/components/schemas/Change" }
+                  evalRuns:
+                    type: array
+                    items: { $ref: "#/components/schemas/EvalRun" }
+                  costs:
+                    type: array
+                    items:
+                      type: object
+                      description: Per-kind cost summary for this change
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/changes/{id}/merge:
+    parameters:
+      - $ref: "#/components/parameters/ChangeId"
+    post:
+      operationId: mergeChange
+      tags: [changes]
+      summary: Merge a change into its project
+      description: |
+        Users only. The change must be approved, accepted, or promoted (unless
+        forcing, which the project policy must allow). Branch protection,
+        stale-base (`requireFreshBase`), and stale-workspace (SEC-2) gates run
+        before the merge.
+      parameters:
+        - name: force
+          in: query
+          schema: { type: boolean, default: false }
+          description: Bypass evaluation/approval gates. Only allowed when the project policy sets `merge.allowForce`.
+        - name: strategy
+          in: query
+          schema: { type: string, enum: [merge, squash], default: merge }
+      responses:
+        "200":
+          description: Merged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  merged: { type: boolean }
+                  changeId: { type: string }
+                  project: { type: string }
+                  workspace: { type: string }
+                  commit: { type: string }
+                  postMerge:
+                    type: object
+                    description: Post-merge policy check outcome
+                    properties:
+                      status: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Project access denied, or merge blocked by branch protection (code PROTECTION_BLOCKED with `reasons`)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      reasons:
+                        type: array
+                        items: { type: string }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Structured conflict responses; `code` is one of STALE_BASE,
+            STALE_WORKSPACE, WORKSPACE_UNVERIFIABLE, or MERGE_CONFLICT (which
+            includes `conflictId` and `conflictingFiles` for
+            `POST /api/projects/conflicts/{id}/resolve`).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      baseSha: { type: string }
+                      currentHead: { type: string }
+                      evaluatedSha: { type: string }
+                      currentTip: { type: string }
+                      conflictId: { type: string }
+                      conflictingFiles:
+                        type: array
+                        items: { type: string }
+                      message: { type: string }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/changes/{id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/ChangeId"
+    post:
+      operationId: rejectChange
+      tags: [changes]
+      summary: Reject a change
+      description: Users only. Merged changes cannot be rejected.
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rejected: { type: boolean }
+                  changeId: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/changes/{id}/evaluate:
+    parameters:
+      - $ref: "#/components/parameters/ChangeId"
+    post:
+      operationId: evaluateChange
+      tags: [changes]
+      summary: Re-run evaluation for a change
+      description: Users only. Merged, rejected, or promoted changes cannot be re-evaluated.
+      responses:
+        "200":
+          description: Evaluation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changeId: { type: string }
+                  eval: { $ref: "#/components/schemas/EvalResult" }
+                  evalRuns:
+                    type: array
+                    items: { $ref: "#/components/schemas/EvalRun" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/changes/{id}/github-pr:
+    parameters:
+      - $ref: "#/components/parameters/ChangeId"
+    post:
+      operationId: promoteChangeToGitHubPr
+      tags: [changes]
+      summary: Promote an accepted change to a GitHub pull request
+      description: |
+        Users only. The change must be accepted (or already promoted) and the
+        project connected to GitHub with a configured GitHub token. Creates a
+        (draft by default) PR from branch `stratum/{changeId}` and marks the
+        change `promoted`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                body: { type: string }
+                base: { type: string, description: "Defaults to the project's default branch" }
+                draft: { type: boolean, default: true }
+      responses:
+        "200":
+          description: PR created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  changeId: { type: string }
+                  github:
+                    type: object
+                    properties:
+                      owner: { type: string }
+                      repo: { type: string }
+                      branch: { type: string }
+                      pullRequestNumber: { type: integer }
+                      pullRequestUrl: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/changes/{id}/comments:
+    parameters:
+      - $ref: "#/components/parameters/ChangeId"
+    post:
+      operationId: addChangeComment
+      tags: [reviews]
+      summary: Add a comment to a change
+      description: Users and agents with read access to the project may comment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 20000 }
+      responses:
+        "201":
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  comment: { $ref: "#/components/schemas/ChangeComment" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listChangeComments
+      tags: [reviews]
+      summary: List comments on a change
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: Comments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  comments:
+                    type: array
+                    items: { $ref: "#/components/schemas/ChangeComment" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/changes/{id}/reviews:
+    parameters:
+      - $ref: "#/components/parameters/ChangeId"
+    post:
+      operationId: submitReview
+      tags: [reviews]
+      summary: Submit a human review verdict
+      description: |
+        Users only — agent tokens cannot approve work. An `approve` verdict
+        moves the change to `approved`; `request_changes` moves it to
+        `needs_changes`. Only open, needs_changes, accepted, or approved
+        changes can be reviewed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [verdict]
+              properties:
+                verdict:
+                  type: string
+                  enum: [approve, request_changes]
+                comment: { type: string, maxLength: 20000 }
+      responses:
+        "201":
+          description: Review recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  review: { $ref: "#/components/schemas/Review" }
+                  changeStatus:
+                    type: string
+                    enum: [approved, needs_changes]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/TargetDeleting"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listReviews
+      tags: [reviews]
+      summary: List reviews on a change
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: Reviews
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reviews:
+                    type: array
+                    items: { $ref: "#/components/schemas/Review" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/workspaces/{namespace}/{slug}/workspaces:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    post:
+      operationId: createWorkspace
+      tags: [workspaces]
+      summary: Create a workspace (fork) for a project
+      description: Requires project write access. Omitting `name` generates one (`ws-<timestamp>`).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: 1-64 char alphanumeric slug
+      responses:
+        "201":
+          description: Workspace created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace: { type: string }
+                  remote: { type: string }
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/TargetDeleting"
+    get:
+      operationId: listWorkspaces
+      tags: [workspaces]
+      summary: List workspaces for a project
+      security: [{ bearerAuth: [] }, {}]
+      responses:
+        "200":
+          description: Workspaces
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  namespace: { type: string }
+                  slug: { type: string }
+                  path: { type: string }
+                  workspaces:
+                    type: array
+                    items: { $ref: "#/components/schemas/Workspace" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/workspaces/{name}/commit:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+        description: Workspace name (scoped by projectId in the body)
+    post:
+      operationId: commitToWorkspace
+      tags: [workspaces]
+      summary: Commit files to a workspace
+      description: |
+        Writes the given file map onto the workspace fork as one commit. Bounded
+        to 2000 files / 25 MiB per commit. Requires project write access AND
+        workspace write access (creator or admin); failures return 404 to avoid
+        leaking existence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [files, message, projectId]
+              properties:
+                files:
+                  type: object
+                  additionalProperties: { type: string }
+                  description: Path -> contents map
+                message: { type: string }
+                projectId: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Commit pushed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace: { type: string }
+                  commit: { type: string, description: Commit SHA }
+                  filesChanged:
+                    type: array
+                    items: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/workspaces/{name}/merge:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: mergeWorkspaceDeprecated
+      tags: [workspaces]
+      summary: Deprecated workspace merge endpoint
+      deprecated: true
+      responses:
+        "410":
+          description: 'Gone — use POST /api/projects/{name}/changes instead'
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/workspaces/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: deleteWorkspace
+      tags: [workspaces]
+      summary: Delete a workspace
+      description: Requires project write access AND workspace write access (creator or admin). Also deletes the backing Artifacts fork.
+      parameters:
+        - name: projectId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  workspace: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/orgs:
+    post:
+      operationId: createOrg
+      tags: [orgs]
+      summary: Create an organization
+      description: The creator becomes an org admin. The slug must not collide with an existing username.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug]
+              properties:
+                name: { type: string }
+                slug: { type: string, description: 1-64 char alphanumeric slug }
+      responses:
+        "201":
+          description: Organization created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  org: { $ref: "#/components/schemas/Org" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listOrgs
+      tags: [orgs]
+      summary: List organizations the caller belongs to
+      responses:
+        "200":
+          description: Organizations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orgs:
+                    type: array
+                    items: { $ref: "#/components/schemas/Org" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/orgs/{slug}:
+    parameters:
+      - $ref: "#/components/parameters/OrgSlug"
+    get:
+      operationId: getOrg
+      tags: [orgs]
+      summary: Get an organization (members only)
+      description: Non-members receive the same 404 as a missing org.
+      responses:
+        "200":
+          description: Organization
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  org: { $ref: "#/components/schemas/Org" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/orgs/{slug}/members:
+    parameters:
+      - $ref: "#/components/parameters/OrgSlug"
+    post:
+      operationId: addOrgMember
+      tags: [orgs]
+      summary: Add an organization member (admins only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: { type: string }
+                role:
+                  type: string
+                  enum: [member, admin]
+                  default: member
+      responses:
+        "200":
+          description: Member added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: boolean }
+                  orgId: { type: string }
+                  userId: { type: string }
+                  role: { type: string, enum: [member, admin] }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/orgs/{slug}/members/{uid}:
+    parameters:
+      - $ref: "#/components/parameters/OrgSlug"
+      - name: uid
+        in: path
+        required: true
+        schema: { type: string }
+        description: User id of the member to remove
+    delete:
+      operationId: removeOrgMember
+      tags: [orgs]
+      summary: Remove an organization member (admins only)
+      responses:
+        "200":
+          description: Member removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed: { type: boolean }
+                  orgId: { type: string }
+                  userId: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/orgs/{slug}/teams:
+    parameters:
+      - $ref: "#/components/parameters/OrgSlug"
+    post:
+      operationId: createTeam
+      tags: [orgs]
+      summary: Create a team (admins only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug]
+              properties:
+                name: { type: string }
+                slug: { type: string }
+                permissions:
+                  type: string
+                  enum: [read, write, admin]
+                  default: read
+      responses:
+        "201":
+          description: Team created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  team: { $ref: "#/components/schemas/Team" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listTeams
+      tags: [orgs]
+      summary: List teams (members only)
+      responses:
+        "200":
+          description: Teams
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  teams:
+                    type: array
+                    items: { $ref: "#/components/schemas/Team" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/orgs/{slug}/teams/{id}:
+    parameters:
+      - $ref: "#/components/parameters/OrgSlug"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: deleteTeam
+      tags: [orgs]
+      summary: Delete a team (admins only)
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  id: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/orgs/{slug}/teams/{id}/members:
+    parameters:
+      - $ref: "#/components/parameters/OrgSlug"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: addTeamMember
+      tags: [orgs]
+      summary: Add a team member (admins only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: { type: string }
+      responses:
+        "200":
+          description: Member added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: boolean }
+                  teamId: { type: string }
+                  userId: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/orgs/{slug}/teams/{id}/members/{uid}:
+    parameters:
+      - $ref: "#/components/parameters/OrgSlug"
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: uid
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: removeTeamMember
+      tags: [orgs]
+      summary: Remove a team member (admins only)
+      responses:
+        "200":
+          description: Member removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed: { type: boolean }
+                  teamId: { type: string }
+                  userId: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/users/me:
+    get:
+      operationId: getMe
+      tags: [users]
+      summary: Get the authenticated user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  email: { type: string, format: email }
+                  createdAt: { type: string, format: date-time }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     delete:
+      operationId: deleteAccount
+      tags: [users]
       summary: Delete account (GDPR erasure, self-only, async)
+      description: |
+        Requires a confirm token equal to the caller's username. Marks the
+        account as deleting (credentials are invalidated immediately) and
+        enqueues the erasure cascade job.
       requestBody:
         required: true
         content:
@@ -97,21 +2204,1284 @@ paths:
                   type: string
                   description: Must exactly equal the caller's username.
       responses:
-        '202':
+        "202":
           description: Erasure enqueued (jobId returned); credentials invalidated immediately
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeletionAccepted" }
+        "400":
+          description: Confirmation mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated, or the user no longer exists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/users/me/rotate-token:
+    post:
+      operationId: rotateToken
+      tags: [users]
+      summary: Rotate the caller's API token
+      description: The old token is invalid as of this response; the new one is shown once.
+      responses:
+        "200":
+          description: New API token
           content:
             application/json:
               schema:
                 type: object
-                required: [status, jobId]
+                required: [token]
                 properties:
-                  status:
+                  token: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/users/me/delete:
+    post:
+      operationId: deleteAccountForm
+      tags: [users]
+      summary: Delete account (form-friendly alias of DELETE /api/users/me)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string }
+      responses:
+        "202":
+          description: Erasure enqueued (JSON callers)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeletionAccepted" }
+        "302":
+          description: Redirect to home (form callers)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/users/check-username:
+    get:
+      operationId: checkUsername
+      tags: [users]
+      summary: Check whether a username is available
+      security: []
+      parameters:
+        - name: username
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Availability result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available: { type: boolean }
+                  message: { type: string }
+        "400":
+          description: Missing or invalid username (same body shape, available=false)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available: { type: boolean }
+                  message: { type: string }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/agents:
+    post:
+      operationId: createAgent
+      tags: [agents]
+      summary: Register an agent and mint its token
+      description: The agent token is returned once, on creation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                model: { type: string }
+                description: { type: string }
+                promptHash: { type: string }
+      responses:
+        "201":
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: { $ref: "#/components/schemas/Agent" }
+                  token:
                     type: string
-                    example: deleting
-                  jobId:
-                    type: string
-                    example: del_abc123
-        '400':
-          description: Confirmation mismatch
-        '401':
-          description: Not authenticated, or the user no longer exists
+                    description: Plaintext agent token, shown once
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listAgents
+      tags: [agents]
+      summary: List the caller's agents
+      responses:
+        "200":
+          description: Agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agents:
+                    type: array
+                    items: { $ref: "#/components/schemas/Agent" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/agents/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getAgent
+      tags: [agents]
+      summary: Get an agent (owner only)
+      description: Non-owners receive a 404 (existence is not disclosed).
+      responses:
+        "200":
+          description: Agent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteAgent
+      tags: [agents]
+      summary: Delete (revoke) an agent
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  id: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/bulk-import:
+    post:
+      operationId: startBulkImport
+      tags: [bulk-import]
+      summary: Start a bulk import job (up to 50 repositories)
+      description: Imports run in the background; poll `GET /api/bulk-import/{id}` for status. Only the caller's own namespace is allowed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repos]
+              properties:
+                repos:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [url]
+                    properties:
+                      url: { type: string }
+                      namespace: { type: string }
+                      slug: { type: string }
+                      branch: { type: string }
+                      visibility:
+                        type: string
+                        enum: [private, public]
+      responses:
+        "201":
+          description: Job started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobId: { type: string }
+                  status: { type: string, example: queued }
+                  totalRepos: { type: integer }
+                  message: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    get:
+      operationId: listBulkImportJobs
+      tags: [bulk-import]
+      summary: List the caller's bulk import jobs
+      responses:
+        "200":
+          description: Jobs, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/BulkImportJobSummary" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/bulk-import/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getBulkImportJob
+      tags: [bulk-import]
+      summary: Get bulk import job status
+      responses:
+        "200":
+          description: Job status with progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkImportJobStatus" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/webhooks/github:
+    post:
+      operationId: receiveGitHubWebhook
+      tags: [github]
+      summary: GitHub webhook receiver
+      description: |
+        Inbound receiver for GitHub `push`, `pull_request`,
+        `pull_request_review`, and `ping` events. Authenticated by HMAC
+        signature (`X-Hub-Signature-256`) against the configured webhook
+        secret, not by bearer token. Requires `X-GitHub-Event` and
+        `X-GitHub-Delivery` headers; duplicate delivery ids are skipped.
+        Processing errors still return 200 to prevent GitHub retries.
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-GitHub-Delivery
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Raw GitHub webhook payload for the event type
+      responses:
+        "200":
+          description: Received (possibly a duplicate, or with a logged processing error)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received: { type: boolean }
+                  duplicate: { type: boolean }
+                  error: { type: string }
+        "400":
+          description: Missing headers or invalid JSON
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Invalid signature
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501":
+          description: Webhook secret not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/metrics:
+    get:
+      operationId: adminMetrics
+      tags: [admin]
+      summary: Import and commit/merge metrics dashboard
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      responses:
+        "200":
+          description: Metrics summary (totals, rates, performance, time windows, queue status, error breakdown)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  timestamp: { type: string, format: date-time }
+                  commits: { type: object }
+                  totals: { type: object }
+                  rates: { type: object }
+                  performance: { type: object }
+                  timeWindows: { type: object }
+                  queue: { type: object }
+                  errors: { type: object }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/metrics/health:
+    get:
+      operationId: adminMetricsHealth
+      tags: [admin]
+      summary: Quick admin health check with key metrics
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      responses:
+        "200":
+          description: Key metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  timestamp: { type: string, format: date-time }
+                  recentFailures24h: { type: integer }
+                  activeImports: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/metrics/bench:
+    post:
+      operationId: adminBenchCommit
+      tags: [admin]
+      summary: Commit-throughput probe (ADR 004 Phase 2)
+      description: Writes one R2 git blob and drives a group-commit ref advance through the RepoDO. Intended for benchmark scripts.
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      parameters:
+        - name: repo
+          in: query
+          schema: { type: string, default: bench-repo }
+        - name: path
+          in: query
+          schema: { type: string, default: shared.txt }
+        - name: bytes
+          in: query
+          schema: { type: integer, default: 256, minimum: 1, maximum: 100000 }
+      responses:
+        "200":
+          description: Blob written and ref advanced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  blob: { type: string, description: Blob oid }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/metrics/bench-stats:
+    get:
+      operationId: adminBenchStats
+      tags: [admin]
+      summary: Read the bench Durable Object's counters
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      parameters:
+        - name: repo
+          in: query
+          schema: { type: string, default: bench-repo }
+      responses:
+        "200":
+          description: Bench counters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  head: { type: string }
+                  batches: { type: integer }
+                  landed: { type: integer }
+                  conflictsResolved: { type: integer }
+                  treeSize: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/metrics/artifacts-bench:
+    post:
+      operationId: adminArtifactsBench
+      tags: [admin]
+      summary: Measure Artifacts single-repo push throughput
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      parameters:
+        - name: iterations
+          in: query
+          schema: { type: integer, default: 20, minimum: 1, maximum: 200 }
+        - name: batch
+          in: query
+          schema: { type: integer, default: 1, minimum: 1, maximum: 256 }
+        - name: bytes
+          in: query
+          schema: { type: integer, default: 256, minimum: 1, maximum: 100000 }
+      responses:
+        "200":
+          description: Push latency percentiles and effective commits/sec
+          content:
+            application/json:
+              schema: { type: object }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/metrics/realflow-bench:
+    post:
+      operationId: adminRealflowBench
+      tags: [admin]
+      summary: Batched-merge real-flow benchmark (ADR 004 Task 1)
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      parameters:
+        - name: n
+          in: query
+          schema: { type: integer, default: 25, minimum: 1, maximum: 50 }
+      responses:
+        "200":
+          description: Fetch/merge/push timing breakdown
+          content:
+            application/json:
+              schema: { type: object }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/metrics/r2flow-bench:
+    post:
+      operationId: adminR2flowBench
+      tags: [admin]
+      summary: R2-fed merge-flow benchmark (ADR 004 Task 1c)
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      parameters:
+        - name: n
+          in: query
+          schema: { type: integer, default: 25, minimum: 1, maximum: 50 }
+      responses:
+        "200":
+          description: Clone/load/merge/push timing breakdown
+          content:
+            application/json:
+              schema: { type: object }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/audit:
+    get:
+      operationId: adminAudit
+      tags: [admin]
+      summary: Query the audit trail
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      parameters:
+        - name: action
+          in: query
+          schema: { type: string }
+          description: Filter by audit action (e.g. merge.forced, token.rotated)
+        - name: actor
+          in: query
+          schema: { type: string }
+          description: Filter by actor id
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/backup:
+    get:
+      operationId: adminListBackups
+      tags: [admin]
+      summary: List backup runs (newest first)
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      responses:
+        "200":
+          description: Backup runs, each flagged complete/incomplete
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items: { type: object }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: adminRunBackup
+      tags: [admin]
+      summary: Trigger a backup run now (single-flight)
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      responses:
+        "200":
+          description: Backup summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary: { type: object }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A backup run is already in progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/restore/{runTs}/plan:
+    parameters:
+      - name: runTs
+        in: path
+        required: true
+        schema: { type: string }
+        description: Backup run timestamp identifier
+    get:
+      operationId: adminRestorePlan
+      tags: [admin]
+      summary: Dry-run restorability check for a backup run
+      description: Reads and decrypts every blob in the run and verifies it against the manifest. Read-only.
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      responses:
+        "200":
+          description: Restore plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan: { type: object }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/deletion-jobs/{id}/redrive:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: adminRedriveDeletionJob
+      tags: [admin]
+      summary: Re-drive an incomplete deletion job
+      description: Resets the attempt budget and drives the job once; idempotent.
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      responses:
+        "200":
+          description: Job re-driven
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: "#/components/schemas/DeletionJob" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Deletion job is not in the incomplete state (code NOT_REDRIVABLE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/backfill-project-id/plan:
+    get:
+      operationId: adminBackfillPlan
+      tags: [admin]
+      summary: Dry-run plan for backfilling legacy project_id columns
+      description: Reports how much legacy (NULL project_id) data exists per table and which project names are safe to backfill. Read-only.
+      security:
+        - bearerAuth: []
+        - adminApiKey: []
+      responses:
+        "200":
+          description: Backfill plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan: { type: object }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Stratum API token (user token or agent token)
+    adminApiKey:
+      type: apiKey
+      in: header
+      name: X-Admin-API-Key
+      description: Admin API key for administrator endpoints
+
+  parameters:
+    Namespace:
+      name: namespace
+      in: path
+      required: true
+      schema: { type: string }
+      description: Project namespace, including the @ prefix (e.g. "@alice")
+    Slug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+      description: Project slug
+    ProjectName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+      description: Project name (single segment, not namespace/slug)
+    OrgSlug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+      description: Organization slug
+    ChangeId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Change id
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Access denied
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found (also returned for access denied, to avoid disclosing existence)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TargetDeleting:
+      description: The project (or its owner) is being deleted (code TARGET_DELETING)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: >
+            Machine-readable code present on some errors (e.g. TARGET_DELETING,
+            STALE_BASE, STALE_WORKSPACE, WORKSPACE_UNVERIFIABLE, MERGE_CONFLICT,
+            PROTECTION_BLOCKED, NOT_REDRIVABLE, GONE, INVALID_PATH)
+
+    Project:
+      type: object
+      required: [id, name, namespace, slug]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        namespace:
+          type: string
+          description: '"@username" or "@org-slug"'
+        slug: { type: string }
+        path:
+          type: string
+          description: "/{namespace}/{slug}"
+        remote:
+          type: string
+          description: Backing Artifacts git remote URL
+        createdAt: { type: string, format: date-time }
+        visibility:
+          type: string
+          enum: [private, public]
+        githubUrl: { type: string }
+        githubOwner: { type: string }
+        githubRepo: { type: string }
+        githubDefaultBranch: { type: string }
+        githubConnectionStatus:
+          type: string
+          enum: [connected, disconnected]
+
+    Workspace:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        createdAt: { type: string, format: date-time }
+        path:
+          type: string
+          description: "/{namespace}/{slug}/workspaces/{name}"
+        remote:
+          type: string
+          description: Workspace fork remote (returned on creation)
+
+    Change:
+      type: object
+      required: [id, project, workspace, status, createdAt]
+      properties:
+        id: { type: string }
+        project:
+          type: string
+          description: Project name (or project id for changes created via the GitHub bridge)
+        projectId:
+          type: string
+          format: uuid
+          description: Globally-unique project id; absent on legacy rows
+        workspace: { type: string }
+        status:
+          type: string
+          enum: [open, needs_changes, accepted, approved, promoted, merged, rejected, reverted]
+        agentId: { type: string }
+        evalScore: { type: number }
+        evalPassed: { type: boolean }
+        evalReason: { type: string }
+        baseSha:
+          type: string
+          description: Project HEAD at change creation — the base the evaluation ran against
+        evaluatedSha:
+          type: string
+          description: Workspace tip the evaluation ran against; merges reject if it moved
+        evaluatedTreeOid: { type: string }
+        agentModel:
+          type: string
+          description: Authoring agent's model, snapshotted at change creation
+        agentPromptHash: { type: string }
+        workspaceHeadSha: { type: string }
+        createdAt: { type: string, format: date-time }
+        mergedAt: { type: string, format: date-time }
+        githubOwner: { type: string }
+        githubRepo: { type: string }
+        githubBranch: { type: string }
+        githubPrNumber: { type: integer }
+        githubPrUrl: { type: string }
+        githubPrState: { type: string }
+        githubHeadSha: { type: string }
+        promotedAt: { type: string, format: date-time }
+        promotedBy: { type: string }
+
+    EvalResult:
+      type: object
+      required: [score, passed, reason]
+      properties:
+        score: { type: number }
+        passed: { type: boolean }
+        reason: { type: string }
+        issues:
+          type: array
+          items: { type: string }
+
+    EvalRun:
+      type: object
+      required: [id, changeId, evaluatorType, score, passed, reason, ranAt]
+      properties:
+        id: { type: string }
+        changeId: { type: string }
+        evaluatorType:
+          type: string
+          description: e.g. secret_scan, diff, webhook, llm, sandbox
+        score: { type: number }
+        passed: { type: boolean }
+        reason: { type: string }
+        issues:
+          type: array
+          items: { type: string }
+        ranAt: { type: string, format: date-time }
+
+    Issue:
+      type: object
+      required: [id, project, number, title, status, authorType, authorId, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        project: { type: string }
+        projectId: { type: string, format: uuid }
+        number: { type: integer }
+        title: { type: string }
+        body: { type: string }
+        status:
+          type: string
+          enum: [open, closed]
+        authorType:
+          type: string
+          enum: [user, agent]
+        authorId: { type: string }
+        linkedChangeId: { type: string }
+        closedAt: { type: string, format: date-time }
+        closedBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Review:
+      type: object
+      required: [id, changeId, reviewerId, verdict, createdAt]
+      properties:
+        id: { type: string }
+        changeId: { type: string }
+        reviewerId: { type: string }
+        verdict:
+          type: string
+          enum: [approve, request_changes]
+        comment: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    ChangeComment:
+      type: object
+      required: [id, changeId, authorType, authorId, body, createdAt]
+      properties:
+        id: { type: string }
+        changeId: { type: string }
+        authorType:
+          type: string
+          enum: [user, agent]
+        authorId: { type: string }
+        body: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    ActivityEvent:
+      type: object
+      required: [id, type, actorType, payload, createdAt]
+      properties:
+        id: { type: string }
+        type:
+          type: string
+          description: Domain event type (e.g. change.created, change.merged, issue.opened)
+        actorType:
+          type: string
+          enum: [user, agent, system]
+        actorId: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        createdAt: { type: string, format: date-time }
+
+    Webhook:
+      type: object
+      required: [id, project, url, events, active, createdBy, createdAt]
+      properties:
+        id: { type: string }
+        project: { type: string }
+        projectId: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        secret:
+          type: string
+          description: Returned only on creation; omitted from list responses
+        events:
+          type: string
+          description: Comma-separated event types, or "*" for all
+        active: { type: boolean }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    WebhookDelivery:
+      type: object
+      required: [id, webhookId, eventId, eventType, status, createdAt]
+      properties:
+        id: { type: string }
+        webhookId: { type: string }
+        eventId: { type: string }
+        eventType: { type: string }
+        status:
+          type: string
+          enum: [success, failed]
+        statusCode: { type: integer }
+        error: { type: string }
+        durationMs: { type: number }
+        createdAt: { type: string, format: date-time }
+
+    CommitLogEntry:
+      type: object
+      required: [sha, message, author, timestamp]
+      properties:
+        sha: { type: string }
+        message: { type: string }
+        author: { type: string }
+        timestamp:
+          type: number
+          description: Unix timestamp
+
+    ProvenanceRecord:
+      type: object
+      required: [id, commitSha, project, workspace, changeId, mergedAt]
+      properties:
+        id: { type: string }
+        commitSha: { type: string }
+        project: { type: string }
+        projectId: { type: string, format: uuid }
+        workspace: { type: string }
+        changeId: { type: string }
+        agentId: { type: string }
+        evalScore: { type: number }
+        model:
+          type: string
+          description: Model that authored the change, snapshotted at change creation
+        promptHash: { type: string }
+        mergedAt: { type: string, format: date-time }
+
+    ImportProgress:
+      type: object
+      required: [id, projectId, namespace, slug, status, sourceUrl, branch, startedAt, updatedAt, version, progress, errors, logs]
+      properties:
+        id: { type: string }
+        projectId: { type: string, format: uuid }
+        namespace: { type: string }
+        slug: { type: string }
+        status:
+          type: string
+          enum: [queued, cloning, processing, completed, failed, cancelled, cancelling, syncing, checking]
+        sourceUrl: { type: string }
+        branch: { type: string }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version:
+          type: integer
+          description: Optimistic-locking version, incremented on each update
+        progress:
+          type: object
+          properties:
+            totalFiles: { type: integer }
+            processedFiles: { type: integer }
+            currentFile: { type: string }
+            bytesTransferred: { type: integer }
+            totalBytes: { type: integer }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              file: { type: string }
+              error: { type: string }
+              timestamp: { type: string }
+        logs:
+          type: array
+          items:
+            type: object
+            properties:
+              message: { type: string }
+              level:
+                type: string
+                enum: [info, warn, error]
+              timestamp: { type: string }
+
+    SyncStatus:
+      type: object
+      properties:
+        namespace: { type: string }
+        slug: { type: string }
+        sourceUrl: { type: string }
+        provider:
+          type: string
+          enum: [github, gitlab, bitbucket]
+        lastSyncedAt: { type: string, format: date-time }
+        lastSyncedCommit: { type: string }
+        lastSyncStatus:
+          type: string
+          enum: [success, failed, in_progress, idle]
+        lastSyncError: { type: string }
+        autoSyncEnabled: { type: boolean }
+        hasUpdates: { type: boolean }
+        commitsBehind: { type: integer }
+        latestCommit: { type: string }
+        lastCheckedAt: { type: string, format: date-time }
+        importProgress:
+          type: object
+          description: Present when a sync/import is active
+          properties:
+            status: { type: string }
+            progress: { type: object }
+            logs:
+              type: array
+              items: { type: object }
+            errors:
+              type: array
+              items: { type: object }
+
+    Org:
+      type: object
+      required: [id, name, slug, ownerId, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        ownerId: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    Team:
+      type: object
+      required: [id, orgId, name, slug, permissions, createdAt]
+      properties:
+        id: { type: string }
+        orgId: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        permissions:
+          type: string
+          enum: [read, write, admin]
+        createdAt: { type: string, format: date-time }
+
+    Agent:
+      type: object
+      required: [id, name, ownerId, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        ownerId: { type: string }
+        model: { type: string }
+        description: { type: string }
+        promptHash: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    AuditEntry:
+      type: object
+      required: [id, action, actorType, detail, createdAt]
+      properties:
+        id: { type: string }
+        action:
+          type: string
+          description: e.g. token.rotated, agent.created, merge.forced, deletion.requested
+        actorType:
+          type: string
+          enum: [user, agent, system]
+        actorId: { type: string }
+        subject: { type: string }
+        detail:
+          type: object
+          additionalProperties: true
+        createdAt: { type: string, format: date-time }
+
+    DeletionAccepted:
+      type: object
+      required: [status, jobId]
+      properties:
+        status:
+          type: string
+          example: deleting
+        jobId:
+          type: string
+          example: del_abc123
+
+    DeletionJob:
+      type: object
+      required: [id, kind, state, attempts, createdAt]
+      properties:
+        id: { type: string }
+        kind:
+          type: string
+          enum: [project, account]
+        target:
+          type: string
+          description: Raw JSON of the captured deletion target
+        state:
+          type: string
+          enum: [pending, running, verifying, completed, incomplete]
+        checkpoint: { type: [string, "null"] }
+        heartbeatAt: { type: [string, "null"] }
+        leaseOwner: { type: [string, "null"] }
+        leaseExpiresAt: { type: [string, "null"] }
+        residuals:
+          type: array
+          items: { type: string }
+        attempts: { type: integer }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, "null"] }
+        finishedAt: { type: [string, "null"] }
+
+    BulkImportJobSummary:
+      type: object
+      properties:
+        jobId: { type: string }
+        status:
+          type: string
+          enum: [queued, processing, completed, failed, partial]
+        totalRepos: { type: integer }
+        processedRepos: { type: integer }
+        successfulRepos: { type: integer }
+        failedRepos: { type: integer }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        hasErrors: { type: boolean }
+
+    BulkImportJobStatus:
+      type: object
+      properties:
+        jobId: { type: string }
+        status:
+          type: string
+          enum: [queued, processing, completed, failed, partial]
+        totalRepos: { type: integer }
+        processedRepos: { type: integer }
+        successfulRepos: { type: integer }
+        failedRepos: { type: integer }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              repo: { type: string }
+              error: { type: string }
+        progress:
+          type: object
+          properties:
+            percentage: { type: integer }
+            current: { type: integer }
+            total: { type: integer }
+
+    HealthCheckResult:
+      type: object
+      required: [status, latency]
+      properties:
+        status:
+          type: string
+          enum: [ok, error, degraded]
+        latency:
+          type: string
+          example: 12ms
+        message: { type: string }
+
+    HealthCheckResponse:
+      type: object
+      required: [status, timestamp, checks]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        timestamp: { type: string, format: date-time }
+        checks:
+          type: object
+          required: [database, kv, queue, artifacts]
+          properties:
+            database: { $ref: "#/components/schemas/HealthCheckResult" }
+            kv: { $ref: "#/components/schemas/HealthCheckResult" }
+            queue: { $ref: "#/components/schemas/HealthCheckResult" }
+            artifacts: { $ref: "#/components/schemas/HealthCheckResult" }

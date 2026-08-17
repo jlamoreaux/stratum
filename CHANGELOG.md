@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to restore it.
 
 ### Added
+- Split/unified diff toggle on the change review page — instant, pure-CSS switch
+  (no client-side JavaScript, no reload; GitHub/GitLab need a full reload).
+- `git push` to a project URL now fails **in-protocol**: the receive-pack
+  advertisement is served, and each ref update is answered with a legible `ng`
+  report-status plus sideband guidance pointing at workspace remotes — instead of
+  an opaque HTTP 403. The pkt-line/report-status machinery
+  (`src/utils/git-protocol.ts`) is the groundwork for the gated default-branch
+  push (ADR 005 slice 2b, #115).
+- Complete OpenAPI 3.1 specification (`docs/api/openapi.yml`): 72 paths / 91
+  operations generated from the route code, replacing the 4-path stub.
+- Real user documentation: a full getting-started walkthrough and a 15-question
+  FAQ (`docs/user-guide/`).
 - `@stratum/mcp` (`mcp/`): MCP server exposing the full eval-gated change flow —
   projects, workspaces, commits, changes, reviews, merges, and issues — so any
   MCP-capable agent or editor (Claude Code, Cursor, Zed, Copilot, custom agents)
@@ -39,8 +51,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - High-frequency agent commits via the Durable-Object SQLite hot index (ADR 004).
 
 ### Changed
+
+- **Production signup is open.** The closed-beta invite gate is off in the
+  production config (`BETA_GATE = "0"`); staging keeps it on so the invite path
+  stays exercised. Takes effect on the next production deploy.
 - **LLM evaluator fails closed.** An unparseable model response now scores 0 and blocks,
-  instead of inferring a 0.8 score from "LGTM" prose.
+  instead of inferring a 0.8 score from "LGTM" prose. Non-finite scores (JSON
+  `1e999`) fail closed rather than clamping to a pass, and `maxDiffChars` is
+  floored/bounded to [1000, 100k] so a tiny or fractional window can never send
+  the model an empty diff.
+- README repositioned around the control plane: Stratum is the governance layer
+  for AI-written code on top of wherever code lives, usable from any agent or
+  editor.
+- CLI and MCP clients reject project references with extra path segments instead
+  of silently truncating; the MCP client enforces a request deadline (default
+  120s) so a stalled API can't hang a tool call forever.
 
 ## [0.1.0] - 2026-06-11
 
