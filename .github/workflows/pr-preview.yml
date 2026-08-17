@@ -114,6 +114,9 @@ jobs:
       - name: Comment on PR
         uses: actions/github-script@v7
         with:
+          # Ride out transient GitHub API 5xx (503 brownouts have failed
+          # otherwise-green runs on nothing but the status comment).
+          retries: 3
           script: |
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -392,6 +395,9 @@ jobs:
       - name: Comment on PR
         uses: actions/github-script@v7
         with:
+          # Ride out transient GitHub API 5xx (503 brownouts have failed
+          # otherwise-green runs on nothing but the status comment).
+          retries: 3
           script: |
             const previewUrl = '${{ steps.deploy.outputs.preview_url }}';
             const dbId = '${{ steps.db.outputs.db_id }}';
