@@ -58,8 +58,10 @@ const SECRET_PATTERNS = [
  * credential-ish keyword on the same line so ordinary identifiers and hashes
  * in test fixtures don't trip a blocking gate.
  */
+// The optional `:\s*[^=;\n]*=` arm consumes a TypeScript type annotation
+// (`const apiToken: string = "..."`) so typed assignments can't evade the scan.
 const ENTROPY_CANDIDATE =
-  /(?:secret|token|key|passwd|password|credential|auth)[a-z0-9_]*['"]?\s*[:=]\s*['"`]?([A-Za-z0-9+/_=-]{24,})/i;
+  /(?:secret|token|key|passwd|password|credential|auth)[a-z0-9_]*['"]?\s*(?:=\s*|:\s*(?:[^=;\n]*=\s*)?)['"`]?([A-Za-z0-9+/_=-]{24,})/i;
 
 const ENTROPY_MIN_MIXED = 4.0;
 const ENTROPY_MIN_HEX = 3.5;

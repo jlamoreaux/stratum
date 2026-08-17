@@ -14,6 +14,10 @@ const DEFAULT_MAX_DIFF_CHARS = 24_000;
 // value feeding the model an effectively empty diff that it would still score.
 const MAX_DIFF_CHARS_CEILING = 100_000;
 const MAX_DIFF_CHARS_FLOOR = 1_000;
+// The serialized policy shares the model's input budget with the diff; a
+// pathological policy must not blow the context (or starve the diff), so an
+// oversize one fails closed before any model call.
+const MAX_POLICY_CONTEXT_CHARS = 8_000;
 
 const SYSTEM_PROMPT = [
   "You are a rigorous code reviewer acting as an automated merge gate.",
@@ -68,11 +72,23 @@ export class LLMEvaluator implements Evaluator {
         ? `Diff truncated for review: evaluated first ${maxDiffChars} of ${diff.length} chars`
         : undefined;
 
+      const policyContext = JSON.stringify(sanitizePolicy(policy));
+      if (policyContext.length > MAX_POLICY_CONTEXT_CHARS) {
+        logger.warn("Policy context too large for LLM evaluation, failing closed", {
+          policyChars: policyContext.length,
+        });
+        return ok({
+          score: 0,
+          passed: false,
+          reason: `LLM evaluator failed closed: policy context is ${policyContext.length} chars (limit ${MAX_POLICY_CONTEXT_CHARS})`,
+        });
+      }
+
       const messages = [
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Policy context: ${JSON.stringify(sanitizePolicy(policy))}\n\nDiff to review:\n${diff.slice(0, maxDiffChars)}`,
+          content: `Policy context: ${policyContext}\n\nDiff to review:\n${diff.slice(0, maxDiffChars)}`,
         },
       ];
 
@@ -97,15 +113,16 @@ export class LLMEvaluator implements Evaluator {
 
       // A gate whose verdict can't be read has not passed. Never infer a score
       // from prose ("LGTM") — that let unparseable output half-approve a merge.
+      // Never echo raw model output into the result: the model can quote the
+      // diff, and the diff can contain exactly the secrets this gate catches.
       const failClosed = (why: string): Result<EvalResult, AppError> => {
         logger.warn("LLM response unusable, failing closed", { why });
-        const snippet = responseText?.slice(0, 200);
         return ok({
           score: 0,
           passed: false,
           reason: `LLM evaluator failed closed: ${why}`,
           issues: [
-            ...(snippet ? [`Raw model response: ${snippet}`] : []),
+            `Model response (${responseText?.length ?? 0} chars) was not a valid verdict object`,
             ...(truncationNote ? [truncationNote] : []),
           ],
           costs,
@@ -134,7 +151,7 @@ export class LLMEvaluator implements Evaluator {
       }
 
       const score = Math.min(1, Math.max(0, parsed.score));
-      const passed = score >= threshold;
+      const passed = parsed.passed && score >= threshold;
       const modelIssues =
         Array.isArray(parsed.issues) && parsed.issues.every((i) => typeof i === "string")
           ? (parsed.issues as string[])

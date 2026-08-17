@@ -77,7 +77,9 @@ describe("LLMEvaluator — unparseable responses fail closed", () => {
       expect(result.data.score).toBe(0);
       expect(result.data.passed).toBe(false);
       expect(result.data.reason).toContain("failed closed");
-      expect(result.data.issues?.[0]).toContain("This diff looks fine overall.");
+      // Raw model output can quote the diff (secrets included) — only metadata.
+      expect(result.data.issues?.[0]).toContain("29 chars");
+      expect(JSON.stringify(result.data)).not.toContain("This diff looks fine");
     }
   });
 
@@ -268,7 +270,7 @@ describe("LLMEvaluator — diff truncation", () => {
 });
 
 describe("LLMEvaluator — non-finite scores", () => {
-  it('JSON "1e999" parses to Infinity and fails closed instead of clamping to a pass', async () => {
+  it("JSON 1e999 parses to Infinity and fails closed instead of clamping to a pass", async () => {
     const ai = makeMockAi('{"score": 1e999, "passed": true, "reason": "great"}');
     const evaluator = new LLMEvaluator(ai);
     const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
@@ -278,6 +280,39 @@ describe("LLMEvaluator — non-finite scores", () => {
       expect(result.data.passed).toBe(false);
       expect(result.data.reason).toContain("failed closed");
     }
+  });
+});
+
+describe("LLMEvaluator — model verdict is honored", () => {
+  it("passed:false with a high score still fails", async () => {
+    const ai = makeMockAi(
+      JSON.stringify({ score: 0.9, passed: false, reason: "Looks risky despite score" }),
+    );
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0.9);
+      expect(result.data.passed).toBe(false);
+    }
+  });
+});
+
+describe("LLMEvaluator — policy context bound", () => {
+  it("an oversize policy fails closed before any model call", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: `https://ci.example.com/${"a".repeat(9000)}` }],
+    });
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0);
+      expect(result.data.passed).toBe(false);
+      expect(result.data.reason).toContain("policy context");
+    }
+    expect(ai.run).not.toHaveBeenCalled();
   });
 });
 

@@ -249,6 +249,16 @@ describe("SecretScanEvaluator — entropy detection", () => {
     }
   });
 
+  it("flags a typed TypeScript credential assignment", async () => {
+    const diff = makeDiff([`const apiToken: string = "${ENTROPY_MIXED}";`]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.[0]).toContain("High-Entropy Credential");
+    }
+  });
+
   it("does not flag a low-entropy value with a credential-ish name", async () => {
     const diff = makeDiff(['const apiToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";']);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
