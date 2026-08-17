@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   packages:
-    name: CLI & Agent Packages
+    name: CLI, Agent & MCP Packages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,6 +32,14 @@ jobs:
 
       - name: Agent — install, typecheck, test, build
         working-directory: agent
+        run: |
+          npm install
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: MCP — install, typecheck, test, build
+        working-directory: mcp
         run: |
           npm install
           npm run typecheck

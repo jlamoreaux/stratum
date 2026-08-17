@@ -16,6 +16,7 @@ serverless Git. The web UI is server-rendered JSX with **no client-side JavaScri
 | `src/` | The Worker: routes, middleware, storage, queue consumers, evaluation engine, UI |
 | `cli/` | `@stratum/cli` — standalone publishable package |
 | `agent/` | `@stratum/agent` — reference agent, standalone publishable package |
+| `mcp/` | `@stratum/mcp` — MCP server for any MCP-capable agent/editor, standalone publishable package |
 | `tests/` | Vitest suites: unit (`tests/*.test.ts`), `tests/integration/`, `tests/smoke/` |
 | `migrations/` | D1 SQL migrations |
 | `docs/` | User, API, developer docs, and ADRs (`docs/adr/`) |

@@ -54,6 +54,7 @@ Stratum is a GitHub alternative where both humans and AI agents are first-class 
 | Issue Tracker | ✅ | Per-project issues, auto-close on linked-change merge |
 | Bidirectional GitHub Sync | ✅ | Inbound webhooks + outbound PR promotion |
 | CLI Tool | 🚧 | `@stratum/cli` at full API parity; install from `cli/` (not yet published to npm) |
+| MCP Server | 🚧 | `@stratum/mcp` — any MCP-capable agent or editor can drive the eval-gated change flow; install from `mcp/` (not yet published to npm) |
 
 **Legend:** ✅ Working | 🚧 In Progress | 📋 Planned
 

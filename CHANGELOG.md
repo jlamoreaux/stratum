@@ -21,10 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to restore it.
 
 ### Added
+- `@stratum/mcp` (`mcp/`): MCP server exposing the full eval-gated change flow —
+  projects, workspaces, commits, changes, reviews, merges, and issues — so any
+  MCP-capable agent or editor (Claude Code, Cursor, Zed, Copilot, custom agents)
+  can work against Stratum without a bespoke integration.
+- Secret scanner now covers 25+ credential patterns (GitHub fine-grained PATs, GitLab,
+  Slack, Stripe, OpenAI, Anthropic, Google, npm, PyPI, Hugging Face, SendGrid, Twilio,
+  Azure, private-key blocks, JWTs, connection-string credentials) plus Shannon-entropy
+  detection for generic high-entropy credentials in keyword context.
+- LLM evaluator: review window is configurable via `maxDiffChars` in the policy
+  (default raised 8k → 24k chars, capped at 100k); truncated evaluations say so in
+  their result issues; the evaluator now sends a real reviewer system prompt.
+
 - Open-source onboarding: `LICENSE` (MIT), `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`,
   issue and pull-request templates.
 - Enforced test-coverage thresholds in `vitest.config.ts`.
 - High-frequency agent commits via the Durable-Object SQLite hot index (ADR 004).
+
+### Changed
+- **LLM evaluator fails closed.** An unparseable model response now scores 0 and blocks,
+  instead of inferring a 0.8 score from "LGTM" prose.
 
 ## [0.1.0] - 2026-06-11
 
