@@ -113,6 +113,35 @@ describe("buildSplitRows", () => {
       rightKind: "add",
     });
   });
+
+  it("no-newline markers are metadata: never paired, never breaking alignment", () => {
+    const diff = [
+      "diff --git a/src/x.ts b/src/x.ts",
+      "--- a/src/x.ts",
+      "+++ b/src/x.ts",
+      "@@ -1 +1 @@",
+      "-old final line",
+      "\\ No newline at end of file",
+      "+new final line",
+      "\\ No newline at end of file",
+    ].join("\n");
+    const [file] = parseUnifiedDiff(diff);
+    if (!file) throw new Error("diff did not parse");
+    expect(file.lines.filter((l) => l.kind === "meta")).toHaveLength(2);
+    // The marker between del and add must not flush the pairing: the changed
+    // final line still renders as one aligned row, with no metadata rows.
+    const rows = buildSplitRows(file.lines);
+    expect(rows).toEqual([
+      { kind: "hunk", text: "@@ -1 +1 @@" },
+      {
+        kind: "pair",
+        left: "old final line",
+        right: "new final line",
+        leftKind: "del",
+        rightKind: "add",
+      },
+    ]);
+  });
 });
 
 describe("DiffView split toggle", () => {
@@ -151,5 +180,12 @@ describe("DiffView split toggle", () => {
     const html = renderToString(<DiffView files={[]} />);
     expect(html).toContain("No changes");
     expect(html).not.toContain("diff-split-toggle");
+  });
+
+  it("split table carries accessible caption and column headers", () => {
+    const html = renderToString(<DiffView files={files} />);
+    expect(html).toContain("Side-by-side diff of src/x.ts");
+    expect(html).toContain('<th scope="col">Original</th>');
+    expect(html).toContain('<th scope="col">Modified</th>');
   });
 });

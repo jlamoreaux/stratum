@@ -4,7 +4,7 @@ export interface DiffFile {
   path: string;
   additions: number;
   deletions: number;
-  lines: Array<{ kind: "add" | "del" | "context" | "hunk"; text: string }>;
+  lines: Array<{ kind: "add" | "del" | "context" | "hunk" | "meta"; text: string }>;
 }
 
 /**
@@ -36,6 +36,10 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
 
     if (line.startsWith("@@")) {
       current.lines.push({ kind: "hunk", text: line });
+    } else if (line.startsWith("\\")) {
+      // "\ No newline at end of file" — metadata about the adjacent line, not
+      // file content; kept distinct so the split view doesn't pair it.
+      current.lines.push({ kind: "meta", text: line });
     } else if (line.startsWith("+")) {
       current.additions += 1;
       current.lines.push({ kind: "add", text: line });
@@ -55,6 +59,7 @@ const lineClass: Record<DiffFile["lines"][number]["kind"], string> = {
   del: "diff-line diff-del",
   context: "diff-line",
   hunk: "diff-line diff-hunk",
+  meta: "diff-line diff-meta",
 };
 
 export type SplitRow =
@@ -112,6 +117,10 @@ export function buildSplitRows(lines: DiffFile["lines"]): SplitRow[] {
         flush();
         rows.push({ kind: "hunk", text: line.text });
         break;
+      case "meta":
+        // Skip without flushing: the marker sits inside a del/add segment and
+        // must not break the pairing (or render as content in both columns).
+        break;
       case "context": {
         flush();
         const text = stripMarker(line.text);
@@ -132,6 +141,13 @@ export function buildSplitRows(lines: DiffFile["lines"]): SplitRow[] {
 
 const SplitTable: FC<{ file: DiffFile }> = ({ file }) => (
   <table class="diff-split">
+    <caption class="visually-hidden">Side-by-side diff of {file.path}</caption>
+    <thead class="visually-hidden">
+      <tr>
+        <th scope="col">Original</th>
+        <th scope="col">Modified</th>
+      </tr>
+    </thead>
     <tbody>
       {buildSplitRows(file.lines).map((row, index) =>
         row.kind === "hunk" ? (

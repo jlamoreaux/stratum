@@ -1,6 +1,6 @@
 # Remaining Work
 
-Last updated: 2026-06-12
+Last updated: 2026-08-17
 
 The master-plan feature roadmap (Phases 0–3 plus the code-level Phase 4
 hardening items) is complete as of 2026-06-11. See
@@ -85,5 +85,4 @@ The diff viewer
 ([`src/ui/components/diff-view.tsx`](../src/ui/components/diff-view.tsx))
 now renders both views and switches instantly with a pure-CSS checkbox toggle —
 no page reload, no content refetch, and no client-side JavaScript, preserving
-the server-rendered-only invariant. (GitHub/GitLab require a full reload to
-switch views.)
+the server-rendered-only invariant.

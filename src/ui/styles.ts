@@ -549,6 +549,14 @@ a:hover { text-decoration: underline; }
 .diff-add { background: rgba(74, 222, 128, 0.12); color: #b9f0cd; }
 .diff-del { background: rgba(248, 113, 113, 0.12); color: #f5c2c2; }
 .diff-hunk { color: #7cb7ff; background: #14181f; }
+.diff-meta { color: #666; font-style: italic; }
+
+/* Present for assistive tech, removed from the visual layout. */
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  padding: 0; border: 0; clip-path: inset(50%); overflow: hidden;
+  white-space: nowrap;
+}
 
 /* Unified/split toggle: hidden checkbox + sibling selectors, no client JS.
    The instant client-side switch (vs. GitHub's full reload) is deliberate. */
