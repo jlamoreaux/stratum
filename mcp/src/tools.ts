@@ -20,12 +20,17 @@ function jsonResult(value: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
-function errorResult(error: unknown): ToolResult {
+function errorResult(error: unknown, kind = "Stratum API error"): ToolResult {
   const message = error instanceof Error ? error.message : String(error);
-  return { content: [{ type: "text", text: `Stratum API error: ${message}` }], isError: true };
+  return { content: [{ type: "text", text: `${kind}: ${message}` }], isError: true };
 }
 
-/** Wrap a typed handler with schema validation and error-to-result mapping. */
+/**
+ * Wrap a typed handler with schema validation and error-to-result mapping.
+ * Validation failures are labeled distinctly from API failures — an agent that
+ * reads "Stratum API error" for a schema violation would retry the same
+ * invalid arguments instead of fixing them.
+ */
 function tool<Shape extends z.ZodRawShape>(
   name: string,
   description: string,
@@ -37,8 +42,13 @@ function tool<Shape extends z.ZodRawShape>(
     description,
     schema,
     handler: async (raw) => {
+      let args: z.infer<z.ZodObject<Shape>>;
       try {
-        const args = z.object(schema).parse(raw);
+        args = z.object(schema).parse(raw);
+      } catch (error) {
+        return errorResult(error, "Invalid arguments");
+      }
+      try {
         return jsonResult(await handler(args));
       } catch (error) {
         return errorResult(error);

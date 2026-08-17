@@ -24,7 +24,7 @@ serverless Git. The web UI is server-rendered JSX with **no client-side JavaScri
 
 ## Commands
 
-Run from the repo root unless noted. `cli/` and `agent/` have their own `package.json`.
+Run from the repo root unless noted. `cli/`, `agent/`, and `mcp/` have their own `package.json`.
 
 ```bash
 npm install          # install deps

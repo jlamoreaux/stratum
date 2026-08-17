@@ -227,7 +227,10 @@ export class StratumClient {
     const params = new URLSearchParams();
     if (opts?.force) params.set("force", "true");
     if (opts?.strategy) params.set("strategy", opts.strategy);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
+    // params.size needs Node >= 18.16; the serialized string works on every
+    // release the engines field allows.
+    const serialized = params.toString();
+    const query = serialized ? `?${serialized}` : "";
     return this.request<{
       merged: boolean;
       commit?: string;

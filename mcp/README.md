@@ -16,8 +16,8 @@ The full agent contribution loop:
 3. **Propose** — `stratum_create_change` runs the project's evaluation gates
    (`.stratum/policy.yaml`: secret scan, diff policy, LLM review, sandbox tests)
    and returns each gate's verdict
-4. **Land** — `stratum_get_change`, `stratum_merge_change`, `stratum_reject_change`,
-   `stratum_review_change`
+4. **Land** — `stratum_get_change`, `stratum_list_changes`, `stratum_merge_change`,
+   `stratum_reject_change`, `stratum_review_change`
 5. **Track** — `stratum_create_issue`, `stratum_list_issues`, `stratum_update_issue`,
    `stratum_whoami`
 
