@@ -36,7 +36,7 @@ jobs:
           path: coverage/
 
   packages:
-    name: CLI & Agent Packages
+    name: CLI, Agent & MCP Packages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -62,6 +62,19 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+
+      - name: MCP — install, typecheck, test, build
+        working-directory: mcp
+        run: |
+          npm install
+          npm run typecheck
+          npm test
+          npm run build
+          # Smoke: the built entrypoint must complete a real MCP initialize
+          # handshake over stdio (it exits 0 on stdin EOF).
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}' \
+            | env STRATUM_API_KEY=smoke-not-a-real-key timeout 30s node dist/index.js > /tmp/mcp-smoke.log 2>&1
+          grep -F '"serverInfo":{"name":"stratum"' /tmp/mcp-smoke.log
 
   # ========================================================================
   # Staging Deployment with Automatic Migration

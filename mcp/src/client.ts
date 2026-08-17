@@ -1,7 +1,7 @@
 /**
- * Typed client for the Stratum REST API. Method-per-endpoint, mirroring the
- * Worker's routes — when a route changes shape, the corresponding method and
- * its test change with it.
+ * Typed client for the Stratum REST API, mirroring the Worker's routes.
+ * Kept standalone (not shared with @stratum/cli) so each package publishes
+ * without a workspace dependency.
  */
 
 interface ApiErrorBody {
@@ -18,7 +18,7 @@ export interface ProjectRef {
 /**
  * Parse "ns/slug" or "@ns/slug" into a project reference. Exactly two
  * non-empty segments — extra segments are rejected rather than silently
- * dropped, so a command can never operate on a different project than named.
+ * dropped, so a tool can never operate on a different project than named.
  */
 export function parseProjectRef(ref: string): ProjectRef {
   const segments = ref.split("/");
@@ -81,10 +81,15 @@ export interface ActivityEvent {
   createdAt: string;
 }
 
+// Change creation runs the full evaluation suite synchronously server-side, so
+// the deadline must comfortably exceed a slow LLM + sandbox run.
+const DEFAULT_TIMEOUT_MS = 120_000;
+
 export class StratumClient {
   constructor(
     private host: string,
     private apiKey: string,
+    private opts: { timeoutMs?: number } = {},
   ) {}
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -94,11 +99,22 @@ export class StratumClient {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error("Stratum API request timed out")),
+      this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!response.ok) {
       let message = `HTTP ${response.status}`;
@@ -119,14 +135,6 @@ export class StratumClient {
 
   // ── Projects ────────────────────────────────────────────────────────────
 
-  async createProject(name: string, opts?: { org?: string; visibility?: string }) {
-    return this.request<ProjectSummary & { commit: string }>("POST", "/api/projects", {
-      name,
-      ...(opts?.org ? { org: opts.org } : {}),
-      ...(opts?.visibility ? { visibility: opts.visibility } : {}),
-    });
-  }
-
   async listProjects() {
     return this.request<{ projects: ProjectSummary[] }>("GET", "/api/projects");
   }
@@ -135,14 +143,6 @@ export class StratumClient {
     return this.request<ProjectSummary>(
       "GET",
       `/api/projects/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}`,
-    );
-  }
-
-  async deleteProject(ref: ProjectRef, confirm: string) {
-    return this.request<{ status: string; jobId: string }>(
-      "DELETE",
-      `/api/projects/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}`,
-      { confirm },
     );
   }
 
@@ -181,13 +181,6 @@ export class StratumClient {
     return this.request<{ workspaces: Array<{ name: string; createdAt: string; path: string }> }>(
       "GET",
       `/api/workspaces/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}/workspaces`,
-    );
-  }
-
-  async deleteWorkspace(name: string, projectId: string) {
-    return this.request<{ deleted: boolean }>(
-      "DELETE",
-      `/api/workspaces/${encodeURIComponent(name)}?projectId=${encodeURIComponent(projectId)}`,
     );
   }
 
@@ -287,21 +280,9 @@ export class StratumClient {
     );
   }
 
-  // ── Agents & account ────────────────────────────────────────────────────
-
-  async createAgent(name: string, model?: string) {
-    return this.request<{ agent: { id: string; name: string }; token: string }>(
-      "POST",
-      "/api/agents",
-      { name, ...(model ? { model } : {}) },
-    );
-  }
+  // ── Account ─────────────────────────────────────────────────────────────
 
   async me() {
     return this.request<{ id: string; email: string }>("GET", "/api/users/me");
-  }
-
-  async deleteAccount(confirm: string) {
-    return this.request<{ status: string; jobId: string }>("DELETE", "/api/users/me", { confirm });
   }
 }
