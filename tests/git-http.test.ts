@@ -1108,9 +1108,11 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     // A real AppError (not a shape-alike cast) so the test binds to the same
     // context contract createChangeWithEvaluation actually produces.
     vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce(
-      err(new AppError("record eval runs failed", "DATABASE_ERROR", 500, {
-        changeId: "chg_stuck1",
-      })),
+      err(
+        new AppError("record eval runs failed", "DATABASE_ERROR", 500, {
+          changeId: "chg_stuck1",
+        }),
+      ),
     );
     const res = await app.fetch(
       req("/@owner/repo.git/git-receive-pack", {
