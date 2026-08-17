@@ -136,6 +136,66 @@ describe("SecretScanEvaluator", () => {
     }
   });
 
+  it.each([
+    ["AWS Access Key", 'const key = "ASIAIOSFODNN7EXAMPLE";'],
+    ["AWS Secret Key", 'aws_secret_access_key = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYaa"'],
+    ["GitHub OAuth Token", `const t = "gho_${"a".repeat(36)}";`],
+    ["GitHub User-to-Server Token", `const t = "ghu_${"a".repeat(36)}";`],
+    ["GitHub Fine-Grained PAT", `const t = "github_pat_${"a".repeat(82)}";`],
+    ["GitLab Personal Access Token", `const t = "glpat-${"a".repeat(20)}";`],
+    ["Slack Token", 'const t = "xoxb-123456789012-abcdefghijkl";'],
+    // Assembled from parts so GitHub push protection doesn't flag the fixture
+    // itself as a leaked webhook.
+    [
+      "Slack Webhook URL",
+      `url = https://hooks.slack${".com"}/services/T0000000000/B0000000000/${"X".repeat(24)}`,
+    ],
+    ["Stripe Live Key", `const t = "sk_live_${"a1".repeat(12)}";`],
+    ["OpenAI API Key (Legacy)", `const t = "sk-${"a".repeat(20)}T3BlbkFJ${"a".repeat(20)}";`],
+    ["OpenAI API Key (Project)", `const t = "sk-proj-${"a1".repeat(24)}";`],
+    ["Anthropic API Key", `const t = "sk-ant-api03-${"a1".repeat(20)}";`],
+    ["Google API Key", `const t = "AIza${"a1".repeat(17)}b";`],
+    ["npm Access Token", `const t = "npm_${"a1".repeat(18)}";`],
+    ["PyPI Upload Token", `const t = "pypi-AgEIcHlwaS5vcmc${"a1".repeat(12)}";`],
+    ["Hugging Face Token", `const t = "hf_${"a1".repeat(17)}";`],
+    ["SendGrid API Key", `const t = "SG.${"a".repeat(22)}.${"a".repeat(43)}";`],
+    ["Twilio API Key", `const t = "SK${"0123456789abcdef".repeat(2)}";`],
+    ["Private Key Block", "-----BEGIN RSA PRIVATE KEY-----"],
+    ["Private Key Block", "-----BEGIN OPENSSH PRIVATE KEY-----"],
+    [
+      "JSON Web Token",
+      'const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";',
+    ],
+    ["Connection String Credential", 'DB = "postgres://admin:hunter2@db.internal:5432/prod"'],
+    ["Connection String Credential", 'DB = "mongodb+srv://svc:p4ssw0rd@cluster.example.net"'],
+    ["Azure Storage Account Key", `conn = "AccountKey=${"A1b2".repeat(11)}=="`],
+  ])("detects %s", async (name, line) => {
+    const diff = makeDiff([line]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.score).toBe(0);
+      expect(result.data.issues?.[0]).toContain(name);
+    }
+  });
+
+  it("does not flag a test-mode Stripe key", async () => {
+    const diff = makeDiff([`const t = "sk_test_${"a1".repeat(12)}";`]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(true);
+  });
+
+  it("reports one issue per line even when several patterns match", async () => {
+    const diff = makeDiff([`const a = "AKIAIOSFODNN7EXAMPLE"; const b = "ghp_${"a".repeat(36)}";`]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.issues).toHaveLength(1);
+    }
+  });
+
   it("ignores policy configuration — always runs", async () => {
     const diff = makeDiff(['const key = "AKIAIOSFODNN7EXAMPLE";']);
     const resultWithNull = await evaluator.evaluate(diff, policy, mockLogger);
@@ -150,5 +210,55 @@ describe("SecretScanEvaluator", () => {
       expect(resultWithNull.data.passed).toBe(false);
       expect(resultWithPolicy.data.passed).toBe(false);
     }
+  });
+});
+
+describe("SecretScanEvaluator — entropy detection", () => {
+  it("flags a high-entropy value assigned to a credential-ish name", async () => {
+    const diff = makeDiff(['const apiToken = "hR8s2Kd91mZqLpXw4Yv7NbT3cFgJ6aQe";']);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.[0]).toContain("High-Entropy Credential");
+    }
+  });
+
+  it("flags a random hex value at the lower hex threshold", async () => {
+    const diff = makeDiff(['const secretKey = "9f8e7d6c5b4a39281706e5d4c3b2a190";']);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.[0]).toContain("High-Entropy Credential");
+    }
+  });
+
+  it("does not flag a low-entropy value with a credential-ish name", async () => {
+    const diff = makeDiff(['const apiToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";']);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(true);
+  });
+
+  it("does not flag an English-word value with a credential-ish name", async () => {
+    const diff = makeDiff(['const tokenName = "authenticationTokenBuilder";']);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(true);
+  });
+
+  it("does not flag a high-entropy value without credential context", async () => {
+    const diff = makeDiff(['const digest = "hR8s2Kd91mZqLpXw4Yv7NbT3cFgJ6aQe";']);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(true);
+  });
+
+  it("does not flag short values even with credential context", async () => {
+    const diff = makeDiff(['const apiKey = "hR8s2Kd91mZqLpXw";']);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(true);
   });
 });

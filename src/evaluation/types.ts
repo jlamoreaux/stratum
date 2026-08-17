@@ -57,4 +57,4 @@ export type EvaluatorConfig =
     }
   | { type: "webhook"; url: string; secret?: string; timeoutMs?: number }
   | { type: "sandbox"; command?: string; timeoutMs?: number }
-  | { type: "llm"; model?: string; threshold?: number };
+  | { type: "llm"; model?: string; threshold?: number; maxDiffChars?: number };
