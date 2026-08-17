@@ -410,22 +410,121 @@ describe("git smart-HTTP proxy — upstream proxy (Task 3)", () => {
   });
 });
 
-describe("git smart-HTTP proxy — receive-pack rejection (Task 4)", () => {
-  it("POST git-receive-pack → 403 naming stratum commit, no upstream call", async () => {
+describe("git smart-HTTP proxy — receive-pack in-protocol rejection (Task 4)", () => {
+  const OID_A = "a".repeat(40);
+  const OID_B = "b".repeat(40);
+
+  function pktLine(payload: string): Uint8Array {
+    const data = new TextEncoder().encode(payload);
+    const header = new TextEncoder().encode((data.byteLength + 4).toString(16).padStart(4, "0"));
+    const out = new Uint8Array(data.byteLength + 4);
+    out.set(header, 0);
+    out.set(data, 4);
+    return out;
+  }
+
+  function pushBody(caps: string): Uint8Array {
+    const line = pktLine(`${OID_A} ${OID_B} refs/heads/main\0${caps}`);
+    const flush = new TextEncoder().encode("0000");
+    const out = new Uint8Array(line.byteLength + flush.byteLength);
+    out.set(line, 0);
+    out.set(flush, line.byteLength);
+    return out;
+  }
+
+  it("POST git-receive-pack → 200 report-status with per-ref ng, pack never forwarded", async () => {
     const env = makeEnv();
-    await seedProject(env, { visibility: "public" });
+    await seedProject(env);
     const fetchMock = stubFetch(() => okUpstream());
-    const res = await app.fetch(req("/@owner/repo.git/git-receive-pack", { method: "POST" }), env);
-    expect(res.status).toBe(403);
-    expect(await res.text()).toContain("stratum commit");
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: pushBody("report-status"),
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("application/x-git-receive-pack-result");
+    const text = await res.text();
+    expect(text).toContain("unpack ok\n");
+    expect(text).toContain("ng refs/heads/main");
+    expect(text).toContain("gated");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("info/refs?service=git-receive-pack → 403", async () => {
+  it("sideband push gets remote guidance messages naming the workspace remote", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    stubFetch(() => okUpstream());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: pushBody("report-status side-band-64k"),
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("workspaces/<ws>.git");
+    expect(text).toContain("ng refs/heads/main");
+  });
+
+  it("push requires write: anonymous → 401 challenge, non-writer → 404", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    stubFetch(() => okUpstream());
+    const anon = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", { method: "POST", body: pushBody("") }),
+      env,
+    );
+    expect(anon.status).toBe(401);
+    const other = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OTHER_TOKEN),
+        body: pushBody("report-status"),
+      }),
+      env,
+    );
+    expect(other.status).toBe(404);
+  });
+
+  it("malformed push body → 400, not a synthesized report", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    stubFetch(() => okUpstream());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: "zzzz garbage",
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("info/refs?service=git-receive-pack advertises for a writer (write-scoped proxy)", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await app.fetch(
+      req("/@owner/repo.git/info/refs?service=git-receive-pack", { headers: basic(OWNER_TOKEN) }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("service=git-receive-pack");
+    expect(vi.mocked(freshRepoToken).mock.calls[0]?.[2]).toBe("write");
+  });
+
+  it("info/refs?service=git-receive-pack challenges the anonymous caller", async () => {
     const env = makeEnv();
     await seedProject(env, { visibility: "public" });
+    stubFetch(() => okUpstream());
     const res = await app.fetch(req("/@owner/repo.git/info/refs?service=git-receive-pack"), env);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
   });
 });
 

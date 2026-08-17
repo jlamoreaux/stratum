@@ -21,13 +21,20 @@ deferred**.
   report-status is the truthful outcome — no pkt-line parsing or report-status
   synthesis needed. A streaming body cap bounds push size.
 - **Slice 2b — gated default-branch push (deferred, Phase B).** Pushing to the
-  **project** URL (`/@ns/slug.git`) is still refused (`403`). Routing a push
-  through the change → eval → MergeQueue gate requires: pinning the evaluated sha
-  and **merging by sha** (not the fork's mutable tip — TOCTOU/gate-bypass);
+  **project** URL (`/@ns/slug.git`) is still refused, but the refusal is now
+  **in-protocol**: the receive-pack advertisement is proxied (write-authorized),
+  the RPC parses the client's command list, and each ref update is answered with
+  a `ng` report-status line plus side-band guidance naming the workspace remote
+  — so `git push` exits non-zero with a legible reason instead of an opaque HTTP
+  403. The wire-protocol groundwork (pkt-line parse of receive-pack commands +
+  capabilities, sideband encoding, synthesized report-status — the "fiddly and
+  must be got right" part below) lives in `src/utils/git-protocol.ts` with a
+  full test suite. What remains for the real gated push: pinning the evaluated
+  sha and **merging by sha** (not the fork's mutable tip — TOCTOU/gate-bypass);
   durable async eval (a queue + sweeper + dedupe, not `waitUntil`); idempotent
   change creation under concurrent pushes (a DB uniqueness constraint); and
-  Gerrit-style `refs/for/main` → `ok` semantics with synthesized report-status.
-  Tracked in #115.
+  landing the incoming pack on a server-managed workspace ref before answering
+  `ok`. Tracked in #115.
 
 ## Context
 

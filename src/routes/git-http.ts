@@ -9,15 +9,17 @@ import { getProjectByPath, getWorkspace } from "../storage/state";
 import { getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
+import { buildReportStatus, parseReceivePackRequest, wantsSideband } from "../utils/git-protocol";
 import { createLogger } from "../utils/logger";
 
 /**
  * Git smart-HTTP proxy (ADR 005).
  *
  * Lets a Stratum project be used as a git remote. Two surfaces:
- *  - Project URL `/@ns/slug.git` — clone/fetch (read). Pushing to the project
- *    URL is refused (`pushNotSupported`); the gated `push → change → eval →
- *    merge` path is a separate slice (Phase B / #115).
+ *  - Project URL `/@ns/slug.git` — clone/fetch (read). A push is answered
+ *    in-protocol with a per-ref `ng` refusal plus sideband guidance (the pack
+ *    is never forwarded); the gated `push → change → eval → merge` path is a
+ *    separate slice (Phase B / #115) that will replace the refusal.
  *  - Workspace URL `/@ns/slug/workspaces/<ws>.git` — clone/fetch (read) AND
  *    `git push` (write), proxied verbatim to the workspace's Artifacts fork.
  *    The client clones the workspace, so ref/old-oid semantics line up and
@@ -210,11 +212,18 @@ async function proxyUpstream(
   return new Response(upstream.body, { status: 200, headers: responseHeaders });
 }
 
-function pushNotSupported(): Response {
-  return new Response(
-    "push over git is not yet supported — use 'stratum commit' or the change flow\n",
-    { status: 403, headers: { "Content-Type": "text/plain" } },
-  );
+/**
+ * Guidance streamed to a pushing client (as `remote:` lines) when it pushes to
+ * the project URL. The gated default-branch push (slice 2b, #115) will replace
+ * the rejection with the change/eval pipeline; until then the refusal happens
+ * in-protocol so `git push` fails legibly instead of with an opaque HTTP 403.
+ */
+function pushGuidance(namespace: string, slug: string): string[] {
+  return [
+    "Pushes to a project's protected refs are gated by Stratum's change flow.",
+    `Push to a workspace remote instead: /${namespace}/${slug}/workspaces/<ws>.git`,
+    "then open a change (stratum change create) to run evaluations and merge.",
+  ];
 }
 
 /** Strip a trailing `.git` so both `/@ns/slug.git` and `/@ns/slug` resolve. */
@@ -223,11 +232,13 @@ function normalizeSlug(slug: string): string {
 }
 
 /**
- * Resolve + authorize a project for a read, applying the no-leak truth table.
- * Returns the project on success, or a `Response` to return as-is.
+ * Resolve + authorize a project for a read (clone/fetch) or write (push),
+ * applying the no-leak truth table. Returns the project on success, or a
+ * `Response` to return as-is.
  */
-async function authorizeRead(
+async function authorizeProject(
   c: { req: { header(name: string): string | undefined; param(name: string): string }; env: Env },
+  scope: "read" | "write",
   logger: ReturnType<typeof createLogger>,
 ): Promise<ProjectEntry | Response> {
   const namespace = c.req.param("namespace");
@@ -251,8 +262,11 @@ async function authorizeRead(
   }
 
   const project = projectResult.data;
-  const canRead = await canReadProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId);
-  if (!canRead) {
+  const allowed =
+    scope === "write"
+      ? await canWriteProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId)
+      : await canReadProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId);
+  if (!allowed) {
     return isAnonymous ? authChallenge() : gitNotFound();
   }
 
@@ -276,7 +290,7 @@ const gitUnavailable = (resource: "project" | "workspace"): Response =>
 
 /**
  * Resolve + authorize a workspace for clone/fetch (read) or push (write),
- * applying the same no-leak truth table as `authorizeRead`. Returns the
+ * applying the same no-leak truth table as `authorizeProject`. Returns the
  * workspace's Artifacts remote on success, or a `Response` to return as-is.
  */
 async function authorizeWorkspace(
@@ -393,25 +407,28 @@ export const gitHttpRouter = new Hono<{ Bindings: Env }>();
 gitHttpRouter.get("/:namespace/:slug/info/refs", async (c) => {
   const logger = createLogger({ requestId: crypto.randomUUID(), path: c.req.path, method: "GET" });
   const service = c.req.query("service");
-  if (service === RECEIVE_PACK) return pushNotSupported();
-  if (service !== UPLOAD_PACK) {
-    return new Response("only the smart-HTTP git-upload-pack service is supported\n", {
+  const scope = service === RECEIVE_PACK ? "write" : service === UPLOAD_PACK ? "read" : null;
+  if (!scope) {
+    return new Response("unsupported git service\n", {
       status: 400,
       headers: { "Content-Type": "text/plain" },
     });
   }
 
-  const result = await authorizeRead(c, logger);
+  // The receive-pack advertisement is proxied (write-authorized) so `git push`
+  // proceeds to the RPC below, where the refusal is delivered in-protocol
+  // instead of as an opaque HTTP error at the advertise step.
+  const result = await authorizeProject(c, scope, logger);
   if (result instanceof Response) return result;
 
-  const upstreamUrl = `${result.remote}/info/refs?service=${UPLOAD_PACK}`;
-  return proxyUpstream(c, result.remote, "read", upstreamUrl, "GET", undefined, logger);
+  const upstreamUrl = `${result.remote}/info/refs?service=${service}`;
+  return proxyUpstream(c, result.remote, scope, upstreamUrl, "GET", undefined, logger);
 });
 
 // POST /@:namespace/:slug.git/git-upload-pack — clone/fetch RPC
 gitHttpRouter.post("/:namespace/:slug/git-upload-pack", async (c) => {
   const logger = createLogger({ requestId: crypto.randomUUID(), path: c.req.path, method: "POST" });
-  const result = await authorizeRead(c, logger);
+  const result = await authorizeProject(c, "read", logger);
   if (result instanceof Response) return result;
 
   const body = await readCappedBody(c, logger);
@@ -421,9 +438,47 @@ gitHttpRouter.post("/:namespace/:slug/git-upload-pack", async (c) => {
 });
 
 // POST /@:namespace/:slug.git/git-receive-pack — push to the project ref.
-// Refused: the gated push path (open a change + eval + merge) is a separate
-// slice (#115 / ADR 005 Phase B). Push to a workspace URL instead.
-gitHttpRouter.post("/:namespace/:slug/git-receive-pack", () => pushNotSupported());
+// The pack is never forwarded: every ref update is answered with an in-protocol
+// `ng` (plus sideband guidance), so `git push` exits non-zero with a legible
+// reason. The gated push path (open a change + eval + merge) is a separate
+// slice (#115 / ADR 005 Phase B) and will replace the rejection here.
+gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
+  const logger = createLogger({ requestId: crypto.randomUUID(), path: c.req.path, method: "POST" });
+  const result = await authorizeProject(c, "write", logger);
+  if (result instanceof Response) return result;
+
+  const body = await readCappedBody(c, logger);
+  if (body instanceof Response) return body;
+
+  const parsed = parseReceivePackRequest(new Uint8Array(body));
+  if (!parsed.success) {
+    logger.warn("Malformed receive-pack request", { error: parsed.error.message });
+    return new Response(`${parsed.error.message}\n`, {
+      status: 400,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+
+  const { commands, capabilities } = parsed.data;
+  logger.info("Refusing project push in-protocol (gated push not yet enabled)", {
+    refs: commands.map((cmd) => cmd.ref),
+  });
+
+  const reportBody = buildReportStatus({
+    unpack: "ok",
+    results: commands.map((cmd) => ({
+      ref: cmd.ref,
+      ok: false,
+      reason: "project pushes are gated — push to a workspace remote and open a change",
+    })),
+    messages: pushGuidance(c.req.param("namespace"), normalizeSlug(c.req.param("slug"))),
+    sideband: wantsSideband(capabilities),
+  });
+  return new Response(reportBody, {
+    status: 200,
+    headers: { "Content-Type": "application/x-git-receive-pack-result" },
+  });
+});
 
 // ── Workspace URLs: /@:namespace/:slug/workspaces/:workspace.git ─────────────
 // Clone/fetch (read) and push (write), proxied verbatim to the workspace fork.
