@@ -224,9 +224,14 @@ app.post("/projects/:name/changes", async (c) => {
     },
   });
   if (!outcome.success) {
-    return outcome.error.statusCode >= 500
-      ? internalError(outcome.error.message)
-      : badRequest(outcome.error.message);
+    // Post-creation failures leave an open change row; name it so the caller
+    // can re-evaluate or reject that change instead of losing track of it.
+    const stuckChangeId = outcome.error.context?.changeId;
+    const message =
+      typeof stuckChangeId === "string"
+        ? `${outcome.error.message} (change ${stuckChangeId})`
+        : outcome.error.message;
+    return outcome.error.statusCode >= 500 ? internalError(message) : badRequest(message);
   }
   const { change: updatedChange, evalResult, evalRuns: recordedRuns } = outcome.data;
   return created({ change: updatedChange, eval: evalResult, evalRuns: recordedRuns });

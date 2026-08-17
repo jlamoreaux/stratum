@@ -914,7 +914,7 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     );
     expect(vi.mocked(createWorkspaceFork)).toHaveBeenCalledTimes(1);
     const forkArgs = vi.mocked(createWorkspaceFork).mock.calls[0]?.[2];
-    expect(forkArgs?.workspaceName).toMatch(/^push-[0-9a-f-]{8}$/);
+    expect(forkArgs?.workspaceName).toMatch(/^push-[0-9a-f-]{36}$/);
     expect(forkArgs?.actor.userId).toBe("user_owner");
 
     const changeArgs = vi.mocked(createChangeWithEvaluation).mock.calls[0]?.[2];
@@ -1061,6 +1061,58 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     // The pack landed → the change flow ran and reported its id.
     expect(text).toContain("chg_push1");
     expect(vi.mocked(createChangeWithEvaluation)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(env.ARTIFACTS.delete)).not.toHaveBeenCalled();
+  });
+
+  it("preserves the fork when an HTTP 200 report-status cannot be parsed", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    // HTTP 200 with an unknown status line: Artifacts processed the request,
+    // so the pack may have landed — deleting the fork could destroy commits.
+    stubFetch(
+      () =>
+        new Response("000eunpack ok\n0017weird refs/heads/x\n0000", {
+          status: 200,
+          headers: { "Content-Type": "application/x-git-receive-pack-result" },
+        }),
+    );
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(vi.mocked(env.ARTIFACTS.delete)).not.toHaveBeenCalled();
+    expect(vi.mocked(createChangeWithEvaluation)).not.toHaveBeenCalled();
+  });
+
+  it("names the stuck change when post-creation processing fails with a changeId", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    stubFetch(() => upstreamPushOk());
+    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce({
+      success: false,
+      error: Object.assign(new Error("record eval runs failed"), {
+        code: "DATABASE_ERROR",
+        statusCode: 500,
+        context: { changeId: "chg_stuck1" },
+      }),
+    } as never);
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const text = await res.text();
+    // The existing change is named so the pusher re-evaluates it, not duplicates it.
+    expect(text).toContain("chg_stuck1");
+    expect(text).toContain("re-evaluate");
     expect(vi.mocked(env.ARTIFACTS.delete)).not.toHaveBeenCalled();
   });
 

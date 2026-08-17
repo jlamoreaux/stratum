@@ -23,8 +23,9 @@ real Artifacts).
   synthesis needed. A streaming body cap bounds push size.
 - **Slice 2b — gated default-branch push (implemented, staging-flagged).**
   Behind `GIT_PUSH_GATED_ENABLED` ("true" on staging, "false" in production
-  until validated against real Artifacts), a single-ref push to
-  `refs/heads/main` on the **project** URL is routed through the change gate:
+  until validated against real Artifacts), a single-ref push to the project's
+  configured default branch (`sourceDefaultBranch` → `githubDefaultBranch` →
+  `main`) on the **project** URL is routed through the change gate:
   the pack lands on a fresh server-managed workspace fork (whose `main` sits at
   the project tip, so the client's old-oid lines up and the remote's own
   fast-forward check stays truthful), then the shared change-flow service

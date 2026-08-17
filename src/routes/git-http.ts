@@ -469,7 +469,7 @@ async function forwardPackToWorkspace(
   workspaceRemote: string,
   body: ArrayBuffer,
   logger: ReturnType<typeof createLogger>,
-): Promise<{ ok: boolean; body: Uint8Array } | null> {
+): Promise<{ ok: boolean; landed: boolean; body: Uint8Array } | null> {
   const tokenResult = await freshRepoToken(c.env.ARTIFACTS, workspaceRemote, "write", logger);
   if (!tokenResult.success) {
     logger.error("Failed to mint Artifacts token for gated push", tokenResult.error);
@@ -504,10 +504,16 @@ async function forwardPackToWorkspace(
   const report = parseReportStatus(responseBody);
   if (!report.success) {
     logger.error("Gated push: unparseable workspace report-status", report.error);
-    return { ok: false, body: responseBody };
+    // HTTP 200 means Artifacts processed the request, so the pack may already
+    // be in the fork even though the verdict is unreadable. Fail closed on
+    // success, but flag the outcome as "may have landed" so the caller never
+    // treats it as a proven rejection and deletes the client's commits.
+    return { ok: false, landed: true, body: responseBody };
   }
   const pushOk = report.data.unpack === "ok" && report.data.results.every((r) => r.ok);
-  return { ok: pushOk, body: responseBody };
+  // A parsed `ng`/failed-unpack proves the ref never moved, so the fork holds
+  // nothing of the client's; only then is `landed` false.
+  return { ok: pushOk, landed: pushOk, body: responseBody };
 }
 
 /**
@@ -623,7 +629,9 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   // Land the pack on a fresh server-managed workspace fork. The fork's main is
   // at the project tip, so the client's old-oid (computed against the project
   // advertisement) lines up and Artifacts' own ref check stays truthful.
-  const workspaceName = `push-${crypto.randomUUID().slice(0, 8)}`;
+  // Full UUID: an 8-hex prefix is only 32 bits, and a name collision would
+  // make setWorkspace overwrite an existing workspace entry with this fork.
+  const workspaceName = `push-${crypto.randomUUID()}`;
   const actor = {
     ...(identity?.userId !== undefined ? { userId: identity.userId } : {}),
     ...(identity?.agentId !== undefined ? { agentId: identity.agentId } : {}),
@@ -650,12 +658,23 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
     return refuseAll("upstream git error while landing the pack — try again", []);
   }
   if (!forwarded.ok) {
-    // Artifacts rejected the pack (non-fast-forward, corrupt pack, …). Its own
-    // report-status is the truthful outcome; relay it verbatim — the upstream
-    // negotiated the same capabilities we were sent, so the framing matches.
-    // The empty fork is torn down: the pack never landed, nothing references it.
     logger.warn("Gated push rejected by workspace remote", { workspaceName: forkedName });
-    await cleanupPushWorkspace(c.env, project.id, forkedName, forkResult.data.remote, logger);
+    if (forwarded.landed) {
+      // Unknown outcome (HTTP 200, unreadable verdict): the pack may be in the
+      // fork, so deleting it could destroy the client's commits. Preserve it
+      // and log its coordinates for manual triage.
+      logger.error("Gated push: unknown upstream outcome; preserving fork", undefined, {
+        workspaceName: forkedName,
+        remote: forkResult.data.remote,
+        projectId: project.id,
+      });
+    } else {
+      // A parsed rejection (non-fast-forward, corrupt pack, …) proves the ref
+      // never moved — the empty fork can be torn down. The upstream's own
+      // report-status is relayed verbatim below; the framing matches because
+      // it negotiated the same capabilities we were sent.
+      await cleanupPushWorkspace(c.env, project.id, forkedName, forkResult.data.remote, logger);
+    }
     return receivePackResult(forwarded.body);
   }
 
@@ -668,6 +687,18 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   });
   if (!outcome.success) {
     logger.error("Gated push change creation failed", outcome.error);
+    // Post-creation failures carry the open change's id in the error context;
+    // naming it steers the user to re-evaluate rather than open a duplicate.
+    const stuckChangeId = outcome.error.context?.changeId;
+    if (typeof stuckChangeId === "string") {
+      return refuseAll(
+        `change ${stuckChangeId} created but processing failed: ${outcome.error.message} — re-evaluate it in Stratum`,
+        [
+          `Change ${stuckChangeId} exists (workspace '${forkedName}') but evaluation/recording did not complete.`,
+          `Re-run evaluation at /changes/${stuckChangeId} — do not open a duplicate change.`,
+        ],
+      );
+    }
     return refuseAll(
       `pack landed in workspace ${forkedName} but change creation failed: ${outcome.error.message}`,
       [`Your commits are safe in workspace '${forkedName}' — open a change from it manually.`],

@@ -157,9 +157,12 @@ export function buildReportStatus(report: ReportStatus): Uint8Array {
   for (const result of report.results) {
     statusLines.push(
       encodePktLine(
+        // The ref is echoed from the client's own command line and can carry
+        // arbitrary bytes/length — sanitize it too, or a hostile ref would
+        // make encodePktLine throw and turn the refusal into an HTTP 500.
         result.ok
-          ? `ok ${result.ref}\n`
-          : `ng ${result.ref} ${sanitizeStatusText(result.reason ?? "rejected")}\n`,
+          ? `ok ${sanitizeStatusText(result.ref)}\n`
+          : `ng ${sanitizeStatusText(result.ref)} ${sanitizeStatusText(result.reason ?? "rejected")}\n`,
       ),
     );
   }
