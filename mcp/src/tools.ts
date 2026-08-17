@@ -130,13 +130,19 @@ export function buildTools(client: StratumClient): ToolDef[] {
       "stratum_create_change",
       "Open a change (merge proposal) from a workspace. This synchronously runs the project's evaluation gates from .stratum/policy.yaml — secret scan, diff policy, LLM review, sandbox tests — and returns the verdicts. A failing gate blocks the merge.",
       { project: projectArg, workspace: z.string().describe("Source workspace name") },
-      (a) => client.createChange(a.project, a.workspace),
+      (a) => {
+        const ref = parseProjectRef(a.project);
+        return client.createChange(`${ref.namespace}/${ref.slug}`, a.workspace);
+      },
     ),
     tool(
       "stratum_list_changes",
       "List changes for a Stratum project, optionally filtered by status (open, merged, rejected, reverted).",
       { project: projectArg, status: z.string().optional().describe("Optional status filter") },
-      (a) => client.listChanges(a.project, a.status),
+      (a) => {
+        const ref = parseProjectRef(a.project);
+        return client.listChanges(`${ref.namespace}/${ref.slug}`, a.status);
+      },
     ),
     tool(
       "stratum_get_change",
@@ -162,7 +168,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     ),
     tool(
       "stratum_review_change",
-      "Submit a review verdict on a change. Note: approvals are a human gate — the server rejects approve verdicts from agent tokens, so agents can request changes but never approve their own work.",
+      "Submit a review verdict on a change. Note: approvals are a human gate — the server rejects ALL approve verdicts from agent tokens (not just on the agent's own changes); agents can only request changes.",
       {
         change_id: z.string().describe("Change id"),
         verdict: z.enum(["approve", "request_changes"]).describe("Review verdict"),

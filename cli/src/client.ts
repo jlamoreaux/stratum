@@ -15,10 +15,15 @@ export interface ProjectRef {
   slug: string;
 }
 
-/** Parse "ns/slug" or "@ns/slug" into a project reference. */
+/**
+ * Parse "ns/slug" or "@ns/slug" into a project reference. Exactly two
+ * non-empty segments — extra segments are rejected rather than silently
+ * dropped, so a command can never operate on a different project than named.
+ */
 export function parseProjectRef(ref: string): ProjectRef {
-  const [nsRaw, slug] = ref.split("/", 2);
-  if (!nsRaw || !slug) {
+  const segments = ref.split("/");
+  const [nsRaw, slug] = segments;
+  if (segments.length !== 2 || !nsRaw || nsRaw === "@" || !slug) {
     throw new Error(`Invalid project reference '${ref}' — expected namespace/slug`);
   }
   return { namespace: nsRaw.startsWith("@") ? nsRaw : `@${nsRaw}`, slug };

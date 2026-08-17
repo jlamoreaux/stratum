@@ -27,6 +27,24 @@ function makeDiff(addedLines: string[], removedLines: string[] = []): string {
   return [...header, ...removed, ...added].join("\n");
 }
 
+// Detector-positive fixtures are assembled at runtime so the raw test file
+// never contains a complete credential-shaped literal — otherwise this very
+// diff would be blocked by the scanner it is testing (and by GitHub push
+// protection / SAST). Keep every fixture split across at least two parts.
+const AWS_KEY = `${"AKIA"}IOSFODNN7EXAMPLE`;
+const AWS_TEMP_KEY = `${"ASIA"}IOSFODNN7EXAMPLE`;
+const AWS_SECRET = `${"wJalrXUtnFEMIK7MDENG"}bPxRfiCYEXAMPLEKEYaa`;
+const SLACK_TOKEN = `${"xoxb"}-123456789012-abcdefghijkl`;
+const PEM_RSA = `-----BEGIN RSA ${"PRIVATE KEY"}-----`;
+const PEM_OPENSSH = `-----BEGIN OPENSSH ${"PRIVATE KEY"}-----`;
+const JWT = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "dozjgNryP4J3jVmNHl0w5N"].join(
+  ".",
+);
+const PG_URL = `${"postgres"}://admin:${"hunter2"}@db.internal:5432/prod`;
+const MONGO_URL = `${"mongodb+srv"}://svc:${"p4ssw0rd"}@cluster.example.net`;
+const ENTROPY_MIXED = `${"hR8s2Kd91mZqLpXw"}4Yv7NbT3cFgJ6aQe`;
+const ENTROPY_HEX = `${"9f8e7d6c5b4a3928"}1706e5d4c3b2a190`;
+
 describe("SecretScanEvaluator", () => {
   it("passes a clean diff with no secrets", async () => {
     const diff = makeDiff(["const x = 1;", "export default x;"]);
@@ -41,7 +59,7 @@ describe("SecretScanEvaluator", () => {
   });
 
   it("detects AWS access key in added line", async () => {
-    const diff = makeDiff(['const key = "AKIAIOSFODNN7EXAMPLE";']);
+    const diff = makeDiff([`const key = "${AWS_KEY}";`]);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
@@ -104,7 +122,7 @@ describe("SecretScanEvaluator", () => {
   });
 
   it("does not scan removed lines (starting with -)", async () => {
-    const diff = makeDiff(["const safe = true;"], ['const key = "AKIAIOSFODNN7EXAMPLE";']);
+    const diff = makeDiff(["const safe = true;"], [`const key = "${AWS_KEY}";`]);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
@@ -127,7 +145,7 @@ describe("SecretScanEvaluator", () => {
   });
 
   it("reports issue with correct line number", async () => {
-    const diff = makeDiff(["const safe = true;", 'const key = "AKIAIOSFODNN7EXAMPLE";']);
+    const diff = makeDiff(["const safe = true;", `const key = "${AWS_KEY}";`]);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
@@ -137,13 +155,13 @@ describe("SecretScanEvaluator", () => {
   });
 
   it.each([
-    ["AWS Access Key", 'const key = "ASIAIOSFODNN7EXAMPLE";'],
-    ["AWS Secret Key", 'aws_secret_access_key = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYaa"'],
+    ["AWS Access Key", `const key = "${AWS_TEMP_KEY}";`],
+    ["AWS Secret Key", `aws_secret_access_key = "${AWS_SECRET}"`],
     ["GitHub OAuth Token", `const t = "gho_${"a".repeat(36)}";`],
     ["GitHub User-to-Server Token", `const t = "ghu_${"a".repeat(36)}";`],
     ["GitHub Fine-Grained PAT", `const t = "github_pat_${"a".repeat(82)}";`],
     ["GitLab Personal Access Token", `const t = "glpat-${"a".repeat(20)}";`],
-    ["Slack Token", 'const t = "xoxb-123456789012-abcdefghijkl";'],
+    ["Slack Token", `const t = "${SLACK_TOKEN}";`],
     // Assembled from parts so GitHub push protection doesn't flag the fixture
     // itself as a leaked webhook.
     [
@@ -160,14 +178,11 @@ describe("SecretScanEvaluator", () => {
     ["Hugging Face Token", `const t = "hf_${"a1".repeat(17)}";`],
     ["SendGrid API Key", `const t = "SG.${"a".repeat(22)}.${"a".repeat(43)}";`],
     ["Twilio API Key", `const t = "SK${"0123456789abcdef".repeat(2)}";`],
-    ["Private Key Block", "-----BEGIN RSA PRIVATE KEY-----"],
-    ["Private Key Block", "-----BEGIN OPENSSH PRIVATE KEY-----"],
-    [
-      "JSON Web Token",
-      'const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N";',
-    ],
-    ["Connection String Credential", 'DB = "postgres://admin:hunter2@db.internal:5432/prod"'],
-    ["Connection String Credential", 'DB = "mongodb+srv://svc:p4ssw0rd@cluster.example.net"'],
+    ["Private Key Block", PEM_RSA],
+    ["Private Key Block", PEM_OPENSSH],
+    ["JSON Web Token", `const jwt = "${JWT}";`],
+    ["Connection String Credential", `DB = "${PG_URL}"`],
+    ["Connection String Credential", `DB = "${MONGO_URL}"`],
     ["Azure Storage Account Key", `conn = "AccountKey=${"A1b2".repeat(11)}=="`],
   ])("detects %s", async (name, line) => {
     const diff = makeDiff([line]);
@@ -188,7 +203,7 @@ describe("SecretScanEvaluator", () => {
   });
 
   it("reports one issue per line even when several patterns match", async () => {
-    const diff = makeDiff([`const a = "AKIAIOSFODNN7EXAMPLE"; const b = "ghp_${"a".repeat(36)}";`]);
+    const diff = makeDiff([`const a = "${AWS_KEY}"; const b = "ghp_${"a".repeat(36)}";`]);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
@@ -197,7 +212,7 @@ describe("SecretScanEvaluator", () => {
   });
 
   it("ignores policy configuration — always runs", async () => {
-    const diff = makeDiff(['const key = "AKIAIOSFODNN7EXAMPLE";']);
+    const diff = makeDiff([`const key = "${AWS_KEY}";`]);
     const resultWithNull = await evaluator.evaluate(diff, policy, mockLogger);
     const resultWithPolicy = await evaluator.evaluate(
       diff,
@@ -215,7 +230,7 @@ describe("SecretScanEvaluator", () => {
 
 describe("SecretScanEvaluator — entropy detection", () => {
   it("flags a high-entropy value assigned to a credential-ish name", async () => {
-    const diff = makeDiff(['const apiToken = "hR8s2Kd91mZqLpXw4Yv7NbT3cFgJ6aQe";']);
+    const diff = makeDiff([`const apiToken = "${ENTROPY_MIXED}";`]);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
@@ -225,7 +240,7 @@ describe("SecretScanEvaluator — entropy detection", () => {
   });
 
   it("flags a random hex value at the lower hex threshold", async () => {
-    const diff = makeDiff(['const secretKey = "9f8e7d6c5b4a39281706e5d4c3b2a190";']);
+    const diff = makeDiff([`const secretKey = "${ENTROPY_HEX}";`]);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
@@ -249,7 +264,7 @@ describe("SecretScanEvaluator — entropy detection", () => {
   });
 
   it("does not flag a high-entropy value without credential context", async () => {
-    const diff = makeDiff(['const digest = "hR8s2Kd91mZqLpXw4Yv7NbT3cFgJ6aQe";']);
+    const diff = makeDiff([`const digest = "${ENTROPY_MIXED}";`]);
     const result = await evaluator.evaluate(diff, policy, mockLogger);
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.passed).toBe(true);

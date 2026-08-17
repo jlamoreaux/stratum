@@ -22,14 +22,19 @@ The full agent contribution loop:
    `stratum_whoami`
 
 Stratum's governance invariants hold over MCP exactly as they do over the REST
-API: **agent tokens can never approve their own work** (approvals are a human
-gate), merges are blocked by failing evaluators, and every merged change keeps
-its provenance and cost records.
+API: **agent tokens cannot submit approve verdicts at all** (approvals are a
+human gate — an agent can only request changes, on anyone's change), merges are
+blocked by failing evaluators, and every merged change keeps its provenance and
+cost records.
 
 ## Setup
 
+`@stratum/mcp` is not yet published to npm — install from source:
+
 ```bash
-npm install -g @stratum/mcp
+git clone https://github.com/stratum-eng/stratum.git
+cd stratum/mcp
+npm install && npm run build   # binary at dist/index.js (bin name: stratum-mcp)
 export STRATUM_API_KEY=stratum_user_...   # or a stratum_agent_ token
 export STRATUM_HOST=https://app.usestratum.dev   # optional; also works self-hosted
 ```
@@ -37,7 +42,7 @@ export STRATUM_HOST=https://app.usestratum.dev   # optional; also works self-hos
 ### Claude Code
 
 ```bash
-claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- stratum-mcp
+claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- node /path/to/stratum/mcp/dist/index.js
 ```
 
 ### Any MCP client (stdio)
@@ -46,12 +51,16 @@ claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- stratum-mcp
 {
   "mcpServers": {
     "stratum": {
-      "command": "stratum-mcp",
+      "command": "node",
+      "args": ["/path/to/stratum/mcp/dist/index.js"],
       "env": { "STRATUM_API_KEY": "stratum_user_..." }
     }
   }
 }
 ```
+
+(Once the package is on npm, `npm install -g @stratum/mcp` will provide a
+`stratum-mcp` binary to use as the command directly.)
 
 ## Development
 

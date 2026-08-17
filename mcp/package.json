@@ -16,7 +16,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

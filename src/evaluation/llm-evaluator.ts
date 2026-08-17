@@ -9,9 +9,11 @@ import type { EvalPolicy, EvalResult, Evaluator, EvaluatorConfig } from "./types
 const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const DEFAULT_THRESHOLD = 0.7;
 const DEFAULT_MAX_DIFF_CHARS = 24_000;
-// Upper bound on a policy-supplied window so a hostile policy can't blow the
-// model's context or the Worker's memory.
+// Policy-supplied window bounds: the ceiling stops a hostile policy blowing the
+// model's context or the Worker's memory; the floor stops a tiny/fractional
+// value feeding the model an effectively empty diff that it would still score.
 const MAX_DIFF_CHARS_CEILING = 100_000;
+const MAX_DIFF_CHARS_FLOOR = 1_000;
 
 const SYSTEM_PROMPT = [
   "You are a rigorous code reviewer acting as an automated merge gate.",
@@ -52,8 +54,11 @@ export class LLMEvaluator implements Evaluator {
       const model = config?.model ?? DEFAULT_MODEL;
       const threshold = config?.threshold ?? DEFAULT_THRESHOLD;
       const maxDiffChars =
-        typeof config?.maxDiffChars === "number" && config.maxDiffChars > 0
-          ? Math.min(config.maxDiffChars, MAX_DIFF_CHARS_CEILING)
+        typeof config?.maxDiffChars === "number" && Number.isFinite(config.maxDiffChars)
+          ? Math.min(
+              Math.max(Math.floor(config.maxDiffChars), MAX_DIFF_CHARS_FLOOR),
+              MAX_DIFF_CHARS_CEILING,
+            )
           : DEFAULT_MAX_DIFF_CHARS;
 
       logger.debug("LLM config", { model, threshold, maxDiffChars });
@@ -121,6 +126,7 @@ export class LLMEvaluator implements Evaluator {
 
       if (
         typeof parsed.score !== "number" ||
+        !Number.isFinite(parsed.score) ||
         typeof parsed.passed !== "boolean" ||
         typeof parsed.reason !== "string"
       ) {

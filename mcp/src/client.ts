@@ -15,10 +15,15 @@ export interface ProjectRef {
   slug: string;
 }
 
-/** Parse "ns/slug" or "@ns/slug" into a project reference. */
+/**
+ * Parse "ns/slug" or "@ns/slug" into a project reference. Exactly two
+ * non-empty segments — extra segments are rejected rather than silently
+ * dropped, so a tool can never operate on a different project than named.
+ */
 export function parseProjectRef(ref: string): ProjectRef {
-  const [nsRaw, slug] = ref.split("/", 2);
-  if (!nsRaw || !slug) {
+  const segments = ref.split("/");
+  const [nsRaw, slug] = segments;
+  if (segments.length !== 2 || !nsRaw || nsRaw === "@" || !slug) {
     throw new Error(`Invalid project reference '${ref}' — expected namespace/slug`);
   }
   return { namespace: nsRaw.startsWith("@") ? nsRaw : `@${nsRaw}`, slug };
@@ -76,10 +81,15 @@ export interface ActivityEvent {
   createdAt: string;
 }
 
+// Change creation runs the full evaluation suite synchronously server-side, so
+// the deadline must comfortably exceed a slow LLM + sandbox run.
+const DEFAULT_TIMEOUT_MS = 120_000;
+
 export class StratumClient {
   constructor(
     private host: string,
     private apiKey: string,
+    private opts: { timeoutMs?: number } = {},
   ) {}
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -89,11 +99,22 @@ export class StratumClient {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error("Stratum API request timed out")),
+      this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!response.ok) {
       let message = `HTTP ${response.status}`;

@@ -35,7 +35,7 @@ export interface MergePolicy {
   requiredApprovals?: number;
   /** Evaluator types whose latest run must have passed (e.g. ["secret_scan", "diff"]). */
   requiredEvaluators?: string[];
-  /** When false, the ?force=true override is rejected. Default true. */
+  /** The ?force=true override is rejected unless this is explicitly true. Default false. */
   allowForce?: boolean;
   /** When true, a change whose recorded base is behind project HEAD cannot merge. */
   requireFreshBase?: boolean;

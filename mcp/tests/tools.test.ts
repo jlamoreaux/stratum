@@ -39,16 +39,23 @@ describe("tool registry", () => {
       "stratum_get_project",
       "stratum_list_files",
       "stratum_get_file",
+      "stratum_get_activity",
       "stratum_create_workspace",
+      "stratum_list_workspaces",
       "stratum_commit",
       "stratum_create_change",
+      "stratum_list_changes",
       "stratum_get_change",
       "stratum_merge_change",
+      "stratum_reject_change",
       "stratum_review_change",
       "stratum_create_issue",
+      "stratum_list_issues",
+      "stratum_update_issue",
     ]) {
       expect(names).toContain(required);
     }
+    expect(names).toHaveLength(18);
   });
 
   it("gives every tool a non-empty description", () => {
@@ -113,6 +120,14 @@ describe("write tools", () => {
       message: "add feature",
       projectId: "proj_123",
     });
+  });
+
+  it("stratum_create_change normalizes a bare namespace before hitting the API", async () => {
+    await getTool(tools, "stratum_create_change").handler({
+      project: "acme/api",
+      workspace: "ws-1",
+    });
+    expect(lastCall().url).toBe("https://stratum.example.com/api/projects/%40acme%2Fapi/changes");
   });
 
   it("stratum_create_change posts the workspace and echoes eval verdicts", async () => {

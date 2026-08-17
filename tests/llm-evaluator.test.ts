@@ -209,9 +209,33 @@ describe("LLMEvaluator — diff truncation", () => {
   it("policy maxDiffChars overrides the default window", async () => {
     const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
     const evaluator = new LLMEvaluator(ai);
-    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 500 }] });
-    await evaluator.evaluate("a".repeat(1000), policy, mockLogger);
-    expect(sentDiffPortion(ai).length).toBe(500);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 2000 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(2000);
+  });
+
+  it("a tiny maxDiffChars is raised to the 1000-char floor, never an empty diff", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 5 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(1000);
+  });
+
+  it("a fractional maxDiffChars is floored to an integer window", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 2000.7 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(2000);
+  });
+
+  it("a fractional value below one still sends a non-empty diff", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 0.5 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(1000);
   });
 
   it("policy maxDiffChars is capped at the 100k ceiling", async () => {
@@ -239,6 +263,20 @@ describe("LLMEvaluator — diff truncation", () => {
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.issues).toBeUndefined();
+    }
+  });
+});
+
+describe("LLMEvaluator — non-finite scores", () => {
+  it('JSON "1e999" parses to Infinity and fails closed instead of clamping to a pass', async () => {
+    const ai = makeMockAi('{"score": 1e999, "passed": true, "reason": "great"}');
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0);
+      expect(result.data.passed).toBe(false);
+      expect(result.data.reason).toContain("failed closed");
     }
   });
 });

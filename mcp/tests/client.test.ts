@@ -17,6 +17,15 @@ describe("parseProjectRef", () => {
   it("rejects malformed references", () => {
     expect(() => parseProjectRef("just-a-name")).toThrow(/namespace\/slug/);
   });
+
+  it("rejects extra path segments instead of silently truncating", () => {
+    expect(() => parseProjectRef("team/repo/extra")).toThrow(/namespace\/slug/);
+  });
+
+  it("rejects an empty namespace", () => {
+    expect(() => parseProjectRef("@/repo")).toThrow(/namespace\/slug/);
+    expect(() => parseProjectRef("/repo")).toThrow(/namespace\/slug/);
+  });
 });
 
 describe("StratumClient", () => {
@@ -71,5 +80,30 @@ describe("StratumClient", () => {
       async () => new Response("<html>", { status: 502, statusText: "Bad Gateway" }),
     );
     await expect(client.listProjects()).rejects.toThrow("Bad Gateway");
+  });
+
+  it("passes an abort signal to fetch so a stalled API cannot hang forever", async () => {
+    await client.listProjects();
+    const init = lastCall().init;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts the request when the configured deadline elapses", async () => {
+    vi.useFakeTimers();
+    try {
+      const slow = new StratumClient("https://stratum.example.com", "key", { timeoutMs: 50 });
+      fetchMock.mockImplementation(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+          }),
+      );
+      const pending = slow.listProjects();
+      const assertion = expect(pending).rejects.toThrow("timed out");
+      await vi.advanceTimersByTimeAsync(60);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
