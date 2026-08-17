@@ -235,6 +235,9 @@ DEV_LOGIN_ENABLED = "false"
 # bound" at merge time and workspace staging silently no-ops. The config-guard
 # middleware logs an error if this is set "true" with no bucket bound.
 REPO_DO_ENABLED = "false"
+# Gated git push (ADR 005 slice 2b) — off until validated on staging; pushes to
+# a project URL keep getting the in-protocol refusal pointing at workspaces.
+GIT_PUSH_GATED_ENABLED = "false"
 # Production OAuth callbacks. The matching callback URLs must also be registered
 # in the GitHub and Google OAuth app settings.
 OAUTH_REDIRECT_URI = "https://app.usestratum.dev/auth/github/callback"
@@ -342,6 +345,10 @@ DEV_LOGIN_ENABLED = "false"
 # RepoDO + R2 merge path (ADR 004). "true" on staging: workspace commits stage to
 # R2 and merges route through the fetch-free R2 path (cold path as fallback).
 REPO_DO_ENABLED = "true"
+# Gated git push (ADR 005 slice 2b): a push to a project's default branch lands
+# on a server-managed workspace and opens an eval-gated change. Staging-first;
+# flip production once validated end-to-end against real Artifacts.
+GIT_PUSH_GATED_ENABLED = "true"
 OAUTH_REDIRECT_URI = "https://staging.app.usestratum.dev/auth/github/callback"
 EMAIL_FROM_ADDRESS = "noreply@staging.app.usestratum.dev"
 # Closed beta — validate the invite gate on staging before prod. Points at the
