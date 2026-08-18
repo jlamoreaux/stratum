@@ -1,5 +1,5 @@
 import { createPatch } from "diff";
-import git from "isomorphic-git";
+import git, { Errors as GitErrors } from "isomorphic-git";
 import type { ArtifactsCreateResult, ArtifactsNamespace, Author, CommitLogEntry } from "../types";
 import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -128,6 +128,22 @@ export interface MergeWorkspaceOptions {
    * workspace history, else the merge fails closed.
    */
   workspaceSha?: string;
+}
+
+/**
+ * isomorphic-git reports a genuine content conflict as its own
+ * `MergeConflictError`, carrying the conflicting paths in `data.filepaths`.
+ * Matched by `code` as well as `instanceof` so a duplicated module instance
+ * (dual ESM/CJS load) still classifies correctly.
+ */
+function isGitMergeConflict(
+  error: unknown,
+): error is InstanceType<typeof GitErrors.MergeConflictError> {
+  return (
+    error instanceof GitErrors.MergeConflictError ||
+    (error instanceof Error &&
+      (error as { code?: unknown }).code === GitErrors.MergeConflictError.code)
+  );
 }
 
 export class MergeConflictError extends AppError {
@@ -547,8 +563,33 @@ export async function mergeWorkspaceIntoProject(
     const message =
       mergeResult.error instanceof Error ? mergeResult.error.message : String(mergeResult.error);
     logger.error("Merge failed", mergeResult.error, { projectRemote, workspaceRemote, message });
+    if (isGitMergeConflict(mergeResult.error)) {
+      const filepaths = Array.isArray(mergeResult.error.data?.filepaths)
+        ? mergeResult.error.data.filepaths
+        : [];
+      return err(
+        new MergeConflictError(
+          `Merge failed; workspace may be stale or conflicting: ${message}`,
+          filepaths,
+        ),
+      );
+    }
+    // isomorphic-git throws MergeNotSupportedError for conflict shapes it can't
+    // auto-resolve (e.g. add/add) and for histories with no single merge base —
+    // still content conflicts the caller must resolve, just with no file list.
+    if (mergeResult.error instanceof GitErrors.MergeNotSupportedError) {
+      return err(
+        new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`),
+      );
+    }
+    // Anything else (network, auth, corrupt objects) is an operational failure —
+    // surface it as such rather than telling the client to resolve conflicts.
     return err(
-      new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`),
+      new ExternalServiceError(
+        "Git",
+        `Merge failed: ${message}`,
+        mergeResult.error instanceof Error ? mergeResult.error : undefined,
+      ),
     );
   }
 
