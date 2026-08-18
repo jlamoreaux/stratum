@@ -201,17 +201,19 @@ export default {
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const logger = createLogger({ component: "queue" });
 
-    // Determine which queue this is based on the queue name
+    // Route by queue-name prefix: Cloudflare queues are account-level, so each
+    // environment gets its own instance ("stratum-events", "stratum-events-staging")
+    // while this one codebase consumes them all.
     const queueName = batch.queue;
 
-    if (queueName === "stratum-imports") {
+    if (queueName.startsWith("stratum-imports")) {
       // Handle import queue messages
       logger.info("Processing import queue batch", {
         queue: queueName,
         messageCount: batch.messages.length,
       });
       await handleImportQueue(batch as MessageBatch<ImportJobMessage | SyncJobMessage>, env);
-    } else if (queueName === "stratum-events") {
+    } else if (queueName.startsWith("stratum-events")) {
       await handleEventQueue(batch as MessageBatch<EventQueueMessage>, env);
     } else {
       // Unknown queue - ack all messages to prevent retries
