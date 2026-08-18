@@ -1,0 +1,38 @@
+name: Docs Site
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "docs/api/openapi.yml"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "docs/api/openapi.yml"
+      - ".github/workflows/docs.yml"
+
+concurrency:
+  group: docs-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Docs Site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install and build
+        working-directory: website
+        run: |
+          npm ci
+          npm run build
