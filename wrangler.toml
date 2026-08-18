@@ -315,25 +315,29 @@ script_name = "stratum-staging"
 binding = "REPO_OBJECTS"
 bucket_name = "stratum-repo-objects-staging"
 
+# Staging gets its own queues: queue names are account-level, so sharing
+# "stratum-events"/"stratum-imports" with production delivered every staging
+# message to the PRODUCTION consumer, whose D1 has no matching outbox row —
+# each one was dropped ("Event row missing for queue message") and staging's
+# 5-minute sweep cron re-enqueued it until its attempt budget ran out. The
+# -staging suffix keeps each environment's producer/consumer pair on its own
+# database. The CI staging deploy creates these queues idempotently.
 [[env.staging.queues.producers]]
 binding = "EVENTS_QUEUE"
-queue = "stratum-events"
+queue = "stratum-events-staging"
 
 [[env.staging.queues.producers]]
 binding = "IMPORT_QUEUE"
-queue = "stratum-imports"
+queue = "stratum-imports-staging"
 
-# Staging queue consumers for testing
-# These are disabled by default to prevent staging from competing with production
-# Enable when running integration tests: wrangler deploy --env=staging
-# [[env.staging.queues.consumers]]
-# queue = "stratum-events-staging"
-#
-# [[env.staging.queues.consumers]]
-# queue = "stratum-imports-staging"
-# max_batch_size = 1
-# max_retries = 3
-# retry_delay = 30
+[[env.staging.queues.consumers]]
+queue = "stratum-events-staging"
+
+[[env.staging.queues.consumers]]
+queue = "stratum-imports-staging"
+max_batch_size = 1
+max_retries = 3
+retry_delay = 30
 
 [[env.staging.send_email]]
 name = "EMAIL"
