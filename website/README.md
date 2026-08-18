@@ -39,8 +39,10 @@ in `docs/` as plain Markdown and is not published here.
 
 The site is a fully static build (`dist/`) served by an assets-only Cloudflare
 Worker (`stratum-docs`, configured in `wrangler.toml`) on the custom domain
-`docs.usestratum.dev`. Deploy via the `Deploy Docs` GitHub Actions workflow
-(`.github/workflows/deploy-docs.yml`, manual dispatch), or by hand:
+`docs.usestratum.dev`. It deploys automatically on every push to `main` that
+touches `website/` or the OpenAPI spec (`.github/workflows/docs.yml`; PRs get a
+build-only check). For an out-of-band redeploy, use the `Deploy Docs` workflow
+(`.github/workflows/deploy-docs.yml`, manual dispatch) or deploy by hand:
 
 ```bash
 npm run deploy   # builds, then wrangler deploy
