@@ -155,6 +155,17 @@ describe("S7 — commit route identifier validation", () => {
     expect(await res.text()).toContain("repo-relative");
     expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
   });
+
+  it("rejects a payload over the total byte cap before cloning", async () => {
+    const env = await makeSeededEnv();
+    const res = await app.fetch(
+      commitReq({ files: { "big.bin": "x".repeat(25 * 1024 * 1024 + 1) } }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("too large");
+    expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
+  });
 });
 
 describe("S7 — delete route identifier validation", () => {

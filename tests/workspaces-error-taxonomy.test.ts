@@ -165,6 +165,55 @@ describe("S5 — storage failures do not echo tenant identifiers", () => {
     expect(JSON.parse(text)).toEqual({ error: "Internal error" });
   });
 
+  it("workspace CREATE against a corrupt project entry → generic 500", async () => {
+    const env = makeEnv();
+    await env.STATE.put("project:@owner:repo", "{not json");
+    const res = await app.fetch(
+      new Request("http://localhost/api/workspaces/@owner/repo/workspaces", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OWNER_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+      env,
+    );
+    expect(res.status).toBe(500);
+    const text = await res.text();
+    expect(text).not.toContain("project:");
+    expect(JSON.parse(text)).toEqual({ error: "Internal error" });
+  });
+
+  it("workspace LIST against a corrupt project entry → generic 500", async () => {
+    const env = makeEnv();
+    await env.STATE.put("project:@owner:repo", "{not json");
+    const res = await app.fetch(
+      new Request("http://localhost/api/workspaces/@owner/repo/workspaces", {
+        headers: { Authorization: `Bearer ${OWNER_TOKEN}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(500);
+    expect(JSON.parse(await res.text())).toEqual({ error: "Internal error" });
+  });
+
+  it("workspace LIST when the KV list itself fails → generic 500", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    const state = env.STATE as unknown as { list: () => Promise<never> };
+    state.list = async () => {
+      throw new Error(`kv outage near workspace:${PROJECT_ID}`);
+    };
+    const res = await app.fetch(
+      new Request("http://localhost/api/workspaces/@owner/repo/workspaces", {
+        headers: { Authorization: `Bearer ${OWNER_TOKEN}` },
+      }),
+      env,
+    );
+    expect(res.status).toBe(500);
+    const text = await res.text();
+    expect(text).not.toContain(PROJECT_ID);
+    expect(JSON.parse(text)).toEqual({ error: "Internal error" });
+  });
+
   it("delete against a CORRUPT workspace entry → generic 500", async () => {
     const env = makeEnv();
     await seedProject(env);
