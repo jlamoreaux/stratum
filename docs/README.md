@@ -7,7 +7,11 @@ Welcome to the Stratum documentation. This directory contains comprehensive guid
 ```
 docs/
 ├── README.md                           # This file
-├── PIVOT_SUMMARY.md                    # Strategic pivot explanation
+├── ARTIFACTS_BEST_PRACTICES_AUDIT.md   # Artifacts usage audit
+├── CURRENT_CAPABILITIES.md             # What the platform can do today
+├── DEVELOPER_WORKFLOW.md               # Day-to-day developer workflow
+├── REMAINING_WORK.md                   # Known remaining work
+├── STAGING_SETUP.md                    # Staging environment setup
 ├── api/                                # API Documentation
 │   ├── openapi.yml                     # OpenAPI 3.1.0 specification
 │   ├── authentication.md               # Authentication methods
@@ -37,9 +41,21 @@ docs/
 ├── adr/                                # Architecture Decision Records
 │   ├── 001-namespace-support.md
 │   ├── 002-queue-based-imports.md
-│   └── 003-d1-for-import-state.md
+│   ├── 003-d1-for-import-state.md
+│   ├── 004-high-frequency-agent-commits.md
+│   └── 005-git-smart-http-proxy.md
+├── research/                           # Research notes
+│   ├── github-alternatives-pain-points.md
+│   ├── master-plan-alignment.md
+│   └── option-b-warm-repo-do-spike.md
+├── runbooks/                           # Operational runbooks
+│   ├── artifacts-scaling.md
+│   ├── backup-restore.md
+│   └── d1-migration-reconciliation.md
 └── archive/                            # Historical documents
-    └── README.md                       # Archive index
+    ├── README.md                       # Archive index
+    ├── AUDIT.md                        # UI/UX architecture audit (2026-05-02)
+    └── CODE_REVIEW.md                  # Code review of Phases 1-4 (2026-04-29)
 ```
 
 ## Quick Navigation
@@ -48,7 +64,8 @@ docs/
 
 **Current Priorities & Roadmap:**
 - [TODO.md](/TODO.md) - Current priorities and what's being worked on
-- [PIVOT_SUMMARY.md](/docs/PIVOT_SUMMARY.md) - Strategic direction and adoption model
+- [CURRENT_CAPABILITIES.md](CURRENT_CAPABILITIES.md) - What the platform can do today
+- [REMAINING_WORK.md](REMAINING_WORK.md) - Known remaining work
 
 ### For Users
 
@@ -93,33 +110,36 @@ docs/
 - [ADR 001: Namespace Support](adr/001-namespace-support.md)
 - [ADR 002: Queue-Based Imports](adr/002-queue-based-imports.md)
 - [ADR 003: D1 for Import State](adr/003-d1-for-import-state.md)
+- [ADR 004: High-Frequency Agent Commits to a Shared Repo](adr/004-high-frequency-agent-commits.md)
+- [ADR 005: Native `git push` via a Smart-HTTP Proxy](adr/005-git-smart-http-proxy.md)
 
 **Historical Reference:**
 - [Archived Documents](archive/README.md) - Code reviews, audits, etc.
 
 ## Documentation Status
 
+"Last Updated" is the date of the last substantive commit touching the document (as of this table's refresh on 2026-08-18). "Outline" means the document exists but is a short stub that needs to be fleshed out.
+
 | Document | Status | Priority | Last Updated |
 |----------|--------|----------|--------------|
-| TODO.md (Priorities) | ✅ Complete | Critical | 2026-05-05 |
-| PIVOT_SUMMARY.md | ✅ Complete | Critical | 2026-05-05 |
-| API OpenAPI Spec | ✅ Complete | High | 2024-01-15 |
-| API Authentication | ✅ Complete | High | 2024-01-15 |
-| API Endpoints | ✅ Complete | High | 2024-01-15 |
-| API Errors | ✅ Complete | Medium | 2024-01-15 |
-| User Guide - Getting Started | ✅ Complete | High | 2024-01-15 |
-| User Guide - Importing | ✅ Complete | High | 2024-01-15 |
-| User Guide - Troubleshooting | ✅ Complete | Medium | 2024-01-15 |
-| User Guide - FAQ | ✅ Complete | Medium | 2024-01-15 |
-| Developer - Architecture | ✅ Complete | High | 2026-05-05 |
-| Developer - Local Setup | ✅ Complete | High | 2024-01-15 |
-| Developer - Database | ✅ Complete | High | 2024-01-15 |
-| Developer - Queues | ✅ Complete | Medium | 2024-01-15 |
-| Developer - Testing | ✅ Complete | Medium | 2024-01-15 |
-| Developer - Deployment | ✅ Complete | Medium | 2024-01-15 |
-| ADRs | ✅ Complete | Low | 2024-01-15 |
+| TODO.md (Priorities) | ✅ Complete | Critical | 2026-07-20 |
+| API OpenAPI Spec | ✅ Complete | High | 2026-08-18 |
+| API Authentication | 🚧 Outline | High | 2026-06-17 |
+| API Endpoints | 🚧 Outline | High | 2026-07-19 |
+| API Errors | 🚧 Outline | Medium | 2026-06-16 |
+| User Guide - Getting Started | ✅ Complete | High | 2026-08-18 |
+| User Guide - Importing | 🚧 Outline | High | 2026-06-16 |
+| User Guide - Troubleshooting | 🚧 Outline | Medium | 2026-06-16 |
+| User Guide - FAQ | ✅ Complete | Medium | 2026-08-18 |
+| Developer - Architecture | ✅ Complete | High | 2026-08-18 |
+| Developer - Local Setup | 🚧 Outline | High | 2026-06-17 |
+| Developer - Database | 🚧 Outline | High | 2026-06-16 |
+| Developer - Queues | 🚧 Outline | Medium | 2026-06-16 |
+| Developer - Testing | 🚧 Outline | Medium | 2026-06-16 |
+| Developer - Deployment | ✅ Complete | Medium | 2026-08-07 |
+| ADRs (001-005) | ✅ Complete | Low | 2026-08-18 |
 
-**Legend:** ✅ Complete | 🚧 In Progress | 📋 Planned
+**Legend:** ✅ Complete | 🚧 Outline / In Progress | 📋 Planned
 
 ## Contributing to Documentation
 
