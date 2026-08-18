@@ -242,16 +242,15 @@ GIT_PUSH_GATED_ENABLED = "false"
 # in the GitHub and Google OAuth app settings.
 OAUTH_REDIRECT_URI = "https://app.usestratum.dev/auth/github/callback"
 GOOGLE_REDIRECT_URI = "https://app.usestratum.dev/auth/google/callback"
-# Closed beta — invite code required at signup. The gate fails closed, so
-# REFERRAL_SERVICE_URL must point at a LIVE referral service over a real public
-# hostname: Worker->Worker subrequests over *.workers.dev are intermittently
-# 404'd by the edge, so the referral service has its own custom domain
-# (referral.usestratum.dev -> stratum-landing Worker). The apex usestratum.dev
-# is still on the legacy Pages project; fold this into usestratum.dev after that
-# cutover if desired.
-# REFERRAL_SERVICE_SECRET is set out-of-band via `wrangler secret put` and must
-# match the value on the stratum-landing Worker.
-BETA_GATE = "1"
+# Open signup — the closed-beta invite gate is OFF in production ("available
+# today" is the positioning; Origin launched to every paid Cursor plan).
+# To re-enable the invite wall set BETA_GATE = "1"; the gate fails closed and
+# needs REFERRAL_SERVICE_URL live (referral.usestratum.dev -> stratum-landing
+# Worker; *.workers.dev subrequests are intermittently 404'd by the edge, hence
+# the custom domain). REFERRAL_SERVICE_SECRET is set out-of-band via
+# `wrangler secret put` and must match the stratum-landing Worker. Staging keeps
+# the gate ON so the invite path stays exercised end-to-end.
+BETA_GATE = "0"
 REFERRAL_SERVICE_URL = "https://referral.usestratum.dev"
 
 # =============================================================================
