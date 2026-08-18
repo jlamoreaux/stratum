@@ -23,8 +23,8 @@ const VERSION = (
 const DEFAULT_HOST = "https://app.usestratum.dev";
 
 // The API key travels in an Authorization header on every request, so a
-// non-HTTPS host would leak it in cleartext. Plaintext is allowed only for
-// loopback development hosts.
+// non-HTTPS host would leak it in cleartext. Plain http is allowed only for
+// loopback development hosts; every other protocol fails in fetch anyway.
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 function validateHost(host: string): string {
@@ -35,9 +35,10 @@ function validateHost(host: string): string {
     console.error(`stratum-mcp: STRATUM_HOST is not a valid URL: ${host}`);
     process.exit(1);
   }
-  if (parsed.protocol !== "https:" && !LOOPBACK_HOSTNAMES.has(parsed.hostname)) {
+  const isLoopbackHttp = parsed.protocol === "http:" && LOOPBACK_HOSTNAMES.has(parsed.hostname);
+  if (parsed.protocol !== "https:" && !isLoopbackHttp) {
     console.error(
-      `stratum-mcp: STRATUM_HOST must use https (got ${parsed.protocol}//) — the API key would travel in cleartext.`,
+      `stratum-mcp: STRATUM_HOST must use https (got ${parsed.protocol}//) — http is allowed only for loopback development hosts.`,
     );
     process.exit(1);
   }
