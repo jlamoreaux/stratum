@@ -8,6 +8,13 @@ import { type Result, err, ok } from "../utils/result";
 
 export const DEFAULT_MAX_BACKUP_BYTES = 128 * 1024 * 1024;
 
+/** A tag ref captured in a snapshot: refs/tags/<name> → oid (the annotated tag
+ * object for annotated tags, the target itself for lightweight ones). */
+export interface TagRefRecord {
+  name: string;
+  oid: string;
+}
+
 export interface RepoManifest {
   projectId: string;
   /** Full identity so restore can recreate the correctly-named Artifacts repo
@@ -17,6 +24,10 @@ export interface RepoManifest {
   objectCount: number;
   byteCount: number;
   capturedAt: string;
+  /** Tag refs captured with the pack (#182). OPTIONAL for backward
+   * compatibility: manifests written before tag support omit it, and restore
+   * must treat a missing field as "no tags". */
+  tags?: TagRefRecord[];
 }
 
 export interface RepoSnapshot {
@@ -31,15 +42,19 @@ export type SnapshotResult =
 interface WalkResult {
   objects: { oid: string; bytes: Uint8Array }[];
   tipSha: string;
+  tags: TagRefRecord[];
 }
 
 /**
  * Collect the FULL set of objects reachable from HEAD (every commit + its tree +
  * blobs, deduped) so the resulting pack is reachability-closed and restores to a
- * faithful repo (original tip sha, parents present). Aborts with a "too large"
- * skip once the running byte total exceeds `maxBytes`, before packing — the guard
- * bounds the pack we build, though a pathological repo can still OOM the clone.
- * Operates on an already-cloned fs so it is testable without Artifacts.
+ * faithful repo (original tip sha, parents present). Also walks every
+ * refs/tags/* tip (#182): annotated tag objects themselves plus anything
+ * reachable only from a tag land in the pack, and the tag refs are returned for
+ * the manifest. Aborts with a "too large" skip once the running byte total
+ * exceeds `maxBytes`, before packing — the guard bounds the pack we build,
+ * though a pathological repo can still OOM the clone. Operates on an
+ * already-cloned fs so it is testable without Artifacts.
  */
 export async function walkRepoObjects(
   fs: NodeFS,
@@ -81,18 +96,94 @@ export async function walkRepoObjects(
       return byteCount <= maxBytes;
     };
 
-    for (const entry of log) {
-      const commitObj = await git.readObject({ fs, dir, oid: entry.oid, format: "wrapped" });
-      if (!add(entry.oid, commitObj.object as Uint8Array)) return ok({ tooLarge: true });
+    /** Add one object's wrapped bytes; false = over budget. */
+    const addWrapped = async (oid: string): Promise<boolean> => {
+      const obj = await git.readObject({ fs, dir, oid, format: "wrapped" });
+      return add(oid, obj.object as Uint8Array);
+    };
 
+    /** Add a commit's full history (commits + trees + blobs); false = over budget. */
+    const addCommitHistory = async (tip: string): Promise<boolean> => {
+      const entries = await git.log({ fs, dir, ref: tip, depth: -1 });
+      for (const entry of entries) {
+        if (seen.has(entry.oid)) continue;
+        if (!(await addWrapped(entry.oid))) return false;
+        for (const o of await extractTreeObjects(fs, dir, entry.commit.tree)) {
+          if (!add(o.oid, o.bytes)) return false;
+        }
+      }
+      return true;
+    };
+
+    for (const entry of log) {
+      if (seen.has(entry.oid)) continue;
+      if (!(await addWrapped(entry.oid))) return ok({ tooLarge: true });
       const treeObjects = await extractTreeObjects(fs, dir, entry.commit.tree);
       for (const o of treeObjects) {
         if (!add(o.oid, o.bytes)) return ok({ tooLarge: true });
       }
     }
 
-    logger.debug("Walked repo objects", { tipSha, objectCount: objects.length, byteCount });
-    return ok({ objects, tipSha });
+    // Tags: walk every refs/tags/* tip too. A tag whose objects are missing
+    // locally (e.g. the clone could not deliver them) is SKIPPED with a warning
+    // rather than recorded — recording it would restore a dangling ref, and the
+    // pack must stay closed under reachability.
+    const tags: TagRefRecord[] = [];
+    let tagNames: string[] = [];
+    try {
+      tagNames = await git.listTags({ fs, dir });
+    } catch {
+      tagNames = [];
+    }
+    for (const name of [...tagNames].sort()) {
+      let refOid: string;
+      try {
+        refOid = await git.resolveRef({ fs, dir, ref: `refs/tags/${name}` });
+      } catch {
+        logger.warn("Backup: skipping unreadable tag ref", { name });
+        continue;
+      }
+      try {
+        // Peel annotated tags (adding each tag object in the chain) down to the
+        // target, then close the pack over the target's reachability.
+        let current = refOid;
+        let target: string | null = null;
+        for (let hop = 0; hop < 10 && target === null; hop++) {
+          const parsed = await git.readObject({ fs, dir, oid: current });
+          if (parsed.type === "tag") {
+            if (!(await addWrapped(current))) return ok({ tooLarge: true });
+            current = (parsed.object as { object: string }).object;
+          } else {
+            target = current;
+          }
+        }
+        if (target === null) throw new Error(`tag ${name}: peel chain too deep`);
+        const targetType = (await git.readObject({ fs, dir, oid: target })).type;
+        if (targetType === "commit") {
+          if (!(await addCommitHistory(target))) return ok({ tooLarge: true });
+        } else if (targetType === "tree") {
+          for (const o of await extractTreeObjects(fs, dir, target)) {
+            if (!add(o.oid, o.bytes)) return ok({ tooLarge: true });
+          }
+        } else if (!(await addWrapped(target))) {
+          return ok({ tooLarge: true });
+        }
+        tags.push({ name, oid: refOid });
+      } catch (error) {
+        logger.warn("Backup: skipping unresolvable tag", {
+          name,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    logger.debug("Walked repo objects", {
+      tipSha,
+      objectCount: objects.length,
+      byteCount,
+      tagCount: tags.length,
+    });
+    return ok({ objects, tipSha, tags });
   } catch (error) {
     logger.error("Failed to walk repo objects", error instanceof Error ? error : undefined);
     return err(new AppError("Failed to walk repo objects", "GIT_ERROR", 500));
@@ -115,6 +206,7 @@ export function buildSnapshot(
       objectCount: walk.objects.length,
       byteCount,
       capturedAt,
+      tags: walk.tags,
     },
   };
 }
@@ -139,7 +231,8 @@ export async function snapshotRepo(
   if (!token.success) return err(token.error);
 
   // Full history: a shallow clone would drop ancestors past depth 50, yielding a
-  // pack that can't restore the repo to its true tip.
+  // pack that can't restore the repo to its true tip. Tags are fetched too
+  // (#182) so refs/tags/* and their objects land in the snapshot.
   //
   // Known trade-off: `maxBytes` is enforced by walkRepoObjects AFTER the clone,
   // so an over-cap repo is loaded into MemoryFS before it is skipped. This is
@@ -151,6 +244,7 @@ export async function snapshotRepo(
   // Worker's memory budget so a normal repo never approaches it.
   const clone = await cloneRepo(project.remote, token.data, logger, undefined, {
     fullHistory: true,
+    includeTags: true,
   });
   if (!clone.success) return err(clone.error);
 

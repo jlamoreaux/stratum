@@ -1,5 +1,5 @@
 import git from "isomorphic-git";
-import { type NodeFS, artifactsRepoNameFromRemote, pushMain } from "../storage/git-ops";
+import { type NodeFS, artifactsRepoNameFromRemote, pushMain, pushTags } from "../storage/git-ops";
 import { MemoryFS } from "../storage/memory-fs";
 import { placeLooseObject, unpackObjects } from "../storage/object-loader";
 import type { Env } from "../types";
@@ -57,7 +57,28 @@ export async function reconstructRepo(
     // that reconstructs a dangling ref.
     // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
     await git.readCommit({ fs: fs as any, dir: DIR, oid: manifest.tipSha });
-    logger.debug("Reconstructed repo", { tipSha: manifest.tipSha });
+
+    // Tag refs (#182). `tags` is OPTIONAL: manifests from backups taken before
+    // tag support omit it, and such a restore must keep working unchanged.
+    for (const tag of manifest.tags ?? []) {
+      await git.writeRef({
+        // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
+        fs: fs as any,
+        dir: DIR,
+        ref: `refs/tags/${tag.name}`,
+        value: tag.oid,
+        force: true,
+      });
+      // Same dangling-ref guard as the tip: prove the tag's object (annotated
+      // tag object or lightweight target) actually unpacked.
+      // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
+      await git.readObject({ fs: fs as any, dir: DIR, oid: tag.oid });
+    }
+
+    logger.debug("Reconstructed repo", {
+      tipSha: manifest.tipSha,
+      tagCount: manifest.tags?.length ?? 0,
+    });
     return ok({ fs, dir: DIR });
   } catch (error) {
     logger.error("Failed to reconstruct repo", error instanceof Error ? error : undefined);
@@ -133,6 +154,29 @@ export async function restoreProjectRepo(
     return err(pushed.error);
   }
 
-  logger.info("Restored project repo", { name, tipSha: snapshot.manifest.tipSha });
+  // Tag refs (#182): push after main so their target commits are already on the
+  // remote. Optional field — a pre-tag-support manifest restores exactly as before.
+  const tagNames = (snapshot.manifest.tags ?? []).map((t) => t.name);
+  if (tagNames.length > 0) {
+    const tagsPushed = await pushTags(
+      remote,
+      token,
+      rebuilt.data.fs,
+      rebuilt.data.dir,
+      tagNames,
+      logger,
+      { force: repoExists },
+    );
+    if (!tagsPushed.success) {
+      await rollbackIfCreated();
+      return err(tagsPushed.error);
+    }
+  }
+
+  logger.info("Restored project repo", {
+    name,
+    tipSha: snapshot.manifest.tipSha,
+    tagCount: tagNames.length,
+  });
   return ok({ tipSha: snapshot.manifest.tipSha });
 }
