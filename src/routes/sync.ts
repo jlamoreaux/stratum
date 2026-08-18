@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { importFromGitHub } from "../storage/git-ops";
+import { artifactsRepoNameFromRemote, importFromGitHub, syncFromGitHub } from "../storage/git-ops";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
 import { listProjects } from "../storage/state";
 import type { Env } from "../types";
@@ -34,13 +34,40 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
 
     try {
       projectLogger.info("Syncing project");
-      const result = await importFromGitHub(
-        env.ARTIFACTS,
-        project.name,
-        project.githubUrl,
-        projectLogger,
-      );
-      if (result.success) {
+
+      // #190: existing projects sync INCREMENTALLY into their Artifacts repo —
+      // never delete-and-re-import, which destroyed Stratum-native commits and
+      // orphaned workspace forks. Only projects without a recorded Artifacts
+      // remote (no repo to preserve) still take the legacy import path.
+      let succeeded: boolean;
+      let syncedRemote = project.remote;
+      let syncError: Error | undefined;
+      if (artifactsRepoNameFromRemote(project.remote) !== null) {
+        const result = await syncFromGitHub(
+          env.ARTIFACTS,
+          project.remote,
+          project.githubUrl,
+          projectLogger,
+          project.sourceDefaultBranch ?? project.githubDefaultBranch ?? "main",
+        );
+        succeeded = result.success;
+        if (!result.success) syncError = result.error;
+      } else {
+        const result = await importFromGitHub(
+          env.ARTIFACTS,
+          project.name,
+          project.githubUrl,
+          projectLogger,
+        );
+        succeeded = result.success;
+        if (result.success) {
+          syncedRemote = result.data.remote;
+        } else {
+          syncError = result.error;
+        }
+      }
+
+      if (succeeded) {
         synced++;
         projectLogger.info("Project synced successfully");
         // NOTE: writeSnapshotFromRepo must be called after any new sync trigger added here
@@ -48,7 +75,7 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
           env.STATE,
           env.ARTIFACTS,
           {
-            remote: result.data.remote,
+            remote: syncedRemote,
             namespace: project.namespace,
             slug: project.slug,
           },
@@ -56,7 +83,7 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
         );
       } else {
         failed++;
-        projectLogger.error("Project sync failed", result.error);
+        projectLogger.error("Project sync failed", syncError);
       }
     } catch (error) {
       failed++;
