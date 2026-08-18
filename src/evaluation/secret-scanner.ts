@@ -60,8 +60,49 @@ const SECRET_PATTERNS = [
  */
 // The optional `:\s*[^=;\n]*=` arm consumes a TypeScript type annotation
 // (`const apiToken: string = "..."`) so typed assignments can't evade the scan.
-const ENTROPY_CANDIDATE =
-  /(?:secret|token|key|passwd|password|credential|auth)[a-z0-9_]*['"]?\s*(?:=\s*|:\s*(?:[^=;\n]*=\s*)?)['"`]?([A-Za-z0-9+/_=-]{24,})/i;
+// The regex matches ANY identifier-like assignment of a long token-ish value
+// (global, so every assignment on a line is examined — a low-entropy first
+// match can't mask a later credential); whether the NAME is credential-ish is
+// decided by `isCredentialName`, which respects snake/camel segment boundaries
+// so the `key` inside `monkey` can't trip a blocking false positive.
+const ASSIGNMENT_CANDIDATE =
+  /([A-Za-z_$][A-Za-z0-9_$]*)['"]?\s*(?:=\s*|:\s*(?:[^=;\n]*=\s*)?)['"`]?([A-Za-z0-9+/_=-]{24,})/g;
+
+const CREDENTIAL_KEYWORDS = [
+  "secret",
+  "token",
+  "key",
+  "passwd",
+  "password",
+  "credential",
+  "auth",
+] as const;
+
+/**
+ * True when the identifier contains a credential keyword starting at a
+ * snake/camel segment boundary: `apiKey`, `api_key`, `token`, `mySecret` —
+ * but not the `key` buried inside `monkey`.
+ */
+function isCredentialName(identifier: string): boolean {
+  const lower = identifier.toLowerCase();
+  for (const keyword of CREDENTIAL_KEYWORDS) {
+    let from = 0;
+    let idx = lower.indexOf(keyword, from);
+    while (idx !== -1) {
+      const prev = idx === 0 ? "" : (identifier[idx - 1] ?? "");
+      const atBoundary =
+        idx === 0 ||
+        prev === "_" ||
+        prev === "$" ||
+        /[0-9]/.test(prev) ||
+        (/[a-z]/.test(prev) && /[A-Z]/.test(identifier[idx] ?? ""));
+      if (atBoundary) return true;
+      from = idx + 1;
+      idx = lower.indexOf(keyword, from);
+    }
+  }
+  return false;
+}
 
 const ENTROPY_MIN_MIXED = 4.0;
 const ENTROPY_MIN_HEX = 3.5;
@@ -78,11 +119,18 @@ export function shannonEntropy(value: string): number {
 }
 
 function highEntropyCandidate(line: string): string | undefined {
-  const match = ENTROPY_CANDIDATE.exec(line);
-  const candidate = match?.[1];
-  if (!candidate) return undefined;
-  const threshold = /^[0-9a-f]+$/i.test(candidate) ? ENTROPY_MIN_HEX : ENTROPY_MIN_MIXED;
-  return shannonEntropy(candidate) >= threshold ? candidate : undefined;
+  ASSIGNMENT_CANDIDATE.lastIndex = 0;
+  let match = ASSIGNMENT_CANDIDATE.exec(line);
+  while (match !== null) {
+    const identifier = match[1];
+    const candidate = match[2];
+    if (identifier && candidate && isCredentialName(identifier)) {
+      const threshold = /^[0-9a-f]+$/i.test(candidate) ? ENTROPY_MIN_HEX : ENTROPY_MIN_MIXED;
+      if (shannonEntropy(candidate) >= threshold) return candidate;
+    }
+    match = ASSIGNMENT_CANDIDATE.exec(line);
+  }
+  return undefined;
 }
 
 export class SecretScanEvaluator implements Evaluator {

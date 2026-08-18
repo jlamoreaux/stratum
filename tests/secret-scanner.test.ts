@@ -286,4 +286,25 @@ describe("SecretScanEvaluator — entropy detection", () => {
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.passed).toBe(true);
   });
+
+  it("does not flag a keyword buried inside an unrelated identifier (monkey)", async () => {
+    // `key` occurs inside `monkey` with no snake/camel boundary — a high-entropy
+    // value here must not create a blocking false positive.
+    const diff = makeDiff([`const monkey = "${ENTROPY_MIXED}";`]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(true);
+  });
+
+  it("scans every assignment on a line — a low-entropy first match can't mask a later secret", async () => {
+    const diff = makeDiff([
+      `const token = "aaaaaaaaaaaaaaaaaaaaaaaa"; const apiKey = "${ENTROPY_MIXED}";`,
+    ]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.join("\n")).toContain("High-Entropy Credential");
+    }
+  });
 });
