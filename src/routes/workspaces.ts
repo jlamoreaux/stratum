@@ -29,7 +29,7 @@ import {
   ok,
   unauthorized,
 } from "../utils/response";
-import { isStringRecord, isValidSlug } from "../utils/validation";
+import { isStringRecord, isValidSlug, isValidUuid } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -199,12 +199,18 @@ app.post("/:name/commit", async (c) => {
 
   const { name: workspaceName } = c.req.param();
 
+  // S7 (#130): validate identifier shapes BEFORE they are interpolated into
+  // KV keys. Workspace names are slugs by construction; project ids are
+  // crypto.randomUUID() values — anything else (a ':', a path, an empty
+  // string) is a key-injection probe and is rejected outright.
+  if (!isValidSlug(workspaceName)) return badRequest("invalid workspace name");
+
   const body = await c.req.json<{ files?: unknown; message?: unknown; projectId?: unknown }>();
   if (!isStringRecord(body.files))
     return badRequest("files must be an object of string paths to string contents");
   if (typeof body.message !== "string" || !body.message.trim())
     return badRequest("message is required");
-  if (typeof body.projectId !== "string") return badRequest("projectId is required");
+  if (!isValidUuid(body.projectId)) return badRequest("projectId must be a UUID");
 
   // Bound the payload: the commit clones the repo into a ~128MB isolate, so an
   // unbounded file map is a memory/CPU DoS lever.
@@ -213,7 +219,13 @@ app.post("/:name/commit", async (c) => {
     return badRequest(`too many files in one commit (max ${MAX_COMMIT_FILES})`);
   }
   let totalBytes = 0;
-  for (const contents of Object.values(body.files)) {
+  for (const [path, contents] of Object.entries(body.files)) {
+    // S7 (#130): refuse traversal-shaped paths before any git work — the same
+    // guard commitAndPush enforces (defense in depth), surfaced early here so
+    // a hostile map doesn't cost a clone first.
+    if (path.includes("../") || path.startsWith("/")) {
+      return badRequest("file paths must be repo-relative (no '../' or leading '/')");
+    }
     totalBytes += contents.length;
     if (totalBytes > MAX_COMMIT_BYTES) {
       return badRequest(`commit payload too large (max ${MAX_COMMIT_BYTES} bytes)`);
@@ -352,11 +364,16 @@ app.delete("/:name", async (c) => {
 
   const { name: workspaceName } = c.req.param();
 
+  // S7 (#130): same identifier-shape validation as the commit route, before
+  // the values reach a KV key.
+  if (!isValidSlug(workspaceName)) return badRequest("invalid workspace name");
+
   // Get projectId from query param
   const projectId = c.req.query("projectId");
   if (!projectId) {
     return badRequest("projectId query parameter is required");
   }
+  if (!isValidUuid(projectId)) return badRequest("projectId must be a UUID");
 
   const workspaceResult = await getWorkspace(c.env.STATE, projectId, workspaceName, logger);
   if (!workspaceResult.success) {
