@@ -138,7 +138,7 @@ jobs:
           for queue in stratum-events-staging stratum-imports-staging; do
             if out=$(npx wrangler queues create "$queue" 2>&1); then
               echo "✓ Created queue $queue"
-            elif echo "$out" | grep -qi "already exists"; then
+            elif echo "$out" | grep -qiE "already (exists|taken)|11009"; then
               echo "✓ Queue $queue already exists"
             else
               echo "$out"
