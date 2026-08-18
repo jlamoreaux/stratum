@@ -93,6 +93,7 @@ docs/
 - [ADR 001: Namespace Support](adr/001-namespace-support.md)
 - [ADR 002: Queue-Based Imports](adr/002-queue-based-imports.md)
 - [ADR 003: D1 for Import State](adr/003-d1-for-import-state.md)
+- [ADR 006: SSH Transport for Git](adr/006-ssh-transport.md)
 
 **Historical Reference:**
 - [Archived Documents](archive/README.md) - Code reviews, audits, etc.
