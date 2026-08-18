@@ -2,6 +2,7 @@ import type { ProjectEntry, WorkspaceEntry } from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
+import { artifactsRepoNameFromRemote } from "./git-ops";
 
 const PROJECT_PREFIX = "project:";
 const WORKSPACE_PREFIX = "workspace:";
@@ -349,6 +350,25 @@ export async function setWorkspace(
   logger: Logger,
 ): Promise<Result<void, AppError>> {
   logger.debug("Setting workspace", { projectId, name: entry.name });
+  // S6 (#130): validate the remote at WRITE time, not just where it is read.
+  // Everything downstream (freshRepoToken, the git proxy, workspace delete)
+  // trusts a stored remote enough to mint an Artifacts credential against it,
+  // so a corrupted/injected entry must never be persisted in the first place.
+  if (!artifactsRepoNameFromRemote(entry.remote)) {
+    logger.error("Refusing to store workspace with a non-Artifacts remote", undefined, {
+      projectId,
+      name: entry.name,
+      remote: entry.remote,
+    });
+    return err(
+      new AppError(
+        `Workspace '${entry.name}' remote is not a valid Artifacts remote`,
+        "INVALID_REMOTE",
+        500,
+        { projectId, name: entry.name },
+      ),
+    );
+  }
   try {
     await kv.put(workspaceKey(projectId, entry.name), JSON.stringify(entry));
     return ok(undefined);
