@@ -67,27 +67,55 @@ describe("LLMEvaluator — valid JSON responses", () => {
   });
 });
 
-describe("LLMEvaluator — non-JSON fallback", () => {
-  it("AI returns non-JSON text → fallback logic applies, no throw", async () => {
+describe("LLMEvaluator — unparseable responses fail closed", () => {
+  it("AI returns non-JSON text → score 0, failed, no throw", async () => {
     const ai = makeMockAi("This diff looks fine overall.");
     const evaluator = new LLMEvaluator(ai);
     const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.score).toBe(0.3);
+      expect(result.data.score).toBe(0);
       expect(result.data.passed).toBe(false);
-      expect(result.data.reason).toBe("This diff looks fine overall.");
+      expect(result.data.reason).toContain("failed closed");
+      // Raw model output can quote the diff (secrets included) — only metadata.
+      expect(result.data.issues?.[0]).toContain("29 chars");
+      expect(JSON.stringify(result.data)).not.toContain("This diff looks fine");
     }
   });
 
-  it('"LGTM" in non-JSON response → fallback score 0.8', async () => {
+  it('"LGTM" prose is not treated as approval — still fails closed at 0', async () => {
     const ai = makeMockAi("LGTM, no issues found.");
     const evaluator = new LLMEvaluator(ai);
     const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.score).toBe(0.8);
+      expect(result.data.score).toBe(0);
       expect(result.data.passed).toBe(false);
+      expect(result.data.reason).toContain("failed closed");
+    }
+  });
+
+  it("JSON with wrong field types → fails closed with field reason", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: "high", passed: "yes", reason: 42 }));
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0);
+      expect(result.data.passed).toBe(false);
+      expect(result.data.reason).toContain("missing score/passed/reason");
+    }
+  });
+
+  it("fail-closed result still records estimated token costs", async () => {
+    const ai = makeMockAi("not json");
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.costs?.[0]?.kind).toBe("llm_tokens");
+      expect(result.data.costs?.[0]?.quantity).toBeGreaterThan(0);
+      expect(result.data.costs?.[0]?.estimated).toBe(true);
     }
   });
 });
@@ -154,22 +182,151 @@ describe("LLMEvaluator — issues array", () => {
   });
 });
 
+function sentDiffPortion(ai: AiBinding): string {
+  const runMock = ai.run as ReturnType<typeof vi.fn>;
+  const calledMessages = (
+    runMock.mock.calls[0] as [string, { messages: Array<{ role: string; content: string }> }]
+  )[1].messages;
+  const userMessage = calledMessages.find((m) => m.role === "user");
+  if (!userMessage) throw new Error("user message not found");
+  return userMessage.content.split("Diff to review:\n")[1] ?? "";
+}
+
 describe("LLMEvaluator — diff truncation", () => {
-  it("diff longer than 8000 chars is truncated before being sent to AI", async () => {
+  it("diff longer than the 24000-char default is truncated before being sent to AI", async () => {
     const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
     const evaluator = new LLMEvaluator(ai);
-    const longDiff = "a".repeat(10000);
+    const longDiff = "a".repeat(30000);
     await evaluator.evaluate(longDiff, makePolicy(), mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(24000);
+  });
 
+  it("diff shorter than the window is sent whole", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    await evaluator.evaluate("a".repeat(10000), makePolicy(), mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(10000);
+  });
+
+  it("policy maxDiffChars overrides the default window", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 2000 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(2000);
+  });
+
+  it("a tiny maxDiffChars is raised to the 1000-char floor, never an empty diff", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 5 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(1000);
+  });
+
+  it("a fractional maxDiffChars is floored to an integer window", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 2000.7 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(2000);
+  });
+
+  it("a fractional value below one still sends a non-empty diff", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 0.5 }] });
+    await evaluator.evaluate("a".repeat(5000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(1000);
+  });
+
+  it("policy maxDiffChars is capped at the 100k ceiling", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", maxDiffChars: 5_000_000 }] });
+    await evaluator.evaluate("a".repeat(200_000), policy, mockLogger);
+    expect(sentDiffPortion(ai).length).toBe(100_000);
+  });
+
+  it("a truncated evaluation says so in the result issues", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("a".repeat(30000), makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.issues?.some((i) => i.includes("truncated"))).toBe(true);
+    }
+  });
+
+  it("an untruncated evaluation carries no truncation note", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("small diff", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.issues).toBeUndefined();
+    }
+  });
+});
+
+describe("LLMEvaluator — non-finite scores", () => {
+  it("JSON 1e999 parses to Infinity and fails closed instead of clamping to a pass", async () => {
+    const ai = makeMockAi('{"score": 1e999, "passed": true, "reason": "great"}');
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0);
+      expect(result.data.passed).toBe(false);
+      expect(result.data.reason).toContain("failed closed");
+    }
+  });
+});
+
+describe("LLMEvaluator — model verdict is honored", () => {
+  it("passed:false with a high score still fails", async () => {
+    const ai = makeMockAi(
+      JSON.stringify({ score: 0.9, passed: false, reason: "Looks risky despite score" }),
+    );
+    const evaluator = new LLMEvaluator(ai);
+    const result = await evaluator.evaluate("diff content", makePolicy(), mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0.9);
+      expect(result.data.passed).toBe(false);
+    }
+  });
+});
+
+describe("LLMEvaluator — policy context bound", () => {
+  it("an oversize policy fails closed before any model call", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: `https://ci.example.com/${"a".repeat(9000)}` }],
+    });
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.score).toBe(0);
+      expect(result.data.passed).toBe(false);
+      expect(result.data.reason).toContain("policy context");
+    }
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("LLMEvaluator — prompt", () => {
+  it("sends a real reviewer system prompt demanding strict JSON", async () => {
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "OK" }));
+    const evaluator = new LLMEvaluator(ai);
+    await evaluator.evaluate("diff content", makePolicy(), mockLogger);
     const runMock = ai.run as ReturnType<typeof vi.fn>;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
     const calledMessages = (
       runMock.mock.calls[0] as [string, { messages: Array<{ role: string; content: string }> }]
     )[1].messages;
-    const userMessage = calledMessages.find((m) => m.role === "user");
-    if (!userMessage) throw new Error("user message not found");
-    const parts = userMessage.content.split("Diff to review:\n");
-    const diffPortion = parts[1] ?? "";
-    expect(diffPortion.length).toBeLessThanOrEqual(8000);
+    const system = calledMessages.find((m) => m.role === "system");
+    expect(system?.content).toContain("code reviewer");
+    expect(system?.content).toContain("ONLY a JSON object");
   });
 });
