@@ -11,11 +11,15 @@
     "dev": "astro dev",
     "prebuild": "npm run sync:openapi",
     "build": "astro build",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.36.0",
     "astro": "^5.6.0",
     "sharp": "^0.34.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
   }
 }

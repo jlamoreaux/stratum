@@ -1,7 +1,8 @@
 # Stratum docs site
 
 The public documentation site for [Stratum](https://github.com/stratum-eng/stratum),
-built with [Astro Starlight](https://starlight.astro.build/).
+built with [Astro Starlight](https://starlight.astro.build/) and served at
+[docs.usestratum.dev](https://docs.usestratum.dev).
 
 ## Development
 
@@ -36,11 +37,11 @@ in `docs/` as plain Markdown and is not published here.
 
 ## Deployment
 
-The site is a fully static build (`dist/`) and deploys to Cloudflare Pages via
-the `Deploy Docs` GitHub Actions workflow (`.github/workflows/deploy-docs.yml`,
-manual dispatch), or by hand:
+The site is a fully static build (`dist/`) served by an assets-only Cloudflare
+Worker (`stratum-docs`, configured in `wrangler.toml`) on the custom domain
+`docs.usestratum.dev`. Deploy via the `Deploy Docs` GitHub Actions workflow
+(`.github/workflows/deploy-docs.yml`, manual dispatch), or by hand:
 
 ```bash
-npm run build
-npx wrangler pages deploy dist --project-name=stratum-docs
+npm run deploy   # builds, then wrangler deploy
 ```
