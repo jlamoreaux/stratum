@@ -22,6 +22,8 @@ function jsonResult(value: unknown): ToolResult {
 
 function errorResult(error: unknown, kind = "Stratum API error"): ToolResult {
   const message = error instanceof Error ? error.message : String(error);
+  // stderr, never stdout — stdout carries the MCP stdio framing.
+  console.error(`stratum-mcp: ${kind}: ${message}`);
   return { content: [{ type: "text", text: `${kind}: ${message}` }], isError: true };
 }
 

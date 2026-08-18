@@ -41,6 +41,15 @@ function validateHost(host: string): string {
     );
     process.exit(1);
   }
+  // The client appends API paths by string concatenation, so a query string or
+  // fragment here would smuggle the path into the wrong URL component — and
+  // embedded credentials would be echoed by the startup log line below.
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    console.error(
+      "stratum-mcp: STRATUM_HOST must not contain credentials, a query string, or a fragment.",
+    );
+    process.exit(1);
+  }
   return host;
 }
 

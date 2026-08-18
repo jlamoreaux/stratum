@@ -81,10 +81,15 @@ export interface ActivityEvent {
   createdAt: string;
 }
 
+// Change creation runs the full evaluation suite synchronously server-side, so
+// the deadline must comfortably exceed a slow LLM + sandbox run.
+const DEFAULT_TIMEOUT_MS = 120_000;
+
 export class StratumClient {
   constructor(
     private host: string,
     private apiKey: string,
+    private opts: { timeoutMs?: number } = {},
   ) {}
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -94,27 +99,40 @@ export class StratumClient {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error("Stratum API request timed out")),
+      this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
+    // The timer stays armed through body parsing — the signal propagates into
+    // response.json(), so a server that stalls mid-body can't hang the request
+    // past the deadline.
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      let message = `HTTP ${response.status}`;
-      try {
-        const err = (await response.json()) as ApiErrorBody;
-        message = err.error ?? err.message ?? message;
-        if (err.reasons && err.reasons.length > 0) {
-          message += `\n  - ${err.reasons.join("\n  - ")}`;
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try {
+          const err = (await response.json()) as ApiErrorBody;
+          message = err.error ?? err.message ?? message;
+          if (err.reasons && err.reasons.length > 0) {
+            message += `\n  - ${err.reasons.join("\n  - ")}`;
+          }
+        } catch {
+          message = response.statusText || message;
         }
-      } catch {
-        message = response.statusText || message;
+        throw new Error(message);
       }
-      throw new Error(message);
-    }
 
-    return response.json() as Promise<T>;
+      return (await response.json()) as T;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // ── Projects ────────────────────────────────────────────────────────────

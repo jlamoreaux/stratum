@@ -104,33 +104,35 @@ export class StratumClient {
       () => controller.abort(new Error("Stratum API request timed out")),
       this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     );
-    let response: Response;
+    // The timer stays armed through body parsing — the signal propagates into
+    // response.json(), so a server that stalls mid-body can't hang the request
+    // past the deadline.
     try {
-      response = await fetch(url, {
+      const response = await fetch(url, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
+
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try {
+          const err = (await response.json()) as ApiErrorBody;
+          message = err.error ?? err.message ?? message;
+          if (err.reasons && err.reasons.length > 0) {
+            message += `\n  - ${err.reasons.join("\n  - ")}`;
+          }
+        } catch {
+          message = response.statusText || message;
+        }
+        throw new Error(message);
+      }
+
+      return (await response.json()) as T;
     } finally {
       clearTimeout(timer);
     }
-
-    if (!response.ok) {
-      let message = `HTTP ${response.status}`;
-      try {
-        const err = (await response.json()) as ApiErrorBody;
-        message = err.error ?? err.message ?? message;
-        if (err.reasons && err.reasons.length > 0) {
-          message += `\n  - ${err.reasons.join("\n  - ")}`;
-        }
-      } catch {
-        message = response.statusText || message;
-      }
-      throw new Error(message);
-    }
-
-    return response.json() as Promise<T>;
   }
 
   // ── Projects ────────────────────────────────────────────────────────────
