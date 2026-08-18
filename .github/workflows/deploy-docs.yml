@@ -3,16 +3,24 @@ name: Deploy Docs
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy Docs Site
+    # Guard against dispatching a deploy from a non-main branch, and share the
+    # concurrency group with the docs.yml main-push deploy so the two can't race.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
-      group: deploy-docs
+      group: docs-refs/heads/main
       cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
