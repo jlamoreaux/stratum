@@ -34,7 +34,9 @@ import {
   getDiffBetweenRepos,
   mergeWorkspaceIntoProject,
   parseStagedTree,
+  pushBranchToRemote,
 } from "../storage/git-ops";
+import { parseRepoUrl } from "../storage/git-providers";
 import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
 import type { Change, Env, ProjectEntry } from "../types";
@@ -43,6 +45,7 @@ import { newId } from "../utils/ids";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
 import {
+  appError,
   badRequest,
   created,
   forbidden,
@@ -113,10 +116,22 @@ async function loadMergePolicyCached(
   return inflight;
 }
 
-function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
-  const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
-  if (!match || !match[1] || !match[2]) return null;
-  return { owner: match[1], repo: match[2] };
+/** Hard cap for a caller-supplied PR base branch name. */
+const MAX_BASE_REF_LENGTH = 200;
+
+/**
+ * Loose git branch-name validation for the PR `base` taken from the request
+ * body: printable, no whitespace/control chars, none of git's forbidden
+ * sequences. Rejecting here keeps garbage out of the GitHub API call.
+ */
+function isValidBaseRef(ref: string): boolean {
+  if (ref.length === 0 || ref.length > MAX_BASE_REF_LENGTH) return false;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control chars are exactly what's rejected
+  if (/[\s~^:?*[\\\x00-\x1f\x7f]/.test(ref)) return false;
+  if (ref.startsWith("-") || ref.startsWith("/") || ref.startsWith(".")) return false;
+  if (ref.endsWith("/") || ref.endsWith(".") || ref.endsWith(".lock")) return false;
+  if (ref.includes("..") || ref.includes("//") || ref.includes("@{")) return false;
+  return true;
 }
 
 const MERGEABLE_STATUSES: Change["status"][] = ["approved", "accepted", "promoted"];
@@ -1333,21 +1348,91 @@ app.post("/changes/:id/github-pr", async (c) => {
 
   if (!(await canWriteProject(c.env.DB, project, userId)))
     return forbidden("Project access denied");
-  if (!project?.githubUrl) return badRequest("Project is not connected to GitHub");
 
-  const repo = parseGitHubRepo(project.githubUrl);
-  if (!repo) return badRequest("Project githubUrl is invalid");
+  // Accept the legacy githubUrl or the generic sourceUrl — bulk-imported
+  // projects only set sourceUrl (#189) — as long as it points at github.com.
+  const repoUrl = project.githubUrl ?? project.sourceUrl;
+  if (!repoUrl) return badRequest("Project is not connected to GitHub");
+  const parsedRepo = parseRepoUrl(repoUrl);
+  if (!parsedRepo || parsedRepo.provider !== "github") {
+    return badRequest("Project source is not a GitHub repository");
+  }
+  const repo = { owner: parsedRepo.info.owner, repo: parsedRepo.info.repo };
 
   const body = await c.req
     .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
     .catch(() => ({}) as { title?: string; body?: string; base?: string; draft?: boolean });
+
+  // `base` comes straight from the request body — only a sane branch name may
+  // reach the GitHub API. Absent, fall back to the project's known default.
+  if (body.base !== undefined && (typeof body.base !== "string" || !isValidBaseRef(body.base))) {
+    return badRequest("Invalid base branch name");
+  }
+  const base = body.base ?? project.sourceDefaultBranch ?? project.githubDefaultBranch ?? "main";
 
   // GitHub PR creation needs a GitHub credential — the Artifacts repo token (now
   // never persisted) was never valid here. Use the app's configured GitHub token.
   const githubToken = c.env.GITHUB_TOKEN;
   if (!githubToken) return badRequest("GitHub integration is not configured");
 
+  // The PR's head ref must exist on GitHub before the PR is opened — a missing
+  // head is a guaranteed 422 (#189). Clone the change's workspace fork and
+  // (force-)push its tip to the Stratum-owned `stratum/<changeId>` ref first.
+  const workspaceResult = await getWorkspace(c.env.STATE, project.id, change.workspace, logger);
+  if (!workspaceResult.success) {
+    if (workspaceResult.error.code === "NOT_FOUND") {
+      return notFound("Workspace", change.workspace);
+    }
+    logger.error("Failed to get workspace", workspaceResult.error);
+    return badRequest(workspaceResult.error.message);
+  }
+  const workspaceRemote = workspaceResult.data.remote;
+
   const branch = `stratum/${change.id}`;
+
+  const repoTokenResult = await freshRepoToken(c.env.ARTIFACTS, workspaceRemote, "read", logger);
+  if (!repoTokenResult.success) return internalError(repoTokenResult.error.message);
+  const cloneResult = await cloneRepo(workspaceRemote, repoTokenResult.data, logger);
+  if (!cloneResult.success) return internalError(cloneResult.error.message);
+
+  const pushResult = await pushBranchToRemote(
+    cloneResult.data.fs,
+    cloneResult.data.dir,
+    {
+      url: `https://github.com/${repo.owner}/${repo.repo}.git`,
+      remoteRef: `refs/heads/${branch}`,
+      token: githubToken,
+    },
+    logger,
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push change branch to GitHub", pushResult.error, {
+      changeId: id,
+      branch,
+    });
+    return appError(pushResult.error);
+  }
+
+  // Re-promotion: the PR already exists and the force-push above refreshed its
+  // head, so skip the create call (GitHub 422s on a duplicate head ref).
+  if (change.githubPrNumber !== undefined && change.githubPrUrl !== undefined) {
+    logger.info("Change branch re-pushed to existing GitHub PR", {
+      changeId: id,
+      prNumber: change.githubPrNumber,
+      repo: `${repo.owner}/${repo.repo}`,
+    });
+    return okOrFormRedirect(c, id, {
+      changeId: id,
+      github: {
+        owner: repo.owner,
+        repo: repo.repo,
+        branch,
+        pullRequestNumber: change.githubPrNumber,
+        pullRequestUrl: change.githubPrUrl,
+      },
+    });
+  }
+
   const prBody =
     `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
 
@@ -1362,14 +1447,46 @@ app.post("/changes/:id/github-pr", async (c) => {
       title: body.title ?? `Stratum: ${change.id}`,
       body: prBody,
       head: branch,
-      base: body.base ?? project.githubDefaultBranch ?? "main",
+      base,
       draft: body.draft ?? true,
     }),
   });
 
   if (!ghRes.ok) {
-    logger.error("GitHub PR creation failed", undefined, { status: ghRes.status, changeId: id });
-    return badRequest(`GitHub PR creation failed (${ghRes.status})`);
+    // Surface GitHub's own status + message (never the token) instead of a
+    // generic 400 — a 422 "head invalid" vs. a 404 repo tells the caller
+    // exactly what to fix.
+    const detail = await ghRes.text().catch(() => "");
+    let githubMessage: string | undefined;
+    try {
+      const parsed = JSON.parse(detail) as {
+        message?: string;
+        errors?: Array<{ message?: string; code?: string; field?: string }>;
+      };
+      githubMessage = [
+        parsed.message,
+        ...(parsed.errors ?? []).map(
+          (e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code),
+        ),
+      ]
+        .filter(Boolean)
+        .join("; ");
+    } catch {
+      githubMessage = undefined;
+    }
+    logger.error("GitHub PR creation failed", undefined, {
+      status: ghRes.status,
+      changeId: id,
+      githubMessage,
+    });
+    return c.json(
+      {
+        error: `GitHub PR creation failed (${ghRes.status})${githubMessage ? `: ${githubMessage}` : ""}`,
+        code: "GITHUB_ERROR",
+        githubStatus: ghRes.status,
+      },
+      502,
+    );
   }
 
   const pr = (await ghRes.json()) as { number: number; html_url: string; state: string };

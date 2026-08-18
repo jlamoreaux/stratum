@@ -250,6 +250,42 @@ export async function pushMain(
   return ok(undefined);
 }
 
+/**
+ * Push the cloned repo's local `main` to an arbitrary branch on an external
+ * remote (e.g. GitHub's `stratum/<changeId>` ref before a PR is opened, #189).
+ * Auth is HTTP basic with the token as the password — GitHub accepts any
+ * username alongside a token. Forces by default: the target ref is
+ * Stratum-owned, so re-promotion must move it to the current tip.
+ */
+export async function pushBranchToRemote(
+  fs: NodeFS,
+  dir: string,
+  opts: { url: string; remoteRef: string; token: string; force?: boolean },
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  const res = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: opts.url,
+      ref: "main",
+      remoteRef: opts.remoteRef,
+      onAuth: () => ({ username: "x-access-token", password: opts.token }),
+      force: opts.force ?? true,
+    }),
+  );
+  if (!res.success) {
+    const cause = res.error instanceof Error ? res.error.message : String(res.error);
+    logger.error("Failed to push branch to remote", res.error, {
+      url: opts.url,
+      remoteRef: opts.remoteRef,
+    });
+    return err(new ExternalServiceError("Git", `Failed to push branch: ${cause}`, res.error));
+  }
+  return ok(undefined);
+}
+
 export async function initAndPush(
   remote: string,
   token: string,

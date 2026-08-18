@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import { changesRouter } from "../src/routes/changes";
 import type { Change, Env } from "../src/types";
@@ -33,6 +33,7 @@ vi.mock("../src/storage/git-ops", async (importActual) => {
     freshRepoToken: vi.fn(async () => ({ success: true, data: "test-token" })),
     cloneRepo: vi.fn(async () => ({ success: true, data: { fs: {}, dir: "/" } })),
     batchMergeStagedTrees: vi.fn(),
+    pushBranchToRemote: vi.fn(async () => ({ success: true, data: undefined })),
   };
 });
 
@@ -158,10 +159,12 @@ import { isTargetDeleting } from "../src/storage/deletion";
 import { listEvalRuns, recordEvalRuns } from "../src/storage/eval-runs";
 import {
   batchMergeStagedTrees,
+  cloneRepo,
   freshRepoToken,
   getCommitLog,
   getDiffBetweenRepos,
   mergeWorkspaceIntoProject,
+  pushBranchToRemote,
 } from "../src/storage/git-ops";
 import { packObjects } from "../src/storage/object-loader";
 import { recordProvenance } from "../src/storage/provenance";
@@ -1893,5 +1896,403 @@ describe("POST /api/projects/:name/changes/merge-batch", () => {
       exec() as any,
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/changes/:id/github-pr", () => {
+  let app: ReturnType<typeof makeApp>;
+  let env: Env;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  const acceptedChange: Change = {
+    ...mockChange,
+    status: "accepted",
+    evalScore: 0.9,
+    evalPassed: true,
+  };
+
+  const githubProject = {
+    ...mockProject,
+    githubUrl: "https://github.com/acme/widgets",
+    githubDefaultBranch: "develop",
+  };
+
+  function githubPrCreated(): Response {
+    return new Response(
+      JSON.stringify({
+        number: 42,
+        html_url: "https://github.com/acme/widgets/pull/42",
+        state: "open",
+      }),
+      { status: 201, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  beforeEach(() => {
+    app = makeApp();
+    env = makeEnv();
+    env.GITHUB_TOKEN = "ghp_secret_token";
+    vi.clearAllMocks();
+    vi.mocked(getUserByToken).mockImplementation(async (_db, token) => {
+      if (token === "stratum_user_testtoken00000000000000000") {
+        return {
+          success: true,
+          data: {
+            id: "user_test",
+            email: "test@example.com",
+            username: "test",
+            tokenHash: "hash",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        };
+      }
+      return { success: false, error: new NotFoundError("User", token) };
+    });
+    vi.mocked(getAgentByToken).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Agent", "none"),
+    });
+    vi.mocked(getChange).mockResolvedValue({ success: true, data: acceptedChange });
+    vi.mocked(getProject).mockResolvedValue({ success: true, data: githubProject });
+    vi.mocked(getWorkspace).mockResolvedValue({ success: true, data: mockWorkspace });
+    vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
+    vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "artifacts-token" });
+    vi.mocked(cloneRepo).mockResolvedValue({
+      success: true,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal NodeFS stub
+      data: { fs: {} as any, dir: "/" },
+    });
+    vi.mocked(pushBranchToRemote).mockResolvedValue({ success: true, data: undefined });
+    fetchMock = vi.fn(async () => githubPrCreated());
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const promote = (body?: unknown) =>
+    app.fetch(request("POST", "/api/changes/chg_abc123/github-pr", body ?? {}, USER_AUTH), env);
+
+  it("pushes the change branch to GitHub, then opens the PR from it", async () => {
+    const res = await promote();
+    expect(res.status).toBe(200);
+
+    // The workspace fork is cloned with a fresh read token…
+    expect(freshRepoToken).toHaveBeenCalledWith(
+      env.ARTIFACTS,
+      mockWorkspace.remote,
+      "read",
+      expect.anything(),
+    );
+    expect(cloneRepo).toHaveBeenCalledWith(
+      mockWorkspace.remote,
+      "artifacts-token",
+      expect.anything(),
+    );
+    // …and its tip is pushed to the Stratum-owned head ref on GitHub.
+    expect(pushBranchToRemote).toHaveBeenCalledWith(
+      {},
+      "/",
+      {
+        url: "https://github.com/acme/widgets.git",
+        remoteRef: "refs/heads/stratum/chg_abc123",
+        token: "ghp_secret_token",
+      },
+      expect.anything(),
+    );
+
+    // The push strictly precedes PR creation (a missing head ref is a 422).
+    const pushOrder = vi.mocked(pushBranchToRemote).mock.invocationCallOrder[0] ?? -1;
+    const prOrder = fetchMock.mock.invocationCallOrder[0] ?? -1;
+    expect(pushOrder).toBeGreaterThan(0);
+    expect(pushOrder).toBeLessThan(prOrder);
+
+    // The PR is opened from the branch that was just pushed.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/widgets/pulls",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.head).toBe("stratum/chg_abc123");
+    expect(prPayload.base).toBe("develop"); // project's known default branch
+    expect(prPayload.draft).toBe(true);
+
+    const body = (await res.json()) as { github: Record<string, unknown> };
+    expect(body.github).toEqual({
+      owner: "acme",
+      repo: "widgets",
+      branch: "stratum/chg_abc123",
+      pullRequestNumber: 42,
+      pullRequestUrl: "https://github.com/acme/widgets/pull/42",
+    });
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      "promoted",
+      expect.objectContaining({
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 42,
+        promotedBy: "user_test",
+      }),
+    );
+  });
+
+  it("promotes a bulk-imported project that only has sourceUrl", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        sourceUrl: "https://github.com/imported/repo.git",
+        sourceDefaultBranch: "trunk",
+      },
+    });
+
+    const res = await promote();
+    expect(res.status).toBe(200);
+    expect(pushBranchToRemote).toHaveBeenCalledWith(
+      {},
+      "/",
+      expect.objectContaining({ url: "https://github.com/imported/repo.git" }),
+      expect.anything(),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/imported/repo/pulls",
+      expect.anything(),
+    );
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk"); // sourceDefaultBranch wins
+  });
+
+  it("passes a valid caller-supplied base through to GitHub", async () => {
+    const res = await promote({ base: "release/1.2" });
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("release/1.2");
+  });
+
+  it.each([
+    "two words",
+    "bad..dots",
+    "-leading-dash",
+    "@{upstream}",
+    "branch.lock",
+    "/leading-slash",
+    "trailing-slash/",
+    "trailing-dot.",
+    "double//slash",
+    "back\\slash",
+    "colon:ref",
+    "star*glob",
+    "quest?ion",
+    "ctrl\u0007bell",
+    "a".repeat(201),
+    "",
+  ])("rejects garbage base %j without touching GitHub", async (base) => {
+    const res = await promote({ base });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("Invalid base branch name");
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-string base", async () => {
+    const res = await promote({ base: 42 });
+    expect(res.status).toBe(400);
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
+  });
+
+  it("400s when the project has neither githubUrl nor sourceUrl", async () => {
+    vi.mocked(getProject).mockResolvedValue({ success: true, data: mockProject });
+    const res = await promote();
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "Project is not connected to GitHub",
+    );
+  });
+
+  it("400s when the source is not a GitHub repository", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: { ...mockProject, sourceUrl: "https://gitlab.com/acme/widgets" },
+    });
+    const res = await promote();
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "Project source is not a GitHub repository",
+    );
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
+  });
+
+  it("surfaces GitHub's status and message on PR-creation failure, without the token", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          message: "Validation Failed",
+          errors: [{ resource: "PullRequest", field: "base", code: "invalid" }],
+        }),
+        { status: 422 },
+      ),
+    );
+    const res = await promote();
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string; code: string; githubStatus: number };
+    expect(body.code).toBe("GITHUB_ERROR");
+    expect(body.githubStatus).toBe(422);
+    expect(body.error).toContain("422");
+    expect(body.error).toContain("Validation Failed");
+    expect(body.error).toContain("base invalid");
+    expect(JSON.stringify(body)).not.toContain("ghp_secret_token");
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a non-JSON GitHub failure as status-only", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("<html>bad gateway</html>", { status: 502 }));
+    const res = await promote();
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string; githubStatus: number };
+    expect(body.error).toBe("GitHub PR creation failed (502)");
+    expect(body.githubStatus).toBe(502);
+  });
+
+  it("502s when the branch push fails, without calling the PR API", async () => {
+    vi.mocked(pushBranchToRemote).mockResolvedValue({
+      success: false,
+      error: new AppError(
+        "Git error: Failed to push branch: remote hung up",
+        "EXTERNAL_SERVICE_ERROR",
+        502,
+      ),
+    });
+    const res = await promote();
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("EXTERNAL_SERVICE_ERROR");
+    expect(body.error).toContain("Failed to push branch");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  it("re-promotion re-pushes the branch and reuses the existing PR", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: {
+        ...acceptedChange,
+        status: "promoted",
+        githubPrNumber: 7,
+        githubPrUrl: "https://github.com/acme/widgets/pull/7",
+      },
+    });
+    const res = await promote();
+    expect(res.status).toBe(200);
+    expect(pushBranchToRemote).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled(); // no duplicate-head 422
+    const body = (await res.json()) as { github: Record<string, unknown> };
+    expect(body.github).toEqual(
+      expect.objectContaining({
+        pullRequestNumber: 7,
+        pullRequestUrl: "https://github.com/acme/widgets/pull/7",
+      }),
+    );
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  it("400s when the change is not accepted", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, status: "open" },
+    });
+    const res = await promote();
+    expect(res.status).toBe(400);
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
+  });
+
+  it("400s when GITHUB_TOKEN is not configured", async () => {
+    env.GITHUB_TOKEN = undefined;
+    const res = await promote();
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "GitHub integration is not configured",
+    );
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("404s when the change's workspace no longer exists", async () => {
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Workspace", "fix-bug"),
+    });
+    const res = await promote();
+    expect(res.status).toBe(404);
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
+  });
+
+  it("400s when the workspace lookup fails for another reason", async () => {
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: false,
+      error: new AppError("KV unavailable", "KV_ERROR", 500),
+    });
+    const res = await promote();
+    expect(res.status).toBe(400);
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
+  });
+
+  it("404s when the change does not exist", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Change", "chg_abc123"),
+    });
+    const res = await promote();
+    expect(res.status).toBe(404);
+  });
+
+  it("400s when the change lookup fails for another reason", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+    const res = await promote();
+    expect(res.status).toBe(400);
+  });
+
+  it("404s when the project does not exist", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Project", "my-project"),
+    });
+    const res = await promote();
+    expect(res.status).toBe(404);
+  });
+
+  it("400s when the project lookup fails for another reason", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: false,
+      error: new AppError("KV unavailable", "KV_ERROR", 500),
+    });
+    const res = await promote();
+    expect(res.status).toBe(400);
+  });
+
+  it("400s when recording the promoted status fails after PR creation", async () => {
+    vi.mocked(updateChangeStatus).mockResolvedValue({
+      success: false,
+      error: new AppError("write failed", "DATABASE_ERROR", 500),
+    });
+    const res = await promote();
+    expect(res.status).toBe(400);
+  });
+
+  it("500s when the workspace clone fails", async () => {
+    vi.mocked(cloneRepo).mockResolvedValue({
+      success: false,
+      error: new AppError("Git error: Failed to clone repository", "EXTERNAL_SERVICE_ERROR", 502),
+    });
+    const res = await promote();
+    expect(res.status).toBe(500);
+    expect(pushBranchToRemote).not.toHaveBeenCalled();
   });
 });
