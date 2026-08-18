@@ -207,7 +207,6 @@ export default {
     const queueName = batch.queue;
 
     if (queueName.startsWith("stratum-imports")) {
-      // Handle import queue messages
       logger.info("Processing import queue batch", {
         queue: queueName,
         messageCount: batch.messages.length,
