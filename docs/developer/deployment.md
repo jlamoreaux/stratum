@@ -287,7 +287,9 @@ npx wrangler secret put GITHUB_CLIENT_SECRET
 # Email
 npx wrangler secret put EMAIL_FROM_ADDRESS
 
-# Analytics
+# Analytics — request events carry only the matched route pattern
+# (e.g. /:namespace/:slug/files), method, status, and latency; concrete
+# paths (namespaces, repo slugs, change ids, file paths) are never sent.
 npx wrangler secret put POSTHOG_API_KEY
 
 # Backups — encrypts backup blobs at rest (D1 dumps contain secrets).
