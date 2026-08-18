@@ -39,9 +39,11 @@ interface ConflictResolutionProps {
     strategy: "ours" | "theirs" | "manual";
     content?: string;
   }) => void;
+  /** Per-request CSP nonce — required so the card's scripts pass `script-src`. */
+  nonce: string;
 }
 
-export const ConflictResolution: FC<ConflictResolutionProps> = ({ conflict, onResolve }) => {
+export const ConflictResolution: FC<ConflictResolutionProps> = ({ conflict, onResolve, nonce }) => {
   const isResolved = !!conflict.resolvedAt;
 
   return (
@@ -79,6 +81,7 @@ export const ConflictResolution: FC<ConflictResolutionProps> = ({ conflict, onRe
             conflictId={conflict.id}
             onResolve={onResolve}
             disabled={isResolved}
+            nonce={nonce}
           />
         ))}
       </div>
@@ -88,14 +91,16 @@ export const ConflictResolution: FC<ConflictResolutionProps> = ({ conflict, onRe
           <button
             type="button"
             class="btn btn-primary"
-            onclick={`resolveAllConflicts('${conflict.id}', 'ours')`}
+            data-resolve-all="ours"
+            data-conflict-id={conflict.id}
           >
             Accept All Ours
           </button>
           <button
             type="button"
             class="btn btn-secondary"
-            onclick={`resolveAllConflicts('${conflict.id}', 'theirs')`}
+            data-resolve-all="theirs"
+            data-conflict-id={conflict.id}
           >
             Accept All Theirs
           </button>
@@ -107,6 +112,7 @@ export const ConflictResolution: FC<ConflictResolutionProps> = ({ conflict, onRe
 
       {!isResolved && (
         <script
+          nonce={nonce}
           dangerouslySetInnerHTML={{
             __html: `
             async function resolveAllConflicts(conflictId, strategy) {
@@ -131,6 +137,19 @@ export const ConflictResolution: FC<ConflictResolutionProps> = ({ conflict, onRe
                 alert('Network error: ' + err.message);
               }
             }
+
+            // Wire the "Accept All" buttons (replaces the former inline onclick
+            // attributes). Guarded per-button so a page with several conflict
+            // cards never double-binds.
+            (function () {
+              document.querySelectorAll('button[data-resolve-all]').forEach(function (btn) {
+                if (btn.dataset.wired) return;
+                btn.dataset.wired = '1';
+                btn.addEventListener('click', function () {
+                  resolveAllConflicts(btn.dataset.conflictId, btn.dataset.resolveAll);
+                });
+              });
+            })();
           `,
           }}
         />
@@ -148,13 +167,15 @@ interface ConflictFileViewerProps {
     content?: string;
   }) => void;
   disabled?: boolean;
+  /** Per-request CSP nonce for the per-file script block. */
+  nonce: string;
 }
 
 /**
  * Server-rendered conflict file viewer with client-side JavaScript for interactivity.
- * Uses data attributes and inline scripts for state management instead of React hooks.
+ * Uses data attributes and nonce'd scripts for state management instead of React hooks.
  */
-const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, disabled }) => {
+const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, disabled, nonce }) => {
   const fileId = file.path.replace(/[^a-zA-Z0-9]/g, "_");
 
   return (
@@ -171,7 +192,6 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
                 class="btn btn-sm btn-secondary"
                 data-resolution="ours"
                 data-file-id={fileId}
-                onclick={`handleFileResolve('${fileId}', 'ours')`}
               >
                 Accept Ours
               </button>
@@ -180,7 +200,6 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
                 class="btn btn-sm btn-secondary"
                 data-resolution="theirs"
                 data-file-id={fileId}
-                onclick={`handleFileResolve('${fileId}', 'theirs')`}
               >
                 Accept Theirs
               </button>
@@ -189,7 +208,6 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
                 class="btn btn-sm btn-secondary"
                 data-resolution="manual"
                 data-file-id={fileId}
-                onclick={`handleFileResolve('${fileId}', 'manual')`}
               >
                 Manual Edit
               </button>
@@ -243,11 +261,7 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
             rows={10}
             placeholder="Enter the resolved file content here..."
           />
-          <button
-            type="button"
-            class="btn btn-sm btn-primary"
-            onclick={`submitManualResolution('${fileId}')`}
-          >
+          <button type="button" class="btn btn-sm btn-primary" id={`manual-save-${fileId}`}>
             Save Manual Resolution
           </button>
         </div>
@@ -255,6 +269,7 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
 
       {!disabled && (
         <script
+          nonce={nonce}
           dangerouslySetInnerHTML={{
             __html: `
             // Track resolutions for this file
@@ -318,6 +333,29 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
                 alert('Network error: ' + err.message);
               }
             }
+
+            // Wire this file's buttons (replaces the former inline onclick
+            // attributes). Scoped to this fileId and guarded so repeated
+            // per-file scripts never double-bind.
+            (function () {
+              var fileId = ${JSON.stringify(fileId)};
+              document
+                .querySelectorAll('button[data-file-id="' + fileId + '"][data-resolution]')
+                .forEach(function (btn) {
+                  if (btn.dataset.wired) return;
+                  btn.dataset.wired = '1';
+                  btn.addEventListener('click', function () {
+                    handleFileResolve(fileId, btn.dataset.resolution);
+                  });
+                });
+              var saveBtn = document.getElementById('manual-save-' + fileId);
+              if (saveBtn && !saveBtn.dataset.wired) {
+                saveBtn.dataset.wired = '1';
+                saveBtn.addEventListener('click', function () {
+                  submitManualResolution(fileId);
+                });
+              }
+            })();
           `,
           }}
         />
