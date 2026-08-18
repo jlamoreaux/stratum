@@ -62,7 +62,6 @@ export async function syncAllProjects(
         branch,
       );
       if (result.success) {
-        synced++;
         projectLogger.info("Project synced successfully");
         // NOTE: writeSnapshotFromRepo must be called after any new sync trigger added here
         await writeSnapshotFromRepo(
@@ -76,13 +75,22 @@ export async function syncAllProjects(
           projectLogger,
         );
         if (checkResult.data.latestCommit) {
-          await updateProjectAfterSync(
+          const updateResult = await updateProjectAfterSync(
             env.STATE,
             project,
             checkResult.data.latestCommit,
             projectLogger,
           );
+          // Count the project as synced only once the metadata write lands:
+          // a stale lastSyncedCommit would make the next cron run re-import
+          // a repo that is already up to date.
+          if (!updateResult.success) {
+            failed++;
+            projectLogger.error("Failed to record sync metadata", updateResult.error);
+            continue;
+          }
         }
+        synced++;
       } else {
         failed++;
         projectLogger.error("Project sync failed", result.error);

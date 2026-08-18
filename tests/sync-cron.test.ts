@@ -128,6 +128,41 @@ describe("syncAllProjects (project-sync cron)", () => {
     );
   });
 
+  it("prefers sourceDefaultBranch over githubDefaultBranch when both are set", async () => {
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [makeProject({ sourceDefaultBranch: "trunk", githubDefaultBranch: "master" })],
+    });
+
+    await syncAllProjects(makeEnv());
+
+    expect(mockImport).toHaveBeenCalledWith(
+      expect.anything(),
+      "alice__my-repo",
+      "https://github.com/alice/my-repo",
+      expect.anything(),
+      "trunk",
+    );
+  });
+
+  it("counts the project as failed when recording sync metadata fails", async () => {
+    mockUpdateAfterSync.mockResolvedValueOnce({
+      success: false,
+      error: Object.assign(new Error("KV write failed"), {
+        code: "STORAGE_ERROR",
+        statusCode: 500,
+      }),
+    } as Awaited<ReturnType<typeof updateProjectAfterSync>>);
+    mockListProjects.mockResolvedValue({ success: true, data: [makeProject()] });
+
+    const result = await syncAllProjects(makeEnv());
+
+    // The import itself succeeded, but a stale lastSyncedCommit would trigger
+    // a pointless re-import next run — report it as failed, not synced.
+    expect(result).toEqual({ synced: 0, failed: 1, skipped: 0 });
+    expect(mockSnapshot).toHaveBeenCalledTimes(1);
+  });
+
   it("skips projects that have not enabled auto-sync", async () => {
     mockListProjects.mockResolvedValue({
       success: true,
