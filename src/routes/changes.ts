@@ -1,6 +1,7 @@
 import { type Context, Hono } from "hono";
 import { loadPolicy } from "../evaluation";
 import type { EvalPolicy } from "../evaluation/types";
+import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { runPostMergeCheck } from "../merge/post-merge";
 import { checkMergeProtection } from "../merge/protection";
 import { emitEvent } from "../queue/events";
@@ -1285,6 +1286,18 @@ app.post("/changes/:id/evaluate", async (c) => {
     logger.error("Failed to update change status", updateResult.error);
     return badRequest(updateResult.error.message);
   }
+
+  // Layer mode: report the verdict to the change's linked GitHub PR (comment
+  // upsert + "stratum/evaluation" commit status). Best-effort — a GitHub
+  // failure never fails the evaluation — and a no-op for changes without a
+  // linked PR or projects without a GitHub source.
+  await reportEvaluationToGitHub(
+    c.env,
+    { ...change, evaluatedSha, ...(workspaceHeadSha ? { workspaceHeadSha } : {}) },
+    project,
+    buildEvaluationReport(evalResult, evalRuns),
+    logger,
+  );
 
   logger.info("Change re-evaluated", {
     changeId: id,

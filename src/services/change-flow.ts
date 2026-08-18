@@ -8,6 +8,7 @@ import {
   loadPolicy,
 } from "../evaluation";
 import type { EvalPolicy, EvalResult, Evaluator } from "../evaluation/types";
+import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { type EventActor, emitEvent } from "../queue/events";
 import { getAgent } from "../storage/agents";
 import { createChange, updateChangeStatus } from "../storage/changes";
@@ -398,6 +399,18 @@ export async function createChangeWithEvaluation(
     evaluatedTreeOid,
     ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
   };
+
+  // Layer mode: report the verdict to the change's linked GitHub PR (comment +
+  // commit status). Best-effort by contract — a GitHub failure never fails the
+  // evaluation — and a no-op unless the project has a GitHub source and the
+  // change has a linked PR (freshly created changes normally don't yet).
+  await reportEvaluationToGitHub(
+    env,
+    updatedChange,
+    project,
+    buildEvaluationReport(evalResult, evalRuns),
+    logger,
+  );
 
   logger.info("Change created and evaluated", {
     changeId: change.id,
