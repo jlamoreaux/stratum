@@ -6,7 +6,7 @@ import type { Logger } from "../utils/logger";
 import type { PhaseTimer } from "../utils/phase-timer";
 import { type Result, err, fromPromise, ok } from "../utils/result";
 import { commitObject } from "./git-objects";
-import { MemoryFS } from "./memory-fs";
+import { MODE_SYMLINK, MemoryFS } from "./memory-fs";
 import { packObjects, placeLooseObject, unpackObjects } from "./object-loader";
 
 // Custom HTTP client for Cloudflare Workers
@@ -95,13 +95,15 @@ const DIR = "/";
 export interface NodeFS {
   promises: {
     readFile(path: string, options?: { encoding?: string }): Promise<string | Uint8Array>;
-    writeFile(path: string, data: string | Uint8Array): Promise<void>;
+    writeFile(path: string, data: string | Uint8Array, options?: { mode?: number }): Promise<void>;
     unlink(path: string): Promise<void>;
     readdir(path: string): Promise<string[]>;
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     rmdir(path: string): Promise<void>;
     stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
     lstat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+    readlink(path: string): Promise<string>;
+    symlink(target: string, path: string): Promise<void>;
   };
 }
 
@@ -1123,7 +1125,8 @@ export async function batchMergeStagedTrees(
   return ok(results);
 }
 
-async function squashMerge(
+/** Exported for tests (the workdir copy must preserve file modes and symlinks). */
+export async function squashMerge(
   projectFs: NodeFS,
   projectDir: string,
   workspaceSha: string,
@@ -1142,20 +1145,42 @@ async function squashMerge(
 
   const workspaceFiles = workspaceFilesResult.data;
   const projectFiles = projectFilesResult.data;
-  const workspaceMap = new Map(workspaceFiles);
+  const workspaceMap = new Map(workspaceFiles.map(([path, oid]) => [path, oid]));
 
-  const changed = workspaceFiles.filter(([path, hash]) => {
-    const projectHash = projectFiles.find(([p]) => p === path)?.[1];
-    return projectHash !== hash;
+  // Compare oid AND mode so a mode-only change (chmod +x, file<->symlink) is
+  // carried over — the blob oid alone is identical in that case.
+  const changed = workspaceFiles.filter(([path, hash, mode]) => {
+    const projectEntry = projectFiles.find(([p]) => p === path);
+    return projectEntry?.[1] !== hash || projectEntry?.[2] !== mode;
   });
   const deleted = projectFiles.filter(([path]) => !workspaceMap.has(path));
 
-  for (const [path] of changed) {
-    const contentResult = await readFileAtCommit(projectFs, workspaceSha, path, logger);
-    if (!contentResult.success) return err(contentResult.error);
+  for (const [path, , mode] of changed) {
+    const blobResult = await fromPromise(
+      git.readBlob({ fs: projectFs, dir: DIR, oid: workspaceSha, filepath: path }),
+    );
+    if (!blobResult.success) {
+      logger.error("Failed to read file at commit", blobResult.error, { workspaceSha, path });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to read file: ${path} at commit: ${workspaceSha}`,
+          blobResult.error,
+        ),
+      );
+    }
+    const blob = blobResult.data.blob;
 
+    const fullPath = `${projectDir}/${path}`;
     try {
-      await projectFs.promises.writeFile(`${projectDir}/${path}`, contentResult.data);
+      // Drop whatever is at the path first so file<->symlink transitions and
+      // stale exec bits can't leak through the overwrite.
+      await projectFs.promises.unlink(fullPath).catch(() => {});
+      if (mode === MODE_SYMLINK) {
+        await projectFs.promises.symlink(new TextDecoder().decode(blob), fullPath);
+      } else {
+        await projectFs.promises.writeFile(fullPath, blob, { mode });
+      }
     } catch (error) {
       const appError = error instanceof Error ? error : new Error(String(error));
       logger.error("Failed to write file during squash merge", appError, { path, projectRemote });
@@ -1469,8 +1494,8 @@ async function listFilesAtCommit(
   fs: NodeFS,
   ref: string,
   logger: Logger,
-): Promise<Result<[path: string, oid: string][], AppError>> {
-  const files: [string, string][] = [];
+): Promise<Result<[path: string, oid: string, mode: number][], AppError>> {
+  const files: [string, string, number][] = [];
   const walkResult = await fromPromise(
     git.walk({
       fs,
@@ -1481,7 +1506,8 @@ async function listFilesAtCommit(
         const type = await entry.type();
         if (type === "blob") {
           const oid = await entry.oid();
-          files.push([filepath, oid]);
+          const mode = await entry.mode();
+          files.push([filepath, oid, mode]);
         }
       },
     }),
@@ -1705,7 +1731,9 @@ async function walkDir(
       const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
 
       try {
-        const stat = await fs.promises.stat(fullPath);
+        // lstat: a symlink is a leaf entry (its own tree object), never recursed
+        // into — and a dangling link must not fail the whole walk via ENOENT.
+        const stat = await fs.promises.lstat(fullPath);
         if (stat.isDirectory()) {
           const subFilesResult = await walkDir(fs, fullPath, `${prefix}${entry}/`, logger);
           if (!subFilesResult.success) return err(subFilesResult.error);

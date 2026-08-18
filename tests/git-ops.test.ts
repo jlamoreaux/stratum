@@ -143,8 +143,25 @@ describe("MemoryFS walkDir (via manual test)", () => {
     expect(files).toContain("README.md");
     expect(files.some((f) => f.startsWith(".git"))).toBe(false);
   });
+
+  it("lists symlinks as leaf entries without recursing or failing on dangling links", async () => {
+    const fs = new MemoryFS();
+    await fs.promises.writeFile("/src/index.ts", "export {}");
+    await fs.promises.symlink("index.ts", "/src/alias.ts");
+    await fs.promises.symlink("missing.ts", "/src/dangling.ts");
+    await fs.promises.symlink("/src", "/srclink");
+
+    const files = await walkDir(fs, "/", "");
+    expect(files).toContain("src/index.ts");
+    expect(files).toContain("src/alias.ts");
+    expect(files).toContain("src/dangling.ts");
+    // A symlink to a directory is a leaf, never recursed into.
+    expect(files).toContain("srclink");
+    expect(files.some((f) => f.startsWith("srclink/"))).toBe(false);
+  });
 });
 
+// Mirrors src/storage/git-ops.ts walkDir (lstat so symlinks are leaves).
 async function walkDir(fs: MemoryFS, base: string, prefix: string): Promise<string[]> {
   const nodeFS = fs.toNodeFS();
   const entries = await nodeFS.promises.readdir(base === "/" ? "/" : base);
@@ -153,7 +170,7 @@ async function walkDir(fs: MemoryFS, base: string, prefix: string): Promise<stri
   for (const entry of entries) {
     if (entry === ".git") continue;
     const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
-    const stat = await nodeFS.promises.stat(fullPath);
+    const stat = await nodeFS.promises.lstat(fullPath);
     if (stat.isDirectory()) {
       files.push(...(await walkDir(fs, fullPath, `${prefix}${entry}/`)));
     } else {
