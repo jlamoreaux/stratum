@@ -56,9 +56,11 @@ function parseEntry<T>(raw: string, key: string, logger: Logger): Result<T, AppE
       `Failed to parse KV entry for key "${key}"`,
       error instanceof Error ? error : undefined,
     );
-    return err(
-      new AppError(`Failed to parse KV entry for key "${key}"`, "PARSE_ERROR", 500, { key }),
-    );
+    // S5 (#130): the key embeds tenant identifiers (project id, workspace
+    // name). Keep it in the log/context above, NOT in the message — route
+    // handlers have echoed storage-error messages to callers, and a corrupt
+    // entry must not confirm another tenant's resource exists.
+    return err(new AppError("Failed to parse stored entry", "PARSE_ERROR", 500, { key }));
   }
 }
 
@@ -326,8 +328,11 @@ export async function getWorkspace(
   logger.debug("Fetching workspace", { projectId, name });
   const raw = await kv.get(workspaceKey(projectId, name));
   if (!raw) {
+    // S5 (#130): the project id stays in context (for logs), not the message —
+    // handlers surface error messages, and unauthorized-vs-missing must stay
+    // indistinguishable across tenants.
     return err(
-      new AppError(`Workspace '${name}' not found in project '${projectId}'`, "NOT_FOUND", 404, {
+      new AppError(`Workspace '${name}' not found`, "NOT_FOUND", 404, {
         resource: "workspace",
         projectId,
         name,

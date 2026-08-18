@@ -58,8 +58,11 @@ app.post("/:namespace/:slug/workspaces", async (c) => {
     if (projectResult.error.code === "NOT_FOUND") {
       return notFound("Project", `${namespace}/${slug}`);
     }
+    // S5 (#130): storage failures stay generic — echoing the storage error
+    // (which can carry KV keys/ids) would let a caller distinguish states the
+    // truth table deliberately collapses.
     logger.error("Failed to get project", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return internalError("Internal error");
   }
   const project = projectResult.data;
 
@@ -100,7 +103,7 @@ app.post("/:namespace/:slug/workspaces", async (c) => {
 
   if (!setResult.success) {
     logger.error("Failed to set workspace", setResult.error);
-    return badRequest(setResult.error.message);
+    return internalError("Internal error");
   }
 
   logger.info("Workspace created", { workspaceName, namespace, slug, projectId: project.id });
@@ -146,8 +149,9 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
     if (projectResult.error.code === "NOT_FOUND") {
       return notFound("Project", `${namespace}/${slug}`);
     }
+    // S5 (#130): generic — see the create route.
     logger.error("Failed to get project", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return internalError("Internal error");
   }
   const project = projectResult.data;
 
@@ -157,7 +161,7 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
   const workspacesResult = await listWorkspaces(c.env.STATE, project.id, logger);
   if (!workspacesResult.success) {
     logger.error("Failed to list workspaces", workspacesResult.error);
-    return badRequest(workspacesResult.error.message);
+    return internalError("Internal error");
   }
 
   logger.info("Workspaces listed", {
@@ -221,8 +225,11 @@ app.post("/:name/commit", async (c) => {
     if (workspaceResult.error.code === "NOT_FOUND") {
       return notFound("Workspace", workspaceName);
     }
+    // S5 (#130): a corrupt/unreadable entry surfaces as a generic 500 — never
+    // the storage message (whose KV key embeds the project id), which would
+    // confirm to a stranger that this workspace exists.
     logger.error("Failed to get workspace", workspaceResult.error);
-    return badRequest(workspaceResult.error.message);
+    return internalError("Internal error");
   }
   const workspace = workspaceResult.data;
 
@@ -235,7 +242,7 @@ app.post("/:name/commit", async (c) => {
   if (!projectResult.success) {
     if (projectResult.error.code === "NOT_FOUND") return notFound("Workspace", workspaceName);
     logger.error("Failed to resolve project for commit authz", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return internalError("Internal error");
   }
   const project = projectResult.data;
 
@@ -356,8 +363,9 @@ app.delete("/:name", async (c) => {
     if (workspaceResult.error.code === "NOT_FOUND") {
       return notFound("Workspace", workspaceName);
     }
+    // S5 (#130): generic — see the commit route.
     logger.error("Failed to get workspace", workspaceResult.error);
-    return badRequest(workspaceResult.error.message);
+    return internalError("Internal error");
   }
   const workspace = workspaceResult.data;
 
@@ -368,7 +376,7 @@ app.delete("/:name", async (c) => {
   if (!projectResult.success) {
     if (projectResult.error.code === "NOT_FOUND") return notFound("Workspace", workspaceName);
     logger.error("Failed to resolve project for delete authz", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return internalError("Internal error");
   }
   const project = projectResult.data;
 
@@ -402,7 +410,7 @@ app.delete("/:name", async (c) => {
   const deleteResult = await deleteWorkspace(c.env.STATE, projectId, workspaceName, logger);
   if (!deleteResult.success) {
     logger.error("Failed to delete workspace", deleteResult.error);
-    return badRequest(deleteResult.error.message);
+    return internalError("Internal error");
   }
 
   logger.info("Workspace deleted", { workspaceName, projectId });
