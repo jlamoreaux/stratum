@@ -151,15 +151,19 @@ function pktLine(payload: string): string {
   return (payload.length + 4).toString(16).padStart(4, "0") + payload;
 }
 
+/** Real receive-pack framing: every command line ends with LF, and capabilities
+ * ride on the FIRST command only. Building it correctly keeps these fixtures from
+ * passing on parser tolerance that a real client would never exercise. */
 function pushBody(lines: string[]): Uint8Array {
   return new TextEncoder().encode(
-    `${lines.map((l) => pktLine(`${l}\0report-status`)).join("")}0000`,
+    `${lines
+      .map((line, index) => pktLine(`${line}${index === 0 ? "\0report-status" : ""}\n`))
+      .join("")}0000`,
   );
 }
 
 function singleRefPush(oldOid: string, newOid: string, ref: string): Uint8Array {
-  const line = `${oldOid} ${newOid} ${ref}\0report-status`;
-  return new TextEncoder().encode(`${pktLine(line)}0000`);
+  return pushBody([`${oldOid} ${newOid} ${ref}`]);
 }
 
 /** A realistic upload-pack advertisement carrying branch AND tag refs (with the
@@ -340,7 +344,7 @@ describe("project-remote tag PUSH policy: explicit in-protocol refusal", () => {
         headers: basic(OWNER_TOKEN),
         // side-band-64k so guidance is streamed as remote: lines
         body: new TextEncoder().encode(
-          `${pktLine(`${ZEROS} ${OID_TAG} refs/tags/v1.0.0\0report-status side-band-64k`)}0000`,
+          `${pktLine(`${ZEROS} ${OID_TAG} refs/tags/v1.0.0\0report-status side-band-64k\n`)}0000`,
         ),
       }),
       env,

@@ -254,6 +254,53 @@ describe("restore round-trip with tags", () => {
     const rebuilt = await reconstructRepo(snap.pack, snap.manifest, logger);
     expect(rebuilt.success).toBe(false);
   });
+
+  // The manifest is read back from storage and its tag names are interpolated
+  // into `refs/tags/<name>` and written with force:true — a traversing name would
+  // resolve outside refs/tags/ and could overwrite refs/heads/main.
+  it.each([
+    ["path traversal into refs/heads", "../heads/main"],
+    ["absolute ref path", "/refs/heads/main"],
+    ["parent-dir segment", "v1/../../heads/main"],
+    ["leading dot", ".hidden"],
+    ["lock suffix", "v1.0.0.lock"],
+    ["empty name", ""],
+    ["control characters", "v1\u0000evil"],
+  ])("rejects a manifest tag name with %s", async (_label, tagName) => {
+    const { fs } = await buildRepo([{ "a.txt": "one" }]);
+    const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);
+    if (!walk.success || !("objects" in walk.data)) throw new Error("walk failed");
+    const snap = buildSnapshot(project, walk.data, "2026-08-18T00:00:00Z");
+    const tipSha = snap.manifest.tipSha;
+    // A real, present object id: only the NAME is hostile here.
+    snap.manifest.tags = [{ name: tagName, oid: tipSha }];
+
+    const rebuilt = await reconstructRepo(snap.pack, snap.manifest, logger);
+
+    expect(rebuilt.success).toBe(false);
+    if (rebuilt.success) throw new Error("expected rejection");
+    expect(rebuilt.error.message).toContain("Invalid tag name in manifest");
+  });
+
+  it("still reconstructs ordinary tag names containing dots and slashes", async () => {
+    const { fs } = await buildRepo([{ "a.txt": "one" }]);
+    const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);
+    if (!walk.success || !("objects" in walk.data)) throw new Error("walk failed");
+    const snap = buildSnapshot(project, walk.data, "2026-08-18T00:00:00Z");
+    snap.manifest.tags = [{ name: "release/v1.0.0", oid: snap.manifest.tipSha }];
+
+    const rebuilt = await reconstructRepo(snap.pack, snap.manifest, logger);
+
+    expect(rebuilt.success).toBe(true);
+    if (!rebuilt.success) return;
+    expect(
+      await git.resolveRef({
+        fs: rebuilt.data.fs,
+        dir: rebuilt.data.dir,
+        ref: "refs/tags/release/v1.0.0",
+      }),
+    ).toBe(snap.manifest.tipSha);
+  });
 });
 
 describe("restoreProjectRepo tag push", () => {
@@ -312,5 +359,48 @@ describe("restoreProjectRepo tag push", () => {
     const result = await restoreProjectRepo(env, snap, {}, logger);
     expect(result.success).toBe(false);
     expect(deleteFn).toHaveBeenCalledWith("repo");
+  });
+
+  /** A forced restore over an EXISTING repo is deliberately not rolled back, so a
+   * mid-list tag failure leaves main plus some tags on the remote. The failure has
+   * to say how far it got — otherwise the partial state is invisible. */
+  function makeExistingEnv(deleteFn = vi.fn(async () => true)) {
+    const env = {
+      ARTIFACTS: {
+        get: vi.fn(async () => ({
+          name: "repo",
+          remote: project.remote,
+          createToken: vi.fn(async () => ({ plaintext: "tok" })),
+        })),
+        create: vi.fn(),
+        delete: deleteFn,
+      } as unknown as Env["ARTIFACTS"],
+    } as Env;
+    return { env, deleteFn };
+  }
+
+  it("reports how many tags landed when a forced restore fails mid-list", async () => {
+    // main ok, first tag ok, second tag fails -> 1 of 2 tags pushed.
+    mockPush
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValueOnce(new Error("tag rejected"));
+    const { env, deleteFn } = makeExistingEnv();
+    const { snap } = await makeSnapshot();
+
+    const result = await restoreProjectRepo(env, snap, { force: true }, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    // Names the progress rather than a bare "tag push failed".
+    expect(result.error.message).toContain("1/2 tags pushed");
+    // The pre-existing repo is never deleted by the rollback path.
+    expect(deleteFn).not.toHaveBeenCalled();
+    // And the partial state is logged for an operator/retry.
+    expect(logger.error).toHaveBeenCalledWith(
+      "Forced restore left partial state on an existing repo",
+      undefined,
+      expect.objectContaining({ mainPushed: true, tagCount: 2 }),
+    );
   });
 });

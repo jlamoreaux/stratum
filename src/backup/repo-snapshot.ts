@@ -102,9 +102,13 @@ export async function walkRepoObjects(
       return add(oid, obj.object as Uint8Array);
     };
 
-    /** Add a commit's full history (commits + trees + blobs); false = over budget. */
-    const addCommitHistory = async (tip: string): Promise<boolean> => {
-      const entries = await git.log({ fs, dir, ref: tip, depth: -1 });
+    /** Add a commit's full history (commits + trees + blobs); false = over budget.
+     * `prefetched` lets the HEAD traversal reuse the log it already read. */
+    const addCommitHistory = async (
+      tip: string,
+      prefetched?: Awaited<ReturnType<typeof git.log>>,
+    ): Promise<boolean> => {
+      const entries = prefetched ?? (await git.log({ fs, dir, ref: tip, depth: -1 }));
       for (const entry of entries) {
         if (seen.has(entry.oid)) continue;
         if (!(await addWrapped(entry.oid))) return false;
@@ -115,14 +119,7 @@ export async function walkRepoObjects(
       return true;
     };
 
-    for (const entry of log) {
-      if (seen.has(entry.oid)) continue;
-      if (!(await addWrapped(entry.oid))) return ok({ tooLarge: true });
-      const treeObjects = await extractTreeObjects(fs, dir, entry.commit.tree);
-      for (const o of treeObjects) {
-        if (!add(o.oid, o.bytes)) return ok({ tooLarge: true });
-      }
-    }
+    if (!(await addCommitHistory(tipSha, log))) return ok({ tooLarge: true });
 
     // Tags: walk every refs/tags/* tip too. A tag whose objects are missing
     // locally (e.g. the clone could not deliver them) is SKIPPED with a warning
@@ -132,7 +129,13 @@ export async function walkRepoObjects(
     let tagNames: string[] = [];
     try {
       tagNames = await git.listTags({ fs, dir });
-    } catch {
+    } catch (error) {
+      // No tags is normal; an unreadable ref store is not. Log so the two are
+      // distinguishable, then back up the repo without tags rather than failing.
+      logger.warn("Failed to list tags for snapshot; backing up without tag refs", {
+        dir,
+        error: error instanceof Error ? error.message : String(error),
+      });
       tagNames = [];
     }
     for (const name of [...tagNames].sort()) {

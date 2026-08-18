@@ -61,6 +61,13 @@ export async function reconstructRepo(
     // Tag refs (#182). `tags` is OPTIONAL: manifests from backups taken before
     // tag support omit it, and such a restore must keep working unchanged.
     for (const tag of manifest.tags ?? []) {
+      // The name becomes a ref path component and is written with force:true,
+      // and the manifest is read back from storage — so validate here rather
+      // than trust the snapshot writer. A name containing `..` would resolve
+      // outside refs/tags/ and could overwrite refs/heads/main.
+      if (!isValidTagName(tag.name)) {
+        return err(new AppError(`Invalid tag name in manifest: ${tag.name}`, "BACKUP_ERROR", 500));
+      }
       await git.writeRef({
         // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
         fs: fs as any,
@@ -84,6 +91,24 @@ export async function reconstructRepo(
     logger.error("Failed to reconstruct repo", error instanceof Error ? error : undefined);
     return err(new AppError("Failed to reconstruct repo", "BACKUP_ERROR", 500));
   }
+}
+
+/**
+ * Whether a manifest tag name is a safe `refs/tags/<name>` path component.
+ * Mirrors the parts of git's ref-name rules that matter for path traversal.
+ */
+function isValidTagName(name: unknown): name is string {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    name.length <= 255 &&
+    /^[\w.\-+/]+$/.test(name) &&
+    !name.includes("..") &&
+    !name.startsWith("/") &&
+    !name.endsWith("/") &&
+    !name.startsWith(".") &&
+    !name.endsWith(".lock")
+  );
 }
 
 /**
@@ -168,6 +193,18 @@ export async function restoreProjectRepo(
       { force: repoExists },
     );
     if (!tagsPushed.success) {
+      // rollbackIfCreated is a no-op for a pre-existing repo, so a forced restore
+      // that fails here leaves main pushed and only some tags present. Say so
+      // explicitly: the caller's error alone cannot convey how far it got.
+      if (repoExists) {
+        logger.error("Forced restore left partial state on an existing repo", undefined, {
+          name,
+          tipSha: snapshot.manifest.tipSha,
+          mainPushed: true,
+          tagCount: tagNames.length,
+          detail: tagsPushed.error.message,
+        });
+      }
       await rollbackIfCreated();
       return err(tagsPushed.error);
     }

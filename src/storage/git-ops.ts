@@ -264,7 +264,12 @@ export async function pushTags(
   logger: Logger,
   opts?: { force?: boolean },
 ): Promise<Result<void, AppError>> {
-  for (const name of tagNames) {
+  // Tags are pushed one ref at a time, so a mid-list failure leaves earlier tags
+  // on the remote. Report exactly which ones landed: a forced restore over an
+  // existing repo is not rolled back, and an operator (or a retry, which is
+  // idempotent for already-pushed tags) needs to know how far it got.
+  const pushedTags: string[] = [];
+  for (const [index, name] of tagNames.entries()) {
     const ref = `refs/tags/${name}`;
     const res = await fromPromise(
       git.push({
@@ -279,11 +284,22 @@ export async function pushTags(
       }),
     );
     if (!res.success) {
-      logger.error("Failed to push tag during restore", res.error, { remote, ref });
+      logger.error("Failed to push tag during restore", res.error, {
+        remote,
+        ref,
+        failedTag: name,
+        pushedTags,
+        unpushedTags: tagNames.slice(index + 1),
+      });
       return err(
-        new ExternalServiceError("Git", `Failed to push tag ${name} during restore`, res.error),
+        new ExternalServiceError(
+          "Git",
+          `Failed to push tag ${name} during restore (${pushedTags.length}/${tagNames.length} tags pushed before the failure)`,
+          res.error,
+        ),
       );
     }
+    pushedTags.push(name);
   }
   return ok(undefined);
 }
@@ -441,15 +457,24 @@ export interface RepoTagEntry {
  * target outside the depth window — is returned with `unresolvable: true`
  * rather than failing the whole listing.
  */
-export async function collectRepoTags(fs: NodeFS, dir: string): Promise<RepoTagEntry[]> {
+export async function collectRepoTags(
+  fs: NodeFS,
+  dir: string,
+  logger?: Logger,
+): Promise<RepoTagEntry[]> {
   const names = await git.listTags({ fs, dir });
   const entries: RepoTagEntry[] = [];
   for (const name of [...names].sort()) {
     let oid: string;
     try {
       oid = await git.resolveRef({ fs, dir, ref: `refs/tags/${name}` });
-    } catch {
-      // Ref file unreadable — nothing meaningful to show for this tag.
+    } catch (error) {
+      // Ref file unreadable — nothing meaningful to show for this tag. Logged so
+      // a corrupt ref store is distinguishable from a repo that simply has none.
+      logger?.warn("Skipping tag with unresolvable ref", {
+        tag: name,
+        error: error instanceof Error ? error.message : String(error),
+      });
       continue;
     }
     const entry: RepoTagEntry = {
@@ -487,9 +512,16 @@ export async function collectRepoTags(fs: NodeFS, dir: string): Promise<RepoTagE
       }
       // A peel chain that never terminated (>10 hops) is unresolvable too.
       if (entry.targetSha === null) entry.unresolvable = true;
-    } catch {
+    } catch (error) {
       // The object at `current` is missing locally. If we peeled at least one
       // tag object, `current` names the intended target — record it, degraded.
+      // Expected for a target outside the shallow window; logged at debug so a
+      // corrupt object store is still traceable.
+      logger?.debug("Tag target not present locally; listing it as unresolvable", {
+        tag: name,
+        oid: current,
+        error: error instanceof Error ? error.message : String(error),
+      });
       entry.targetSha = current === oid ? null : current;
       entry.unresolvable = true;
     }
@@ -514,7 +546,9 @@ export async function listRepoTags(
   const cloneResult = await cloneRepo(remote, token, logger, httpClient, { includeTags: true });
   if (!cloneResult.success) return err(cloneResult.error);
 
-  const collected = await fromPromise(collectRepoTags(cloneResult.data.fs, cloneResult.data.dir));
+  const collected = await fromPromise(
+    collectRepoTags(cloneResult.data.fs, cloneResult.data.dir, logger),
+  );
   if (!collected.success) {
     logger.error("Failed to collect repo tags", collected.error, { remote });
     return err(new ExternalServiceError("Git", "Failed to list tags", collected.error));
