@@ -1,10 +1,13 @@
-# Error Codes
+---
+title: Error codes
+description: HTTP status codes and machine-readable error codes returned by the Stratum API.
+---
 
 Errors are returned as JSON: `{ "error": "<human-readable message>" }`, with a
 machine-readable `code` field present on some errors. The per-endpoint status
-codes are in the [OpenAPI specification](openapi.yml).
+codes are in the [OpenAPI specification](/reference/openapi/).
 
-## HTTP Status Codes
+## HTTP status codes
 
 | Code | Meaning |
 |------|---------|

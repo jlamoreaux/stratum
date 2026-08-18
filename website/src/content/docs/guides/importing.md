@@ -1,9 +1,12 @@
-# Importing from GitHub
+---
+title: Importing from GitHub
+description: Import a repository from GitHub, GitLab, or Bitbucket, track progress, and keep the project in sync with its source.
+---
 
 Stratum imports repositories from **GitHub, GitLab, and Bitbucket**. Imports run
 as background jobs, so large repositories don't block the request. The complete
 request/response contract for every endpoint on this page is in the
-[OpenAPI specification](../api/openapi.yml).
+[OpenAPI specification](/reference/openapi/).
 
 Examples use the hosted instance and a user API token — substitute your own
 host and token:
@@ -91,4 +94,5 @@ curl -X POST "$STRATUM_HOST/api/projects/@username/repo/sync/settings" \
 `GET …/sync/history` (paginated with `limit`/`offset`).
 
 Bidirectional GitHub sync — inbound webhooks and outbound PR promotion, i.e.
-**layer mode** — is covered in [Getting started](getting-started.md).
+**layer mode** — is covered in
+[Getting started](/guides/getting-started/#choose-your-level-of-buy-in-layer-mode-vs-alternative-mode).

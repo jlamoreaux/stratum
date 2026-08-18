@@ -1,10 +1,13 @@
-# Authentication
+---
+title: Authentication
+description: Bearer tokens, session cookies, anonymous access, and the admin API key.
+---
 
 Most API endpoints accept a Stratum API token as an
 `Authorization: Bearer <token>` header. Browser requests may instead be
 authenticated by the `stratum_session` cookie. The
-[OpenAPI specification](openapi.yml) marks the exact security requirements per
-endpoint.
+[OpenAPI specification](/reference/openapi/) marks the exact security
+requirements per endpoint.
 
 ## API tokens
 
@@ -18,7 +21,7 @@ For programmatic access:
 
 ```bash
 curl -H "Authorization: Bearer stratum_user_xxxxx" \
-  https://your-instance.workers.dev/api/projects
+  https://app.usestratum.dev/api/projects
 ```
 
 ## Session cookies

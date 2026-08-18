@@ -2,6 +2,8 @@
 
 Welcome to the Stratum documentation. This directory contains comprehensive guides for users, developers, and API consumers.
 
+The public-facing subset (user guide and API reference) is also published as a docs site built from [`website/`](../website/) — when editing those pages here, mirror the change in `website/src/content/docs/` (the OpenAPI spec needs no mirroring; the site build copies `api/openapi.yml` automatically).
+
 ## Documentation Structure
 
 ```
