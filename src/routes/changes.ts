@@ -12,6 +12,7 @@ import {
   runEvaluation,
 } from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
+import { dismissApprovals } from "../storage/change-reviews";
 import {
   getChange,
   getChangesByIds,
@@ -1265,6 +1266,35 @@ app.post("/changes/:id/evaluate", async (c) => {
     },
     evaluateCostSamples,
   );
+
+  // Stale-approval dismissal (#193): a different evaluated sha means any prior
+  // 'approve' verdicts were given for code the reviewer never saw — drop them
+  // before re-pinning, so a re-push can't merge on approvals for the old
+  // revision. request_changes verdicts survive, and a no-op re-evaluation of
+  // the same sha (including legacy changes with no recorded sha) keeps
+  // approvals. Dismiss BEFORE the sha update: if the dismissal fails we bail
+  // with the old sha still pinned, never with stale approvals against a new one.
+  if (change.evaluatedSha !== undefined && change.evaluatedSha !== evaluatedSha) {
+    const dismissResult = await dismissApprovals(c.env.DB, logger, id);
+    if (!dismissResult.success) {
+      logger.error("Failed to dismiss stale approvals", dismissResult.error);
+      return internalError(dismissResult.error.message);
+    }
+    if (dismissResult.data > 0) {
+      await recordAudit(c.env.DB, logger, {
+        action: "review.approvals_dismissed",
+        actorType: "user",
+        actorId: userId,
+        subject: id,
+        detail: {
+          project: change.project,
+          dismissed: dismissResult.data,
+          previousEvaluatedSha: change.evaluatedSha,
+          evaluatedSha,
+        },
+      });
+    }
+  }
 
   const updateResult = await updateChangeStatus(
     c.env.DB,

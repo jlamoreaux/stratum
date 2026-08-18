@@ -183,6 +183,35 @@ export async function listReviews(
   }
 }
 
+/**
+ * Dismiss every 'approve' verdict on a change because its evaluated revision
+ * changed (#193) — those approvals were given for different code and must not
+ * count toward requiredApprovals. 'request_changes' verdicts are kept, matching
+ * GitHub's dismiss-stale-approvals-on-push semantics. Returns the number of
+ * approvals dismissed.
+ */
+export async function dismissApprovals(
+  db: D1Database,
+  logger: Logger,
+  changeId: string,
+): Promise<Result<number, AppError>> {
+  try {
+    const result = await db
+      .prepare("DELETE FROM change_reviews WHERE change_id = ? AND verdict = 'approve'")
+      .bind(changeId)
+      .run();
+    const dismissed = result.meta?.changes ?? 0;
+    if (dismissed > 0) {
+      logger.info("Stale approvals dismissed", { changeId, dismissed });
+    }
+    return ok(dismissed);
+  } catch (error) {
+    const appError = toAppError(error, "dismissApprovals", { changeId });
+    logger.error("Failed to dismiss approvals", appError, { changeId });
+    return err(appError);
+  }
+}
+
 /** Current approval count for a change (one vote per reviewer). */
 export async function countApprovals(
   db: D1Database,
