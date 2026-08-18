@@ -984,6 +984,22 @@ describe("git smart-HTTP proxy — workspace push ref policy (S3)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("a PROJECT push with an unknown Content-Encoding fails closed (400)", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: { ...basic(OWNER_TOKEN), "Content-Encoding": "br" },
+        body: WS_MAIN_PUSH,
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("a gzipped PROJECT push is decoded before gating too", async () => {
     const { gzipSync } = await import("node:zlib");
     const env = makeEnv(); // flag off → in-protocol refusal proves the parse worked
