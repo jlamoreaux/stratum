@@ -103,7 +103,10 @@ Honestly, several:
   rejected in-protocol with the reason (and, where gated push is enabled, opens
   an eval-gated change instead). Push to workspace remotes for direct writes.
 - **Authorization** is still minimal in places; project-level access control is
-  not enforced on every route.
+  not enforced on every route. One deliberate GitHub-parity choice worth
+  knowing: any authenticated user can **open** an issue on a public project
+  (rate-limited), while editing or closing issues requires project write
+  access.
 - **Evaluation runs synchronously** at change creation — there's no async
   evaluation queue yet, so very slow evaluators stretch the request.
 
@@ -130,11 +133,13 @@ production and staging in separate Artifacts namespaces.
 
 ## How do backups work?
 
-D1 (changes, issues, events, costs, audit) and KV identity data back up to R2
-daily and on demand, along with the reachable history of a rotating slice of
-repositories — coverage rotates across runs under a per-run cap, so every repo
-is covered over time rather than every run. There is a tested restore path,
-documented in `docs/runbooks/backup-restore.md`.
+Backups require the **optional R2 bucket binding** — without it the scheduled
+backup logs a warning and skips the run, so configure R2 if you want backups.
+With R2 configured, D1 (changes, issues, events, costs, audit) and KV identity
+data back up daily and on demand, along with the reachable history of a
+rotating slice of repositories — coverage rotates across runs under a per-run
+cap, so every repo is covered over time rather than every run. There is a
+tested restore path, documented in `docs/runbooks/backup-restore.md`.
 
 ## Can I turn off telemetry?
 
