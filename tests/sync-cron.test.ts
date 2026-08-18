@@ -26,11 +26,16 @@ vi.mock("../src/storage/repo-snapshot", () => ({
   writeSnapshotFromRepo: vi.fn(async () => undefined),
 }));
 
-vi.mock("../src/storage/sync", () => ({
-  checkForSyncUpdates: vi.fn(),
-  getProjectSourceUrl: (p: ProjectEntry) => p.sourceUrl || p.githubUrl,
-  updateProjectAfterSync: vi.fn(async () => ({ success: true, data: {} })),
-}));
+// Keep the real getProjectSourceUrl so the sourceUrl/githubUrl preference is
+// exercised; only the network/KV-touching functions are mocked.
+vi.mock("../src/storage/sync", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/storage/sync")>();
+  return {
+    ...actual,
+    checkForSyncUpdates: vi.fn(),
+    updateProjectAfterSync: vi.fn(async () => ({ success: true, data: {} })),
+  };
+});
 
 import { importFromGitHub } from "../src/storage/git-ops";
 import { writeSnapshotFromRepo } from "../src/storage/repo-snapshot";
@@ -184,6 +189,97 @@ describe("syncAllProjects (project-sync cron)", () => {
 
     expect(result).toEqual({ synced: 0, failed: 1, skipped: 0 });
     expect(mockImport).not.toHaveBeenCalled();
+  });
+
+  it("returns zeros and imports nothing when listing projects fails", async () => {
+    mockListProjects.mockResolvedValue({
+      success: false,
+      error: Object.assign(new Error("KV down"), { code: "STORAGE_ERROR", statusCode: 500 }),
+    } as Awaited<ReturnType<typeof listProjects>>);
+
+    const result = await syncAllProjects(makeEnv());
+
+    expect(result).toEqual({ synced: 0, failed: 0, skipped: 0 });
+    expect(mockCheck).not.toHaveBeenCalled();
+    expect(mockImport).not.toHaveBeenCalled();
+  });
+
+  it("prefers sourceUrl over the legacy githubUrl", async () => {
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [makeProject({ sourceUrl: "https://gitlab.com/alice/my-repo" })],
+    });
+
+    await syncAllProjects(makeEnv());
+
+    expect(mockImport).toHaveBeenCalledWith(
+      expect.anything(),
+      "alice__my-repo",
+      "https://gitlab.com/alice/my-repo",
+      expect.anything(),
+      "main",
+    );
+  });
+
+  it("falls back to githubDefaultBranch when sourceDefaultBranch is unset", async () => {
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [makeProject({ githubDefaultBranch: "master" })],
+    });
+
+    await syncAllProjects(makeEnv());
+
+    expect(mockImport).toHaveBeenCalledWith(
+      expect.anything(),
+      "alice__my-repo",
+      "https://github.com/alice/my-repo",
+      expect.anything(),
+      "master",
+    );
+  });
+
+  it("counts a synced project without recording a commit when the check has no latestCommit", async () => {
+    mockCheck.mockResolvedValue({
+      success: true,
+      data: { hasUpdates: true, commitsBehind: 1 },
+    });
+    mockListProjects.mockResolvedValue({ success: true, data: [makeProject()] });
+
+    const result = await syncAllProjects(makeEnv());
+
+    expect(result).toEqual({ synced: 1, failed: 0, skipped: 0 });
+    expect(mockSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockUpdateAfterSync).not.toHaveBeenCalled();
+  });
+
+  it("counts a thrown exception as failed and continues with the remaining projects", async () => {
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [
+        makeProject({ slug: "boom", remote: "https://acct.artifacts.cloudflare.net/alice__boom" }),
+        makeProject(),
+      ],
+    });
+    mockImport.mockRejectedValueOnce(new Error("network exploded")).mockResolvedValueOnce({
+      success: true,
+      data: { remote: "https://acct.artifacts.cloudflare.net/alice__my-repo" },
+    } as Awaited<ReturnType<typeof importFromGitHub>>);
+
+    const result = await syncAllProjects(makeEnv());
+
+    expect(result).toEqual({ synced: 1, failed: 1, skipped: 0 });
+    expect(mockImport).toHaveBeenCalledTimes(2);
+    expect(mockSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts a thrown non-Error value as failed", async () => {
+    mockListProjects.mockResolvedValue({ success: true, data: [makeProject()] });
+    mockImport.mockRejectedValueOnce("string rejection");
+
+    const result = await syncAllProjects(makeEnv());
+
+    expect(result).toEqual({ synced: 0, failed: 1, skipped: 0 });
+    expect(mockSnapshot).not.toHaveBeenCalled();
   });
 
   it("counts a failed import as failed and writes no snapshot", async () => {
