@@ -1,9 +1,12 @@
+import git from "isomorphic-git";
 import { describe, expect, it, vi } from "vitest";
 import {
+  type NodeFS,
   artifactsRepoNameFromRemote,
   buildUnifiedDiff,
   extractTokenSecret,
   freshRepoToken,
+  readTreeAtCommit,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
 import type { ArtifactsNamespace } from "../src/types";
@@ -223,5 +226,90 @@ describe("buildUnifiedDiff", () => {
     expect(diff).toContain("diff --git a/src/old.ts b/src/old.ts");
     expect(diff).toContain("deleted file mode 100644");
     expect(diff).toContain("-export const old = true;");
+  });
+});
+
+describe("readTreeAtCommit", () => {
+  async function makeRepo() {
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const dir = "/";
+    await git.init({ fs, dir, defaultBranch: "main" });
+
+    const author = { name: "Test", email: "test@example.com" };
+    await fs.promises.writeFile("/package.json", '{"name":"app"}');
+    await fs.promises.mkdir("/src");
+    await fs.promises.writeFile("/src/math.ts", "export const add = 1;");
+    await git.add({ fs, dir, filepath: ["package.json", "src/math.ts"] });
+    const first = await git.commit({ fs, dir, message: "first", author });
+
+    await fs.promises.writeFile("/src/math.ts", "export const add = 2;");
+    await fs.promises.writeFile("/src/new.ts", "export const fresh = true;");
+    await git.add({ fs, dir, filepath: ["src/math.ts", "src/new.ts"] });
+    const second = await git.commit({ fs, dir, message: "second", author });
+
+    return { fs, first, second };
+  }
+
+  it("reads the full file set of the pinned commit, not the current HEAD", async () => {
+    const { fs, first } = await makeRepo();
+    const result = await readTreeAtCommit(fs, "/", first, noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect([...result.data.keys()].sort()).toEqual(["package.json", "src/math.ts"]);
+    expect(result.data.get("src/math.ts")).toBe("export const add = 1;");
+  });
+
+  it("reads the later commit's tree including files it added", async () => {
+    const { fs, second } = await makeRepo();
+    const result = await readTreeAtCommit(fs, "/", second, noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect([...result.data.keys()].sort()).toEqual(["package.json", "src/math.ts", "src/new.ts"]);
+    expect(result.data.get("src/math.ts")).toBe("export const add = 2;");
+  });
+
+  it("skips files whose blobs cannot be read, keeping the rest of the tree", async () => {
+    const { fs } = await makeRepo();
+    const dir = "/";
+    const goodBlob = await git.writeBlob({
+      fs,
+      dir,
+      blob: new TextEncoder().encode("still readable"),
+    });
+    const treeOid = await git.writeTree({
+      fs,
+      dir,
+      tree: [
+        { mode: "100644", path: "good.txt", oid: goodBlob, type: "blob" },
+        // A dangling oid: listed in the tree but the object does not exist.
+        {
+          mode: "100644",
+          path: "missing.txt",
+          oid: "0123456789abcdef0123456789abcdef01234567",
+          type: "blob",
+        },
+      ],
+    });
+    const author = { name: "Test", email: "test@example.com", timestamp: 0, timezoneOffset: 0 };
+    const commit = await git.writeCommit({
+      fs,
+      dir,
+      commit: { tree: treeOid, parent: [], author, committer: author, message: "broken tree" },
+    });
+
+    const result = await readTreeAtCommit(fs, dir, commit, noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect([...result.data.keys()]).toEqual(["good.txt"]);
+    expect(result.data.get("good.txt")).toBe("still readable");
+  });
+
+  it("errors when the pinned commit is not present in the clone", async () => {
+    const { fs } = await makeRepo();
+    const missing = "0123456789abcdef0123456789abcdef01234567";
+    const result = await readTreeAtCommit(fs, "/", missing, noopLogger);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain(`Failed to read tree at commit ${missing}`);
   });
 });

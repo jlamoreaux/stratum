@@ -7,6 +7,7 @@ import {
   WebhookEvaluator,
   loadPolicy,
 } from "../evaluation";
+import type { SandboxRepoAccess } from "../evaluation/sandbox-evaluator";
 import type { EvalPolicy, EvalResult, Evaluator } from "../evaluation/types";
 import { type EventActor, emitEvent } from "../queue/events";
 import { getAgent } from "../storage/agents";
@@ -76,12 +77,20 @@ export class UnavailableEvaluator implements Evaluator {
  * Build the evaluator set for a policy: the always-on blocking secret scan plus
  * whatever the policy configures. Evaluators whose binding is missing become
  * UnavailableEvaluator (score 0, fail) rather than silently vanishing.
+ *
+ * `workspaceRepo` is read access to the workspace being evaluated (remote +
+ * read token + the pinned evaluated commit); the sandbox evaluator needs it to
+ * materialize the full tree it runs the test command against. Without it — or
+ * without the SANDBOX binding (`[[sandboxes]]` in wrangler.toml, currently an
+ * ops decision) — a policy naming `sandbox` fails closed with a reason that
+ * says exactly which prerequisite is missing.
  */
 export function buildEvaluators(
   env: Env,
   policy: EvalPolicy,
   projectName: string,
   logger: Logger,
+  workspaceRepo?: SandboxRepoAccess,
 ): Array<{ type: string; evaluator: Evaluator }> {
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
@@ -103,15 +112,33 @@ export function buildEvaluators(
             },
           ];
         case "sandbox":
-          if (env.SANDBOX) {
-            return [{ type: "sandbox", evaluator: new SandboxEvaluator(env.SANDBOX) }];
+          if (!env.SANDBOX) {
+            // Fail closed with an actionable reason: the [[sandboxes]] binding
+            // is commented out in wrangler.toml until the beta is enabled, and
+            // any policy naming `sandbox` blocks merges until it is (or the
+            // evaluator is removed from the policy).
+            return [
+              {
+                type: "sandbox",
+                evaluator: new UnavailableEvaluator(
+                  "sandbox",
+                  "SANDBOX binding is not configured — enable [[sandboxes]] in wrangler.toml or remove the sandbox evaluator from the policy",
+                ),
+              },
+            ];
           }
-          return [
-            {
-              type: "sandbox",
-              evaluator: new UnavailableEvaluator("sandbox", "SANDBOX binding is not configured"),
-            },
-          ];
+          if (!workspaceRepo) {
+            return [
+              {
+                type: "sandbox",
+                evaluator: new UnavailableEvaluator(
+                  "sandbox",
+                  "workspace repository access was not provided to the evaluation pipeline",
+                ),
+              },
+            ];
+          }
+          return [{ type: "sandbox", evaluator: new SandboxEvaluator(env.SANDBOX, workspaceRepo) }];
         default:
           logger.warn(
             `Unknown evaluator type "${(cfg as { type: string }).type}" in policy for project ${projectName}`,
@@ -326,7 +353,11 @@ export async function createChangeWithEvaluation(
     workspaceSha: workspaceHeadSha,
   } = diffResult.data;
 
-  const evaluators = buildEvaluators(env, policy, projectName, logger);
+  const evaluators = buildEvaluators(env, policy, projectName, logger, {
+    remote: workspaceRemote,
+    token: workspaceReadToken.data,
+    ref: evaluatedSha,
+  });
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";

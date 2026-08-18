@@ -1560,18 +1560,27 @@ export async function listFilesInRepo(
 
 /**
  * Read the full working tree (paths → text contents) in a single clone.
- * Used by the post-merge smoke check to populate a sandbox.
+ * Used by the post-merge smoke check and the sandbox evaluator to populate a
+ * sandbox. When `ref` (a commit sha) is given, the tree of that commit is read
+ * instead of the clone's HEAD, so callers can pin the exact evaluated commit;
+ * a ref that is not reachable in the (shallow) clone is an error — the pinned
+ * tree no longer exists, so callers must not silently evaluate something else.
  */
 export async function readRepoFiles(
   remote: string,
   token: string,
   logger: Logger,
+  ref?: string,
 ): Promise<Result<Map<string, string>, AppError>> {
-  logger.debug("Reading repo files", { remote });
+  logger.debug("Reading repo files", { remote, ref });
 
   const cloneResult = await cloneRepo(remote, token, logger);
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
+
+  if (ref !== undefined) {
+    return readTreeAtCommit(fs, dir, ref, logger);
+  }
 
   const filesResult = await walkDir(fs, dir, "", logger);
   if (!filesResult.success) return err(filesResult.error);
@@ -1587,6 +1596,41 @@ export async function readRepoFiles(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+  return ok(contents);
+}
+
+/** Every file (path → text contents) in the tree of one commit. Exported for tests. */
+export async function readTreeAtCommit(
+  fs: NodeFS,
+  dir: string,
+  commitSha: string,
+  logger: Logger,
+): Promise<Result<Map<string, string>, AppError>> {
+  const listResult = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
+  if (!listResult.success) {
+    logger.error("Failed to list files at commit", listResult.error, { commitSha });
+    return err(
+      new ExternalServiceError(
+        "Git",
+        `Failed to read tree at commit ${commitSha}`,
+        listResult.error,
+      ),
+    );
+  }
+
+  const contents = new Map<string, string>();
+  for (const path of listResult.data) {
+    const blobResult = await fromPromise(git.readBlob({ fs, dir, oid: commitSha, filepath: path }));
+    if (!blobResult.success) {
+      logger.warn("Skipping unreadable file in commit tree", {
+        path,
+        commitSha,
+        error: blobResult.error.message,
+      });
+      continue;
+    }
+    contents.set(path, new TextDecoder().decode(blobResult.data.blob));
   }
   return ok(contents);
 }

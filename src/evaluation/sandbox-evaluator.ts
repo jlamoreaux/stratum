@@ -1,3 +1,4 @@
+import { readRepoFiles } from "../storage/git-ops";
 import type { SandboxBinding } from "../types";
 import type { AppError } from "../utils/errors";
 import { ExternalServiceError } from "../utils/errors";
@@ -6,39 +7,32 @@ import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
-function parseDiffFiles(diff: string): Map<string, string> {
-  const files = new Map<string, string>();
-  const lines = diff.split("\n");
-  let currentPath: string | null = null;
-  const contentLines: string[] = [];
+const DEFAULT_COMMAND = "npm test";
+const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
+const MAX_OUTPUT_IN_REASON = 500;
 
-  const flush = () => {
-    if (currentPath !== null) {
-      files.set(currentPath, contentLines.join("\n"));
-    }
-  };
-
-  for (const line of lines) {
-    if (line.startsWith("+++ b/")) {
-      flush();
-      currentPath = line.slice(6);
-      contentLines.length = 0;
-    } else if (
-      currentPath !== null &&
-      !line.startsWith("--- ") &&
-      !line.startsWith("diff ") &&
-      !line.startsWith("index ") &&
-      !line.startsWith("@@ ")
-    ) {
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        contentLines.push(line.slice(1));
-      }
-    }
-  }
-
-  flush();
-  return files;
+/**
+ * Read access to the workspace repo whose tree is being evaluated. Threaded in
+ * by `buildEvaluators` so the sandbox runs against the FULL workspace tree
+ * (the evaluated commit), not a reconstruction from diff hunks.
+ */
+export interface SandboxRepoAccess {
+  /** The workspace repo remote. */
+  remote: string;
+  /** A read-scoped token for that remote. */
+  token: string;
+  /** The evaluated commit sha (pinned as evaluated_sha). HEAD when absent. */
+  ref?: string;
 }
+
+/** Reads a repo tree into path → contents; injectable for tests. */
+export type RepoFilesReader = (
+  remote: string,
+  token: string,
+  logger: Logger,
+  ref?: string,
+) => Promise<Result<Map<string, string>, AppError>>;
 
 function parseTestOutput(stdout: string, stderr: string): number | null {
   const combined = `${stdout}\n${stderr}`;
@@ -58,18 +52,28 @@ function parseTestOutput(stdout: string, stderr: string): number | null {
   return null;
 }
 
+/** `npm ci` with a lockfile, `npm install` without one, nothing without a package.json. */
+export function installCommandFor(files: ReadonlyMap<string, string>): string | null {
+  if (!files.has("package.json")) return null;
+  return files.has("package-lock.json") ? "npm ci" : "npm install";
+}
+
 export class SandboxEvaluator implements Evaluator {
-  constructor(private sandbox: SandboxBinding) {}
+  constructor(
+    private sandbox: SandboxBinding,
+    private repo: SandboxRepoAccess,
+    private readFiles: RepoFilesReader = readRepoFiles,
+  ) {}
 
   async evaluate(
-    diff: string,
+    _diff: string,
     policy: EvalPolicy,
     logger: Logger,
   ): Promise<Result<EvalResult, AppError>> {
     logger.debug("Starting sandbox evaluation");
 
     const config = policy.evaluators.find((e) => e.type === "sandbox") as
-      | { type: "sandbox"; command?: string; timeoutMs?: number }
+      | { type: "sandbox"; command?: string; timeoutMs?: number; installTimeoutMs?: number }
       | undefined;
 
     if (!config) {
@@ -77,16 +81,36 @@ export class SandboxEvaluator implements Evaluator {
       return ok({ score: 1.0, passed: true, reason: "No sandbox evaluator configured" });
     }
 
-    const command = config.command ?? "npm test";
-    const timeoutMs = config.timeoutMs ?? 60_000;
+    const command = config.command ?? DEFAULT_COMMAND;
+    const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const installTimeoutMs = config.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS;
     const minScore = policy.minScore ?? 0.7;
 
-    logger.debug("Sandbox config", { command, timeoutMs });
+    logger.debug("Sandbox config", { command, timeoutMs, installTimeoutMs });
 
-    const files = parseDiffFiles(diff);
     let sb: Awaited<ReturnType<SandboxBinding["create"]>> | null = null;
 
     try {
+      // Materialize the full workspace tree at the evaluated commit — the same
+      // tree the merge would land — so the command runs against real sources,
+      // not just the added lines of the diff.
+      const filesResult = await this.readFiles(
+        this.repo.remote,
+        this.repo.token,
+        logger,
+        this.repo.ref,
+      );
+      if (!filesResult.success) {
+        logger.error("Could not read workspace tree for sandbox", filesResult.error);
+        return err(
+          new ExternalServiceError(
+            "Sandbox",
+            `Could not read workspace tree: ${filesResult.error.message}`,
+          ) as AppError,
+        );
+      }
+      const files = filesResult.data;
+
       sb = await this.sandbox.create();
       logger.debug("Sandbox created");
 
@@ -95,9 +119,32 @@ export class SandboxEvaluator implements Evaluator {
       }
       logger.debug("Files written to sandbox", { fileCount: files.size });
 
+      let sandboxMs = 0;
+
+      const installCommand = installCommandFor(files);
+      if (installCommand !== null) {
+        const installStartedAt = Date.now();
+        const install = await sb.run(installCommand, { timeout: installTimeoutMs });
+        sandboxMs += Date.now() - installStartedAt;
+        logger.debug("Sandbox install completed", {
+          installCommand,
+          exitCode: install.exitCode,
+        });
+        if (install.exitCode !== 0) {
+          const output = (install.stdout + install.stderr).slice(0, MAX_OUTPUT_IN_REASON).trim();
+          logger.info("Sandbox evaluation failed at dependency install", { installCommand });
+          return ok({
+            score: 0,
+            passed: false,
+            reason: `Dependency install (${installCommand}) failed: ${output}`,
+            costs: [{ kind: "sandbox_ms", quantity: sandboxMs }],
+          });
+        }
+      }
+
       const runStartedAt = Date.now();
       const result = await sb.run(command, { timeout: timeoutMs });
-      const sandboxMs = Date.now() - runStartedAt;
+      sandboxMs += Date.now() - runStartedAt;
       logger.debug("Sandbox command completed", { exitCode: result.exitCode, sandboxMs });
 
       let score: number;
@@ -109,7 +156,7 @@ export class SandboxEvaluator implements Evaluator {
       }
 
       const passed = score >= minScore;
-      const reason = (result.stdout + result.stderr).slice(0, 500).trim();
+      const reason = (result.stdout + result.stderr).slice(0, MAX_OUTPUT_IN_REASON).trim();
 
       logger.info("Sandbox evaluation complete", { score, passed });
       return ok({ score, passed, reason, costs: [{ kind: "sandbox_ms", quantity: sandboxMs }] });

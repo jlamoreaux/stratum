@@ -315,7 +315,10 @@ const sandboxEvaluator: Evaluator = {
   id: 'tests',
   type: 'sandbox',
   async evaluate(ctx) {
-    // Clone workspace to Sandbox
+    // Materialize the FULL workspace tree at the evaluated commit
+    // (readRepoFiles pinned to evaluated_sha), not just the diff
+    // Install dependencies (npm ci with a lockfile, npm install with
+    // only a package.json, nothing otherwise)
     // Run configured command
     // Capture output and exit code
   }
@@ -327,9 +330,19 @@ const sandboxEvaluator: Evaluator = {
 evaluators:
   - id: tests
     type: sandbox
-    command: "npm test"
+    command: "npm test"        # default
+    timeoutMs: 60000           # command timeout (default 60s)
+    installTimeoutMs: 120000   # dependency install timeout (default 120s)
     required: true
 ```
+
+**Fail-closed when unavailable:** the `[[sandboxes]]` binding is commented out
+in `wrangler.toml` (beta feature; enabling it is an ops decision). While it is
+absent, any policy naming a `sandbox` evaluator fails closed — every evaluation
+records `sandbox unavailable: SANDBOX binding is not configured — enable
+[[sandboxes]] in wrangler.toml or remove the sandbox evaluator from the policy`
+with score 0, which blocks the merge. Remove the evaluator from the policy or
+enable the binding.
 
 ### Composite Scoring
 
