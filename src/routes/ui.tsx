@@ -27,6 +27,7 @@ import { getProjectSourceUrl, getSyncStatus } from "../storage/sync";
 import { getUser, rotateUserToken } from "../storage/users";
 import { listDeliveries, listWebhooks } from "../storage/webhooks";
 import type { Env, ProjectEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import { parseUnifiedDiff } from "../ui/components/diff-view";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
 import { ActivityPage } from "../ui/pages/activity";
@@ -360,9 +361,10 @@ app.get("/p/:name", async (c) => {
       const tokenResult = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
       if (!tokenResult.success) throw tokenResult.error;
       const readToken = tokenResult.data;
+      const branch = projectDefaultBranch(project);
       const [filesResult, logResult] = await Promise.all([
-        listFilesInRepo(project.remote, readToken, logger),
-        getCommitLog(project.remote, readToken, logger, 20),
+        listFilesInRepo(project.remote, readToken, logger, branch),
+        getCommitLog(project.remote, readToken, logger, 20, branch),
       ]);
 
       if (filesResult.success) {
@@ -380,7 +382,13 @@ app.get("/p/:name", async (c) => {
       // Try to read README.md if it exists
       const readmePath = files.find((f) => f.toLowerCase() === "readme.md");
       if (readmePath) {
-        const readmeResult = await readFileFromRepo(project.remote, readToken, readmePath, logger);
+        const readmeResult = await readFileFromRepo(
+          project.remote,
+          readToken,
+          readmePath,
+          logger,
+          branch,
+        );
         if (readmeResult.success) {
           readme = readmeResult.data;
         }
@@ -570,6 +578,7 @@ app.get("/changes/:id", async (c) => {
           workspaceResult.data.remote,
           workspaceToken.data,
           logger,
+          projectDefaultBranch(projectResult.data),
         );
         if (diffResult.success) {
           diffFiles = parseUnifiedDiff(diffResult.data.diff);
@@ -1125,7 +1134,7 @@ app.get("/:namespace/:slug/sync", async (c) => {
     // Only external import sources are shown; the internal artifacts remote is not a
     // sync source and must not leak into the page.
     sourceUrl: getProjectSourceUrl(project) ?? "",
-    sourceBranch: "main",
+    sourceBranch: projectDefaultBranch(project),
     lastSyncStatus: (stored?.lastSyncStatus ?? "idle") as
       | "success"
       | "failed"
@@ -1218,7 +1227,13 @@ app.get("/:namespace/:slug/blob/*", async (c) => {
       500,
     );
   }
-  const contentResult = await getFileContent(project.remote, readToken.data, filePath, logger);
+  const contentResult = await getFileContent(
+    project.remote,
+    readToken.data,
+    filePath,
+    logger,
+    projectDefaultBranch(project),
+  );
   if (!contentResult.success) {
     return c.html(
       <div style="padding:2rem;font-family:monospace;color:#f87171;">Error loading file.</div>,
@@ -1347,9 +1362,10 @@ app.get("/:namespace/:slug", async (c) => {
       const tokenResult = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
       if (!tokenResult.success) throw tokenResult.error;
       const readToken = tokenResult.data;
+      const branch = projectDefaultBranch(project);
       const [filesResult, logResult] = await Promise.all([
-        listFilesInRepo(project.remote, readToken, logger),
-        getCommitLog(project.remote, readToken, logger, 20),
+        listFilesInRepo(project.remote, readToken, logger, branch),
+        getCommitLog(project.remote, readToken, logger, 20, branch),
       ]);
 
       if (filesResult.success) {
@@ -1367,7 +1383,13 @@ app.get("/:namespace/:slug", async (c) => {
       // Try to read README.md if it exists
       const readmePath = files.find((f) => f.toLowerCase() === "readme.md");
       if (readmePath) {
-        const readmeResult = await readFileFromRepo(project.remote, readToken, readmePath, logger);
+        const readmeResult = await readFileFromRepo(
+          project.remote,
+          readToken,
+          readmePath,
+          logger,
+          branch,
+        );
         if (readmeResult.success) {
           readme = readmeResult.data;
         }

@@ -3,6 +3,7 @@ import { importFromGitHub } from "../storage/git-ops";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
 import { listProjects } from "../storage/state";
 import type { Env } from "../types";
+import { projectDefaultBranch } from "../types";
 import { createLogger } from "../utils/logger";
 
 // The former unauthenticated `POST /projects/:name/sync` handler was removed: it
@@ -39,6 +40,7 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
         project.name,
         project.githubUrl,
         projectLogger,
+        projectDefaultBranch(project),
       );
       if (result.success) {
         synced++;
@@ -51,6 +53,7 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
             remote: result.data.remote,
             namespace: project.namespace,
             slug: project.slug,
+            defaultBranch: projectDefaultBranch(project),
           },
           projectLogger,
         );
