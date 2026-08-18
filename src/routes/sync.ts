@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import { importFromGitHub } from "../storage/git-ops";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
 import { listProjects } from "../storage/state";
-import type { Env } from "../types";
+import { checkForSyncUpdates, getProjectSourceUrl, updateProjectAfterSync } from "../storage/sync";
+import { type Env, artifactsRepoName } from "../types";
 import { createLogger } from "../utils/logger";
 
 // The former unauthenticated `POST /projects/:name/sync` handler was removed: it
@@ -14,31 +15,51 @@ const app = new Hono<{ Bindings: Env }>();
 
 export { app as syncRouter };
 
-export async function syncAllProjects(env: Env): Promise<{ synced: number; failed: number }> {
+export async function syncAllProjects(
+  env: Env,
+): Promise<{ synced: number; failed: number; skipped: number }> {
   const logger = createLogger({ operation: "syncAllProjects" });
 
   const projectsResult = await listProjects(env.STATE, logger);
   if (!projectsResult.success) {
     logger.error("Failed to list projects for sync", projectsResult.error);
-    return { synced: 0, failed: 0 };
+    return { synced: 0, failed: 0, skipped: 0 };
   }
 
   const projects = projectsResult.data;
   let synced = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const project of projects) {
-    if (!project.githubUrl) continue;
+    if (!project.autoSyncEnabled) continue;
 
-    const projectLogger = logger.child({ projectName: project.name, githubUrl: project.githubUrl });
+    const sourceUrl = getProjectSourceUrl(project);
+    if (!sourceUrl) continue;
+
+    const projectLogger = logger.child({ projectName: project.name, sourceUrl });
 
     try {
-      projectLogger.info("Syncing project");
+      const checkResult = await checkForSyncUpdates(env.STATE, project, undefined, projectLogger);
+      if (!checkResult.success) {
+        failed++;
+        projectLogger.error("Sync update check failed", checkResult.error);
+        continue;
+      }
+      if (!checkResult.data.hasUpdates) {
+        skipped++;
+        projectLogger.debug("Project up to date, skipping sync");
+        continue;
+      }
+
+      projectLogger.info("Syncing project", { commitsBehind: checkResult.data.commitsBehind });
+      const branch = project.sourceDefaultBranch || project.githubDefaultBranch || "main";
       const result = await importFromGitHub(
         env.ARTIFACTS,
-        project.name,
-        project.githubUrl,
+        artifactsRepoName(project),
+        sourceUrl,
         projectLogger,
+        branch,
       );
       if (result.success) {
         synced++;
@@ -54,6 +75,14 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
           },
           projectLogger,
         );
+        if (checkResult.data.latestCommit) {
+          await updateProjectAfterSync(
+            env.STATE,
+            project,
+            checkResult.data.latestCommit,
+            projectLogger,
+          );
+        }
       } else {
         failed++;
         projectLogger.error("Project sync failed", result.error);
@@ -67,6 +96,6 @@ export async function syncAllProjects(env: Env): Promise<{ synced: number; faile
     }
   }
 
-  logger.info("Batch sync completed", { synced, failed, total: projects.length });
-  return { synced, failed };
+  logger.info("Batch sync completed", { synced, failed, skipped, total: projects.length });
+  return { synced, failed, skipped };
 }
