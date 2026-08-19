@@ -168,6 +168,7 @@ import {
 import { isTargetDeleting } from "../src/storage/deletion";
 import { listEvalRuns, recordEvalRuns } from "../src/storage/eval-runs";
 import {
+  MergeConflictError,
   batchMergeStagedTrees,
   freshRepoToken,
   getCommitLog,
@@ -1234,6 +1235,53 @@ describe("POST /api/changes/:id/merge", () => {
       expect.any(Object),
       { strategy: "squash" },
     );
+  });
+
+  it("returns 409 with the conflicting file list and persists conflict context (#185)", async () => {
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
+    vi.mocked(mergeWorkspaceIntoProject).mockResolvedValue({
+      success: false,
+      error: new MergeConflictError("Merge failed; workspace may be stale or conflicting", [
+        "src/a.ts",
+        "docs/readme.md",
+      ]),
+    });
+    const put = vi.fn(async (_key: string, _value: string, _opts?: unknown) => undefined);
+    env.STATE = { put } as unknown as KVNamespace;
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
+      env,
+    );
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as {
+      code: string;
+      conflictId: string;
+      conflictingFiles: string[];
+    };
+    expect(body.code).toBe("MERGE_CONFLICT");
+    expect(body.conflictingFiles).toEqual(["src/a.ts", "docs/readme.md"]);
+    expect(body.conflictId).toBeTruthy();
+
+    // The persisted conflict context carries the same file list for the
+    // resolution flow.
+    expect(put).toHaveBeenCalledWith(
+      `conflict:${body.conflictId}`,
+      expect.any(String),
+      expect.objectContaining({ expirationTtl: expect.any(Number) }),
+    );
+    const persisted = JSON.parse(put.mock.calls[0]?.[1] ?? "{}") as {
+      conflictingFiles: string[];
+      workspaceName: string;
+    };
+    expect(persisted.conflictingFiles).toEqual(["src/a.ts", "docs/readme.md"]);
+    expect(persisted.workspaceName).toBe("fix-bug");
+    expect(markChangeMerged).not.toHaveBeenCalled();
   });
 
   it("returns 400 when merge implementation reports a conflict", async () => {
