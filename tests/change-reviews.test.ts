@@ -77,14 +77,6 @@ function makeReviewsD1(): { db: D1Database; comments: CommentRow[]; reviews: Rev
               created_at: bindings[5] as string,
             });
           }
-        } else if (upper.startsWith("DELETE FROM CHANGE_REVIEWS")) {
-          // Emulate: WHERE change_id = ? AND verdict = 'approve'
-          const before = reviews.length;
-          for (let i = reviews.length - 1; i >= 0; i--) {
-            const r = reviews[i];
-            if (r && r.change_id === bindings[0] && r.verdict === "approve") reviews.splice(i, 1);
-          }
-          return { success: true, meta: { changes: before - reviews.length } };
         }
         return { success: true, meta: {} };
       },
@@ -106,7 +98,18 @@ function makeReviewsD1(): { db: D1Database; comments: CommentRow[]; reviews: Rev
       },
       all: async <T>() => {
         let results: unknown[] = [];
-        if (upper.includes("FROM CHANGE_COMMENTS")) {
+        if (upper.startsWith("DELETE FROM CHANGE_REVIEWS")) {
+          // Emulate: WHERE change_id = ? AND verdict = 'approve' RETURNING reviewer_id
+          const dismissed: ReviewRow[] = [];
+          for (let i = reviews.length - 1; i >= 0; i--) {
+            const r = reviews[i];
+            if (r && r.change_id === bindings[0] && r.verdict === "approve") {
+              dismissed.push(r);
+              reviews.splice(i, 1);
+            }
+          }
+          results = dismissed.map((r) => ({ reviewer_id: r.reviewer_id }));
+        } else if (upper.includes("FROM CHANGE_COMMENTS")) {
           results = comments
             .filter((r) => r.change_id === bindings[0])
             .sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -264,7 +267,7 @@ describe("stale approval dismissal (#193)", () => {
     const dismissed = await dismissApprovals(db, mockLogger, "chg_1");
     expect(dismissed.success).toBe(true);
     if (!dismissed.success) return;
-    expect(dismissed.data).toBe(1);
+    expect(dismissed.data).toEqual(["user_1"]);
 
     // request_changes survives the re-push (GitHub keeps those); the other
     // change's approval is untouched.
@@ -285,7 +288,7 @@ describe("stale approval dismissal (#193)", () => {
     });
 
     const dismissed = await dismissApprovals(db, mockLogger, "chg_1");
-    expect(dismissed.success && dismissed.data).toBe(0);
+    expect(dismissed.success && dismissed.data).toEqual([]);
   });
 
   it("stops counting dismissed approvals; a re-approve counts again", async () => {
@@ -352,7 +355,7 @@ describe("stale approval dismissal (#193)", () => {
     const db = {
       prepare: () => ({
         bind: () => ({
-          run: async () => {
+          all: async () => {
             throw new Error("D1 unavailable");
           },
         }),

@@ -567,13 +567,16 @@ app.post("/changes/:id/merge", async (c) => {
     });
 
     if (force) {
-      await recordAudit(c.env.DB, logger, {
+      const auditResult = await recordAudit(c.env.DB, logger, {
         action: "merge.forced",
         actorType: "user",
         actorId: userId,
         subject: id,
         detail: { project: change.project },
       });
+      if (!auditResult.success) {
+        logger.error("Failed to audit forced merge", auditResult.error, { changeId: id });
+      }
     }
 
     const postMergeViaQueue = result.commit
@@ -740,13 +743,16 @@ app.post("/changes/:id/merge", async (c) => {
   });
 
   if (force) {
-    await recordAudit(c.env.DB, logger, {
+    const auditResult = await recordAudit(c.env.DB, logger, {
       action: "merge.forced",
       actorType: "user",
       actorId: userId,
       subject: id,
       detail: { project: change.project },
     });
+    if (!auditResult.success) {
+      logger.error("Failed to audit forced merge", auditResult.error, { changeId: id });
+    }
   }
 
   const postMerge = await runPostMergeCheck(
@@ -1071,13 +1077,16 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
     // audit trail — the single-merge path records `merge.forced` too (SEC-2).
     if (force) {
       for (const changeId of merged) {
-        await recordAudit(c.env.DB, logger, {
+        const auditResult = await recordAudit(c.env.DB, logger, {
           action: "merge.forced",
           actorType: "user",
           actorId: userId,
           subject: changeId,
           detail: { project: projectName, batch: true },
         });
+        if (!auditResult.success) {
+          logger.error("Failed to audit forced batch merge", auditResult.error, { changeId });
+        }
       }
     }
     await stub.gcStagedTrees(mergedWorkspaces).catch(() => {});
@@ -1280,19 +1289,25 @@ app.post("/changes/:id/evaluate", async (c) => {
       logger.error("Failed to dismiss stale approvals", dismissResult.error);
       return internalError(dismissResult.error.message);
     }
-    if (dismissResult.data > 0) {
-      await recordAudit(c.env.DB, logger, {
+    if (dismissResult.data.length > 0) {
+      const auditResult = await recordAudit(c.env.DB, logger, {
         action: "review.approvals_dismissed",
         actorType: "user",
         actorId: userId,
         subject: id,
         detail: {
           project: change.project,
-          dismissed: dismissResult.data,
+          dismissed: dismissResult.data.length,
+          dismissedReviewerIds: dismissResult.data,
           previousEvaluatedSha: change.evaluatedSha,
           evaluatedSha,
         },
       });
+      if (!auditResult.success) {
+        // The approvals are already dismissed; do not fail the request. Log
+        // the gap so a missing audit record for a real dismissal is detectable.
+        logger.error("Failed to audit approval dismissal", auditResult.error, { changeId: id });
+      }
     }
   }
 

@@ -187,24 +187,29 @@ export async function listReviews(
  * Dismiss every 'approve' verdict on a change because its evaluated revision
  * changed (#193) — those approvals were given for different code and must not
  * count toward requiredApprovals. 'request_changes' verdicts are kept, matching
- * GitHub's dismiss-stale-approvals-on-push semantics. Returns the number of
- * approvals dismissed.
+ * GitHub's dismiss-stale-approvals-on-push semantics. Returns the reviewer IDs
+ * whose approvals were dismissed, so callers can record who was dismissed.
  */
 export async function dismissApprovals(
   db: D1Database,
   logger: Logger,
   changeId: string,
-): Promise<Result<number, AppError>> {
+): Promise<Result<string[], AppError>> {
   try {
     const result = await db
-      .prepare("DELETE FROM change_reviews WHERE change_id = ? AND verdict = 'approve'")
+      .prepare(
+        "DELETE FROM change_reviews WHERE change_id = ? AND verdict = 'approve' RETURNING reviewer_id",
+      )
       .bind(changeId)
-      .run();
-    const dismissed = result.meta?.changes ?? 0;
-    if (dismissed > 0) {
-      logger.info("Stale approvals dismissed", { changeId, dismissed });
+      .all<{ reviewer_id: string }>();
+    const dismissedReviewerIds = result.results.map((row) => row.reviewer_id);
+    if (dismissedReviewerIds.length > 0) {
+      logger.info("Stale approvals dismissed", {
+        changeId,
+        dismissed: dismissedReviewerIds.length,
+      });
     }
-    return ok(dismissed);
+    return ok(dismissedReviewerIds);
   } catch (error) {
     const appError = toAppError(error, "dismissApprovals", { changeId });
     logger.error("Failed to dismiss approvals", appError, { changeId });

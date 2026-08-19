@@ -128,7 +128,7 @@ vi.mock("../src/storage/provenance", () => ({
 }));
 
 vi.mock("../src/storage/change-reviews", () => ({
-  dismissApprovals: vi.fn(async () => ({ success: true, data: 0 })),
+  dismissApprovals: vi.fn(async () => ({ success: true, data: [] })),
   countApprovals: vi.fn(async () => ({ success: true, data: 0 })),
 }));
 
@@ -1483,6 +1483,27 @@ describe("POST /api/changes/:id/merge", () => {
     expect(res.status).toBe(200);
   });
 
+  it("does not fail a forced merge when the merge.forced audit write fails", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, status: "accepted", evaluatedSha: "sha_evaluated_old" },
+    });
+    vi.mocked(loadPolicy).mockResolvedValue({
+      evaluators: [],
+      merge: { allowForce: true },
+    });
+    vi.mocked(recordAudit).mockResolvedValueOnce({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await app.fetch(
+      request("POST", `/api/changes/${mockChange.id}/merge?force=true`, undefined, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+  });
+
   it("PROV: records the snapshotted model and prompt hash on merge", async () => {
     vi.mocked(getChange).mockResolvedValue({
       success: true,
@@ -1825,6 +1846,30 @@ describe("POST /api/projects/:name/changes/merge-batch", () => {
     expect(gcCalls).toEqual([["fix-bug"]]);
   });
 
+  it("does not throw in deferred persist when a batch merge.forced audit write fails", async () => {
+    vi.mocked(recordAudit).mockResolvedValueOnce({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/projects/my-project/changes/merge-batch",
+        { changeIds: ["chg_b1", "chg_b2", "chg_b1"], force: true },
+        USER_AUTH,
+      ),
+      env,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal ExecutionContext
+      exec() as any,
+    );
+    expect(res.status).toBe(200);
+
+    // The audit failure must not reject the deferred waitUntil work.
+    await expect(Promise.all(waitUntils)).resolves.toBeDefined();
+    expect(gcCalls).toEqual([["fix-bug"]]);
+  });
+
   it("SEC-2: skips a batch change whose staged tree doesn't match the evaluated tree", async () => {
     // Staged tree oid is "a".repeat(40) for every workspace. chg_b1 was evaluated
     // against that tree (matches → merges); chg_b2 was evaluated against a
@@ -1957,7 +2002,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
     });
     vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(recordEvalRuns).mockResolvedValue({ success: true, data: [] });
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: 1 });
+    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
     vi.mocked(recordAudit).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(CompositeEvaluator).mockImplementation(
       () =>
@@ -1989,7 +2034,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
   });
 
   it("records an audit entry for the dismissal", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: 2 });
+    vi.mocked(dismissApprovals).mockResolvedValue({
+      success: true,
+      data: ["user_1", "user_2"],
+    });
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
       env,
@@ -2004,10 +2052,28 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       detail: {
         project: "my-project",
         dismissed: 2,
+        dismissedReviewerIds: ["user_1", "user_2"],
         previousEvaluatedSha: "old_sha",
         evaluatedSha: "new_sha",
       },
     });
+  });
+
+  it("logs but does not fail the request when auditing the dismissal fails", async () => {
+    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
+    vi.mocked(recordAudit).mockResolvedValue({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+
+    // The dismissal already happened; a failed audit write must not fail the request.
+    expect(res.status).toBe(200);
+    expect(updateChangeStatus).toHaveBeenCalled();
   });
 
   it("keeps approvals when the re-evaluated sha is unchanged", async () => {
@@ -2045,7 +2111,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
   });
 
   it("skips the audit entry when there were no approvals to dismiss", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: 0 });
+    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: [] });
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
       env,
