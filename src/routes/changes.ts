@@ -1339,13 +1339,22 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!repo) return badRequest("Project githubUrl is invalid");
 
   const body = await c.req
-    .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
-    .catch(() => ({}) as { title?: string; body?: string; base?: string; draft?: boolean });
+    .json<{ title?: string; body?: string; draft?: boolean }>()
+    .catch(() => ({}) as { title?: string; body?: string; draft?: boolean });
 
   // GitHub PR creation needs a GitHub credential — the Artifacts repo token (now
   // never persisted) was never valid here. Use the app's configured GitHub token.
   const githubToken = c.env.GITHUB_TOKEN;
   if (!githubToken) return badRequest("GitHub integration is not configured");
+
+  // The PR base is the project's own recorded default branch — never a
+  // caller-supplied value. This endpoint acts with the instance-wide GitHub
+  // token, so letting the request body choose an arbitrary base would let a
+  // caller aim that shared credential at a branch of its choosing on the linked
+  // repo. (The complete fix — a per-user GitHub credential plus repo-ownership
+  // verification, replacing the shared token — is tracked as follow-up; the
+  // OAuth scope is currently `user:email`.)
+  const base = project.githubDefaultBranch ?? project.sourceDefaultBranch ?? "main";
 
   const branch = `stratum/${change.id}`;
   const prBody =
@@ -1362,7 +1371,7 @@ app.post("/changes/:id/github-pr", async (c) => {
       title: body.title ?? `Stratum: ${change.id}`,
       body: prBody,
       head: branch,
-      base: body.base ?? project.githubDefaultBranch ?? "main",
+      base,
       draft: body.draft ?? true,
     }),
   });

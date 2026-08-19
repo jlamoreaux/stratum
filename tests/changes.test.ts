@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import { changesRouter } from "../src/routes/changes";
 import type { Change, Env } from "../src/types";
@@ -1893,5 +1893,78 @@ describe("POST /api/projects/:name/changes/merge-batch", () => {
       exec() as any,
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/changes/:id/github-pr — base is the project default, not caller-supplied (SA-6)", () => {
+  let app: ReturnType<typeof makeApp>;
+  let env: Env;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    app = makeApp();
+    env = { ...makeEnv(), GITHUB_TOKEN: "ghtok" } as Env;
+    vi.clearAllMocks();
+    vi.mocked(getUserByToken).mockImplementation(async (_db, token) =>
+      token === "stratum_user_testtoken00000000000000000"
+        ? {
+            success: true,
+            data: {
+              id: "user_test",
+              email: "t@x.io",
+              username: "test",
+              tokenHash: "h",
+              createdAt: "2026-01-01T00:00:00.000Z",
+            },
+          }
+        : { success: false, error: new NotFoundError("User", token) },
+    );
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        githubUrl: "https://github.com/acme/widgets",
+        githubDefaultBranch: "trunk",
+      },
+    });
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, status: "accepted" },
+    });
+    vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
+    fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            number: 7,
+            html_url: "https://github.com/acme/widgets/pull/7",
+            state: "open",
+          }),
+          { status: 201 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("ignores a caller-supplied base and targets the project's default branch", async () => {
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/changes/chg_abc123/github-pr",
+        { base: "attacker-controlled" },
+        USER_AUTH,
+      ),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sent = JSON.parse(init.body as string) as { base: string };
+    expect(sent.base).toBe("trunk");
   });
 });
