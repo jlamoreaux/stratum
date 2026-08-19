@@ -99,7 +99,8 @@ function makeReviewsD1(): { db: D1Database; comments: CommentRow[]; reviews: Rev
       all: async <T>() => {
         let results: unknown[] = [];
         if (upper.startsWith("DELETE FROM CHANGE_REVIEWS")) {
-          // Emulate: WHERE change_id = ? AND verdict = 'approve' RETURNING reviewer_id
+          // Return the dismissed reviewer IDs so tests can assert on the
+          // dismissal audit contract, not just a count.
           const dismissed: ReviewRow[] = [];
           for (let i = reviews.length - 1; i >= 0; i--) {
             const r = reviews[i];
