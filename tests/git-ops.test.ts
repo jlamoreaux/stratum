@@ -334,6 +334,23 @@ describe("mergeWorkspaceIntoProject merge-failure classification (#185)", () => 
     }
   });
 
+  it("classifies MergeNotSupportedError by code when instanceof fails (duplicate module instance)", async () => {
+    const foreign = Object.assign(new Error("merge not supported"), {
+      code: "MergeNotSupportedError",
+    });
+    vi.mocked(git.merge).mockRejectedValue(foreign);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("MERGE_CONFLICT");
+      expect(result.error.statusCode).toBe(409);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([]);
+    }
+  });
+
   it("does NOT report an operational failure (network) as a merge conflict", async () => {
     vi.mocked(git.merge).mockRejectedValue(new Error("connect ETIMEDOUT 203.0.113.9:443"));
 
