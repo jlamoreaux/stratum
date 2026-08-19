@@ -12,6 +12,7 @@ import {
 } from "../storage/webhooks";
 import type { Env, ProjectEntry } from "../types";
 import { canWriteProject } from "../utils/authz";
+import { escapeHtml } from "../utils/html";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
 import { badRequest, created, forbidden, internalError, notFound, ok } from "../utils/response";
@@ -142,7 +143,15 @@ app.post("/:namespace/:slug/webhooks", async (c) => {
   });
 
   if (!contentType.includes("application/json")) {
-    return c.redirect(`/${project.namespace}/${project.slug}/webhooks`, 302);
+    // The management page redacts the signing secret, so a form-based creator
+    // would otherwise never see it. Show it exactly once here (not persisted, not
+    // in the URL, no client JS) with a link back to the management page.
+    const wh = webhookResult.data;
+    const backUrl = `/${project.namespace}/${project.slug}/webhooks`;
+    return c.html(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Webhook created</title><link rel="stylesheet" href="/ui.css"></head><body><main style="max-width:640px;margin:3rem auto;padding:0 1rem;font-family:monospace"><h1>Webhook created</h1><p><strong>Copy the signing secret now — it will not be shown again.</strong></p><p>URL: <code>${escapeHtml(wh.url)}</code></p><p>Signing secret: <code>${escapeHtml(wh.secret)}</code></p><p>Verify each delivery's <code>X-Stratum-Signature</code> (HMAC-SHA256) with this secret.</p><p><a href="${escapeHtml(backUrl)}">&larr; Back to webhooks</a></p></main></body></html>`,
+      201,
+    );
   }
   // The secret is returned on creation; receivers verify X-Stratum-Signature with it.
   return created({ webhook: webhookResult.data });

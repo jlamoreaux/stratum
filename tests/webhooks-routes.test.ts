@@ -10,6 +10,7 @@ vi.mock("../src/storage/webhooks", async (importActual) => {
   const actual = await importActual<typeof import("../src/storage/webhooks")>();
   return {
     ...actual,
+    createWebhook: vi.fn(),
     listWebhooks: vi.fn(),
     getWebhook: vi.fn(),
     listDeliveries: vi.fn(),
@@ -25,6 +26,7 @@ import { getProjectByPath } from "../src/storage/state";
 import { getUserByToken } from "../src/storage/users";
 import {
   type Webhook,
+  createWebhook,
   deleteWebhook,
   getWebhook,
   listDeliveries,
@@ -186,6 +188,30 @@ describe("webhook management routes — project-id scoping (SA-1)", () => {
 
     expect(res.status).toBe(404);
     expect(deleteWebhook).not.toHaveBeenCalled();
+  });
+
+  it("shows the signing secret once when a webhook is created via the HTML form", async () => {
+    vi.mocked(createWebhook).mockResolvedValue({
+      success: true,
+      data: webhook({ secret: "stm_whsec_deadbeefdeadbeefdeadbeefdeadbeef" }),
+    });
+
+    const form = new URLSearchParams({ url: "https://hooks.example.com/x" });
+    const res = await makeApp().fetch(
+      new Request("http://localhost/@alice/api/webhooks", {
+        method: "POST",
+        headers: { ...AUTH, "Content-Type": "application/x-www-form-urlencoded" },
+        body: form.toString(),
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(201);
+    const html = await res.text();
+    // The secret is delivered exactly once on creation, not via a redirect to the
+    // redacted management page.
+    expect(html).toContain("stm_whsec_deadbeefdeadbeefdeadbeefdeadbeef");
+    expect(html).toContain("will not be shown again");
   });
 
   it("falls back to the name for a legacy webhook with no project_id", async () => {
