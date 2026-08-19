@@ -292,6 +292,16 @@ describe("mergeWorkspaceIntoProject merge-failure classification (#185)", () => 
     expect(git.push).not.toHaveBeenCalled();
   });
 
+  it("merges with abortOnConflict: false so real conflicts carry their file list", async () => {
+    vi.mocked(git.merge).mockResolvedValue({
+      oid: "merged-sha",
+    } as Awaited<ReturnType<typeof git.merge>>);
+
+    await doMerge();
+
+    expect(git.merge).toHaveBeenCalledWith(expect.objectContaining({ abortOnConflict: false }));
+  });
+
   it("classifies a conflict by code when instanceof fails (duplicate module instance)", async () => {
     const foreign = Object.assign(new Error("Automatic merge failed: README.md"), {
       code: "MergeConflictError",

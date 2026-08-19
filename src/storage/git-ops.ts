@@ -564,6 +564,12 @@ export async function mergeWorkspaceIntoProject(
         theirs: workspaceSha,
         author,
         message: "Merge workspace into project",
+        // isomorphic-git defaults to true, which throws the file-list-less
+        // MergeNotSupportedError for any conflict its diff3 algorithm can't
+        // auto-resolve. false lets it write conflict markers instead and throw
+        // MergeConflictError with the real filepaths — safe here since `dir` is
+        // a fresh, throwaway MemoryFS clone discarded after this call returns.
+        abortOnConflict: false,
       }),
     ),
   );
