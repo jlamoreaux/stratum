@@ -309,6 +309,37 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
     expect(vi.mocked(kv.delete)).toHaveBeenCalledWith("conflict:conflict-abc");
   });
 
+  it("blocks a manual resolution that contains a secret (422, never pushes)", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "src/foo.ts", content: 'const k = "AKIAIOSFODNN7EXAMPLE";' }],
+        }),
+      }),
+      { STATE: kv, DB: makeDb() },
+    );
+
+    expect(res.status).toBe(422);
+    const body = await res.json<{ code: string }>();
+    expect(body.code).toBe("SECRET_DETECTED");
+    // The always-on secret scan must block before any push happens.
+    expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+  });
+
   it("404s a caller without project write access (never mints a token or pushes)", async () => {
     const kv = makeKv();
     vi.mocked(resolveConflict).mockClear();
