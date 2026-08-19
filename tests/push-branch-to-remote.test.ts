@@ -16,7 +16,7 @@ describe("pushBranchToRemote", () => {
     vi.clearAllMocks();
   });
 
-  it("pushes local main to the given remote ref with token auth, forced by default", async () => {
+  it("pushes local main to the given remote ref with token auth, not forced by default", async () => {
     vi.mocked(git.push).mockResolvedValueOnce({ ok: true } as never);
 
     const result = await pushBranchToRemote(
@@ -36,12 +36,12 @@ describe("pushBranchToRemote", () => {
     expect(opts.url).toBe("https://github.com/acme/widgets.git");
     expect(opts.ref).toBe("main");
     expect(opts.remoteRef).toBe("refs/heads/stratum/chg_1");
-    expect(opts.force).toBe(true);
+    expect(opts.force).toBe(false);
     const onAuth = opts.onAuth as () => { username: string; password: string };
     expect(onAuth()).toEqual({ username: "x-access-token", password: "gh-token" });
   });
 
-  it("passes an explicit force: false through", async () => {
+  it("passes an explicit force: true through, for a Stratum-owned ref", async () => {
     vi.mocked(git.push).mockResolvedValueOnce({ ok: true } as never);
 
     const result = await pushBranchToRemote(
@@ -49,16 +49,16 @@ describe("pushBranchToRemote", () => {
       "/",
       {
         url: "https://github.com/acme/widgets.git",
-        remoteRef: "refs/heads/feature",
+        remoteRef: "refs/heads/stratum/chg_1",
         token: "gh-token",
-        force: false,
+        force: true,
       },
       logger,
     );
 
     expect(result.success).toBe(true);
     const opts = vi.mocked(git.push).mock.calls[0]?.[0] as unknown as Record<string, unknown>;
-    expect(opts.force).toBe(false);
+    expect(opts.force).toBe(true);
   });
 
   it("wraps push failures in a 502 external-service error without leaking the token", async () => {

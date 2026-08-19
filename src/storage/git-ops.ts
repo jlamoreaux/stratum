@@ -1,5 +1,5 @@
 import { createPatch } from "diff";
-import git from "isomorphic-git";
+import git, { Errors as GitErrors } from "isomorphic-git";
 import type { ArtifactsCreateResult, ArtifactsNamespace, Author, CommitLogEntry } from "../types";
 import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -130,6 +130,31 @@ export interface MergeWorkspaceOptions {
   workspaceSha?: string;
 }
 
+/**
+ * Matches an isomorphic-git error class by `instanceof` as well as by its
+ * static `code`, so a duplicated module instance (dual ESM/CJS load) still
+ * classifies correctly.
+ */
+function matchesGitError(
+  error: unknown,
+  errorClass: { code: string } & (new (...args: never[]) => unknown),
+): boolean {
+  return (
+    error instanceof errorClass ||
+    (error instanceof Error && (error as { code?: unknown }).code === errorClass.code)
+  );
+}
+
+/**
+ * isomorphic-git reports a genuine content conflict as its own
+ * `MergeConflictError`, carrying the conflicting paths in `data.filepaths`.
+ */
+function isGitMergeConflict(
+  error: unknown,
+): error is InstanceType<typeof GitErrors.MergeConflictError> {
+  return matchesGitError(error, GitErrors.MergeConflictError);
+}
+
 export class MergeConflictError extends AppError {
   readonly conflictingFiles: string[];
   constructor(message: string, conflictingFiles: string[] = []) {
@@ -254,8 +279,9 @@ export async function pushMain(
  * Push the cloned repo's local `main` to an arbitrary branch on an external
  * remote (e.g. GitHub's `stratum/<changeId>` ref before a PR is opened, #189).
  * Auth is HTTP basic with the token as the password — GitHub accepts any
- * username alongside a token. Forces by default: the target ref is
- * Stratum-owned, so re-promotion must move it to the current tip.
+ * username alongside a token. `force` defaults to false since `remoteRef` is
+ * caller-supplied and could name a non-Stratum-owned branch; pass `force: true`
+ * explicitly when overwriting a ref this app owns (e.g. re-promotion).
  */
 export async function pushBranchToRemote(
   fs: NodeFS,
@@ -272,7 +298,7 @@ export async function pushBranchToRemote(
       ref: "main",
       remoteRef: opts.remoteRef,
       onAuth: () => ({ username: "x-access-token", password: opts.token }),
-      force: opts.force ?? true,
+      force: opts.force ?? false,
     }),
   );
   if (!res.success) {
@@ -353,8 +379,8 @@ export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  httpClient: HttpClient = http,
   opts: { fullHistory?: boolean } = {},
+  httpClient: HttpClient = http,
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
 
@@ -575,6 +601,12 @@ export async function mergeWorkspaceIntoProject(
         theirs: workspaceSha,
         author,
         message: "Merge workspace into project",
+        // isomorphic-git defaults to true, which throws the file-list-less
+        // MergeNotSupportedError for any conflict its diff3 algorithm can't
+        // auto-resolve. false lets it write conflict markers instead and throw
+        // MergeConflictError with the real filepaths — safe here since `dir` is
+        // a fresh, throwaway MemoryFS clone discarded after this call returns.
+        abortOnConflict: false,
       }),
     ),
   );
@@ -583,8 +615,33 @@ export async function mergeWorkspaceIntoProject(
     const message =
       mergeResult.error instanceof Error ? mergeResult.error.message : String(mergeResult.error);
     logger.error("Merge failed", mergeResult.error, { projectRemote, workspaceRemote, message });
+    if (isGitMergeConflict(mergeResult.error)) {
+      const filepaths = Array.isArray(mergeResult.error.data?.filepaths)
+        ? mergeResult.error.data.filepaths
+        : [];
+      return err(
+        new MergeConflictError(
+          `Merge failed; workspace may be stale or conflicting: ${message}`,
+          filepaths,
+        ),
+      );
+    }
+    // isomorphic-git throws MergeNotSupportedError for conflict shapes it can't
+    // auto-resolve (e.g. add/add) and for histories with no single merge base —
+    // still content conflicts the caller must resolve, just with no file list.
+    if (matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)) {
+      return err(
+        new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`),
+      );
+    }
+    // Anything else (network, auth, corrupt objects) is an operational failure —
+    // surface it as such rather than telling the client to resolve conflicts.
     return err(
-      new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`),
+      new ExternalServiceError(
+        "Git",
+        `Merge failed: ${message}`,
+        mergeResult.error instanceof Error ? mergeResult.error : undefined,
+      ),
     );
   }
 
