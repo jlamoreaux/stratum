@@ -290,11 +290,14 @@ npx wrangler secret put EMAIL_FROM_ADDRESS
 # Analytics — each request event carries the request properties: the matched
 # route pattern (e.g. /:namespace/:slug/files), method, status, and latency;
 # concrete paths (namespaces, repo slugs, change ids, file paths) are never
-# sent. Events also carry identity attribution: distinctId is the acting
-# user/agent id, or "server" for unattributed requests (those are marked
-# $process_person_profile: false so no person profile is created). Note: the
-# event property was renamed `path` -> `route`; dashboards and queries keyed
-# on `path` must switch to `route` — old `path` references receive no new data.
+# sent. A request that never reached a registered route (e.g. rejected by
+# global middleware before routing) is captured with route: "*"; a 404 is
+# excluded entirely, not captured with route: "*". Events also carry identity
+# attribution: distinctId is the acting user/agent id, or "server" for
+# unattributed requests (those are marked $process_person_profile: false so
+# no person profile is created). Note: the event property was renamed
+# `path` -> `route`; dashboards and queries keyed on `path` must switch to
+# `route` — old `path` references receive no new data.
 npx wrangler secret put POSTHOG_API_KEY
 
 # Backups — encrypts backup blobs at rest (D1 dumps contain secrets).
