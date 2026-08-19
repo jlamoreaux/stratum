@@ -35,6 +35,8 @@ security:
 tags:
   - name: health
     description: Liveness and dependency health checks
+  - name: discovery
+    description: Public agent-discovery metadata (auth.md, OAuth well-known documents)
   - name: projects
     description: Project creation, metadata, files, and history
   - name: imports
@@ -119,6 +121,98 @@ paths:
                   status: { type: string, example: ok }
                   service: { type: string, example: stratum }
                   timestamp: { type: string, format: date-time }
+
+  /auth.md:
+    get:
+      operationId: getAuthMd
+      tags: [discovery]
+      summary: Agent authentication & registration guide (auth.md)
+      description: |
+        Human- and agent-readable Markdown describing how to register an agent
+        identity and use Stratum credentials. URLs in the document are derived
+        from the request origin.
+      security: []
+      responses:
+        "200":
+          description: The auth.md document
+          content:
+            text/markdown:
+              schema: { type: string }
+
+  /.well-known/oauth-protected-resource:
+    get:
+      operationId: getProtectedResourceMetadata
+      tags: [discovery]
+      summary: OAuth 2.0 Protected Resource Metadata (RFC 9728)
+      security: []
+      responses:
+        "200":
+          description: Protected resource metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { type: string, format: uri }
+                  authorization_servers:
+                    type: array
+                    items: { type: string, format: uri }
+                  scopes_supported:
+                    type: array
+                    items: { type: string }
+                  bearer_methods_supported:
+                    type: array
+                    items: { type: string, example: header }
+                  resource_name: { type: string, example: Stratum }
+                  resource_documentation: { type: string, format: uri }
+
+  /.well-known/oauth-authorization-server:
+    get:
+      operationId: getAuthorizationServerMetadata
+      tags: [discovery]
+      summary: OAuth 2.0 Authorization Server Metadata (RFC 8414) with agent_auth block
+      description: |
+        Published for its `agent_auth` extension (auth.md agent registration
+        metadata). Stratum runs no OAuth flows as an authorization server, so
+        the standard grant/response lists are empty.
+      security: []
+      responses:
+        "200":
+          description: Authorization server metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  issuer: { type: string, format: uri }
+                  service_documentation: { type: string, format: uri }
+                  scopes_supported:
+                    type: array
+                    items: { type: string }
+                  grant_types_supported:
+                    type: array
+                    items: { type: string }
+                  response_types_supported:
+                    type: array
+                    items: { type: string }
+                  agent_auth:
+                    type: object
+                    description: auth.md agent registration metadata
+                    properties:
+                      skill: { type: string, format: uri }
+                      register_uri: { type: string, format: uri }
+                      identity_types_supported:
+                        type: array
+                        items: { type: string, example: service_auth }
+                      credential_types_supported:
+                        type: array
+                        items: { type: string, example: bearer_token }
+                      registration_methods:
+                        type: array
+                        items: { type: object }
+                      claim_uri: { type: string, format: uri }
+                      revocation_uri: { type: string, format: uri }
+                      revocation_method: { type: string, example: DELETE }
 
   /api/projects:
     post:

@@ -18,6 +18,7 @@ import { backupRouter } from "./routes/backup";
 import { bulkImportRouter } from "./routes/bulk-import";
 import { changesRouter } from "./routes/changes";
 import { deletionJobsRouter } from "./routes/deletion-jobs";
+import { discoveryRouter } from "./routes/discovery";
 import { emailAuthRouter } from "./routes/email-auth";
 import { gitHttpRouter } from "./routes/git-http";
 import { healthRouter } from "./routes/health";
@@ -121,6 +122,9 @@ app.get("/ui.css", (c) => {
 
 // Health check endpoint
 app.route("/api/health", healthRouter);
+
+// Agent discovery: /auth.md + OAuth well-known metadata (public, read-only)
+app.route("/", discoveryRouter);
 
 // Admin metrics endpoint
 app.route("/api/admin/metrics", metricsRouter);

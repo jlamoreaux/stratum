@@ -38,6 +38,27 @@ requests. A small set of endpoints requires no authentication at all:
 - `POST /api/webhooks/github` — the inbound GitHub webhook receiver, which is
   authenticated by HMAC signature (`X-Hub-Signature-256`) against the
   configured webhook secret rather than by a bearer token
+- `GET /auth.md`, `GET /.well-known/oauth-protected-resource`,
+  `GET /.well-known/oauth-authorization-server` — public agent-discovery
+  metadata (see [Agent discovery](#agent-discovery))
+
+## Agent discovery
+
+Agents that land on an instance cold can bootstrap without prior knowledge:
+
+- **`/auth.md`** — a Markdown guide to registering an agent identity and using
+  Stratum credentials, with all URLs derived from the instance's own origin.
+- **`/.well-known/oauth-protected-resource`** ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728))
+  and **`/.well-known/oauth-authorization-server`** ([RFC 8414](https://www.rfc-editor.org/rfc/rfc8414)) —
+  machine-readable metadata; the latter carries an `agent_auth` block
+  ([auth.md](https://github.com/workos/auth.md)) describing the registration
+  endpoint (`POST /api/agents`), identity/credential types, and revocation.
+  Stratum runs no OAuth flows as an authorization server, so the standard
+  grant lists are intentionally empty.
+
+At the DNS layer, DNS-AID records under `_agents.<domain>` point agents at the
+instance before any HTTP request — see
+[docs/runbooks/dns-aid.md](../runbooks/dns-aid.md).
 
 ## Admin API key
 
