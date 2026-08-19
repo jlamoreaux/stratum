@@ -164,9 +164,20 @@ async function authenticate(
   if (!result.success) return null;
   // An agent inherits its owner's access, so a deleting owner's agent must stop
   // working too — otherwise it's an authenticated git write channel that outlives
-  // the account it belongs to.
-  const owner = await getUser(c.env.DB, result.data.ownerId, logger);
-  if (owner.success && owner.data.deletingAt) return null;
+  // the account it belongs to. Fail CLOSED on the owner lookup: an unresolved or
+  // deleting owner yields no identity. getUser can reject on a D1 error, which
+  // would otherwise escape authenticate's documented no-500 contract, so catch it.
+  let owner: Awaited<ReturnType<typeof getUser>>;
+  try {
+    owner = await getUser(c.env.DB, result.data.ownerId, logger);
+  } catch (err) {
+    logger.warn("Agent owner lookup threw during git auth; failing closed", {
+      ownerId: result.data.ownerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  if (!owner.success || owner.data.deletingAt) return null;
   return { agentId: result.data.id, agentOwnerId: result.data.ownerId };
 }
 
