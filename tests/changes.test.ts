@@ -51,6 +51,7 @@ vi.mock("../src/storage/deletion", () => ({
 
 vi.mock("../src/evaluation", () => ({
   loadPolicy: vi.fn(),
+  diffTouchesProtectedConfig: vi.fn(() => false),
   DiffEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
       success: true,
