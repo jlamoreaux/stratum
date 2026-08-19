@@ -984,7 +984,9 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
     );
   }
 
-  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name);
+  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name, {
+    projectId: project.id,
+  });
   if (!webhooksResult.success) {
     logger.error("Failed to list webhooks", webhooksResult.error);
     return c.html(
@@ -996,7 +998,9 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
   }
 
   const webhooks = await Promise.all(
-    webhooksResult.data.map(async (webhook) => {
+    // Strip the signing secret before it reaches the HTML — it is shown once on
+    // creation via the JSON API and must never render in the management page.
+    webhooksResult.data.map(async ({ secret: _secret, ...webhook }) => {
       const deliveriesResult = await listDeliveries(c.env.DB, logger, webhook.id, 5);
       return { webhook, deliveries: deliveriesResult.success ? deliveriesResult.data : [] };
     }),

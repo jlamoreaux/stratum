@@ -8,6 +8,7 @@ import {
   listDeliveries,
   listWebhooks,
   setWebhookActive,
+  webhookBelongsToProject,
 } from "../storage/webhooks";
 import type { Env, ProjectEntry } from "../types";
 import { canWriteProject } from "../utils/authz";
@@ -160,7 +161,9 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
   if ("response" in access) return access.response;
   const { project } = access;
 
-  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name);
+  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name, {
+    projectId: project.id,
+  });
   if (!webhooksResult.success) {
     return internalError(webhooksResult.error.message);
   }
@@ -189,7 +192,7 @@ app.get("/:namespace/:slug/webhooks/:id/deliveries", async (c) => {
     if (webhookResult.error.code === "NOT_FOUND") return notFound("Webhook", id);
     return internalError(webhookResult.error.message);
   }
-  if (webhookResult.data.project !== project.name) return notFound("Webhook", id);
+  if (!webhookBelongsToProject(webhookResult.data, project)) return notFound("Webhook", id);
 
   const deliveriesResult = await listDeliveries(c.env.DB, logger, id);
   if (!deliveriesResult.success) {
@@ -218,7 +221,7 @@ app.post("/:namespace/:slug/webhooks/:id/toggle", async (c) => {
     if (webhookResult.error.code === "NOT_FOUND") return notFound("Webhook", id);
     return internalError(webhookResult.error.message);
   }
-  if (webhookResult.data.project !== project.name) return notFound("Webhook", id);
+  if (!webhookBelongsToProject(webhookResult.data, project)) return notFound("Webhook", id);
 
   const updateResult = await setWebhookActive(c.env.DB, logger, id, !webhookResult.data.active);
   if (!updateResult.success) {
@@ -259,7 +262,7 @@ app.delete("/:namespace/:slug/webhooks/:id", async (c) => {
     if (webhookResult.error.code === "NOT_FOUND") return notFound("Webhook", id);
     return internalError(webhookResult.error.message);
   }
-  if (webhookResult.data.project !== project.name) return notFound("Webhook", id);
+  if (!webhookBelongsToProject(webhookResult.data, project)) return notFound("Webhook", id);
 
   const deleteResult = await deleteWebhook(c.env.DB, logger, id);
   if (!deleteResult.success) {
@@ -296,7 +299,7 @@ app.post("/:namespace/:slug/webhooks/:id/delete", async (c) => {
     if (webhookResult.error.code === "NOT_FOUND") return notFound("Webhook", id);
     return internalError(webhookResult.error.message);
   }
-  if (webhookResult.data.project !== project.name) return notFound("Webhook", id);
+  if (!webhookBelongsToProject(webhookResult.data, project)) return notFound("Webhook", id);
 
   const deleteResult = await deleteWebhook(c.env.DB, logger, id);
   if (!deleteResult.success) {
