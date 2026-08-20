@@ -342,8 +342,8 @@ export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  httpClient: HttpClient = http,
   opts: { fullHistory?: boolean } = {},
+  httpClient: HttpClient = http,
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
 
@@ -1618,9 +1618,10 @@ export async function listFilesInRepo(
  * Read the full working tree (paths → text contents) in a single clone.
  * Used by the post-merge smoke check and the sandbox evaluator to populate a
  * sandbox. When `ref` (a commit sha) is given, the tree of that commit is read
- * instead of the clone's HEAD, so callers can pin the exact evaluated commit;
- * a ref that is not reachable in the (shallow) clone is an error — the pinned
- * tree no longer exists, so callers must not silently evaluate something else.
+ * instead of the clone's HEAD, so callers can pin the exact evaluated commit —
+ * cloned in full, since a pinned sha can fall outside a shallow clone's depth
+ * window; a ref still not reachable after that is an error, never a silent
+ * fall-through to evaluating something else.
  */
 export async function readRepoFiles(
   remote: string,
@@ -1630,7 +1631,7 @@ export async function readRepoFiles(
 ): Promise<Result<Map<string, string>, AppError>> {
   logger.debug("Reading repo files", { remote, ref });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { fullHistory: ref !== undefined });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 

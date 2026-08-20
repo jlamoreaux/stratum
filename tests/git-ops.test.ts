@@ -8,6 +8,7 @@ import {
   extractTokenSecret,
   freshRepoToken,
   mergeWorkspaceIntoProject,
+  readRepoFiles,
   readTreeAtCommit,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
@@ -331,6 +332,26 @@ describe("readTreeAtCommit", () => {
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error.message).toContain(`Failed to read tree at commit ${missing}`);
+  });
+});
+
+describe("readRepoFiles clone depth", () => {
+  beforeEach(() => {
+    vi.mocked(git.clone).mockReset().mockResolvedValue(undefined);
+  });
+
+  it("clones with full history when pinning a commit sha", async () => {
+    await readRepoFiles("https://example.com/repo.git", "token", noopLogger, "some-sha");
+
+    const cloneOpts = vi.mocked(git.clone).mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(cloneOpts.depth).toBeUndefined();
+  });
+
+  it("clones shallow (depth 50) when reading the live HEAD", async () => {
+    await readRepoFiles("https://example.com/repo.git", "token", noopLogger);
+
+    const cloneOpts = vi.mocked(git.clone).mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(cloneOpts.depth).toBe(50);
   });
 });
 
