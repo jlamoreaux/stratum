@@ -1614,7 +1614,33 @@ app.post("/changes/:id/github-pr", async (c) => {
     }
     pr = existingPr;
   } else {
-    pr = (await ghRes.json()) as GithubPr;
+    // The branch is already pushed by this point, so a malformed success body
+    // must not escape as an unhandled rejection (a bare 500): map it to the
+    // same structured 502 every other GitHub failure uses.
+    const parsed = await ghRes
+      .json()
+      .then((value) => value as Partial<GithubPr>)
+      .catch(() => undefined);
+    if (
+      !parsed ||
+      typeof parsed.number !== "number" ||
+      typeof parsed.html_url !== "string" ||
+      typeof parsed.state !== "string"
+    ) {
+      logger.error("GitHub PR creation returned an unreadable response body", undefined, {
+        status: ghRes.status,
+        changeId: id,
+      });
+      return c.json(
+        {
+          error: "GitHub PR creation failed: unreadable response from GitHub",
+          code: "GITHUB_ERROR",
+          githubStatus: ghRes.status,
+        },
+        502,
+      );
+    }
+    pr = parsed as GithubPr;
   }
 
   const promotedAt = new Date().toISOString();

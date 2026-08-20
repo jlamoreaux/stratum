@@ -2274,6 +2274,28 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(updateChangeStatus).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["invalid JSON", () => new Response("not json at all", { status: 201 })],
+    [
+      "a body missing the PR fields",
+      () => new Response(JSON.stringify({ ok: true }), { status: 201 }),
+    ],
+  ])(
+    "502s rather than throwing when GitHub returns a 2xx with %s",
+    async (_label, makeResponse) => {
+      fetchMock.mockResolvedValueOnce(makeResponse());
+      const res = await promote();
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe("GITHUB_ERROR");
+      expect(body.error).toContain("unreadable response");
+      // The branch was already pushed by this point; the change must not be
+      // recorded as promoted against a PR number we never actually read.
+      expect(pushBranchToRemote).toHaveBeenCalledTimes(1);
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    },
+  );
+
   it("reconciles a duplicate-head 422 by reusing the PR GitHub already has open", async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(
