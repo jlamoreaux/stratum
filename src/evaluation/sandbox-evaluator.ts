@@ -52,14 +52,20 @@ function parseTestOutput(stdout: string, stderr: string): number | null {
   return null;
 }
 
+/** The lockfile names `npm ci` accepts. */
+const NPM_LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"] as const;
+
 /**
- * `npm ci` with a lockfile, `npm install` without one, nothing without a
- * package.json. `--no-audit --no-fund` skip registry calls the sandbox
- * evaluation has no use for.
+ * A lockfile means the dependency tree is already pinned, so `npm ci` installs
+ * it verbatim — an evaluation score only means something if every run resolves
+ * the same versions. Without one, `npm install` is the best available
+ * (unpinned) approximation; without a package.json there is nothing to install,
+ * because the repo is not an npm project. `--no-audit --no-fund` skip registry
+ * round trips the evaluation has no use for.
  */
 export function installCommandFor(files: ReadonlyMap<string, string>): string | null {
   if (!files.has("package.json")) return null;
-  const base = files.has("package-lock.json") ? "npm ci" : "npm install";
+  const base = NPM_LOCKFILES.some((lockfile) => files.has(lockfile)) ? "npm ci" : "npm install";
   return `${base} --no-audit --no-fund`;
 }
 

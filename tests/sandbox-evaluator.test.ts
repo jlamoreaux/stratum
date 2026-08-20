@@ -248,6 +248,32 @@ describe("installCommandFor", () => {
     ).toBe("npm ci --no-audit --no-fund");
     expect(installCommandFor(new Map([["package-lock.json", "{}"]]))).toBeNull();
   });
+
+  it("treats npm-shrinkwrap.json as a lockfile", () => {
+    // `npm ci` accepts either lockfile name. A shrinkwrap-only project is just
+    // as pinned as a package-lock one, so it must not fall back to the
+    // unpinned `npm install`.
+    expect(
+      installCommandFor(
+        new Map([
+          ["package.json", "{}"],
+          ["npm-shrinkwrap.json", "{}"],
+        ]),
+      ),
+    ).toBe("npm ci --no-audit --no-fund");
+    // Both present is still a frozen install (npm prefers the shrinkwrap).
+    expect(
+      installCommandFor(
+        new Map([
+          ["package.json", "{}"],
+          ["npm-shrinkwrap.json", "{}"],
+          ["package-lock.json", "{}"],
+        ]),
+      ),
+    ).toBe("npm ci --no-audit --no-fund");
+    // A lockfile alone is still not an npm project.
+    expect(installCommandFor(new Map([["npm-shrinkwrap.json", "{}"]]))).toBeNull();
+  });
 });
 
 describe("SandboxEvaluator — exit code behaviour", () => {
