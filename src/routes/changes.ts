@@ -1354,6 +1354,46 @@ app.post("/changes/:id/evaluate", async (c) => {
   return okOrFormRedirect(c, id, { changeId: id, eval: evalResult, evalRuns: recordResult.data });
 });
 
+/** Bound on every direct GitHub API call in the promotion flow below. */
+const GITHUB_API_TIMEOUT_MS = 15_000;
+
+interface GithubPr {
+  number: number;
+  html_url: string;
+  state: string;
+}
+
+/**
+ * GitHub 422s PR creation with a "pull request already exists" error when the
+ * head ref already has an open PR — a race between a concurrent promotion (or
+ * a retry after `updateChangeStatus` failed post-creation) and the create
+ * call above. Look up and reuse that PR instead of failing the request.
+ */
+async function findOpenPrForHead(
+  repo: { owner: string; repo: string },
+  branch: string,
+  headers: Record<string, string>,
+  logger: Logger,
+): Promise<GithubPr | undefined> {
+  const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls?head=${repo.owner}:${branch}&state=open`;
+  let res: Response;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) });
+  } catch (error) {
+    logger.error(
+      "Lookup of existing PR for duplicate head failed",
+      error instanceof Error ? error : undefined,
+      {
+        branch,
+      },
+    );
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const prs = (await res.json().catch(() => [])) as GithubPr[];
+  return prs[0];
+}
+
 app.post("/changes/:id/github-pr", async (c) => {
   const logger = createLogger({
     requestId: crypto.randomUUID(),
@@ -1487,21 +1527,42 @@ app.post("/changes/:id/github-pr", async (c) => {
   const prBody =
     `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
 
-  const ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${githubToken}`,
-      "User-Agent": "stratum",
-    },
-    body: JSON.stringify({
-      title: body.title ?? `Stratum: ${change.id}`,
-      body: prBody,
-      head: branch,
-      base,
-      draft: body.draft ?? true,
-    }),
-  });
+  const githubHeaders = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${githubToken}`,
+    "User-Agent": "stratum",
+  };
+
+  let ghRes: Response;
+  try {
+    ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
+      method: "POST",
+      headers: githubHeaders,
+      body: JSON.stringify({
+        title: body.title ?? `Stratum: ${change.id}`,
+        body: prBody,
+        head: branch,
+        base,
+        draft: body.draft ?? true,
+      }),
+      // A slow GitHub response must not hold the request open until the
+      // platform's own subrequest limit kills it.
+      signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+    });
+  } catch (error) {
+    logger.error("GitHub PR creation request failed", error instanceof Error ? error : undefined, {
+      changeId: id,
+    });
+    return c.json(
+      {
+        error: "GitHub PR creation failed: request timed out or network error",
+        code: "GITHUB_ERROR",
+      },
+      502,
+    );
+  }
+
+  let pr: GithubPr;
 
   if (!ghRes.ok) {
     // Surface GitHub's own status + message (never the token) instead of a
@@ -1509,38 +1570,53 @@ app.post("/changes/:id/github-pr", async (c) => {
     // exactly what to fix.
     const detail = await ghRes.text().catch(() => "");
     let githubMessage: string | undefined;
+    let errors: Array<{ message?: string; code?: string; field?: string }> = [];
     try {
       const parsed = JSON.parse(detail) as {
         message?: string;
         errors?: Array<{ message?: string; code?: string; field?: string }>;
       };
+      errors = parsed.errors ?? [];
       githubMessage = [
         parsed.message,
-        ...(parsed.errors ?? []).map(
-          (e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code),
-        ),
+        ...errors.map((e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code)),
       ]
         .filter(Boolean)
         .join("; ");
     } catch {
       githubMessage = undefined;
     }
-    logger.error("GitHub PR creation failed", undefined, {
-      status: ghRes.status,
-      changeId: id,
-      githubMessage,
-    });
-    return c.json(
-      {
-        error: `GitHub PR creation failed (${ghRes.status})${githubMessage ? `: ${githubMessage}` : ""}`,
-        code: "GITHUB_ERROR",
-        githubStatus: ghRes.status,
-      },
-      502,
-    );
+
+    // GitHub's duplicate-head 422 ("A pull request already exists for
+    // owner:branch") means the PR the caller wanted already exists — reuse it
+    // rather than failing (see findOpenPrForHead above).
+    const duplicateHead =
+      ghRes.status === 422 &&
+      errors.some((e) => e.message?.toLowerCase().includes("pull request already exists"));
+    const existingPr = duplicateHead
+      ? await findOpenPrForHead(repo, branch, githubHeaders, logger)
+      : undefined;
+
+    if (!existingPr) {
+      logger.error("GitHub PR creation failed", undefined, {
+        status: ghRes.status,
+        changeId: id,
+        githubMessage,
+      });
+      return c.json(
+        {
+          error: `GitHub PR creation failed (${ghRes.status})${githubMessage ? `: ${githubMessage}` : ""}`,
+          code: "GITHUB_ERROR",
+          githubStatus: ghRes.status,
+        },
+        502,
+      );
+    }
+    pr = existingPr;
+  } else {
+    pr = (await ghRes.json()) as GithubPr;
   }
 
-  const pr = (await ghRes.json()) as { number: number; html_url: string; state: string };
   const promotedAt = new Date().toISOString();
 
   const updateResult = await updateChangeStatus(c.env.DB, logger, id, "promoted", {

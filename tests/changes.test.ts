@@ -2264,6 +2264,91 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(body.githubStatus).toBe(502);
   });
 
+  it("502s without leaking details when the PR-creation request itself fails (timeout/network)", async () => {
+    fetchMock.mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"));
+    const res = await promote();
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe("GITHUB_ERROR");
+    expect(body.error).toContain("timed out or network error");
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a duplicate-head 422 by reusing the PR GitHub already has open", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          message: "Validation Failed",
+          errors: [
+            {
+              resource: "PullRequest",
+              code: "custom",
+              message: "A pull request already exists for acme:stratum/chg_abc123.",
+            },
+          ],
+        }),
+        { status: 422 },
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify([
+          { number: 99, html_url: "https://github.com/acme/widgets/pull/99", state: "open" },
+        ]),
+        { status: 200 },
+      ),
+    );
+
+    const res = await promote();
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.github.com/repos/acme/widgets/pulls?head=acme:stratum/chg_abc123&state=open",
+      expect.anything(),
+    );
+    const body = (await res.json()) as { github: Record<string, unknown> };
+    expect(body.github).toEqual(
+      expect.objectContaining({
+        pullRequestNumber: 99,
+        pullRequestUrl: "https://github.com/acme/widgets/pull/99",
+      }),
+    );
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      "promoted",
+      expect.objectContaining({ githubPrNumber: 99 }),
+    );
+  });
+
+  it("falls back to the original 502 when the duplicate-head lookup itself finds nothing open", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          message: "Validation Failed",
+          errors: [
+            {
+              resource: "PullRequest",
+              code: "custom",
+              message: "A pull request already exists for acme:stratum/chg_abc123.",
+            },
+          ],
+        }),
+        { status: 422 },
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }));
+
+    const res = await promote();
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string; githubStatus: number };
+    expect(body.code).toBe("GITHUB_ERROR");
+    expect(body.githubStatus).toBe(422);
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
   it("502s when the branch push fails, without calling the PR API", async () => {
     vi.mocked(pushBranchToRemote).mockResolvedValue({
       success: false,
