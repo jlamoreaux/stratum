@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { blobObject, commitObject, treeObject } from "../src/storage/git-objects";
 import { type NodeFS, squashMerge } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
-import { placeLooseObject } from "../src/storage/object-loader";
+import { type FsLike, placeLooseObject } from "../src/storage/object-loader";
 import type { Logger } from "../src/utils/logger";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -122,10 +122,10 @@ describe("squashMerge preserves file modes and symlinks", () => {
     });
 
     for (const o of [fileBlob, scriptBlob, linkToFile, goneBlob, baseTree, base]) {
-      await placeLooseObject(fs as never, gitdir, o.oid, o.bytes);
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
     }
     for (const o of [linkToScript, wsTree, ws]) {
-      await placeLooseObject(fs as never, gitdir, o.oid, o.bytes);
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
     }
     await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
     await git.checkout({ fs: gitfs, dir, ref: "main" });
@@ -194,7 +194,7 @@ describe("squashMerge preserves file modes and symlinks", () => {
       timestamp: 1700000001,
     });
     for (const o of [fileBlob, tree, base, ws]) {
-      await placeLooseObject(fs as never, gitdir, o.oid, o.bytes);
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
     }
     await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
     await git.checkout({ fs: gitfs, dir, ref: "main" });
@@ -213,6 +213,56 @@ describe("squashMerge preserves file modes and symlinks", () => {
     expect(result.success).toBe(true);
     if (result.success) expect(result.data).toBe(base.oid);
     // No changes -> no push.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on a gitlink (submodule) entry instead of silently dropping it", async () => {
+    const raw = new MemoryFS();
+    const fs = raw.toNodeFS() as unknown as NodeFS;
+    const gitfs = fs as unknown as Parameters<typeof git.init>[0]["fs"];
+    const dir = "/";
+    const gitdir = "/.git";
+    await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+    const fileBlob = await blobObject(enc("base\n"));
+    const baseTree = await treeObject([{ mode: "100644", name: "file.txt", oid: fileBlob.oid }]);
+    const base = await commitObject({
+      tree: baseTree.oid,
+      parents: [],
+      message: "base",
+      timestamp: 1700000000,
+    });
+    // A gitlink (submodule reference): mode 160000, oid is the submodule's
+    // commit — never read as a blob, so it doesn't need to exist as an object.
+    const wsTree = await treeObject([
+      { mode: "100644", name: "file.txt", oid: fileBlob.oid },
+      { mode: "160000", name: "vendor/lib", oid: "a".repeat(40) },
+    ]);
+    const ws = await commitObject({
+      tree: wsTree.oid,
+      parents: [base.oid],
+      message: "add submodule",
+      timestamp: 1700000001,
+    });
+    for (const o of [fileBlob, baseTree, base, wsTree, ws]) {
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
+    }
+    await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
+    await git.checkout({ fs: gitfs, dir, ref: "main" });
+
+    const fetchSpy = stubReceivePackServer(base.oid);
+
+    const result = await squashMerge(
+      fs,
+      dir,
+      ws.oid,
+      "https://example.test/git/project.git",
+      "token",
+      author,
+      logger,
+    );
+    expect(result.success).toBe(false);
+    // Fails before ever pushing — the unsupported gitlink is never silently merged.
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

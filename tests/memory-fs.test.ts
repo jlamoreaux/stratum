@@ -2,7 +2,7 @@ import git from "isomorphic-git";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { blobObject, commitObject, treeObject } from "../src/storage/git-objects";
 import { MemoryFS } from "../src/storage/memory-fs";
-import { placeLooseObject } from "../src/storage/object-loader";
+import { type FsLike, placeLooseObject } from "../src/storage/object-loader";
 
 describe("MemoryFS", () => {
   let fs: MemoryFS;
@@ -492,8 +492,10 @@ describe("MemoryFS", () => {
       expect(result.success).toBe(false);
       if (!result.success) expect(result.error.code).toBe("ENOTDIR");
     });
+  });
 
-    it("toNodeFS rmdir and writeFile throw on failure", async () => {
+  describe("toNodeFS", () => {
+    it("rmdir and writeFile throw on failure", async () => {
       const nodeFS = fs.toNodeFS();
       await expect(nodeFS.promises.rmdir("/missing")).rejects.toMatchObject({ code: "ENOENT" });
       await fs.mkdir("/dir");
@@ -502,7 +504,7 @@ describe("MemoryFS", () => {
       });
     });
 
-    it("toNodeFS symlink and readlink throw on failure", async () => {
+    it("symlink and readlink throw on failure", async () => {
       const nodeFS = fs.toNodeFS();
       await nodeFS.promises.writeFile("/f.txt", "x");
       await expect(nodeFS.promises.readlink("/f.txt")).rejects.toMatchObject({ code: "EINVAL" });
@@ -574,7 +576,7 @@ describe("MemoryFS + isomorphic-git round trips", () => {
       timestamp: 1700000000,
     });
     for (const o of [fileBlob, execBlob, linkBlob, tree, base]) {
-      await placeLooseObject(fs as never, gitdir, o.oid, o.bytes);
+      await placeLooseObject(fs as unknown as FsLike, gitdir, o.oid, o.bytes);
     }
     await git.writeRef({ fs, dir, ref: "refs/heads/main", value: base.oid, force: true });
     await git.checkout({ fs, dir, ref: "main" });

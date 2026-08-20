@@ -1146,12 +1146,13 @@ export async function squashMerge(
   const workspaceFiles = workspaceFilesResult.data;
   const projectFiles = projectFilesResult.data;
   const workspaceMap = new Map(workspaceFiles.map(([path, oid]) => [path, oid]));
+  const projectMap = new Map(projectFiles.map(([path, oid, mode]) => [path, { oid, mode }]));
 
   // Compare oid AND mode so a mode-only change (chmod +x, file<->symlink) is
   // carried over — the blob oid alone is identical in that case.
   const changed = workspaceFiles.filter(([path, hash, mode]) => {
-    const projectEntry = projectFiles.find(([p]) => p === path);
-    return projectEntry?.[1] !== hash || projectEntry?.[2] !== mode;
+    const projectEntry = projectMap.get(path);
+    return projectEntry?.oid !== hash || projectEntry?.mode !== mode;
   });
   const deleted = projectFiles.filter(([path]) => !workspaceMap.has(path));
 
@@ -1508,6 +1509,12 @@ async function listFilesAtCommit(
           const oid = await entry.oid();
           const mode = await entry.mode();
           files.push([filepath, oid, mode]);
+        } else if (type === "commit") {
+          // Gitlink (submodule reference) — MemoryFS has no checked-out submodule
+          // behind it (see MemoryStats.mode), so silently omitting it here would
+          // let squashMerge's diff miss an added/changed/removed submodule
+          // pointer. Fail closed instead of losing it.
+          throw new Error(`Gitlink (submodule) entry at "${filepath}" is not supported`);
         }
       },
     }),
@@ -1714,7 +1721,8 @@ export async function revertToCommit(
   return ok(revertSha);
 }
 
-async function walkDir(
+/** Exported for tests (mirrors real symlink-as-leaf traversal, no local copy). */
+export async function walkDir(
   fs: NodeFS,
   base: string,
   prefix: string,
