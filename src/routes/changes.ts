@@ -131,11 +131,20 @@ const MAX_BASE_REF_LENGTH = 200;
  * git applies its per-component rules to every slash-separated component, not
  * just to the ref as a whole, so `release/.hidden` and `release/v1.lock` are
  * invalid even though the full string neither starts with `.` nor ends with
- * `.lock`. A bare `@` is a legal branch name — only the `@{` reflog syntax is
- * rejected.
+ * `.lock`.
+ *
+ * A bare `@` is rejected deliberately. git itself will happily create
+ * `refs/heads/@` (verified against git 2.43), but `@` is its shorthand for
+ * HEAD, so `git checkout @` resolves to HEAD rather than to the branch — the
+ * name is ambiguous wherever it is used, and GitHub blocks ambiguous branch
+ * names of its own accord. `@` inside a longer name (`feature/@/thing`) is
+ * unambiguous and stays legal; only the `@{` reflog syntax is a hard error.
+ * This is an allowlist for untrusted input, not a reimplementation of git's
+ * parser, so erring toward rejection here is deliberate.
  */
 function isValidBaseRef(ref: string): boolean {
   if (ref.length === 0 || ref.length > MAX_BASE_REF_LENGTH) return false;
+  if (ref === "@") return false;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: control chars are exactly what's rejected
   if (/[\s~^:?*[\\\x00-\x1f\x7f]/.test(ref)) return false;
   if (ref.startsWith("-") || ref.startsWith("/")) return false;

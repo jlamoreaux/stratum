@@ -2180,8 +2180,8 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(prPayload.base).toBe("release/1.2");
   });
 
-  it.each(["@", "feature/@/thing", "v1.0.0", "a.b.c/d.e"])(
-    "accepts the legal base %j (only the @{ reflog syntax is rejected)",
+  it.each(["feature/@/thing", "feature/@-fix", "v1.0.0", "a.b.c/d.e"])(
+    "accepts the legal base %j (@ inside a longer name is unambiguous)",
     async (base) => {
       const res = await promote({ base });
       expect(res.status).toBe(200);
@@ -2215,6 +2215,9 @@ describe("POST /api/changes/:id/github-pr", () => {
     "release/v1.",
     "release/v1.lock",
     "release/v1.lock/next",
+    // git will create refs/heads/@, but "@" is git's shorthand for HEAD, so the
+    // name is ambiguous everywhere it is used. Rejected deliberately.
+    "@",
   ])("rejects garbage base %j without touching GitHub", async (base) => {
     const res = await promote({ base });
     expect(res.status).toBe(400);
