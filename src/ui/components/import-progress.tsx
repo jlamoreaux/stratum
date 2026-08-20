@@ -217,9 +217,11 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
         ? 50
         : 0;
 
-  // Safely escape for JavaScript string interpolation
-  const safeNamespace = JSON.stringify(namespace).slice(1, -1);
-  const safeSlug = JSON.stringify(slug).slice(1, -1);
+  // Safely escape for interpolation into a quoted string inside an inline
+  // <script> body — JSON.stringify alone doesn't escape "<", so a namespace
+  // or slug containing "</script>" could terminate the script tag early.
+  const safeNamespace = JSON.stringify(namespace).slice(1, -1).replace(/</g, "\\u003c");
+  const safeSlug = JSON.stringify(slug).slice(1, -1).replace(/</g, "\\u003c");
 
   // Get the main error for classification (use the last error or logs)
   const lastError = errors.length > 0 ? errors[errors.length - 1] : undefined;

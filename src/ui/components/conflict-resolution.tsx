@@ -1,4 +1,5 @@
 import type { FC } from "hono/jsx";
+import { serializeForScript } from "../../utils/html";
 
 export interface ConflictFile {
   path: string;
@@ -274,8 +275,8 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
             __html: `
             // Track resolutions for this file
             if (!window.fileResolutions) window.fileResolutions = {};
-            window.fileResolutions[${JSON.stringify(fileId)}] = {
-              path: ${JSON.stringify(file.path)},
+            window.fileResolutions[${serializeForScript(fileId)}] = {
+              path: ${serializeForScript(file.path)},
               strategy: null,
               content: null
             };
@@ -307,7 +308,7 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
               window.fileResolutions[fileId].strategy = 'manual';
               window.fileResolutions[fileId].content = content;
 
-              const conflictId = ${JSON.stringify(conflictId)};
+              const conflictId = ${serializeForScript(conflictId)};
               const filePath = window.fileResolutions[fileId].path;
 
               try {
@@ -338,7 +339,7 @@ const ConflictFileViewer: FC<ConflictFileViewerProps> = ({ file, conflictId, dis
             // attributes). Scoped to this fileId and guarded so repeated
             // per-file scripts never double-bind.
             (function () {
-              var fileId = ${JSON.stringify(fileId)};
+              var fileId = ${serializeForScript(fileId)};
               document
                 .querySelectorAll('button[data-file-id="' + fileId + '"][data-resolution]')
                 .forEach(function (btn) {

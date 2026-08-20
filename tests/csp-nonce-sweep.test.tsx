@@ -29,17 +29,14 @@ vi.mock("../src/storage/agents", () => ({
 
 const NONCE = "sweep-test-nonce";
 
-/** All opening `<script …>` tags in the HTML. */
 function scriptTags(html: string): string[] {
   return [...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]);
 }
 
-/** Opening script tags that do NOT carry the expected nonce attribute. */
 function scriptTagsWithoutNonce(html: string, nonce: string): string[] {
   return scriptTags(html).filter((tag) => !tag.includes(`nonce="${nonce}"`));
 }
 
-/** Inline event-handler attributes (onclick=", onsubmit=", …) in the HTML. */
 function inlineHandlerAttrs(html: string): string[] {
   return [...html.matchAll(/\son[a-z]+="/g)].map((m) => m[0].trim());
 }
@@ -216,6 +213,21 @@ describe("CSP nonce sweep — components", () => {
     expect(html).toContain('id="import-cancel-form"');
   });
 
+  it("ImportProgressCard: a namespace/slug containing </script> cannot terminate the nonce'd script", () => {
+    const html = renderToString(
+      <ImportProgressCard
+        {...importProgressBase}
+        namespace="@alice</script><script>window.pwned=1</script>"
+        slug="my-repo</script><script>window.pwned=1</script>"
+        status="processing"
+        nonce={NONCE}
+      />,
+    );
+    expectCspClean(html, { expectScripts: true });
+    expect(html).not.toContain("</script><script>window.pwned");
+    expect(html).toContain("\\u003c/script>");
+  });
+
   // Every error classification (with and without an action button) plus the
   // terminal statuses — none may emit an un-nonced script or inline handler.
   const failureMessages = [
@@ -284,6 +296,31 @@ describe("CSP nonce sweep — components", () => {
     expect(html).toContain('data-resolve-all="ours"');
     expect(html).toContain('data-resolve-all="theirs"');
     expect(html).toContain('id="manual-save-src_app_ts"');
+  });
+
+  it("ConflictResolution: a file path containing </script> cannot terminate the nonce'd script", () => {
+    const conflict: SyncConflict = {
+      id: "conf-1</script><script>window.pwned=1</script>",
+      namespace: "@alice",
+      slug: "my-repo",
+      sourceUrl: "https://github.com/acme/api",
+      sourceBranch: "main",
+      detectedAt: "2024-01-01T00:00:00Z",
+      conflicts: [
+        {
+          path: "src/</script><script>window.pwned=1</script>.ts",
+          ours: { content: "a", branch: "main", commit: "abc1234", timestamp: "2024-01-01" },
+          theirs: { content: "b", branch: "up", commit: "def5678", timestamp: "2024-01-02" },
+        },
+      ],
+    };
+    const html = renderToString(<ConflictResolution conflict={conflict} nonce={NONCE} />);
+    // expectCspClean is the real guarantee: if the payload broke out of the
+    // nonce'd script, it would inject an un-nonced <script> tag and this fails.
+    expectCspClean(html, { expectScripts: true });
+    expect(html).not.toContain("</script><script>window.pwned");
+    // The malicious payload only ever appears escaped inside the JS string.
+    expect(html).toContain("\\u003c/script>");
   });
 });
 
