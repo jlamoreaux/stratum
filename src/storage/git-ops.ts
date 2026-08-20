@@ -489,7 +489,14 @@ export async function collectRepoTags(
     // still yields the intended sha from the tag object we did read.
     let current = oid;
     try {
-      for (let hop = 0; hop < 10 && entry.targetSha === null; hop++) {
+      // Peel until a non-tag target or a repeated oid (cycle) is hit — a
+      // visited-oid set rather than a fixed hop cap so a valid, unusually long
+      // tag-of-tag chain still resolves instead of being marked unresolvable.
+      const visited = new Set<string>();
+      let hop = 0;
+      while (entry.targetSha === null) {
+        if (visited.has(current)) break;
+        visited.add(current);
         const obj = await git.readObject({ fs, dir, oid: current });
         if (obj.type === "tag") {
           const tag = obj.object as {
@@ -506,11 +513,12 @@ export async function collectRepoTags(
             }
           }
           current = tag.object;
+          hop++;
         } else {
           entry.targetSha = current;
         }
       }
-      // A peel chain that never terminated (>10 hops) is unresolvable too.
+      // A peel chain that never terminated (cycle) is unresolvable too.
       if (entry.targetSha === null) entry.unresolvable = true;
     } catch (error) {
       // The object at `current` is missing locally. If we peeled at least one

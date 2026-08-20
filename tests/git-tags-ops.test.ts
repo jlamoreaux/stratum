@@ -9,6 +9,7 @@ import {
   pushTags,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
+import { placeLooseObject } from "../src/storage/object-loader";
 import type { Env, ProjectEntry } from "../src/types";
 import type { Logger } from "../src/utils/logger";
 
@@ -188,6 +189,58 @@ describe("collectRepoTags", () => {
     expect(entry?.targetSha).toBe(c1);
     expect(entry?.message).toBe("outer"); // first tag object in the chain wins
     expect(entry?.unresolvable).toBe(false);
+  });
+
+  it("resolves a tag-of-tag chain longer than the old fixed hop cap", async () => {
+    const { fs, shas } = await buildRepo("/repo", [{ "a.txt": "one" }]);
+    const c1 = shas[0] as string;
+    let current = c1;
+    let currentType: "commit" | "tag" = "commit";
+    // 11 tag objects deep — one more than the old fixed 10-hop limit.
+    for (let i = 0; i < 11; i++) {
+      current = await git.writeTag({
+        fs,
+        dir: "/repo",
+        tag: { object: current, type: currentType, tag: `t${i}`, tagger, message: `t${i}\n` },
+      });
+      currentType = "tag";
+    }
+    await git.writeRef({ fs, dir: "/repo", ref: "refs/tags/deep", value: current, force: true });
+
+    const tags = await collectRepoTags(fs, "/repo");
+    const entry = tags.find((t) => t.name === "deep");
+    expect(entry?.annotated).toBe(true);
+    expect(entry?.targetSha).toBe(c1);
+    expect(entry?.unresolvable).toBe(false);
+  });
+
+  it("marks a self-referential tag object unresolvable instead of looping forever", async () => {
+    const { fs } = await buildRepo("/repo", [{ "a.txt": "one" }]);
+    // A real tag-of-tag cycle can't exist through normal writes (an oid is a
+    // hash of content that would have to embed that same oid). Simulate the
+    // on-disk corruption the visited-oid guard defends against: place a loose
+    // tag object, at an oid we choose, whose own `object` field is that same
+    // oid — placeLooseObject bypasses hash verification, so this is a genuine
+    // self-reference once read back.
+    const selfOid = "c".repeat(40);
+    const content = new TextEncoder().encode(
+      `object ${selfOid}\ntype commit\ntag cycle\ntagger Test <test@x.com> 1700000000 +0000\n\nself-referential (corrupted fixture)\n`,
+    );
+    const header = new TextEncoder().encode(`tag ${content.length}\0`);
+    const bytes = new Uint8Array(header.length + content.length);
+    bytes.set(header, 0);
+    bytes.set(content, header.length);
+    await placeLooseObject(
+      fs as unknown as Parameters<typeof placeLooseObject>[0],
+      "/repo/.git",
+      selfOid,
+      bytes,
+    );
+    await git.writeRef({ fs, dir: "/repo", ref: "refs/tags/cycle", value: selfOid, force: true });
+
+    const tags = await collectRepoTags(fs, "/repo");
+    const entry = tags.find((t) => t.name === "cycle");
+    expect(entry?.unresolvable).toBe(true);
   });
 });
 

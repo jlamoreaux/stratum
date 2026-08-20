@@ -4,6 +4,7 @@ import { reconstructRepo, restoreProjectRepo } from "../src/backup/repo-restore"
 import { type RepoManifest, buildSnapshot, walkRepoObjects } from "../src/backup/repo-snapshot";
 import type { NodeFS } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
+import { placeLooseObject } from "../src/storage/object-loader";
 import type { Env, ProjectEntry } from "../src/types";
 import type { Logger } from "../src/utils/logger";
 
@@ -151,6 +152,67 @@ describe("backup walk with tags", () => {
     );
   });
 
+  it("snapshots a tag-of-tag chain longer than the old fixed hop cap", async () => {
+    const { fs, shas } = await buildRepo([{ "a.txt": "one" }]);
+    const c1 = shas[0] as string;
+    let current = c1;
+    let currentType: "commit" | "tag" = "commit";
+    // 11 tag objects deep — one more than the old fixed 10-hop limit.
+    for (let i = 0; i < 11; i++) {
+      current = await git.writeTag({
+        fs,
+        dir: SRC,
+        tag: { object: current, type: currentType, tag: `t${i}`, tagger, message: `t${i}\n` },
+      });
+      currentType = "tag";
+    }
+    await git.writeRef({ fs, dir: SRC, ref: "refs/tags/deep", value: current, force: true });
+
+    const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);
+    if (!walk.success || !("objects" in walk.data)) throw new Error("walk failed");
+    expect(walk.data.tags).toEqual([{ name: "deep", oid: current }]);
+    const oids = walk.data.objects.map((o) => o.oid);
+    expect(oids).toContain(c1); // the chain's target commit made it into the pack
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      "Backup: skipping unresolvable tag",
+      expect.anything(),
+    );
+  });
+
+  it("skips (with a warning) a tag whose oid forms a cycle instead of looping forever", async () => {
+    const { fs, shas } = await buildRepo([{ "a.txt": "one" }]);
+    await git.tag({ fs, dir: SRC, ref: "good", object: shas[0] });
+    // A real tag-of-tag cycle can't exist through normal writes (an oid is a
+    // hash of content that would have to embed that same oid). Simulate the
+    // on-disk corruption the visited-oid guard defends against: place a loose
+    // tag object, at an oid we choose, whose own `object` field is that same
+    // oid — placeLooseObject bypasses hash verification, so this is a genuine
+    // self-reference once read back.
+    const selfOid = "c".repeat(40);
+    const content = new TextEncoder().encode(
+      `object ${selfOid}\ntype commit\ntag cycle\ntagger Test <test@x.com> 1700000000 +0000\n\nself-referential (corrupted fixture)\n`,
+    );
+    const header = new TextEncoder().encode(`tag ${content.length}\0`);
+    const bytes = new Uint8Array(header.length + content.length);
+    bytes.set(header, 0);
+    bytes.set(content, header.length);
+    await placeLooseObject(
+      fs as unknown as Parameters<typeof placeLooseObject>[0],
+      `${SRC}/.git`,
+      selfOid,
+      bytes,
+    );
+    await git.writeRef({ fs, dir: SRC, ref: "refs/tags/cycle", value: selfOid, force: true });
+
+    const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);
+    if (!walk.success || !("objects" in walk.data)) throw new Error("walk failed");
+    expect(walk.data.tags.map((t) => t.name)).toEqual(["good"]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Backup: skipping unresolvable tag",
+      expect.objectContaining({ name: "cycle" }),
+    );
+  });
+
   it("aborts with tooLarge when the tag walk pushes the byte total over the cap", async () => {
     // Measure the HEAD-only byte count first…
     const headOnly = await buildRepo([{ "a.txt": "one" }]);
@@ -266,6 +328,10 @@ describe("restore round-trip with tags", () => {
     ["lock suffix", "v1.0.0.lock"],
     ["empty name", ""],
     ["control characters", "v1\u0000evil"],
+    ["repeated slash (empty component)", "release//v1"],
+    ["dot-prefixed inner component", "release/.hidden"],
+    ["trailing-dot inner component", "release/v1."],
+    ["lock-suffixed inner component", "release/v1.0.lock/next"],
   ])("rejects a manifest tag name with %s", async (_label, tagName) => {
     const { fs } = await buildRepo([{ "a.txt": "one" }]);
     const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);

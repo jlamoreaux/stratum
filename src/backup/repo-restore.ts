@@ -98,17 +98,30 @@ export async function reconstructRepo(
  * Mirrors the parts of git's ref-name rules that matter for path traversal.
  */
 function isValidTagName(name: unknown): name is string {
-  return (
-    typeof name === "string" &&
-    name.length > 0 &&
-    name.length <= 255 &&
-    /^[\w.\-+/]+$/.test(name) &&
-    !name.includes("..") &&
-    !name.startsWith("/") &&
-    !name.endsWith("/") &&
-    !name.startsWith(".") &&
-    !name.endsWith(".lock")
-  );
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name.length > 255 ||
+    !/^[\w.\-+/]+$/.test(name) ||
+    name.includes("..") ||
+    name.startsWith("/") ||
+    name.endsWith("/")
+  ) {
+    return false;
+  }
+  // Every slash-separated path component must independently be a valid ref
+  // component — a bare startsWith(".")/endsWith(".lock") check on the whole
+  // name misses a hostile inner component like "release/.hidden" or
+  // "release/v1.0.lock/next", and doesn't catch repeated slashes (an empty
+  // component) or a component ending in a bare ".".
+  return name.split("/").every((component) => {
+    return (
+      component.length > 0 &&
+      !component.startsWith(".") &&
+      !component.endsWith(".lock") &&
+      !component.endsWith(".")
+    );
+  });
 }
 
 /**

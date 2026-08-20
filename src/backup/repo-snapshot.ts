@@ -148,10 +148,15 @@ export async function walkRepoObjects(
       }
       try {
         // Peel annotated tags (adding each tag object in the chain) down to the
-        // target, then close the pack over the target's reachability.
+        // target, then close the pack over the target's reachability. A
+        // visited-oid set (not a fixed hop cap) so a valid, unusually long
+        // tag-of-tag chain still snapshots correctly instead of being dropped.
         let current = refOid;
         let target: string | null = null;
-        for (let hop = 0; hop < 10 && target === null; hop++) {
+        const visited = new Set<string>();
+        while (target === null) {
+          if (visited.has(current)) throw new Error(`tag ${name}: cyclic tag chain`);
+          visited.add(current);
           const parsed = await git.readObject({ fs, dir, oid: current });
           if (parsed.type === "tag") {
             if (!(await addWrapped(current))) return ok({ tooLarge: true });
@@ -160,7 +165,6 @@ export async function walkRepoObjects(
             target = current;
           }
         }
-        if (target === null) throw new Error(`tag ${name}: peel chain too deep`);
         const targetType = (await git.readObject({ fs, dir, oid: target })).type;
         if (targetType === "commit") {
           if (!(await addCommitHistory(target))) return ok({ tooLarge: true });
