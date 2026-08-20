@@ -2180,6 +2180,16 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(prPayload.base).toBe("release/1.2");
   });
 
+  it.each(["@", "feature/@/thing", "v1.0.0", "a.b.c/d.e"])(
+    "accepts the legal base %j (only the @{ reflog syntax is rejected)",
+    async (base) => {
+      const res = await promote({ base });
+      expect(res.status).toBe(200);
+      const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+      expect(prPayload.base).toBe(base);
+    },
+  );
+
   it.each([
     "two words",
     "bad..dots",
@@ -2197,6 +2207,14 @@ describe("POST /api/changes/:id/github-pr", () => {
     "ctrl\u0007bell",
     "a".repeat(201),
     "",
+    // git applies its per-component rules to every slash-separated component,
+    // not just the whole ref, so these are invalid despite the full string
+    // neither starting with "." nor ending with "." / ".lock".
+    ".hidden",
+    "release/.hidden",
+    "release/v1.",
+    "release/v1.lock",
+    "release/v1.lock/next",
   ])("rejects garbage base %j without touching GitHub", async (base) => {
     const res = await promote({ base });
     expect(res.status).toBe(400);
@@ -2344,6 +2362,67 @@ describe("POST /api/changes/:id/github-pr", () => {
       expect.objectContaining({ githubPrNumber: 99 }),
     );
   });
+
+  // A persisted PR record is what a later re-promotion checks to decide the PR
+  // already exists and skip creation, so storing a malformed one strands the
+  // change forever. Every one of these must 502 rather than persist.
+  it.each([
+    ["a zero PR number", { number: 0, html_url: "https://github.com/a/b/pull/1", state: "open" }],
+    [
+      "a non-integer PR number",
+      { number: 1.5, html_url: "https://github.com/a/b/pull/1", state: "open" },
+    ],
+    [
+      "a string PR number",
+      { number: "7", html_url: "https://github.com/a/b/pull/7", state: "open" },
+    ],
+    ["an empty url", { number: 7, html_url: "", state: "open" }],
+    ["a non-https url", { number: 7, html_url: "javascript:alert(1)", state: "open" }],
+    ["a closed state", { number: 7, html_url: "https://github.com/a/b/pull/7", state: "closed" }],
+    ["a missing state", { number: 7, html_url: "https://github.com/a/b/pull/7" }],
+    ["a null body", null],
+  ])("502s instead of persisting a create response with %s", async (_label, payload) => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(payload), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const res = await promote();
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { code: string }).code).toBe("GITHUB_ERROR");
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  // Same guard on the other path in: the duplicate-head lookup must not hand
+  // back an unusable record either, and must survive a non-array body.
+  it.each([
+    ["a non-array body", { message: "not a list" }],
+    ["an empty array", []],
+    ["a closed PR", [{ number: 5, html_url: "https://github.com/a/b/pull/5", state: "closed" }]],
+    ["a malformed entry", [{ number: -1, html_url: "" }]],
+  ])(
+    "falls back to the original 502 when the duplicate-head lookup returns %s",
+    async (_l, body) => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            message: "Validation Failed",
+            errors: [{ message: "A pull request already exists for acme:stratum/chg_abc123." }],
+          }),
+          { status: 422 },
+        ),
+      );
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(body), { status: 200 }));
+
+      const res = await promote();
+      expect(res.status).toBe(502);
+      const parsed = (await res.json()) as { code: string; githubStatus: number };
+      expect(parsed.code).toBe("GITHUB_ERROR");
+      expect(parsed.githubStatus).toBe(422);
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    },
+  );
 
   it("falls back to the original 502 when the duplicate-head lookup itself finds nothing open", async () => {
     fetchMock.mockResolvedValueOnce(

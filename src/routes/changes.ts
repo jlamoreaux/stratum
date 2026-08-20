@@ -117,22 +117,33 @@ async function loadMergePolicyCached(
   return inflight;
 }
 
-/** Hard cap for a caller-supplied PR base branch name. */
+/**
+ * `base` arrives in the request body, so it is untrusted input on its way to
+ * the GitHub API — this bounds it before it gets there.
+ */
 const MAX_BASE_REF_LENGTH = 200;
 
 /**
  * Loose git branch-name validation for the PR `base` taken from the request
  * body: printable, no whitespace/control chars, none of git's forbidden
  * sequences. Rejecting here keeps garbage out of the GitHub API call.
+ *
+ * git applies its per-component rules to every slash-separated component, not
+ * just to the ref as a whole, so `release/.hidden` and `release/v1.lock` are
+ * invalid even though the full string neither starts with `.` nor ends with
+ * `.lock`. A bare `@` is a legal branch name — only the `@{` reflog syntax is
+ * rejected.
  */
 function isValidBaseRef(ref: string): boolean {
   if (ref.length === 0 || ref.length > MAX_BASE_REF_LENGTH) return false;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: control chars are exactly what's rejected
   if (/[\s~^:?*[\\\x00-\x1f\x7f]/.test(ref)) return false;
-  if (ref.startsWith("-") || ref.startsWith("/") || ref.startsWith(".")) return false;
-  if (ref.endsWith("/") || ref.endsWith(".") || ref.endsWith(".lock")) return false;
+  if (ref.startsWith("-") || ref.startsWith("/")) return false;
+  if (ref.endsWith("/")) return false;
   if (ref.includes("..") || ref.includes("//") || ref.includes("@{")) return false;
-  return true;
+  return ref
+    .split("/")
+    .every((c) => c.length > 0 && !c.startsWith(".") && !c.endsWith(".") && !c.endsWith(".lock"));
 }
 
 const MERGEABLE_STATUSES: Change["status"][] = ["approved", "accepted", "promoted"];
@@ -1354,13 +1365,38 @@ app.post("/changes/:id/evaluate", async (c) => {
   return okOrFormRedirect(c, id, { changeId: id, eval: evalResult, evalRuns: recordResult.data });
 });
 
-/** Bound on every direct GitHub API call in the promotion flow below. */
+/**
+ * Bound on every direct GitHub API call in the promotion flow below, so one
+ * slow GitHub subrequest cannot consume the whole request lifetime and get the
+ * worker killed by the platform's own limit instead of failing cleanly.
+ */
 const GITHUB_API_TIMEOUT_MS = 15_000;
 
 interface GithubPr {
   number: number;
   html_url: string;
   state: string;
+}
+
+/**
+ * A PR record is only usable if it can be persisted: `githubPrNumber` and
+ * `githubPrUrl` are what a later re-promotion checks to decide the PR already
+ * exists and skip creation entirely. Persisting a malformed record therefore
+ * strands the change permanently — every retry short-circuits to a PR that
+ * isn't there — so both the create response and the duplicate-head lookup are
+ * validated through here before anything is stored.
+ */
+function isUsableGithubPr(value: unknown): value is GithubPr {
+  if (typeof value !== "object" || value === null) return false;
+  const pr = value as Partial<GithubPr>;
+  return (
+    typeof pr.number === "number" &&
+    Number.isSafeInteger(pr.number) &&
+    pr.number > 0 &&
+    typeof pr.html_url === "string" &&
+    pr.html_url.startsWith("https://") &&
+    pr.state === "open"
+  );
 }
 
 /**
@@ -1390,8 +1426,10 @@ async function findOpenPrForHead(
     return undefined;
   }
   if (!res.ok) return undefined;
-  const prs = (await res.json().catch(() => [])) as GithubPr[];
-  return prs[0];
+  const body: unknown = await res.json().catch(() => undefined);
+  if (!Array.isArray(body)) return undefined;
+  const pr = body[0];
+  return isUsableGithubPr(pr) ? pr : undefined;
 }
 
 app.post("/changes/:id/github-pr", async (c) => {
@@ -1617,17 +1655,9 @@ app.post("/changes/:id/github-pr", async (c) => {
     // The branch is already pushed by this point, so a malformed success body
     // must not escape as an unhandled rejection (a bare 500): map it to the
     // same structured 502 every other GitHub failure uses.
-    const parsed = await ghRes
-      .json()
-      .then((value) => value as Partial<GithubPr>)
-      .catch(() => undefined);
-    if (
-      !parsed ||
-      typeof parsed.number !== "number" ||
-      typeof parsed.html_url !== "string" ||
-      typeof parsed.state !== "string"
-    ) {
-      logger.error("GitHub PR creation returned an unreadable response body", undefined, {
+    const parsed: unknown = await ghRes.json().catch(() => undefined);
+    if (!isUsableGithubPr(parsed)) {
+      logger.error("GitHub PR creation returned an unusable response body", undefined, {
         status: ghRes.status,
         changeId: id,
       });
@@ -1640,7 +1670,7 @@ app.post("/changes/:id/github-pr", async (c) => {
         502,
       );
     }
-    pr = parsed as GithubPr;
+    pr = parsed;
   }
 
   const promotedAt = new Date().toISOString();
