@@ -149,7 +149,7 @@ describe("SandboxEvaluator — dependency install", () => {
 
     await evaluator.evaluate("", makePolicy(), mockLogger);
 
-    expect(runCalls.map((c) => c.command)).toEqual(["npm ci", "npm test"]);
+    expect(runCalls.map((c) => c.command)).toEqual(["npm ci --no-audit --no-fund", "npm test"]);
   });
 
   it("runs `npm install` when package.json exists without a lockfile", async () => {
@@ -160,7 +160,10 @@ describe("SandboxEvaluator — dependency install", () => {
 
     await evaluator.evaluate("", makePolicy(), mockLogger);
 
-    expect(runCalls.map((c) => c.command)).toEqual(["npm install", "npm test"]);
+    expect(runCalls.map((c) => c.command)).toEqual([
+      "npm install --no-audit --no-fund",
+      "npm test",
+    ]);
   });
 
   it("skips the install step entirely when there is no package.json", async () => {
@@ -182,7 +185,10 @@ describe("SandboxEvaluator — dependency install", () => {
 
     await evaluator.evaluate("", policy, mockLogger);
 
-    expect(runCalls[0]).toEqual({ command: "npm ci", opts: { timeout: 120_000 } });
+    expect(runCalls[0]).toEqual({
+      command: "npm ci --no-audit --no-fund",
+      opts: { timeout: 120_000 },
+    });
     expect(runCalls[1]).toEqual({ command: "npm test", opts: { timeout: 30_000 } });
   });
 
@@ -202,7 +208,10 @@ describe("SandboxEvaluator — dependency install", () => {
     const { binding, runCalls } = makeMockSandbox({
       exitCode: 0,
       runResults: {
-        "npm ci": { exitCode: 1, stderr: "ERESOLVE unable to resolve dependency tree" },
+        "npm ci --no-audit --no-fund": {
+          exitCode: 1,
+          stderr: "ERESOLVE unable to resolve dependency tree",
+        },
       },
     });
     const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles());
@@ -213,18 +222,22 @@ describe("SandboxEvaluator — dependency install", () => {
     if (result.success) {
       expect(result.data.score).toBe(0);
       expect(result.data.passed).toBe(false);
-      expect(result.data.reason).toContain("Dependency install (npm ci) failed");
+      expect(result.data.reason).toContain(
+        "Dependency install (npm ci --no-audit --no-fund) failed",
+      );
       expect(result.data.reason).toContain("ERESOLVE");
       expect(result.data.costs?.[0]?.kind).toBe("sandbox_ms");
     }
-    expect(runCalls.map((c) => c.command)).toEqual(["npm ci"]);
+    expect(runCalls.map((c) => c.command)).toEqual(["npm ci --no-audit --no-fund"]);
   });
 });
 
 describe("installCommandFor", () => {
   it("maps manifest/lockfile presence to the right command", () => {
     expect(installCommandFor(new Map())).toBeNull();
-    expect(installCommandFor(new Map([["package.json", "{}"]]))).toBe("npm install");
+    expect(installCommandFor(new Map([["package.json", "{}"]]))).toBe(
+      "npm install --no-audit --no-fund",
+    );
     expect(
       installCommandFor(
         new Map([
@@ -232,7 +245,7 @@ describe("installCommandFor", () => {
           ["package-lock.json", "{}"],
         ]),
       ),
-    ).toBe("npm ci");
+    ).toBe("npm ci --no-audit --no-fund");
     expect(installCommandFor(new Map([["package-lock.json", "{}"]]))).toBeNull();
   });
 });
@@ -417,7 +430,7 @@ describe("SandboxEvaluator — destroy lifecycle", () => {
   it("destroy() is called when the install step fails", async () => {
     const { binding, instance } = makeMockSandbox({
       exitCode: 0,
-      runResults: { "npm ci": { exitCode: 1, stderr: "boom" } },
+      runResults: { "npm ci --no-audit --no-fund": { exitCode: 1, stderr: "boom" } },
     });
     const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles());
 
@@ -460,14 +473,30 @@ describe("SandboxEvaluator — reason field", () => {
   });
 
   it("reports sandbox_ms cost covering install + test run", async () => {
-    const { binding } = makeMockSandbox({ exitCode: 0 });
-    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles());
-    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.data.costs).toHaveLength(1);
-      expect(result.data.costs?.[0]?.kind).toBe("sandbox_ms");
-      expect(result.data.costs?.[0]?.quantity).toBeGreaterThanOrEqual(0);
+    vi.useFakeTimers();
+    try {
+      const instance: SandboxInstance = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        run: vi.fn().mockImplementation(async () => {
+          // Each step (install, then the test command) takes 1000ms.
+          vi.advanceTimersByTime(1000);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }),
+        destroy: vi.fn().mockResolvedValue(undefined),
+      };
+      const binding: SandboxBinding = { create: vi.fn().mockResolvedValue(instance) };
+      const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles());
+
+      const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.costs).toHaveLength(1);
+        expect(result.data.costs?.[0]?.kind).toBe("sandbox_ms");
+        expect(result.data.costs?.[0]?.quantity).toBe(2000);
+      }
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

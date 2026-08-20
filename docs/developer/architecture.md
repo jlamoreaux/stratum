@@ -328,12 +328,12 @@ const sandboxEvaluator: Evaluator = {
 **Configuration:**
 ```yaml
 evaluators:
-  - id: tests
-    type: sandbox
+  - type: sandbox
     command: "npm test"        # default
     timeoutMs: 60000           # command timeout (default 60s)
     installTimeoutMs: 120000   # dependency install timeout (default 120s)
-    required: true
+# Pass/fail is decided by the policy-level `minScore` and `requireAll` fields,
+# not by a per-evaluator `required` flag.
 ```
 
 **Fail-closed when unavailable:** the `[[sandboxes]]` binding is commented out

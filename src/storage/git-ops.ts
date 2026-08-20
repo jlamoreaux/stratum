@@ -1679,12 +1679,17 @@ export async function readTreeAtCommit(
   for (const path of listResult.data) {
     const blobResult = await fromPromise(git.readBlob({ fs, dir, oid: commitSha, filepath: path }));
     if (!blobResult.success) {
-      logger.warn("Skipping unreadable file in commit tree", {
-        path,
-        commitSha,
-        error: blobResult.error.message,
-      });
-      continue;
+      // A pinned commit's tree is expected to be complete; an unreadable blob
+      // means object corruption, not a benign gap. Fail closed rather than
+      // handing a caller (e.g. the sandbox evaluator) a silently partial tree.
+      logger.error("Unreadable file in commit tree", blobResult.error, { path, commitSha });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to read tree at commit ${commitSha}: unreadable object at ${path}`,
+          blobResult.error,
+        ),
+      );
     }
     contents.set(path, new TextDecoder().decode(blobResult.data.blob));
   }

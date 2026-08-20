@@ -52,10 +52,15 @@ function parseTestOutput(stdout: string, stderr: string): number | null {
   return null;
 }
 
-/** `npm ci` with a lockfile, `npm install` without one, nothing without a package.json. */
+/**
+ * `npm ci` with a lockfile, `npm install` without one, nothing without a
+ * package.json. `--no-audit --no-fund` skip registry calls the sandbox
+ * evaluation has no use for.
+ */
 export function installCommandFor(files: ReadonlyMap<string, string>): string | null {
   if (!files.has("package.json")) return null;
-  return files.has("package-lock.json") ? "npm ci" : "npm install";
+  const base = files.has("package-lock.json") ? "npm ci" : "npm install";
+  return `${base} --no-audit --no-fund`;
 }
 
 export class SandboxEvaluator implements Evaluator {
@@ -112,10 +117,19 @@ export class SandboxEvaluator implements Evaluator {
       const files = filesResult.data;
 
       sb = await this.sandbox.create();
+      const instance = sb;
       logger.debug("Sandbox created");
 
-      for (const [path, content] of files) {
-        await sb.writeFile(path, content);
+      // The full tree can hold thousands of files; one round trip per file
+      // dominates evaluation latency, so write in bounded concurrent batches.
+      const WRITE_CONCURRENCY = 16;
+      const entries = [...files];
+      for (let i = 0; i < entries.length; i += WRITE_CONCURRENCY) {
+        await Promise.all(
+          entries
+            .slice(i, i + WRITE_CONCURRENCY)
+            .map(([path, content]) => instance.writeFile(path, content)),
+        );
       }
       logger.debug("Files written to sandbox", { fileCount: files.size });
 

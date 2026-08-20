@@ -288,7 +288,7 @@ describe("readTreeAtCommit", () => {
     expect(result.data.get("src/math.ts")).toBe("export const add = 2;");
   });
 
-  it("skips files whose blobs cannot be read, keeping the rest of the tree", async () => {
+  it("fails closed when a blob in the pinned tree cannot be read", async () => {
     const { fs } = await makeRepo();
     const dir = "/";
     const goodBlob = await git.writeBlob({
@@ -318,10 +318,10 @@ describe("readTreeAtCommit", () => {
     });
 
     const result = await readTreeAtCommit(fs, dir, commit, noopLogger);
-    expect(result.success).toBe(true);
-    if (!result.success) return;
-    expect([...result.data.keys()]).toEqual(["good.txt"]);
-    expect(result.data.get("good.txt")).toBe("still readable");
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain(`Failed to read tree at commit ${commit}`);
+    expect(result.error.message).toContain("missing.txt");
   });
 
   it("errors when the pinned commit is not present in the clone", async () => {
