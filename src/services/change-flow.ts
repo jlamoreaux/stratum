@@ -214,9 +214,11 @@ export async function createChangeWithEvaluation(
     workspaceName: string;
     workspaceRemote: string;
     actor: ChangeCreationActor;
+    /** Cloudflare Workers `ExecutionContext.waitUntil`, when the caller has one. */
+    waitUntil?: (promise: Promise<unknown>) => void;
   },
 ): Promise<Result<ChangeCreationOutcome, AppError>> {
-  const { project, projectName, workspaceName, workspaceRemote, actor } = args;
+  const { project, projectName, workspaceName, workspaceRemote, actor, waitUntil } = args;
   const { userId, agentId } = actor;
 
   const baseSha = await resolveProjectHead(env, project, logger);
@@ -404,13 +406,19 @@ export async function createChangeWithEvaluation(
   // commit status). Best-effort by contract — a GitHub failure never fails the
   // evaluation — and a no-op unless the project has a GitHub source and the
   // change has a linked PR (freshly created changes normally don't yet).
-  await reportEvaluationToGitHub(
+  // Scheduled off the request path when the caller has a waitUntil to give us.
+  const reportEvaluation = reportEvaluationToGitHub(
     env,
     updatedChange,
     project,
     buildEvaluationReport(evalResult, evalRuns),
     logger,
   );
+  if (waitUntil) {
+    waitUntil(reportEvaluation);
+  } else {
+    await reportEvaluation;
+  }
 
   logger.info("Change created and evaluated", {
     changeId: change.id,

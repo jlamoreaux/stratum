@@ -40,6 +40,7 @@ import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
 import type { Change, Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
+import { getWaitUntil } from "../utils/execution-ctx";
 import { newId } from "../utils/ids";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
@@ -223,6 +224,7 @@ app.post("/projects/:name/changes", async (c) => {
       ...(userId !== undefined ? { userId } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
     },
+    waitUntil: getWaitUntil(c),
   });
   if (!outcome.success) {
     // Post-creation failures leave an open change row; name it so the caller
@@ -1290,14 +1292,21 @@ app.post("/changes/:id/evaluate", async (c) => {
   // Layer mode: report the verdict to the change's linked GitHub PR (comment
   // upsert + "stratum/evaluation" commit status). Best-effort — a GitHub
   // failure never fails the evaluation — and a no-op for changes without a
-  // linked PR or projects without a GitHub source.
-  await reportEvaluationToGitHub(
+  // linked PR or projects without a GitHub source. Scheduled off the request
+  // path since it's pure side effect the response doesn't depend on.
+  const reportEvaluation = reportEvaluationToGitHub(
     c.env,
     { ...change, evaluatedSha, ...(workspaceHeadSha ? { workspaceHeadSha } : {}) },
     project,
     buildEvaluationReport(evalResult, evalRuns),
     logger,
   );
+  const waitUntil = getWaitUntil(c);
+  if (waitUntil) {
+    waitUntil(reportEvaluation);
+  } else {
+    await reportEvaluation;
+  }
 
   logger.info("Change re-evaluated", {
     changeId: id,

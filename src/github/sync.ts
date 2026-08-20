@@ -77,8 +77,13 @@ export function resolveGitHubRepo(project: ProjectEntry): { owner: string; repo:
   const url = project.sourceUrl ?? project.githubUrl;
   if (url) {
     const parsed = parseRepoUrl(url);
-    if (parsed && parsed.provider === "github") {
-      return { owner: parsed.info.owner, repo: parsed.info.repo };
+    // A URL that parses to a non-GitHub provider (e.g. GitLab, Bitbucket) means
+    // this project's actual source isn't GitHub — don't fall through to the
+    // owner/repo fields below, which could be stale data from a prior provider.
+    if (parsed) {
+      return parsed.provider === "github"
+        ? { owner: parsed.info.owner, repo: parsed.info.repo }
+        : null;
     }
   }
 

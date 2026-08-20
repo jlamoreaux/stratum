@@ -392,11 +392,13 @@ async function reportEvaluationToGitHub(env, change, project, evaluation): Promi
   // Gate: project must have a GitHub source AND the change a linked PR
   // Post evaluation results as PR comment (upserted via changes.github_comment_id —
   //   a re-evaluation edits the prior comment instead of posting a new one)
-  // Set commit status (context "stratum/evaluation", pass/fail) on the evaluated sha
+  // Set commit status (context "stratum/evaluation", pass/fail) on the PR head
+  //   sha (falls back to the evaluated sha for changes mirrored verbatim)
 }
 ```
 
 **PR Comment Format:**
+
 ```markdown
 ## ✅ Stratum Evaluation Results
 

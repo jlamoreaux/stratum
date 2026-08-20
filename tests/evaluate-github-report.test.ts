@@ -236,13 +236,14 @@ describe("POST /api/changes/:id/evaluate — GitHub verdict reporting", () => {
     vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
   });
 
-  function evaluate() {
+  function evaluate(executionCtx?: ExecutionContext) {
     return app.fetch(
       new Request("http://localhost/api/changes/chg_abc123/evaluate", {
         method: "POST",
         headers: USER_AUTH,
       }),
       env,
+      executionCtx,
     );
   }
 
@@ -329,5 +330,29 @@ describe("POST /api/changes/:id/evaluate — GitHub verdict reporting", () => {
 
     const res = await evaluate();
     expect(res.status).toBe(200);
+  });
+
+  it("schedules the GitHub report via waitUntil instead of blocking the response", async () => {
+    const scheduled: Promise<unknown>[] = [];
+    const executionCtx = {
+      waitUntil: vi.fn((p: Promise<unknown>) => scheduled.push(p)),
+      passThroughOnException: vi.fn(),
+    } as unknown as ExecutionContext;
+
+    const res = await evaluate(executionCtx);
+    expect(res.status).toBe(200);
+
+    // The response resolves without awaiting the report — its promise is
+    // handed to waitUntil instead of being awaited on the request path.
+    expect(executionCtx.waitUntil).toHaveBeenCalledTimes(1);
+    expect(scheduled).toHaveLength(1);
+
+    await Promise.all(scheduled);
+    expect(client.postComment).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: "acme", repo: "api", issue_number: 42 }),
+    );
+    expect(client.setStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: "acme", repo: "api", sha: "gh-head-sha" }),
+    );
   });
 });
