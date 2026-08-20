@@ -12,11 +12,14 @@ const DIR = "/";
 const GITDIR = "/.git";
 
 /**
- * Rebuild a repo in an in-memory git store from a snapshot's pack + manifest:
- * write every object loose, point `main` at the tip, and verify the resolved tip
- * matches the manifest. Because the backup captured the FULL reachable object set,
- * the reconstructed pack is closed under reachability and the original tip sha is
- * preserved. Fully testable — no Artifacts.
+ * Reconstructs a repository in an in-memory Git store from a snapshot.
+ *
+ * Restores the main branch and any tagged references, and verifies that their
+ * referenced objects are present in the snapshot.
+ *
+ * @param pack - Serialized Git objects from the snapshot
+ * @param manifest - Snapshot metadata containing the main branch tip and optional tags
+ * @returns The in-memory filesystem and repository directory, or a backup error
  */
 export async function reconstructRepo(
   pack: Uint8Array,
@@ -94,8 +97,10 @@ export async function reconstructRepo(
 }
 
 /**
- * Whether a manifest tag name is a safe `refs/tags/<name>` path component.
- * Mirrors the parts of git's ref-name rules that matter for path traversal.
+ * Determines whether a manifest tag name is safe to use as a `refs/tags/<name>` path.
+ *
+ * @param name - The candidate tag name.
+ * @returns `true` if the name is a valid string tag path without traversal or unsafe path components, `false` otherwise.
  */
 function isValidTagName(name: unknown): name is string {
   if (
@@ -125,9 +130,11 @@ function isValidTagName(name: unknown): name is string {
 }
 
 /**
- * Restore a project's repo into Artifacts: create the repo (or reuse with
- * `force`), reconstruct the objects, and push. The push against real Artifacts is
- * the one leg that can't run in CI — it is validated on staging via the runbook.
+ * Restores a project's repository to Artifacts, optionally overwriting an existing repository.
+ *
+ * @param snapshot - The repository snapshot and manifest to restore.
+ * @param opts - Restore options; set `force` to overwrite an existing repository.
+ * @returns The restored manifest tip SHA.
  */
 export async function restoreProjectRepo(
   env: Env,

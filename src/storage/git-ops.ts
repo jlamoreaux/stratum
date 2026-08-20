@@ -219,9 +219,11 @@ export async function freshRepoToken(
 }
 
 /**
- * Push the local `main` ref (its objects + the ref) to an Artifacts remote.
- * Used by backup restore to publish a reconstructed repo. `force` overwrites a
- * non-empty remote (restore-over-existing behind an explicit opt-in).
+ * Publishes the local `main` branch to an Artifacts remote.
+ *
+ * @param remote - The Artifacts remote URL
+ * @param opts - Controls whether an existing remote branch may be overwritten
+ * @returns An empty result on success, or an application error if publishing fails
  */
 export async function pushMain(
   remote: string,
@@ -251,9 +253,11 @@ export async function pushMain(
 }
 
 /**
- * Push a set of local refs/tags/* refs (their objects + the refs) to an
- * Artifacts remote. Used by backup restore after `pushMain` so a restored repo
- * carries its tags. `force` mirrors the restore-over-existing opt-in.
+ * Pushes local tags to an Artifacts remote, optionally replacing existing remote tags.
+ *
+ * @param tagNames - The tag names to push.
+ * @param opts - Controls whether existing remote tags may be replaced.
+ * @returns An empty result on success, or an error describing the first failed tag push.
  */
 export async function pushTags(
   remote: string,
@@ -304,6 +308,17 @@ export async function pushTags(
   return ok(undefined);
 }
 
+/**
+ * Initializes a repository, commits the specified files to `main`, and pushes the commit.
+ *
+ * @param remote - The Git remote URL.
+ * @param token - The authentication token for the remote.
+ * @param files - A mapping of repository file paths to their contents.
+ * @param message - The commit message.
+ * @param logger - The logger used for operation diagnostics.
+ * @param author - The commit author.
+ * @returns The SHA of the pushed commit, or an application error if initialization, file creation, staging, committing, or pushing fails.
+ */
 export async function initAndPush(
   remote: string,
   token: string,
@@ -367,6 +382,14 @@ export async function initAndPush(
   return ok(commitResult.data);
 }
 
+/**
+ * Clones the repository's `main` branch into an in-memory filesystem.
+ *
+ * @param remote - The repository URL
+ * @param token - The authentication token used for cloning
+ * @param opts - Clone options controlling history depth and tag fetching
+ * @returns The in-memory filesystem and working directory, or an application error
+ */
 export async function cloneRepo(
   remote: string,
   token: string,
@@ -539,9 +562,11 @@ export async function collectRepoTags(
 }
 
 /**
- * Clone a repo (shallow, with tag refs fetched) and list its tags. A tag whose
- * target lies outside the shallow window comes back `unresolvable: true` rather
- * than erroring — see `collectRepoTags`.
+ * Lists the tags in a repository, including entries whose targets cannot be resolved from the cloned history.
+ *
+ * @param remote - The repository's remote URL
+ * @param token - The authentication token for the remote
+ * @returns The repository's tag entries
  */
 export async function listRepoTags(
   remote: string,
@@ -566,6 +591,14 @@ export async function listRepoTags(
   return ok(collected.data);
 }
 
+/**
+ * Commits file changes to the local repository and pushes the `main` branch to the remote.
+ *
+ * @param changes - File paths and their updated contents
+ * @param message - Commit message
+ * @param author - Commit author metadata
+ * @returns The SHA of the created commit, or an application error if writing, staging, committing, or pushing fails
+ */
 export async function commitAndPush(
   fs: NodeFS,
   dir: string,
