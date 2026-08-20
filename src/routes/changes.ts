@@ -12,6 +12,7 @@ import {
   runEvaluation,
 } from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
+import { dismissApprovals } from "../storage/change-reviews";
 import {
   getChange,
   getChangesByIds,
@@ -566,13 +567,16 @@ app.post("/changes/:id/merge", async (c) => {
     });
 
     if (force) {
-      await recordAudit(c.env.DB, logger, {
+      const auditResult = await recordAudit(c.env.DB, logger, {
         action: "merge.forced",
         actorType: "user",
         actorId: userId,
         subject: id,
         detail: { project: change.project },
       });
+      if (!auditResult.success) {
+        logger.error("Failed to audit forced merge", auditResult.error, { changeId: id });
+      }
     }
 
     const postMergeViaQueue = result.commit
@@ -739,13 +743,16 @@ app.post("/changes/:id/merge", async (c) => {
   });
 
   if (force) {
-    await recordAudit(c.env.DB, logger, {
+    const auditResult = await recordAudit(c.env.DB, logger, {
       action: "merge.forced",
       actorType: "user",
       actorId: userId,
       subject: id,
       detail: { project: change.project },
     });
+    if (!auditResult.success) {
+      logger.error("Failed to audit forced merge", auditResult.error, { changeId: id });
+    }
   }
 
   const postMerge = await runPostMergeCheck(
@@ -1070,13 +1077,16 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
     // audit trail — the single-merge path records `merge.forced` too (SEC-2).
     if (force) {
       for (const changeId of merged) {
-        await recordAudit(c.env.DB, logger, {
+        const auditResult = await recordAudit(c.env.DB, logger, {
           action: "merge.forced",
           actorType: "user",
           actorId: userId,
           subject: changeId,
           detail: { project: projectName, batch: true },
         });
+        if (!auditResult.success) {
+          logger.error("Failed to audit forced batch merge", auditResult.error, { changeId });
+        }
       }
     }
     await stub.gcStagedTrees(mergedWorkspaces).catch(() => {});
@@ -1269,6 +1279,41 @@ app.post("/changes/:id/evaluate", async (c) => {
     },
     evaluateCostSamples,
   );
+
+  // Stale-approval dismissal (#193): a different evaluated sha means any prior
+  // 'approve' verdicts were given for code the reviewer never saw — drop them
+  // before re-pinning, so a re-push can't merge on approvals for the old
+  // revision. request_changes verdicts survive, and a no-op re-evaluation of
+  // the same sha (including legacy changes with no recorded sha) keeps
+  // approvals. Dismiss BEFORE the sha update: if the dismissal fails we bail
+  // with the old sha still pinned, never with stale approvals against a new one.
+  if (change.evaluatedSha !== undefined && change.evaluatedSha !== evaluatedSha) {
+    const dismissResult = await dismissApprovals(c.env.DB, logger, id);
+    if (!dismissResult.success) {
+      logger.error("Failed to dismiss stale approvals", dismissResult.error);
+      return internalError(dismissResult.error.message);
+    }
+    if (dismissResult.data.length > 0) {
+      const auditResult = await recordAudit(c.env.DB, logger, {
+        action: "review.approvals_dismissed",
+        actorType: "user",
+        actorId: userId,
+        subject: id,
+        detail: {
+          project: change.project,
+          dismissed: dismissResult.data.length,
+          dismissedReviewerIds: dismissResult.data,
+          previousEvaluatedSha: change.evaluatedSha,
+          evaluatedSha,
+        },
+      });
+      if (!auditResult.success) {
+        // The approvals are already dismissed; do not fail the request. Log
+        // the gap so a missing audit record for a real dismissal is detectable.
+        logger.error("Failed to audit approval dismissal", auditResult.error, { changeId: id });
+      }
+    }
+  }
 
   const updateResult = await updateChangeStatus(
     c.env.DB,

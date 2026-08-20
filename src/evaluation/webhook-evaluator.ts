@@ -4,6 +4,7 @@ import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
 import { validateWebhookUrl } from "../utils/validation";
+import { sanitizePolicy } from "./sanitize-policy";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
 async function computeHmacSha256(secret: string, body: string): Promise<string> {
@@ -49,7 +50,9 @@ export class WebhookEvaluator implements Evaluator {
     }
 
     const timeoutMs = config.timeoutMs ?? 10000;
-    const body = JSON.stringify({ diff, policy });
+    // The payload leaves the Worker, so strip credentials (webhook secrets)
+    // from the policy first — the secret signs the request, it is not content.
+    const body = JSON.stringify({ diff, policy: sanitizePolicy(policy) });
     const headers: Record<string, string> = { "Content-Type": "application/json" };
 
     if (config.secret) {
@@ -78,9 +81,41 @@ export class WebhookEvaluator implements Evaluator {
         return ok({ score: 0, passed: false, reason: `Webhook failed: HTTP ${response.status}` });
       }
 
-      const json = (await response.json()) as { score: number; passed: boolean; reason: string };
-      logger.info("Webhook evaluation complete", { score: json.score, passed: json.passed });
-      return ok({ score: json.score, passed: json.passed, reason: json.reason });
+      // A gate whose verdict can't be read has not passed. The endpoint is
+      // external, so never trust its shape: require a real boolean `passed`
+      // and a finite numeric `score`, and fail closed otherwise — a truthy
+      // string like {"passed":"no"} must not open the gate.
+      const failClosed = (why: string): Result<EvalResult, AppError> => {
+        logger.warn("Webhook response unusable, failing closed", { why });
+        return ok({ score: 0, passed: false, reason: `Webhook evaluator failed closed: ${why}` });
+      };
+
+      let parsed: unknown;
+      try {
+        parsed = await response.json();
+      } catch {
+        return failClosed("response was not valid JSON");
+      }
+
+      if (parsed === null || typeof parsed !== "object") {
+        return failClosed("response JSON was not an object");
+      }
+
+      const verdict = parsed as { score?: unknown; passed?: unknown; reason?: unknown };
+      if (
+        typeof verdict.score !== "number" ||
+        !Number.isFinite(verdict.score) ||
+        typeof verdict.passed !== "boolean"
+      ) {
+        return failClosed("response JSON missing a finite numeric `score` or boolean `passed`");
+      }
+
+      const score = Math.min(1, Math.max(0, verdict.score));
+      const reason =
+        typeof verdict.reason === "string" ? verdict.reason : "Webhook returned no reason.";
+
+      logger.info("Webhook evaluation complete", { score, passed: verdict.passed });
+      return ok({ score, passed: verdict.passed, reason });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(
