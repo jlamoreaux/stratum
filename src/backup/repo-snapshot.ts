@@ -46,15 +46,12 @@ interface WalkResult {
 }
 
 /**
- * Collect the FULL set of objects reachable from HEAD (every commit + its tree +
- * blobs, deduped) so the resulting pack is reachability-closed and restores to a
- * faithful repo (original tip sha, parents present). Also walks every
- * refs/tags/* tip (#182): annotated tag objects themselves plus anything
- * reachable only from a tag land in the pack, and the tag refs are returned for
- * the manifest. Aborts with a "too large" skip once the running byte total
- * exceeds `maxBytes`, before packing — the guard bounds the pack we build,
- * though a pathological repo can still OOM the clone. Operates on an
- * already-cloned fs so it is testable without Artifacts.
+ * Collects all objects reachable from the repository tip and tags.
+ *
+ * @param fs - The filesystem containing the cloned repository
+ * @param dir - The repository directory
+ * @param maxBytes - Maximum total size of collected objects
+ * @returns A result containing the walked objects and tag references, an empty or oversized status, or a Git error
  */
 export async function walkRepoObjects(
   fs: NodeFS,
@@ -197,7 +194,14 @@ export async function walkRepoObjects(
   }
 }
 
-/** Assemble a snapshot from a walked object set. Pure — the unit under test. */
+/**
+ * Builds a repository snapshot from walked objects and project metadata.
+ *
+ * @param project - The project associated with the snapshot
+ * @param walk - The collected repository objects, tip commit, and tag references
+ * @param capturedAt - The snapshot capture timestamp
+ * @returns A packed repository snapshot with its manifest
+ */
 export function buildSnapshot(
   project: ProjectEntry,
   walk: WalkResult,
@@ -219,9 +223,11 @@ export function buildSnapshot(
 }
 
 /**
- * Snapshot one project's repo: clone (the sole Artifacts-coupled call), walk the
- * full reachable object set, and pack it with a manifest carrying the tip sha and
- * full identity. Returns a skip (not an error) for empty or over-cap repos.
+ * Creates a full-history repository snapshot with its manifest and tag references.
+ *
+ * @param project - The project whose repository is being snapshotted
+ * @param capturedAt - Timestamp recorded in the snapshot manifest
+ * @returns A successful snapshot, a skipped result for empty or oversized repositories, or an application error
  */
 export async function snapshotRepo(
   env: Env,

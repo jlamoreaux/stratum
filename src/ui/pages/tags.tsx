@@ -12,7 +12,12 @@ interface TagsProps {
   user?: { id: string; email: string; username: string } | null;
 }
 
-/** "12 Mar 2026" from a tagger timestamp (epoch seconds); empty when absent. */
+/**
+ * Formats a tagger timestamp as a day, abbreviated month, and year.
+ *
+ * @param timestamp - The timestamp in epoch seconds.
+ * @returns The formatted date, or an empty string when the timestamp is absent or invalid.
+ */
 export function formatTagDate(timestamp: number | undefined): string {
   if (timestamp === undefined) return "";
   const date = new Date(timestamp * 1000);

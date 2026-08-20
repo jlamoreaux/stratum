@@ -876,7 +876,12 @@ app.get("/:namespace/:slug/tags", async (c) => {
   );
 });
 
-// Shared loader for issue pages: validates path, loads user + project, checks read access.
+/**
+ * Loads the authenticated user and project context for an issue page after validating the project path and read access.
+ *
+ * @param c - The request context containing route parameters, authentication identifiers, environment services, and request metadata.
+ * @returns The project page context, or an error status when the path is invalid or the project is unavailable or inaccessible.
+ */
 async function loadIssuePageContext(c: {
   env: Env;
   get(key: "userId" | "agentOwnerId"): string | undefined;
