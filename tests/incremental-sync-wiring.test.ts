@@ -58,6 +58,13 @@ vi.mock("../src/storage/state", () => ({
 vi.mock("../src/storage/sync", () => ({
   recordSyncHistory: vi.fn(async () => {}),
   getProjectProvider: vi.fn(() => null),
+  getProjectSourceUrl: vi.fn((project: ProjectEntry) => project.sourceUrl || project.githubUrl),
+  // Daily cron gates on an update check first; default to "updates available"
+  // so the sync/import routing under test actually runs.
+  checkForSyncUpdates: vi.fn(async () => ({
+    success: true,
+    data: { hasUpdates: true, latestCommit: "sha_latest", commitsBehind: 1 },
+  })),
   updateProjectAfterSync: vi.fn(async () => ({ success: true, data: undefined })),
   updateProjectSyncError: vi.fn(async () => ({ success: true, data: undefined })),
 }));
@@ -109,6 +116,7 @@ function makeProject(overrides: Partial<ProjectEntry> = {}): ProjectEntry {
     createdAt: new Date().toISOString(),
     githubUrl: GITHUB_URL,
     importCompleted: true,
+    autoSyncEnabled: true,
     ...overrides,
   };
 }
@@ -289,7 +297,7 @@ describe("syncAllProjects (daily cron)", () => {
     const env = makeEnv();
     const result = await syncAllProjects(env);
 
-    expect(result).toEqual({ synced: 2, failed: 0 });
+    expect(result).toEqual({ synced: 2, failed: 0, skipped: 0 });
     expect(syncFromGitHub).toHaveBeenCalledTimes(1);
     expect(syncFromGitHub).toHaveBeenCalledWith(
       env.ARTIFACTS,
@@ -301,9 +309,10 @@ describe("syncAllProjects (daily cron)", () => {
     expect(importFromGitHub).toHaveBeenCalledTimes(1);
     expect(importFromGitHub).toHaveBeenCalledWith(
       env.ARTIFACTS,
-      "legacy",
+      "test__legacy",
       GITHUB_URL,
       expect.anything(),
+      "main",
     );
     // Snapshots refreshed against the surviving remotes.
     expect(writeSnapshotFromRepo).toHaveBeenCalledWith(
@@ -324,7 +333,7 @@ describe("syncAllProjects (daily cron)", () => {
     const env = makeEnv();
     const result = await syncAllProjects(env);
 
-    expect(result).toEqual({ synced: 0, failed: 1 });
+    expect(result).toEqual({ synced: 0, failed: 1, skipped: 0 });
     expect(importFromGitHub).not.toHaveBeenCalled();
     expect(env.ARTIFACTS.delete).not.toHaveBeenCalled();
     expect(writeSnapshotFromRepo).not.toHaveBeenCalled();
@@ -336,7 +345,7 @@ describe("syncAllProjects (daily cron)", () => {
 
     const result = await syncAllProjects(makeEnv());
 
-    expect(result).toEqual({ synced: 0, failed: 1 });
+    expect(result).toEqual({ synced: 0, failed: 1, skipped: 0 });
   });
 });
 

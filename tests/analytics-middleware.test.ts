@@ -18,6 +18,9 @@ function makeApp(vars: { userId?: string; agentId?: string } = {}) {
   });
   app.use("*", analyticsMiddleware);
   app.get("/api/changes", (c) => c.json({ ok: true }));
+  app.get("/api/changes/:changeId", (c) => c.json({ ok: true }));
+  app.get("/login", (c) => c.json({ ok: true }));
+  app.get("/:ns/:slug/blob/*", (c) => c.json({ ok: true }));
   app.get("/health", (c) => c.json({ ok: true }));
   return app;
 }
@@ -47,7 +50,7 @@ describe("analyticsMiddleware", () => {
     vi.unstubAllGlobals();
   });
 
-  it("captures matched requests with method, path, status, and latency", async () => {
+  it("captures matched requests with method, route, status, and latency", async () => {
     const captured = stubCapture();
     const res = await makeApp().fetch(new Request("https://api.example.com/api/changes"), env);
     await flushCapture();
@@ -56,8 +59,71 @@ describe("analyticsMiddleware", () => {
     expect(captured).toHaveLength(1);
     expect(captured[0]?.event).toBe("api_request");
     expect(captured[0]?.properties.method).toBe("GET");
-    expect(captured[0]?.properties.path).toBe("/api/changes");
+    expect(captured[0]?.properties.route).toBe("/api/changes");
     expect(captured[0]?.properties.status).toBe(200);
+    expect(typeof captured[0]?.properties.latency_ms).toBe("number");
+  });
+
+  it("sends the route pattern for blob paths, never the namespace, slug, or file path", async () => {
+    const captured = stubCapture();
+    const res = await makeApp().fetch(
+      new Request("https://api.example.com/@acme/secret-repo/blob/src/deep/private.ts"),
+      env,
+    );
+    await flushCapture();
+
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.properties.route).toBe("/:ns/:slug/blob/*");
+    expect(captured[0]?.properties.path).toBeUndefined();
+    const body = JSON.stringify(captured[0]);
+    expect(body).not.toContain("acme");
+    expect(body).not.toContain("secret-repo");
+    expect(body).not.toContain("private.ts");
+  });
+
+  it("sends the route pattern for change-id paths, never the concrete id", async () => {
+    const captured = stubCapture();
+    await makeApp().fetch(new Request("https://api.example.com/api/changes/ch_8f3a2b1c"), env);
+    await flushCapture();
+
+    expect(captured[0]?.properties.route).toBe("/api/changes/:changeId");
+    expect(JSON.stringify(captured[0])).not.toContain("ch_8f3a2b1c");
+  });
+
+  it("sends static routes as-is", async () => {
+    const captured = stubCapture();
+    await makeApp().fetch(new Request("https://api.example.com/login"), env);
+    await flushCapture();
+
+    expect(captured[0]?.properties.route).toBe("/login");
+  });
+
+  it("defers the capture through waitUntil when an execution context is present", async () => {
+    const captured = stubCapture();
+    const waitUntil = vi.fn();
+    const executionCtx = { waitUntil, passThroughOnException: () => undefined, props: {} };
+    await makeApp().fetch(
+      new Request("https://api.example.com/api/changes"),
+      env,
+      executionCtx as ExecutionContext,
+    );
+    await flushCapture();
+
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+    expect(captured).toHaveLength(1);
+  });
+
+  it("captures nothing when telemetry is disabled", async () => {
+    const captured = stubCapture();
+    const res = await makeApp().fetch(
+      new Request("https://api.example.com/@acme/secret-repo/blob/src/deep/private.ts"),
+      { ...env, STRATUM_TELEMETRY_DISABLED: "true" } as Env,
+    );
+    await flushCapture();
+
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(0);
   });
 
   it("does not capture 404s (scanner probes on unmatched routes)", async () => {
