@@ -35,12 +35,13 @@ function makeArtifacts() {
   const createToken = vi.fn().mockResolvedValue({ plaintext: "tok_secret?expires=123" });
   const del = vi.fn();
   const importFn = vi.fn();
+  const get = vi.fn().mockResolvedValue({ createToken });
   const artifacts = {
-    get: vi.fn().mockResolvedValue({ createToken }),
+    get,
     delete: del,
     import: importFn,
   } as unknown as ArtifactsNamespace;
-  return { artifacts, del, importFn, createToken };
+  return { artifacts, del, importFn, createToken, get };
 }
 
 beforeEach(() => {
@@ -200,10 +201,8 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
   });
 
   it("fails when token minting fails, before any git operation", async () => {
-    const { artifacts } = makeArtifacts();
-    vi.mocked(artifacts.get as never as () => Promise<unknown>).mockRejectedValue(
-      new Error("artifacts down"),
-    );
+    const { artifacts, get } = makeArtifacts();
+    get.mockRejectedValue(new Error("artifacts down"));
 
     const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
 

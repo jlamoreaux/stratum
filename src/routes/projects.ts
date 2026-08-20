@@ -1727,8 +1727,16 @@ export async function processSyncJob(
       }
     }
 
-    // Update project
-    await updateProjectAfterSync(env.STATE, project, latestCommit || "unknown", logger);
+    // Update project. The remote only changes on the legacy full-import
+    // fallback — incremental sync keeps the existing repo (and thus the
+    // remote) stable. Persisting it here is required: otherwise the next sync
+    // still sees the legacy remote and re-runs the destructive full import.
+    await updateProjectAfterSync(
+      env.STATE,
+      { ...project, remote: syncedRemote },
+      latestCommit || "unknown",
+      logger,
+    );
 
     // Mark import as complete
     await updateImportStatus(

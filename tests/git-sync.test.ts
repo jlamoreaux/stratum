@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { blobObject, commitObject, treeObject } from "../src/storage/git-objects";
 import { type NodeFS, applySourceUpdate } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
-import { placeLooseObject } from "../src/storage/object-loader";
+import { type FsLike, placeLooseObject } from "../src/storage/object-loader";
 import type { Logger } from "../src/utils/logger";
 
 const logger = {
@@ -19,8 +19,9 @@ const logger = {
 const DIR = "/repo";
 const author = { name: "t", email: "t@x.com", timestamp: 1_700_000_000, timezoneOffset: 0 };
 
-// biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-type GitFS = any;
+// isomorphic-git accepts its own fs shape, which is structurally wider than
+// NodeFS; derive it from the library so the tests stay type-checked.
+type GitFS = Parameters<typeof git.init>[0]["fs"];
 
 async function initRepo(): Promise<{ fs: NodeFS; gfs: GitFS }> {
   const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
@@ -31,7 +32,7 @@ async function initRepo(): Promise<{ fs: NodeFS; gfs: GitFS }> {
 
 async function commitFiles(gfs: GitFS, files: Record<string, string>, message = "c") {
   for (const [path, content] of Object.entries(files)) {
-    await gfs.promises.writeFile(`${DIR}/${path}`, content);
+    await (gfs as unknown as NodeFS).promises.writeFile(`${DIR}/${path}`, content);
     await git.add({ fs: gfs, dir: DIR, filepath: path });
   }
   return git.commit({ fs: gfs, dir: DIR, message, author });
@@ -145,7 +146,7 @@ describe("applySourceUpdate (real git, in-memory)", () => {
       timestamp: 1_700_000_100,
     });
     for (const o of [blob, tree, orphan]) {
-      await placeLooseObject(gfs, gitdir, o.oid, o.bytes);
+      await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
     }
 
     const result = await applySourceUpdate(fs, DIR, orphan.oid, logger);

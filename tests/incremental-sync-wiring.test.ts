@@ -87,7 +87,11 @@ import { importFromGitHub, syncFromGitHub } from "../src/storage/git-ops";
 import { updateImportStatus } from "../src/storage/imports";
 import { writeSnapshotFromRepo } from "../src/storage/repo-snapshot";
 import { setProject } from "../src/storage/state";
-import { recordSyncHistory, updateProjectSyncError } from "../src/storage/sync";
+import {
+  recordSyncHistory,
+  updateProjectAfterSync,
+  updateProjectSyncError,
+} from "../src/storage/sync";
 import type { Logger } from "../src/utils/logger";
 
 const noopLogger = {
@@ -177,6 +181,7 @@ beforeEach(() => {
   vi.mocked(writeSnapshotFromRepo).mockClear();
   vi.mocked(updateImportStatus).mockClear();
   vi.mocked(updateProjectSyncError).mockClear();
+  vi.mocked(updateProjectAfterSync).mockClear();
 });
 
 describe("queue consumer sync jobs (webhook + manual sync)", () => {
@@ -321,6 +326,15 @@ describe("syncAllProjects (daily cron)", () => {
       expect.objectContaining({ remote: ARTIFACTS_REMOTE, slug: "repo" }),
       expect.anything(),
     );
+    // The legacy project's newly imported Artifacts remote must be persisted —
+    // otherwise the next cron run still sees LEGACY_REMOTE and re-runs the
+    // destructive full import against an already-existing target.
+    expect(updateProjectAfterSync).toHaveBeenCalledWith(
+      env.STATE,
+      expect.objectContaining({ slug: "legacy", remote: ARTIFACTS_REMOTE }),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("counts a diverged incremental sync as failed without re-importing", async () => {
@@ -436,6 +450,15 @@ describe("projects route processSyncJob (queue-less fallback)", () => {
       env.STATE,
       env.ARTIFACTS,
       expect.objectContaining({ remote: ARTIFACTS_REMOTE }),
+      expect.anything(),
+    );
+    // The newly imported Artifacts remote must be persisted — otherwise the
+    // next sync still sees LEGACY_REMOTE and re-runs the destructive full
+    // import against an already-existing target.
+    expect(updateProjectAfterSync).toHaveBeenCalledWith(
+      env.STATE,
+      expect.objectContaining({ remote: ARTIFACTS_REMOTE }),
+      expect.anything(),
       expect.anything(),
     );
   });

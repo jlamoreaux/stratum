@@ -425,6 +425,30 @@ export async function commitAndPush(
 }
 
 /**
+ * Resolve the tip commit of a ref that was just fetched: prefer `FETCH_HEAD`
+ * (set by the fetch that just ran), falling back to the fetched remote's
+ * tracking ref for backends that don't populate `FETCH_HEAD`.
+ */
+async function resolveFetchedTip(
+  fs: NodeFS,
+  dir: string,
+  remoteTrackingRef: string,
+  logger: Logger,
+  errorMessage: string,
+  logContext: Record<string, unknown>,
+): Promise<Result<string, AppError>> {
+  const fetchHeadResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
+  if (fetchHeadResult.success) return ok(fetchHeadResult.data);
+
+  const remoteRefResult = await fromPromise(git.resolveRef({ fs, dir, ref: remoteTrackingRef }));
+  if (!remoteRefResult.success) {
+    logger.error(errorMessage, remoteRefResult.error, logContext);
+    return err(new ExternalServiceError("Git", errorMessage, remoteRefResult.error));
+  }
+  return ok(remoteRefResult.data);
+}
+
+/**
  * Merges a workspace into its parent project repo.
  *
  * Attempts a true three-way merge via isomorphic-git's multi-remote fetch.
@@ -509,27 +533,16 @@ export async function mergeWorkspaceIntoProject(
     }
     workspaceSha = options.workspaceSha;
   } else {
-    const resolveFetchResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
-    if (resolveFetchResult.success) {
-      workspaceSha = resolveFetchResult.data;
-    } else {
-      const resolveRemoteResult = await fromPromise(
-        git.resolveRef({ fs, dir, ref: "refs/remotes/workspace/main" }),
-      );
-      if (!resolveRemoteResult.success) {
-        logger.error("Failed to resolve workspace ref", resolveRemoteResult.error, {
-          workspaceRemote,
-        });
-        return err(
-          new ExternalServiceError(
-            "Git",
-            "Failed to resolve workspace ref",
-            resolveRemoteResult.error,
-          ),
-        );
-      }
-      workspaceSha = resolveRemoteResult.data;
-    }
+    const tipResult = await resolveFetchedTip(
+      fs,
+      dir,
+      "refs/remotes/workspace/main",
+      logger,
+      "Failed to resolve workspace ref",
+      { workspaceRemote },
+    );
+    if (!tipResult.success) return err(tipResult.error);
+    workspaceSha = tipResult.data;
   }
 
   // SEC-2: content is content-addressed on the staged paths; the cold path merges
@@ -2034,29 +2047,16 @@ export async function syncFromGitHub(
     );
   }
 
-  let sourceTip: string;
-  const fetchHeadResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
-  if (fetchHeadResult.success) {
-    sourceTip = fetchHeadResult.data;
-  } else {
-    const remoteRefResult = await fromPromise(
-      git.resolveRef({ fs, dir, ref: `refs/remotes/source/${branch}` }),
-    );
-    if (!remoteRefResult.success) {
-      logger.error("Failed to resolve fetched source ref", remoteRefResult.error, {
-        sourceUrl,
-        branch,
-      });
-      return err(
-        new ExternalServiceError(
-          "Git",
-          "Failed to resolve fetched source ref",
-          remoteRefResult.error,
-        ),
-      );
-    }
-    sourceTip = remoteRefResult.data;
-  }
+  const tipResult = await resolveFetchedTip(
+    fs,
+    dir,
+    `refs/remotes/source/${branch}`,
+    logger,
+    "Failed to resolve fetched source ref",
+    { sourceUrl, branch },
+  );
+  if (!tipResult.success) return err(tipResult.error);
+  const sourceTip = tipResult.data;
 
   const applyResult = await applySourceUpdate(fs, dir, sourceTip, logger);
   if (!applyResult.success) return err(applyResult.error);

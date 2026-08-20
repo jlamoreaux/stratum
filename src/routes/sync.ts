@@ -102,9 +102,14 @@ export async function syncAllProjects(
           projectLogger,
         );
         if (checkResult.data.latestCommit) {
+          // The remote only changes on the legacy full-import fallback —
+          // incremental sync keeps the existing repo (and thus the remote)
+          // stable. Persisting it here is required: otherwise the next cron
+          // run still sees the legacy remote and re-runs the destructive
+          // full import.
           const updateResult = await updateProjectAfterSync(
             env.STATE,
-            project,
+            { ...project, remote: syncedRemote },
             checkResult.data.latestCommit,
             projectLogger,
           );
