@@ -40,6 +40,7 @@ import {
 import { parseRepoUrl } from "../storage/git-providers";
 import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
+import { getProjectSourceUrl } from "../storage/sync";
 import type { Change, Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
 import { newId } from "../utils/ids";
@@ -1481,9 +1482,13 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!(await canWriteProject(c.env.DB, project, userId)))
     return forbidden("Project access denied");
 
-  // Accept the legacy githubUrl or the generic sourceUrl — bulk-imported
+  // Accept the generic sourceUrl or the legacy githubUrl — bulk-imported
   // projects only set sourceUrl (#189) — as long as it points at github.com.
-  const repoUrl = project.githubUrl ?? project.sourceUrl;
+  // Via the shared accessor, so this can't drift from the precedence the rest
+  // of the codebase uses: sourceUrl wins. A project migrated off githubUrl
+  // keeps the stale value, and this URL is what the branch is force-pushed to,
+  // so preferring the legacy field would publish to the wrong repository.
+  const repoUrl = getProjectSourceUrl(project);
   if (!repoUrl) return badRequest("Project is not connected to GitHub");
   const parsedRepo = parseRepoUrl(repoUrl);
   if (!parsedRepo || parsedRepo.provider !== "github") {

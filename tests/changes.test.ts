@@ -2173,6 +2173,38 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(prPayload.base).toBe("trunk"); // sourceDefaultBranch wins
   });
 
+  it("prefers sourceUrl over a stale legacy githubUrl", async () => {
+    // A project migrated onto sourceUrl keeps its old githubUrl value. This URL
+    // is what the change branch gets FORCE-PUSHED to, so preferring the legacy
+    // field would publish to — and open a PR against — the wrong repository.
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        githubUrl: "https://github.com/stale/old-repo",
+        sourceUrl: "https://github.com/current/new-repo.git",
+      },
+    });
+
+    const res = await promote();
+    expect(res.status).toBe(200);
+    expect(pushBranchToRemote).toHaveBeenCalledWith(
+      {},
+      "/",
+      expect.objectContaining({ url: "https://github.com/current/new-repo.git" }),
+      expect.anything(),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/current/new-repo/pulls",
+      expect.anything(),
+    );
+    // Nothing may reach the stale repo.
+    expect(JSON.stringify(vi.mocked(pushBranchToRemote).mock.calls)).not.toContain(
+      "stale/old-repo",
+    );
+    expect(JSON.stringify(fetchMock.mock.calls)).not.toContain("stale/old-repo");
+  });
+
   it("passes a valid caller-supplied base through to GitHub", async () => {
     const res = await promote({ base: "release/1.2" });
     expect(res.status).toBe(200);
