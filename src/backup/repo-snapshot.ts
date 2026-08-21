@@ -99,7 +99,14 @@ export async function walkRepoObjects(
   }
 }
 
-/** Assemble a snapshot from a walked object set. Pure — the unit under test. */
+/**
+ * Builds a repository snapshot from walked objects and capture metadata.
+ *
+ * @param project - The project associated with the snapshot
+ * @param walk - The walked objects and repository tip commit
+ * @param capturedAt - The snapshot capture timestamp
+ * @returns The packed repository objects and their manifest
+ */
 export function buildSnapshot(
   project: ProjectEntry,
   walk: WalkResult,
@@ -120,16 +127,13 @@ export function buildSnapshot(
 }
 
 /**
- * Creates a backup snapshot of a project's repository: clone (the sole
- * Artifacts-coupled call here), walk the full reachable object set, and pack it
- * with a manifest carrying the tip sha and full identity.
+ * Creates a repository backup snapshot with its manifest.
  *
- * Empty or oversized repositories produce a skip rather than an error — neither
- * is a backup failure, and reporting them as one would make a healthy cron run
- * look broken. Repository access, cloning, and traversal failures are errors.
+ * Empty or oversized repositories produce a skipped result. Repository access,
+ * cloning, and traversal failures produce an application error.
  *
  * @param capturedAt - Timestamp recorded in the snapshot manifest
- * @returns A successful snapshot or a reason the repository was skipped
+ * @returns A successful snapshot, a skipped result, or an application error
  */
 export async function snapshotRepo(
   env: Env,

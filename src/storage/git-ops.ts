@@ -244,9 +244,10 @@ export async function freshRepoToken(
 }
 
 /**
- * Push the local `main` ref (its objects + the ref) to an Artifacts remote.
- * Used by backup restore to publish a reconstructed repo. `force` overwrites a
- * non-empty remote (restore-over-existing behind an explicit opt-in).
+ * Publishes the local `main` branch to a remote repository.
+ *
+ * @param opts - Controls whether an existing remote `main` branch may be overwritten.
+ * @returns No value on success, or an application error if the push fails.
  */
 export async function pushMain(
   remote: string,
@@ -321,6 +322,7 @@ export async function pushBranchToRemote(
  * Initializes a repository with the supplied files, commits them, and pushes the commit to `main`.
  *
  * @param remote - The remote repository URL
+ * @param token - The authentication token for the remote repository
  * @param files - Files to add to the initial commit, keyed by path
  * @param message - The commit message
  * @param author - The commit author
