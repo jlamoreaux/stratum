@@ -50,9 +50,9 @@ docs/
 ### For Everyone
 
 **Current Priorities & Roadmap:**
-- [TODO.md](/TODO.md) - Current priorities and what's being worked on
-- [CURRENT_CAPABILITIES.md](/docs/CURRENT_CAPABILITIES.md) - Authoritative shipped-feature state
-- [REMAINING_WORK.md](/docs/REMAINING_WORK.md) - Known gaps and open work
+- [TODO.md](../TODO.md) - Current priorities and what's being worked on
+- [CURRENT_CAPABILITIES.md](CURRENT_CAPABILITIES.md) - Authoritative shipped-feature state
+- [REMAINING_WORK.md](REMAINING_WORK.md) - Known gaps and open work
 
 ### For Users
 
