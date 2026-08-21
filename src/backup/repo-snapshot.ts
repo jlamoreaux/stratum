@@ -120,10 +120,13 @@ export function buildSnapshot(
 }
 
 /**
- * Creates a backup snapshot of a project's repository.
+ * Creates a backup snapshot of a project's repository: clone (the sole
+ * Artifacts-coupled call here), walk the full reachable object set, and pack it
+ * with a manifest carrying the tip sha and full identity.
  *
- * Empty or oversized repositories produce a skipped result; repository access,
- * cloning, and traversal failures are returned as errors.
+ * Empty or oversized repositories produce a skip rather than an error — neither
+ * is a backup failure, and reporting them as one would make a healthy cron run
+ * look broken. Repository access, cloning, and traversal failures are errors.
  *
  * @param capturedAt - Timestamp recorded in the snapshot manifest
  * @returns A successful snapshot or a reason the repository was skipped

@@ -276,7 +276,14 @@ export async function pushMain(
 }
 
 /**
- * Pushes the local `main` branch to a branch on an external remote.
+ * Pushes the local `main` branch to a branch on an external remote — e.g.
+ * GitHub's `stratum/<changeId>` ref before a PR is opened (#189).
+ *
+ * Auth is HTTP basic with the token as the password; GitHub accepts any
+ * username alongside a token. `force` defaults to false because `remoteRef` is
+ * caller-supplied and could name a branch this app does not own — a defaulted
+ * force-push there would destroy someone else's work. Pass `force: true`
+ * explicitly, and only when overwriting a ref Stratum owns (re-promotion).
  *
  * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
  * @returns A successful result when the push completes, or an application error when it fails.

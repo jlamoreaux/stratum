@@ -71,11 +71,15 @@ const policyInflight = new Map<string, Promise<EvalPolicy>>();
 const policyKvKey = (projectId: string) => `policy:${projectId}`;
 
 /**
- * Loads a project's merge policy using cached values when caching is enabled.
+ * Loads a project's merge policy through a two-level cache, so the hot merge
+ * paths don't clone the repo just to read `.stratum/policy.yaml`:
+ *   in-isolate Map  ->  KV (shared across isolates)  ->  clone (loadPolicy).
  *
- * Concurrent requests for the same project share one policy load. Cached policies
- * expire after the configured cache TTL; uncached loads read the policy from the
- * project's repository and propagate token or policy-loading failures.
+ * Concurrent requests for the same project share one policy load. Caching is
+ * gated on REPO_DO_ENABLED so tests always load fresh with no KV access. The
+ * cache TTL is the bound on how long a branch-protection change takes to take
+ * effect on these paths — shortening it costs clones, lengthening it widens
+ * that window. Throws if the read token can't be minted.
  *
  * @param project - The project whose merge policy to load
  * @returns The project's merge policy
@@ -1393,6 +1397,13 @@ interface GithubPr {
 /**
  * Validates whether a value represents an open GitHub pull request.
  *
+ * A PR record is only usable if it is safe to persist: `githubPrNumber` and
+ * `githubPrUrl` are what a later re-promotion checks to decide the PR already
+ * exists and skip creation entirely. Persisting a malformed record therefore
+ * strands the change permanently — every retry short-circuits to a PR that
+ * isn't there — so both the create response and the duplicate-head lookup are
+ * validated through here before anything is stored.
+ *
  * @param value - The value to validate
  * @returns `true` if the value has a positive safe integer number, an HTTPS URL, and an open state, `false` otherwise.
  */
@@ -1411,6 +1422,11 @@ function isUsableGithubPr(value: unknown): value is GithubPr {
 
 /**
  * Finds an open GitHub pull request associated with a branch.
+ *
+ * GitHub 422s PR creation with "a pull request already exists" when the head
+ * ref already has one open — either a concurrent promotion, or a retry after
+ * `updateChangeStatus` failed post-creation. Looking the PR up and reusing it
+ * turns that dead end into a successful, idempotent promotion.
  *
  * @param repo - The GitHub repository to search
  * @param branch - The head branch associated with the pull request
