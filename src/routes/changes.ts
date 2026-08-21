@@ -71,18 +71,11 @@ const policyInflight = new Map<string, Promise<EvalPolicy>>();
 const policyKvKey = (projectId: string) => `policy:${projectId}`;
 
 /**
- * Loads a project's merge policy through a two-level cache, so the hot merge
- * paths don't clone the repo just to read `.stratum/policy.yaml`:
- *   in-isolate Map  ->  KV (shared across isolates)  ->  clone (loadPolicy).
- *
- * Concurrent requests for the same project share one policy load. Caching is
- * gated on REPO_DO_ENABLED so tests always load fresh with no KV access. The
- * cache TTL is the bound on how long a branch-protection change takes to take
- * effect on these paths — shortening it costs clones, lengthening it widens
- * that window. Throws if the read token can't be minted.
+ * Loads a project's merge policy, using the shared and isolate-local caches when enabled.
  *
  * @param project - The project whose merge policy to load
  * @returns The project's merge policy
+ * @throws If a read token cannot be minted or the policy cannot be loaded
  */
 async function loadMergePolicyCached(
   env: Env,
@@ -131,23 +124,10 @@ async function loadMergePolicyCached(
 const MAX_BASE_REF_LENGTH = 200;
 
 /**
- * Loose git branch-name validation for the PR `base` taken from the request
- * body: printable, no whitespace/control chars, none of git's forbidden
- * sequences. Rejecting here keeps garbage out of the GitHub API call.
+ * Validates a Git branch reference for use as a GitHub pull request base branch.
  *
- * git applies its per-component rules to every slash-separated component, not
- * just to the ref as a whole, so `release/.hidden` and `release/v1.lock` are
- * invalid even though the full string neither starts with `.` nor ends with
- * `.lock`.
- *
- * A bare `@` is rejected deliberately. git itself will happily create
- * `refs/heads/@` (verified against git 2.43), but `@` is its shorthand for
- * HEAD, so `git checkout @` resolves to HEAD rather than to the branch — the
- * name is ambiguous wherever it is used, and GitHub blocks ambiguous branch
- * names of its own accord. `@` inside a longer name (`feature/@/thing`) is
- * unambiguous and stays legal; only the `@{` reflog syntax is a hard error.
- * This is an allowlist for untrusted input, not a reimplementation of git's
- * parser, so erring toward rejection here is deliberate.
+ * @param ref - The branch reference to validate
+ * @returns `true` if the reference satisfies the allowed branch-name rules, `false` otherwise
  */
 function isValidBaseRef(ref: string): boolean {
   if (ref.length === 0 || ref.length > MAX_BASE_REF_LENGTH) return false;
@@ -1395,17 +1375,10 @@ interface GithubPr {
 }
 
 /**
- * Validates whether a value represents an open GitHub pull request.
- *
- * A PR record is only usable if it is safe to persist: `githubPrNumber` and
- * `githubPrUrl` are what a later re-promotion checks to decide the PR already
- * exists and skip creation entirely. Persisting a malformed record therefore
- * strands the change permanently — every retry short-circuits to a PR that
- * isn't there — so both the create response and the duplicate-head lookup are
- * validated through here before anything is stored.
+ * Determines whether a value represents an open GitHub pull request.
  *
  * @param value - The value to validate
- * @returns `true` if the value has a positive safe integer number, an HTTPS URL, and an open state, `false` otherwise.
+ * @returns `true` if the value contains a positive safe integer number, an HTTPS URL, and an open state; `false` otherwise.
  */
 function isUsableGithubPr(value: unknown): value is GithubPr {
   if (typeof value !== "object" || value === null) return false;
