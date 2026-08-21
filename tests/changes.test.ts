@@ -2317,6 +2317,47 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(body.githubStatus).toBe(502);
   });
 
+  // The branch is already pushed when the error body is parsed, so anything
+  // thrown here escapes as a bare 500 and loses the structured GITHUB_ERROR
+  // the caller needs. GitHub is not guaranteed to send the documented shape.
+  it.each([
+    ["an object instead of an array", { message: "Validation Failed", errors: {} }],
+    ["a string instead of an array", { message: "Validation Failed", errors: "invalid" }],
+    ["null entries", { message: "Validation Failed", errors: [null] }],
+    ["non-string members", { message: "Validation Failed", errors: [{ message: 42 }] }],
+    ["a non-object body", "just a string"],
+    ["a null body", null],
+  ])("still returns a structured 502 when GitHub sends %s", async (_label, payload) => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 422 }));
+    const res = await promote();
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string; githubStatus: number };
+    expect(body.code).toBe("GITHUB_ERROR");
+    expect(body.githubStatus).toBe(422);
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  // startsWith("https://") accepts values that are not reachable PR links.
+  it.each([
+    ["a bare scheme", "https://"],
+    ["no path", "https://github.com"],
+    ["a non-GitHub host", "https://evil.example.com/acme/widgets/pull/1"],
+    ["a lookalike host", "https://github.com.evil.example/acme/widgets/pull/1"],
+    ["a non-https scheme", "http://github.com/acme/widgets/pull/1"],
+    ["not a URL at all", "https:/ /nonsense"],
+  ])("502s instead of persisting a PR whose html_url is %s", async (_label, url) => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ number: 7, html_url: url, state: "open" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const res = await promote();
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { code: string }).code).toBe("GITHUB_ERROR");
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
   it("502s without leaking details when the PR-creation request itself fails (timeout/network)", async () => {
     fetchMock.mockRejectedValueOnce(new DOMException("The operation was aborted", "TimeoutError"));
     const res = await promote();

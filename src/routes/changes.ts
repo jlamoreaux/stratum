@@ -71,7 +71,15 @@ const policyInflight = new Map<string, Promise<EvalPolicy>>();
 const policyKvKey = (projectId: string) => `policy:${projectId}`;
 
 /**
- * Loads a project's merge policy, using the shared and isolate-local caches when enabled.
+ * Loads a project's merge policy through a two-level cache — in-isolate Map,
+ * then KV (shared across isolates), then a clone via `loadPolicy`.
+ *
+ * The cache exists because the hot merge paths would otherwise clone the repo
+ * just to read `.stratum/policy.yaml`. Caching is gated on REPO_DO_ENABLED so
+ * tests always load fresh with no KV access, and the TTL is the bound on how
+ * long a branch-protection change takes to take effect here: shortening it
+ * costs clones, lengthening it widens the window where a revoked rule still
+ * applies.
  *
  * @param project - The project whose merge policy to load
  * @returns The project's merge policy
@@ -125,6 +133,19 @@ const MAX_BASE_REF_LENGTH = 200;
 
 /**
  * Validates a Git branch reference for use as a GitHub pull request base branch.
+ *
+ * `base` arrives in the request body, so this is the boundary where untrusted
+ * input is bounded before it reaches the GitHub API — an allowlist, not a
+ * faithful reimplementation of git's parser.
+ *
+ * Two rules are easy to get wrong. git applies its per-component rules to
+ * every slash-separated component, not just the whole ref, so `release/.hidden`
+ * and `release/v1.lock` are invalid even though the full string neither starts
+ * with `.` nor ends with `.lock`. And a bare `@` is rejected deliberately even
+ * though git will happily create `refs/heads/@` (verified against git 2.43):
+ * `@` is git's shorthand for HEAD, so `git checkout @` resolves to HEAD rather
+ * than the branch. `@` inside a longer name is unambiguous and stays legal;
+ * only the `@{` reflog syntax is a hard error.
  *
  * @param ref - The branch reference to validate
  * @returns `true` if the reference satisfies the allowed branch-name rules, `false` otherwise
@@ -1374,11 +1395,37 @@ interface GithubPr {
   state: string;
 }
 
+/** One entry of GitHub's `errors` array, as far as this route relies on it. */
+interface GithubErrorDetail {
+  message?: string;
+  code?: string;
+  field?: string;
+}
+
+/** Narrows one element of an untrusted `errors` array before it is read. */
+function isGithubErrorDetail(value: unknown): value is GithubErrorDetail {
+  if (typeof value !== "object" || value === null) return false;
+  const detail = value as Record<string, unknown>;
+  return (["message", "code", "field"] as const).every(
+    (key) => detail[key] === undefined || typeof detail[key] === "string",
+  );
+}
+
 /**
  * Determines whether a value represents an open GitHub pull request.
  *
+ * Validation is strict because these fields get persisted: `githubPrNumber`
+ * and `githubPrUrl` are what a later re-promotion checks to decide the PR
+ * already exists and skip creation entirely. A malformed record stored here
+ * therefore strands the change permanently — every retry short-circuits to a
+ * PR that isn't there — so both the create response and the duplicate-head
+ * lookup are validated through this before anything is written.
+ *
+ * `html_url` is parsed rather than prefix-matched: `"https://"` passes a
+ * `startsWith` check but is not a reachable PR link.
+ *
  * @param value - The value to validate
- * @returns `true` if the value contains a positive safe integer number, an HTTPS URL, and an open state; `false` otherwise.
+ * @returns `true` if the value contains a positive safe integer number, a usable GitHub HTTPS URL, and an open state; `false` otherwise.
  */
 function isUsableGithubPr(value: unknown): value is GithubPr {
   if (typeof value !== "object" || value === null) return false;
@@ -1388,8 +1435,26 @@ function isUsableGithubPr(value: unknown): value is GithubPr {
     Number.isSafeInteger(pr.number) &&
     pr.number > 0 &&
     typeof pr.html_url === "string" &&
-    pr.html_url.startsWith("https://") &&
+    isUsableGithubUrl(pr.html_url) &&
     pr.state === "open"
+  );
+}
+
+/** A PR link this app would be willing to store and hand back to a caller. */
+function isUsableGithubUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  // The whole promotion path is hard-coded to github.com (api.github.com, the
+  // github.com clone URL), so anything else here is a malformed or spoofed
+  // response rather than a legitimate enterprise host.
+  return (
+    url.protocol === "https:" &&
+    (url.hostname === "github.com" || url.hostname.endsWith(".github.com")) &&
+    url.pathname.length > 1
   );
 }
 
@@ -1612,15 +1677,22 @@ app.post("/changes/:id/github-pr", async (c) => {
     // exactly what to fix.
     const detail = await ghRes.text().catch(() => "");
     let githubMessage: string | undefined;
-    let errors: Array<{ message?: string; code?: string; field?: string }> = [];
+    let errors: GithubErrorDetail[] = [];
     try {
-      const parsed = JSON.parse(detail) as {
-        message?: string;
-        errors?: Array<{ message?: string; code?: string; field?: string }>;
+      // The branch is already pushed by this point, so anything thrown while
+      // parsing an error body escapes as a bare 500 and loses the structured
+      // GITHUB_ERROR/502 the caller needs. GitHub is not guaranteed to send the
+      // documented shape on every failure, so validate rather than cast:
+      // `{"errors":{}}`, `{"errors":"invalid"}` and `{"errors":[null]}` all
+      // reach `.map()` otherwise.
+      const parsed: unknown = JSON.parse(detail);
+      const body = (typeof parsed === "object" && parsed !== null ? parsed : {}) as {
+        message?: unknown;
+        errors?: unknown;
       };
-      errors = parsed.errors ?? [];
+      errors = Array.isArray(body.errors) ? body.errors.filter(isGithubErrorDetail) : [];
       githubMessage = [
-        parsed.message,
+        typeof body.message === "string" ? body.message : undefined,
         ...errors.map((e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code)),
       ]
         .filter(Boolean)

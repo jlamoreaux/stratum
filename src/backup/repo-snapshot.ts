@@ -102,6 +102,10 @@ export async function walkRepoObjects(
 /**
  * Builds a repository snapshot from walked objects and capture metadata.
  *
+ * The manifest carries `tipSha` and the whole project record, not just an id,
+ * because restore has to work without consulting live state — a snapshot must
+ * stay restorable after the project entry has changed or been deleted.
+ *
  * @param project - The project associated with the snapshot
  * @param walk - The walked objects and repository tip commit
  * @param capturedAt - The snapshot capture timestamp
@@ -129,8 +133,10 @@ export function buildSnapshot(
 /**
  * Creates a repository backup snapshot with its manifest.
  *
- * Empty or oversized repositories produce a skipped result. Repository access,
- * cloning, and traversal failures produce an application error.
+ * Empty and oversized repositories are a skip rather than an error: neither is
+ * a backup failure, and reporting them as one would make a healthy cron run
+ * look broken and bury the failures that matter. Repository access, cloning
+ * and traversal failures are real errors and surface as such.
  *
  * @param capturedAt - Timestamp recorded in the snapshot manifest
  * @returns A successful snapshot, a skipped result, or an application error
