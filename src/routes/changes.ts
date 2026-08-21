@@ -71,12 +71,14 @@ const policyInflight = new Map<string, Promise<EvalPolicy>>();
 const policyKvKey = (projectId: string) => `policy:${projectId}`;
 
 /**
- * Load a project's merge policy through a two-level cache so the hot merge paths
- * don't clone the repo just to read `.stratum/policy.yaml`:
- *   in-isolate Map  ->  KV (shared across isolates)  ->  clone (loadPolicy).
- * Request-coalesced per project. Gated on REPO_DO_ENABLED so tests always load
- * fresh (no KV access). The cache TTL bounds how long a branch-protection change
- * takes to apply on these paths. Throws if the read token can't be minted.
+ * Loads a project's merge policy using cached values when caching is enabled.
+ *
+ * Concurrent requests for the same project share one policy load. Cached policies
+ * expire after the configured cache TTL; uncached loads read the policy from the
+ * project's repository and propagate token or policy-loading failures.
+ *
+ * @param project - The project whose merge policy to load
+ * @returns The project's merge policy
  */
 async function loadMergePolicyCached(
   env: Env,
@@ -1389,12 +1391,10 @@ interface GithubPr {
 }
 
 /**
- * A PR record is only usable if it can be persisted: `githubPrNumber` and
- * `githubPrUrl` are what a later re-promotion checks to decide the PR already
- * exists and skip creation entirely. Persisting a malformed record therefore
- * strands the change permanently — every retry short-circuits to a PR that
- * isn't there — so both the create response and the duplicate-head lookup are
- * validated through here before anything is stored.
+ * Validates whether a value represents an open GitHub pull request.
+ *
+ * @param value - The value to validate
+ * @returns `true` if the value has a positive safe integer number, an HTTPS URL, and an open state, `false` otherwise.
  */
 function isUsableGithubPr(value: unknown): value is GithubPr {
   if (typeof value !== "object" || value === null) return false;
@@ -1410,10 +1410,11 @@ function isUsableGithubPr(value: unknown): value is GithubPr {
 }
 
 /**
- * GitHub 422s PR creation with a "pull request already exists" error when the
- * head ref already has an open PR — a race between a concurrent promotion (or
- * a retry after `updateChangeStatus` failed post-creation) and the create
- * call above. Look up and reuse that PR instead of failing the request.
+ * Finds an open GitHub pull request associated with a branch.
+ *
+ * @param repo - The GitHub repository to search
+ * @param branch - The head branch associated with the pull request
+ * @returns The matching pull request, or `undefined` if none is found or the lookup fails.
  */
 async function findOpenPrForHead(
   repo: { owner: string; repo: string },

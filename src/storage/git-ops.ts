@@ -276,12 +276,10 @@ export async function pushMain(
 }
 
 /**
- * Push the cloned repo's local `main` to an arbitrary branch on an external
- * remote (e.g. GitHub's `stratum/<changeId>` ref before a PR is opened, #189).
- * Auth is HTTP basic with the token as the password — GitHub accepts any
- * username alongside a token. `force` defaults to false since `remoteRef` is
- * caller-supplied and could name a non-Stratum-owned branch; pass `force: true`
- * explicitly when overwriting a ref this app owns (e.g. re-promotion).
+ * Pushes the local `main` branch to a branch on an external remote.
+ *
+ * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
+ * @returns A successful result when the push completes, or an application error when it fails.
  */
 export async function pushBranchToRemote(
   fs: NodeFS,
@@ -312,6 +310,15 @@ export async function pushBranchToRemote(
   return ok(undefined);
 }
 
+/**
+ * Initializes a repository with the supplied files, commits them, and pushes the commit to `main`.
+ *
+ * @param remote - The remote repository URL
+ * @param files - Files to add to the initial commit, keyed by path
+ * @param message - The commit message
+ * @param author - The commit author
+ * @returns The SHA of the pushed commit
+ */
 export async function initAndPush(
   remote: string,
   token: string,
@@ -375,6 +382,15 @@ export async function initAndPush(
   return ok(commitResult.data);
 }
 
+/**
+ * Clones the `main` branch of a repository into an in-memory filesystem.
+ *
+ * @param remote - The repository URL to clone
+ * @param token - The authentication token for the repository
+ * @param opts - Clone options
+ * @param opts.fullHistory - Whether to clone the complete reachable history; otherwise, clone the most recent 50 commits
+ * @returns The cloned filesystem and its working directory, or an application error
+ */
 export async function cloneRepo(
   remote: string,
   token: string,
