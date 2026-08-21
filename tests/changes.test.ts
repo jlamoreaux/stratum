@@ -2550,6 +2550,9 @@ describe("POST /api/changes/:id/github-pr", () => {
       data: {
         ...acceptedChange,
         status: "promoted",
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
         githubPrNumber: 7,
         githubPrUrl: "https://github.com/acme/widgets/pull/7",
         githubPrState: "open",
@@ -2576,15 +2579,98 @@ describe("POST /api/changes/:id/github-pr", () => {
   it.each([
     [
       "a closed PR",
-      { githubPrNumber: 7, githubPrUrl: "https://github.com/a/b/pull/7", githubPrState: "closed" },
+      {
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 7,
+        githubPrUrl: "https://github.com/a/b/pull/7",
+        githubPrState: "closed",
+      },
     ],
-    ["no stored state", { githubPrNumber: 7, githubPrUrl: "https://github.com/a/b/pull/7" }],
+    // A project can be re-pointed at a different GitHub repo (migration, or
+    // sourceUrl superseding a legacy githubUrl). The push then lands in the new
+    // repo while these stored values still name a PR in the old one, so the
+    // record is well-formed but belongs to the wrong target.
+    [
+      "a PR from a different owner",
+      {
+        githubOwner: "other",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 7,
+        githubPrUrl: "https://github.com/a/b/pull/7",
+        githubPrState: "open",
+      },
+    ],
+    [
+      "a PR from a different repo",
+      {
+        githubOwner: "acme",
+        githubRepo: "gadgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 7,
+        githubPrUrl: "https://github.com/a/b/pull/7",
+        githubPrState: "open",
+      },
+    ],
+    [
+      "a PR for a different branch",
+      {
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_old",
+        githubPrNumber: 7,
+        githubPrUrl: "https://github.com/a/b/pull/7",
+        githubPrState: "open",
+      },
+    ],
+    [
+      "no stored target (legacy row)",
+      { githubPrNumber: 7, githubPrUrl: "https://github.com/a/b/pull/7", githubPrState: "open" },
+    ],
+    [
+      "no stored state",
+      {
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 7,
+        githubPrUrl: "https://github.com/a/b/pull/7",
+      },
+    ],
     [
       "a zero PR number",
-      { githubPrNumber: 0, githubPrUrl: "https://github.com/a/b/pull/7", githubPrState: "open" },
+      {
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 0,
+        githubPrUrl: "https://github.com/a/b/pull/7",
+        githubPrState: "open",
+      },
     ],
-    ["an unusable url", { githubPrNumber: 7, githubPrUrl: "https://", githubPrState: "open" }],
-    ["a number but no url", { githubPrNumber: 7, githubPrState: "open" }],
+    [
+      "an unusable url",
+      {
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 7,
+        githubPrUrl: "https://",
+        githubPrState: "open",
+      },
+    ],
+    [
+      "a number but no url",
+      {
+        githubOwner: "acme",
+        githubRepo: "widgets",
+        githubBranch: "stratum/chg_abc123",
+        githubPrNumber: 7,
+        githubPrState: "open",
+      },
+    ],
   ])("re-creates the PR when the stored record has %s", async (_label, stored) => {
     vi.mocked(getChange).mockResolvedValue({
       success: true,
@@ -2611,7 +2697,11 @@ describe("POST /api/changes/:id/github-pr", () => {
       expect.anything(),
       "chg_abc123",
       "promoted",
-      expect.objectContaining({ githubPrNumber: 42 }),
+      expect.objectContaining({
+        githubPrNumber: 42,
+        githubPrUrl: "https://github.com/acme/widgets/pull/42",
+        githubPrState: "open",
+      }),
     );
   });
 

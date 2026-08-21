@@ -1625,7 +1625,20 @@ app.post("/changes/:id/github-pr", async (c) => {
     html_url: change.githubPrUrl,
     state: change.githubPrState,
   };
-  if (isUsableGithubPr(storedPr)) {
+  // The stored PR is only reusable if it belongs to the repository this
+  // promotion is actually pushing to. `repo` is derived from the project's
+  // source URL, which can change (a project migrated between GitHub repos, or
+  // `sourceUrl` superseding a legacy `githubUrl`) — and when it does, the push
+  // above lands in the new repository while these stored values still describe
+  // a PR in the old one. Reusing them would answer with the new owner/repo
+  // beside an unrelated PR URL. Legacy rows predating this persistence have the
+  // fields undefined and so fall through, which is correct: creation plus
+  // duplicate-head reconciliation rewrites them from GitHub's own answer.
+  const storedPrMatchesTarget =
+    change.githubOwner === repo.owner &&
+    change.githubRepo === repo.repo &&
+    change.githubBranch === branch;
+  if (isUsableGithubPr(storedPr) && storedPrMatchesTarget) {
     logger.info("Change branch re-pushed to existing GitHub PR", {
       changeId: id,
       prNumber: storedPr.number,
@@ -1643,10 +1656,12 @@ app.post("/changes/:id/github-pr", async (c) => {
     });
   }
   if (change.githubPrNumber !== undefined || change.githubPrUrl !== undefined) {
-    logger.warn("Stored GitHub PR record is unusable; re-creating", {
+    logger.warn("Stored GitHub PR record is unusable or targets another repo; re-creating", {
       changeId: id,
       prNumber: change.githubPrNumber,
       prState: change.githubPrState,
+      storedTarget: `${change.githubOwner ?? "?"}/${change.githubRepo ?? "?"}#${change.githubBranch ?? "?"}`,
+      currentTarget: `${repo.owner}/${repo.repo}#${branch}`,
     });
   }
 
