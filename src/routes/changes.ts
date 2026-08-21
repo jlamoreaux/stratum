@@ -1613,10 +1613,22 @@ app.post("/changes/:id/github-pr", async (c) => {
 
   // Re-promotion: the PR already exists and the force-push above refreshed its
   // head, so skip the create call (GitHub 422s on a duplicate head ref).
-  if (change.githubPrNumber !== undefined && change.githubPrUrl !== undefined) {
+  //
+  // The stored record is validated rather than trusted: rows written before
+  // this route validated GitHub's responses can hold anything, and a closed PR
+  // must not be handed back as a successful promotion. Falling through on a bad
+  // record is the recovery path, not a failure — creation runs, and the
+  // duplicate-head branch below repairs the stored values from GitHub's own
+  // answer when an open PR does exist for this head.
+  const storedPr = {
+    number: change.githubPrNumber,
+    html_url: change.githubPrUrl,
+    state: change.githubPrState,
+  };
+  if (isUsableGithubPr(storedPr)) {
     logger.info("Change branch re-pushed to existing GitHub PR", {
       changeId: id,
-      prNumber: change.githubPrNumber,
+      prNumber: storedPr.number,
       repo: `${repo.owner}/${repo.repo}`,
     });
     return okOrFormRedirect(c, id, {
@@ -1625,9 +1637,16 @@ app.post("/changes/:id/github-pr", async (c) => {
         owner: repo.owner,
         repo: repo.repo,
         branch,
-        pullRequestNumber: change.githubPrNumber,
-        pullRequestUrl: change.githubPrUrl,
+        pullRequestNumber: storedPr.number,
+        pullRequestUrl: storedPr.html_url,
       },
+    });
+  }
+  if (change.githubPrNumber !== undefined || change.githubPrUrl !== undefined) {
+    logger.warn("Stored GitHub PR record is unusable; re-creating", {
+      changeId: id,
+      prNumber: change.githubPrNumber,
+      prState: change.githubPrState,
     });
   }
 

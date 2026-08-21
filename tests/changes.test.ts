@@ -2552,6 +2552,7 @@ describe("POST /api/changes/:id/github-pr", () => {
         status: "promoted",
         githubPrNumber: 7,
         githubPrUrl: "https://github.com/acme/widgets/pull/7",
+        githubPrState: "open",
       },
     });
     const res = await promote();
@@ -2566,6 +2567,52 @@ describe("POST /api/changes/:id/github-pr", () => {
       }),
     );
     expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  // Rows written before this route validated GitHub responses can hold
+  // anything, and a closed PR must not be returned as a live promotion.
+  // Falling through to creation is the recovery path: the record gets rebuilt
+  // from GitHub's own answer rather than left broken.
+  it.each([
+    [
+      "a closed PR",
+      { githubPrNumber: 7, githubPrUrl: "https://github.com/a/b/pull/7", githubPrState: "closed" },
+    ],
+    ["no stored state", { githubPrNumber: 7, githubPrUrl: "https://github.com/a/b/pull/7" }],
+    [
+      "a zero PR number",
+      { githubPrNumber: 0, githubPrUrl: "https://github.com/a/b/pull/7", githubPrState: "open" },
+    ],
+    ["an unusable url", { githubPrNumber: 7, githubPrUrl: "https://", githubPrState: "open" }],
+    ["a number but no url", { githubPrNumber: 7, githubPrState: "open" }],
+  ])("re-creates the PR when the stored record has %s", async (_label, stored) => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...acceptedChange, status: "promoted", ...stored },
+    });
+
+    const res = await promote();
+    expect(res.status).toBe(200);
+    // It must not short-circuit on the bad record — creation has to run.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/widgets/pulls",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = (await res.json()) as { github: Record<string, unknown> };
+    expect(body.github).toEqual(
+      expect.objectContaining({
+        pullRequestNumber: 42,
+        pullRequestUrl: "https://github.com/acme/widgets/pull/42",
+      }),
+    );
+    // …and the repaired record is what gets persisted.
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      "promoted",
+      expect.objectContaining({ githubPrNumber: 42 }),
+    );
   });
 
   it("400s when the change is not accepted", async () => {
