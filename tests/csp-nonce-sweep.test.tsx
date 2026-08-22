@@ -259,6 +259,24 @@ describe("CSP nonce sweep — components", () => {
     });
   }
 
+  it("ImportProgressCard: the error-action window.open passes noopener", () => {
+    const html = renderToString(
+      <ImportProgressCard
+        {...importProgressBase}
+        status="failed"
+        errors={[{ file: "repo", error: "unauthorized", timestamp: "2024-01-01T00:00:00Z" }]}
+        nonce={NONCE}
+      />,
+    );
+    // The action button opens a repository-supplied URL. `window.open` — unlike
+    // `<a target="_blank">`, which browsers treat as implicitly noopener — hands
+    // the opened page a live `window.opener`, letting it navigate this
+    // authenticated tab. Assert the guard is actually in the emitted script.
+    expect(html).toContain("window.open");
+    expect(html).toMatch(/window\.open\([^)]*['"]noopener/);
+    expectCspClean(html);
+  });
+
   for (const status of ["completed", "cancelled"] as const) {
     it(`ImportProgressCard (${status}): CSP-clean`, () => {
       const html = renderToString(

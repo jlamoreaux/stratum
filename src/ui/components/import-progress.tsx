@@ -378,7 +378,12 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
               var btn = document.getElementById('import-error-action');
               if (!btn) return;
               btn.addEventListener('click', function () {
-                window.open(btn.dataset.url, '_blank');
+                // 'noopener' is required here: unlike <a target="_blank">, which
+                // modern browsers treat as implicitly noopener, window.open()
+                // still hands the opened page a live window.opener reference.
+                // The URL is repository-supplied, so without this it could
+                // navigate this authenticated tab (reverse tabnabbing).
+                window.open(btn.dataset.url, '_blank', 'noopener,noreferrer');
               });
             })();
           `,
