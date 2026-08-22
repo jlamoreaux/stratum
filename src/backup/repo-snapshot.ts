@@ -48,6 +48,18 @@ interface WalkResult {
 /**
  * Collects all objects reachable from the repository tip and tags.
  *
+ * The FULL reachable set is collected -- every commit, its tree, and its blobs,
+ * deduped -- so the resulting pack is closed under reachability and restores to
+ * a faithful repo with the original tip sha and its parents present. Every
+ * `refs/tags/*` tip is walked too (#182): annotated tag objects themselves, and
+ * anything reachable only from a tag, would otherwise be missing from the pack.
+ *
+ * Aborts with a "too large" skip once the running byte total exceeds `maxBytes`,
+ * before packing. That bounds the pack being built, not the clone -- a
+ * pathological repo can still exhaust memory earlier, during the clone itself.
+ *
+ * Operates on an already-cloned fs, so it is testable without Artifacts.
+ *
  * @param fs - The filesystem containing the cloned repository
  * @param dir - The repository directory
  * @param maxBytes - Maximum total size of collected objects
@@ -197,6 +209,11 @@ export async function walkRepoObjects(
 /**
  * Builds a repository snapshot from walked objects and project metadata.
  *
+ * Pure, and the unit most of the snapshot tests exercise directly. The manifest
+ * carries `tipSha` and the whole project record rather than just an id, because
+ * restore has to work without consulting live state -- a snapshot must stay
+ * restorable after the project entry has changed or been deleted.
+ *
  * @param project - The project associated with the snapshot
  * @param walk - The collected repository objects, tip commit, and tag references
  * @param capturedAt - The snapshot capture timestamp
@@ -223,7 +240,13 @@ export function buildSnapshot(
 }
 
 /**
- * Creates a full-history repository snapshot with its manifest and tag references.
+ * Creates a full-history repository snapshot with its manifest and tag
+ * references.
+ *
+ * The clone is the sole Artifacts-coupled call in the snapshot path. Empty and
+ * over-cap repositories return a *skip*, not an error: neither is a fault, and
+ * failing the whole backup run because one repo is empty or oversized would
+ * lose the snapshots of every other project in the same run.
  *
  * @param project - The project whose repository is being snapshotted
  * @param capturedAt - Timestamp recorded in the snapshot manifest

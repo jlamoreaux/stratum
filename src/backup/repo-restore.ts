@@ -17,6 +17,14 @@ const GITDIR = "/.git";
  * Restores the main branch and any tagged references, and verifies that their
  * referenced objects are present in the snapshot.
  *
+ * The verification matters because the backup captured the FULL reachable
+ * object set: the reconstructed pack is closed under reachability, so the
+ * original tip sha is preserved rather than a new one being synthesised. A
+ * resolved tip that disagrees with the manifest means the pack was truncated,
+ * which must fail rather than silently restore a different history.
+ *
+ * Operates on an in-memory store, so it is fully testable without Artifacts.
+ *
  * @param pack - Serialized Git objects from the snapshot
  * @param manifest - Snapshot metadata containing the main branch tip and optional tags
  * @returns The in-memory filesystem and repository directory, or a backup error
@@ -130,7 +138,13 @@ function isValidTagName(name: unknown): name is string {
 }
 
 /**
- * Restores a project's repository to Artifacts, optionally overwriting an existing repository.
+ * Restores a project's repository to Artifacts, optionally overwriting an
+ * existing repository.
+ *
+ * The push leg is the one part that cannot run in CI -- it needs real
+ * Artifacts -- so it is validated on staging via the runbook instead. Keep
+ * that in mind when changing this function: the tests around it cover
+ * reconstruction, not publication.
  *
  * @param snapshot - The repository snapshot and manifest to restore.
  * @param opts - Restore options; set `force` to overwrite an existing repository.

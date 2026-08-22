@@ -221,6 +221,10 @@ export async function freshRepoToken(
 /**
  * Publishes the local `main` branch to an Artifacts remote.
  *
+ * Used by backup restore to publish a reconstructed repo. `force` overwrites a
+ * non-empty remote, so it stays an explicit opt-in for restore-over-existing
+ * rather than a default -- a defaulted force here would destroy a live repo.
+ *
  * @param remote - The Artifacts remote URL
  * @param opts - Controls whether an existing remote branch may be overwritten
  * @returns An empty result on success, or an application error if publishing fails
@@ -253,7 +257,11 @@ export async function pushMain(
 }
 
 /**
- * Pushes local tags to an Artifacts remote, optionally replacing existing remote tags.
+ * Pushes local `refs/tags/*` to an Artifacts remote.
+ *
+ * Runs after `pushMain` during backup restore so a restored repo carries its
+ * tags; `force` mirrors the same restore-over-existing opt-in `pushMain` uses,
+ * for the same reason.
  *
  * @param tagNames - The tag names to push.
  * @param opts - Controls whether existing remote tags may be replaced.
@@ -562,7 +570,14 @@ export async function collectRepoTags(
 }
 
 /**
- * Lists the tags in a repository, including entries whose targets cannot be resolved from the cloned history.
+ * Lists the tags in a repository, including entries whose targets cannot be
+ * resolved from the cloned history.
+ *
+ * The clone is shallow but fetches tag refs, so a tag whose target lies outside
+ * the shallow window is reported with `unresolvable: true` rather than raising:
+ * a tag pointing into unfetched history is expected here, not a failure, and
+ * erroring would make the whole listing unavailable because of one old tag.
+ * See `collectRepoTags`.
  *
  * @param remote - The repository's remote URL
  * @param token - The authentication token for the remote
