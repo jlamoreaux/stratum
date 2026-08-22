@@ -10,6 +10,7 @@ import {
   mergeWorkspaceIntoProject,
   readRepoFiles,
   readTreeAtCommit,
+  walkDir,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
 import type { ArtifactsNamespace } from "../src/types";
@@ -161,31 +162,33 @@ describe("MemoryFS walkDir (via manual test)", () => {
     await fs.promises.writeFile("/src/utils/helpers.ts", "export {}");
     await fs.promises.writeFile("/README.md", "# Hello");
 
-    const files = await walkDir(fs, "/", "");
-    expect(files).toContain("src/index.ts");
-    expect(files).toContain("src/utils/helpers.ts");
-    expect(files).toContain("README.md");
-    expect(files.some((f) => f.startsWith(".git"))).toBe(false);
+    const result = await walkDir(fs.toNodeFS(), "/", "", noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toContain("src/index.ts");
+    expect(result.data).toContain("src/utils/helpers.ts");
+    expect(result.data).toContain("README.md");
+    expect(result.data.some((f) => f.startsWith(".git"))).toBe(false);
+  });
+
+  it("lists symlinks as leaf entries without recursing or failing on dangling links", async () => {
+    const fs = new MemoryFS();
+    await fs.promises.writeFile("/src/index.ts", "export {}");
+    await fs.promises.symlink("index.ts", "/src/alias.ts");
+    await fs.promises.symlink("missing.ts", "/src/dangling.ts");
+    await fs.promises.symlink("/src", "/srclink");
+
+    const result = await walkDir(fs.toNodeFS(), "/", "", noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toContain("src/index.ts");
+    expect(result.data).toContain("src/alias.ts");
+    expect(result.data).toContain("src/dangling.ts");
+    // A symlink to a directory is a leaf, never recursed into.
+    expect(result.data).toContain("srclink");
+    expect(result.data.some((f) => f.startsWith("srclink/"))).toBe(false);
   });
 });
-
-async function walkDir(fs: MemoryFS, base: string, prefix: string): Promise<string[]> {
-  const nodeFS = fs.toNodeFS();
-  const entries = await nodeFS.promises.readdir(base === "/" ? "/" : base);
-
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry === ".git") continue;
-    const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
-    const stat = await nodeFS.promises.stat(fullPath);
-    if (stat.isDirectory()) {
-      files.push(...(await walkDir(fs, fullPath, `${prefix}${entry}/`)));
-    } else {
-      files.push(`${prefix}${entry}`);
-    }
-  }
-  return files;
-}
 
 describe("commitAndPush path construction", () => {
   it("writeFile path is correct when dir has trailing slash", async () => {
