@@ -154,6 +154,17 @@ export class MemoryFS {
     return err(fsError("ELOOP", `ELOOP: too many symbolic links encountered: ${path}`));
   }
 
+  /**
+   * Creates a directory, optionally creating missing ancestors.
+   *
+   * Only an existing *directory* makes this a no-op. An existing file or
+   * symlink is ENOTDIR, because callers treat success here as "a directory is
+   * now at this path" -- `writeFile` in particular calls this for the parent
+   * before writing, and returning ok for a file let writes land underneath a
+   * non-directory.
+   *
+   * Does not follow symlinks: a link is not a directory for this purpose.
+   */
   async mkdir(path: string, options?: { recursive?: boolean }): Promise<Result<void, AppError>> {
     const target = this.normalize(path);
     if (target === "/") return ok(undefined);
@@ -189,6 +200,19 @@ export class MemoryFS {
     return ok(undefined);
   }
 
+  /**
+   * Writes a file, creating parent directories as needed.
+   *
+   * The parent is validated before `entries` is touched. The reverse order
+   * strands the new entry when the parent turns out not to be a directory: the
+   * call reports ENOTDIR while a later read of the same path succeeds, and
+   * `readdir` never lists it because the parent's child set is only updated on
+   * the success path.
+   *
+   * Mode follows git rather than POSIX -- git records only the exec bit, so any
+   * exec bit becomes 100755. An overwrite without an explicit mode keeps the
+   * file's existing mode, matching Node.
+   */
   async writeFile(
     path: string,
     data: string | Uint8Array | ArrayBuffer,
