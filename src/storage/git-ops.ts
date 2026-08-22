@@ -1218,8 +1218,11 @@ async function removeSubtree(fs: NodeFS, full: string): Promise<void> {
  *   MemoryFS's `unlink` succeeds on a directory without removing descendants, so
  *   `lib/a.ts` stays readable *through* the new `lib` symlink.
  *
- * Ancestors are probed with `readlink` because the `NodeFS` shape has no
- * `isSymbolicLink()`; it throws for anything that is not a link.
+ * Ancestors are probed with `lstat` and removed unless they are directories.
+ * The `NodeFS` shape has no `isSymbolicLink()`, but it does not need one here:
+ * a plain file blocks a descendant write exactly as a symlink redirects it, so
+ * "not a directory" is the whole test. `readlink` would be the narrower probe
+ * and misses the file case entirely -- it throws EINVAL there.
  */
 async function clearConflictingPathShape(
   fs: NodeFS,
