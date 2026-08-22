@@ -1458,6 +1458,13 @@ function isUsableGithubPr(value: unknown, target: GithubRepoTarget): value is Gi
  * GitHub is rejected too. Owner and repo compare case-insensitively because
  * GitHub echoes its own canonical casing, which need not match the casing
  * parsed out of the project's source URL.
+ *
+ * Userinfo, query, and fragment are all rejected rather than ignored. A
+ * canonical `html_url` carries none of them, and this string is persisted and
+ * handed back to callers verbatim — so `https://user:pw@github.com/o/r/pull/1`
+ * would store credentials, and `...?token=x` would store a secret in a
+ * user-visible link. Checking the host and path alone accepts both, because
+ * `hostname` and `pathname` exclude those components.
  */
 function isUsableGithubUrl(raw: string, target: GithubRepoTarget, prNumber: number): boolean {
   let url: URL;
@@ -1467,6 +1474,8 @@ function isUsableGithubUrl(raw: string, target: GithubRepoTarget, prNumber: numb
     return false;
   }
   if (url.protocol !== "https:" || url.hostname !== "github.com") return false;
+  if (url.username !== "" || url.password !== "") return false;
+  if (url.search !== "" || url.hash !== "") return false;
   const path = url.pathname.replace(/\/$/, "");
   return path.toLowerCase() === `/${target.owner}/${target.repo}/pull/${prNumber}`.toLowerCase();
 }

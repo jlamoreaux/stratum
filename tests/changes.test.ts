@@ -2188,6 +2188,12 @@ describe("POST /api/changes/:id/github-pr", () => {
     ["a PR in another repository", "https://github.com/other/repo/pull/42"],
     ["a different PR number", "https://github.com/acme/widgets/pull/99"],
     ["a non-https scheme", "http://github.com/acme/widgets/pull/42"],
+    // Userinfo/query/fragment survive into the persisted, user-visible link, so
+    // a host+path check that ignores them would store credentials or a token.
+    ["embedded credentials", "https://user:password@github.com/acme/widgets/pull/42"],
+    ["an embedded username only", "https://user@github.com/acme/widgets/pull/42"],
+    ["a query string", "https://github.com/acme/widgets/pull/42?token=secret"],
+    ["a fragment", "https://github.com/acme/widgets/pull/42#diff-abc"],
   ])("502s when GitHub returns %s as html_url", async (_label, htmlUrl) => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ number: 42, html_url: htmlUrl, state: "open" }), {
