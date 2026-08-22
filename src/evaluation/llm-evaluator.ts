@@ -4,7 +4,8 @@ import { ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
-import type { EvalPolicy, EvalResult, Evaluator, EvaluatorConfig } from "./types";
+import { sanitizePolicy } from "./sanitize-policy";
+import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
 const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const DEFAULT_THRESHOLD = 0.7;
@@ -27,19 +28,6 @@ const SYSTEM_PROMPT = [
   "Respond with ONLY a JSON object and no other text:",
   '{"score": <0.0-1.0>, "passed": <bool>, "reason": "<one sentence>", "issues": ["<finding>"]}',
 ].join(" ");
-
-function sanitizePolicy(policy: EvalPolicy): EvalPolicy {
-  return {
-    ...policy,
-    evaluators: policy.evaluators.map((cfg: EvaluatorConfig) => {
-      if (cfg.type === "webhook") {
-        const { secret: _secret, ...rest } = cfg;
-        return rest;
-      }
-      return cfg;
-    }),
-  };
-}
 
 export class LLMEvaluator implements Evaluator {
   constructor(private ai: AiBinding) {}

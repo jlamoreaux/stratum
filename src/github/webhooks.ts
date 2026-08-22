@@ -306,23 +306,22 @@ export async function handlePullRequestReview(
     return;
   }
 
-  let newStatus: "accepted" | "needs_changes" | undefined;
-  if (reviewState === "approved") {
-    newStatus = "accepted";
-  } else if (reviewState === "changes_requested") {
-    newStatus = "needs_changes";
-  }
-
-  if (!newStatus) {
-    logger.debug("Unhandled review state", { reviewState });
+  // A GitHub "approved" review must NOT move a Change into a mergeable state.
+  // The reviewer is an arbitrary GitHub identity with no mapping to an authorized
+  // Stratum human, so honoring it would let a GitHub review satisfy the
+  // human-only approval invariant (approvals are recorded as change_reviews rows
+  // attributed to verified Stratum users, never inferred from GitHub). Approval
+  // is informational here; only the restrictive "changes_requested" signal —
+  // which can block but never enable a merge — updates status.
+  if (reviewState !== "changes_requested") {
+    logger.debug("GitHub review does not change Stratum status", { reviewState });
     return;
   }
 
-  await updateChangeStatus(env.DB, logger, existing.id, newStatus);
-  logger.info("Updated Change status from PR review", {
+  await updateChangeStatus(env.DB, logger, existing.id, "needs_changes");
+  logger.info("Marked Change needs_changes from GitHub changes-requested review", {
     changeId: existing.id,
     reviewState,
-    newStatus,
   });
 }
 
