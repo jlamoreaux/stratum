@@ -2022,11 +2022,16 @@ describe("POST /api/changes/:id/github-pr", () => {
     githubDefaultBranch: "develop",
   };
 
-  function githubPrCreated(): Response {
+  // GitHub always answers with an html_url inside the repository the request was
+  // addressed to, so derive it from the API URL rather than hard-coding one repo.
+  // A fixed acme/widgets link would be wrong for the sourceUrl tests, which
+  // promote to a different repository.
+  function githubPrCreated(apiUrl = "https://api.github.com/repos/acme/widgets/pulls"): Response {
+    const slug = new URL(apiUrl).pathname.replace(/^\/repos\//, "").replace(/\/pulls.*$/, "");
     return new Response(
       JSON.stringify({
         number: 42,
-        html_url: "https://github.com/acme/widgets/pull/42",
+        html_url: `https://github.com/${slug}/pull/42`,
         state: "open",
       }),
       { status: 201, headers: { "Content-Type": "application/json" } },
@@ -2067,7 +2072,7 @@ describe("POST /api/changes/:id/github-pr", () => {
       data: { fs: {} as NodeFS, dir: "/" },
     });
     vi.mocked(pushBranchToRemote).mockResolvedValue({ success: true, data: undefined });
-    fetchMock = vi.fn(async () => githubPrCreated());
+    fetchMock = vi.fn(async (url: string) => githubPrCreated(url));
     vi.stubGlobal("fetch", fetchMock);
   });
 
@@ -2171,6 +2176,46 @@ describe("POST /api/changes/:id/github-pr", () => {
     );
     const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
     expect(prPayload.base).toBe("trunk"); // sourceDefaultBranch wins
+  });
+
+  // A shape-only URL check (github.com suffix + non-empty path) accepts real
+  // GitHub URLs that are not this PR's page. Persisting one strands the change
+  // exactly as a malformed record would, so the create response is rejected.
+  it.each([
+    ["an api.github.com endpoint", "https://api.github.com/repos/acme/widgets/pulls/42"],
+    ["a gist.github.com subdomain", "https://gist.github.com/acme/widgets/pull/42"],
+    ["an unrelated github.com page", "https://github.com/login"],
+    ["a PR in another repository", "https://github.com/other/repo/pull/42"],
+    ["a different PR number", "https://github.com/acme/widgets/pull/99"],
+    ["a non-https scheme", "http://github.com/acme/widgets/pull/42"],
+  ])("502s when GitHub returns %s as html_url", async (_label, htmlUrl) => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ number: 42, html_url: htmlUrl, state: "open" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const res = await promote();
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe("GITHUB_ERROR");
+    // Nothing unusable may be persisted.
+    expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  it("accepts the canonical PR url regardless of owner/repo casing", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          number: 42,
+          html_url: "https://github.com/Acme/Widgets/pull/42",
+          state: "open",
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const res = await promote();
+    expect(res.status).toBe(200);
   });
 
   it("prefers sourceUrl over a stale legacy githubUrl", async () => {

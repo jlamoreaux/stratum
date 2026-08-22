@@ -1389,6 +1389,9 @@ app.post("/changes/:id/evaluate", async (c) => {
  */
 const GITHUB_API_TIMEOUT_MS = 15_000;
 
+/** The repository a promotion is targeting, as resolved from the project source. */
+type GithubRepoTarget = { owner: string; repo: string };
+
 interface GithubPr {
   number: number;
   html_url: string;
@@ -1421,13 +1424,18 @@ function isGithubErrorDetail(value: unknown): value is GithubErrorDetail {
  * PR that isn't there — so both the create response and the duplicate-head
  * lookup are validated through this before anything is written.
  *
- * `html_url` is parsed rather than prefix-matched: `"https://"` passes a
- * `startsWith` check but is not a reachable PR link.
+ * `html_url` is checked against the repository and number it is supposed to
+ * describe, not merely parsed. A shape-only check passes values that are real
+ * GitHub URLs but not this PR's page — `https://api.github.com/repos/o/r/pulls/1`
+ * (an API endpoint, not a web link) and `https://github.com/login` both look
+ * fine to a host-and-non-empty-path test. Persisting either strands the change
+ * exactly as a malformed record would.
  *
  * @param value - The value to validate
- * @returns `true` if the value contains a positive safe integer number, a usable GitHub HTTPS URL, and an open state; `false` otherwise.
+ * @param target - The repository this promotion is pushing to
+ * @returns `true` if the value contains a positive safe integer number, an `html_url` that is this PR's page in `target`, and an open state; `false` otherwise.
  */
-function isUsableGithubPr(value: unknown): value is GithubPr {
+function isUsableGithubPr(value: unknown, target: GithubRepoTarget): value is GithubPr {
   if (typeof value !== "object" || value === null) return false;
   const pr = value as Partial<GithubPr>;
   return (
@@ -1435,27 +1443,32 @@ function isUsableGithubPr(value: unknown): value is GithubPr {
     Number.isSafeInteger(pr.number) &&
     pr.number > 0 &&
     typeof pr.html_url === "string" &&
-    isUsableGithubUrl(pr.html_url) &&
+    isUsableGithubUrl(pr.html_url, target, pr.number) &&
     pr.state === "open"
   );
 }
 
-/** A PR link this app would be willing to store and hand back to a caller. */
-function isUsableGithubUrl(raw: string): boolean {
+/**
+ * A PR link this app would be willing to store and hand back to a caller.
+ *
+ * The host must be exactly `github.com`: the promotion path is hard-coded to
+ * github.com, and a suffix test would also accept `api.github.com` and
+ * `gist.github.com`. The path must be the canonical PR page for this exact
+ * repository and number, so a well-formed URL pointing somewhere else on
+ * GitHub is rejected too. Owner and repo compare case-insensitively because
+ * GitHub echoes its own canonical casing, which need not match the casing
+ * parsed out of the project's source URL.
+ */
+function isUsableGithubUrl(raw: string, target: GithubRepoTarget, prNumber: number): boolean {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
     return false;
   }
-  // The whole promotion path is hard-coded to github.com (api.github.com, the
-  // github.com clone URL), so anything else here is a malformed or spoofed
-  // response rather than a legitimate enterprise host.
-  return (
-    url.protocol === "https:" &&
-    (url.hostname === "github.com" || url.hostname.endsWith(".github.com")) &&
-    url.pathname.length > 1
-  );
+  if (url.protocol !== "https:" || url.hostname !== "github.com") return false;
+  const path = url.pathname.replace(/\/$/, "");
+  return path.toLowerCase() === `/${target.owner}/${target.repo}/pull/${prNumber}`.toLowerCase();
 }
 
 /**
@@ -1471,7 +1484,7 @@ function isUsableGithubUrl(raw: string): boolean {
  * @returns The matching pull request, or `undefined` if none is found or the lookup fails.
  */
 async function findOpenPrForHead(
-  repo: { owner: string; repo: string },
+  repo: GithubRepoTarget,
   branch: string,
   headers: Record<string, string>,
   logger: Logger,
@@ -1494,7 +1507,7 @@ async function findOpenPrForHead(
   const body: unknown = await res.json().catch(() => undefined);
   if (!Array.isArray(body)) return undefined;
   const pr = body[0];
-  return isUsableGithubPr(pr) ? pr : undefined;
+  return isUsableGithubPr(pr, repo) ? pr : undefined;
 }
 
 app.post("/changes/:id/github-pr", async (c) => {
@@ -1638,7 +1651,7 @@ app.post("/changes/:id/github-pr", async (c) => {
     change.githubOwner === repo.owner &&
     change.githubRepo === repo.repo &&
     change.githubBranch === branch;
-  if (isUsableGithubPr(storedPr) && storedPrMatchesTarget) {
+  if (isUsableGithubPr(storedPr, repo) && storedPrMatchesTarget) {
     logger.info("Change branch re-pushed to existing GitHub PR", {
       changeId: id,
       prNumber: storedPr.number,
@@ -1766,7 +1779,7 @@ app.post("/changes/:id/github-pr", async (c) => {
     // must not escape as an unhandled rejection (a bare 500): map it to the
     // same structured 502 every other GitHub failure uses.
     const parsed: unknown = await ghRes.json().catch(() => undefined);
-    if (!isUsableGithubPr(parsed)) {
+    if (!isUsableGithubPr(parsed, repo)) {
       logger.error("GitHub PR creation returned an unusable response body", undefined, {
         status: ghRes.status,
         changeId: id,
