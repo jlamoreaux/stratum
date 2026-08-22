@@ -212,6 +212,9 @@ describe("webhook management routes — project-id scoping (SA-1)", () => {
     // redacted management page.
     expect(html).toContain("stm_whsec_deadbeefdeadbeefdeadbeefdeadbeef");
     expect(html).toContain("will not be shown again");
+    // The only response that ever carries the secret must not be storable —
+    // `no-store`, not merely `no-cache`, which still permits storage.
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("falls back to the name for a legacy webhook with no project_id", async () => {
