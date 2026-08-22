@@ -1229,11 +1229,17 @@ async function clearConflictingPathShape(
   const parts = path.split("/");
   for (let i = 1; i < parts.length; i++) {
     const ancestor = `${projectDir}/${parts.slice(0, i).join("/")}`;
+    let stat: { isDirectory(): boolean };
     try {
-      await fs.promises.readlink(ancestor);
+      stat = await fs.promises.lstat(ancestor);
     } catch {
-      continue; // absent, or a real directory
+      continue; // absent: the write creates it
     }
+    // Anything that is not a directory blocks a descendant write. `lstat`
+    // catches files and symlinks alike and does not follow links; probing with
+    // `readlink` would miss a plain file, which fails the write with ENOTDIR
+    // just as surely as a symlink redirects it.
+    if (stat.isDirectory()) continue;
     await fs.promises.unlink(ancestor).catch(() => {});
   }
   await removeSubtree(fs, `${projectDir}/${path}`);
@@ -1331,7 +1337,26 @@ export async function squashMerge(
     // The worktree removal is conditional; the index removal below never is.
     // Whatever happened on disk, the entry has to leave the index or the squash
     // tree keeps a path the workspace does not have.
-    if (!workspaceDirs.has(path)) {
+    //
+    // Skip the unlink when the path -- or any ancestor of it -- is something
+    // the workspace now owns, because the entry no longer means what the
+    // project tree said it meant.
+    //
+    // Defensive rather than a fix for a reproducible bug: `MemoryFS.unlink`
+    // resolves paths literally and does not follow a symlink ancestor, so with
+    // `lib` replaced by a link, removing `lib/old.ts` returns ENOENT and leaves
+    // the link target alone (verified). `squashMerge` takes the `NodeFS`
+    // interface though, and node's own `fs` *does* traverse -- there the same
+    // unlink would delete a same-named file inside the target that was never
+    // part of this merge. The guard costs nothing and removes that dependency
+    // on which implementation is behind the interface.
+    const supersededByWorkspace =
+      workspaceDirs.has(path) ||
+      path
+        .split("/")
+        .slice(0, -1)
+        .some((_, i, all) => workspaceMap.has(all.slice(0, i + 1).join("/")));
+    if (!supersededByWorkspace) {
       try {
         await projectFs.promises.unlink(`${projectDir}/${path}`);
       } catch (error) {

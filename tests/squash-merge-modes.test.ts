@@ -306,6 +306,131 @@ describe("squashMerge preserves file modes and symlinks", () => {
     expect(leaked.success).toBe(false);
   });
 
+  it("replaces a file ancestor so a nested descendant can be written", async () => {
+    const raw = new MemoryFS();
+    const fs = raw.toNodeFS() as unknown as NodeFS;
+    const gitfs = fs as unknown as Parameters<typeof git.init>[0]["fs"];
+    const dir = "/";
+    const gitdir = "/.git";
+    await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+    // Base: `lib` is a plain FILE, not a symlink. It blocks a nested write with
+    // ENOTDIR exactly as a symlink would, but readlink cannot detect it.
+    const libFileBlob = await blobObject(enc("i am a file\n"));
+    const baseTree = await treeObject([{ mode: "100644", name: "lib", oid: libFileBlob.oid }]);
+    const base = await commitObject({
+      tree: baseTree.oid,
+      parents: [],
+      message: "base",
+      timestamp: 1700000000,
+    });
+
+    const nestedBlob = await blobObject(enc("nested\n"));
+    const libDirTree = await treeObject([{ mode: "100644", name: "file.ts", oid: nestedBlob.oid }]);
+    const wsTree = await treeObject([{ mode: "40000", name: "lib", oid: libDirTree.oid }]);
+    const ws = await commitObject({
+      tree: wsTree.oid,
+      parents: [base.oid],
+      message: "workspace",
+      timestamp: 1700000001,
+    });
+
+    for (const o of [libFileBlob, baseTree, base, nestedBlob, libDirTree, wsTree, ws]) {
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
+    }
+    await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
+    await git.checkout({ fs: gitfs, dir, ref: "main" });
+
+    stubReceivePackServer(base.oid);
+    const result = await squashMerge(
+      fs,
+      dir,
+      ws.oid,
+      "https://example.test/git/project.git",
+      "token",
+      author,
+      logger,
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const commit = await git.readCommit({ fs: gitfs, dir, oid: result.data });
+    expect(commit.commit.tree).toBe(wsTree.oid);
+  });
+
+  it("does not delete through a replacement symlink when removing an obsolete path", async () => {
+    const raw = new MemoryFS();
+    const fs = raw.toNodeFS() as unknown as NodeFS;
+    const gitfs = fs as unknown as Parameters<typeof git.init>[0]["fs"];
+    const dir = "/";
+    const gitdir = "/.git";
+    await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+    // Base: lib/ is a directory holding old.ts. The target dir already contains
+    // a file of the SAME NAME, which is what an unlink through the replacement
+    // symlink would destroy.
+    const oldBlob = await blobObject(enc("old\n"));
+    const victimBlob = await blobObject(enc("do not delete\n"));
+    const libTree = await treeObject([{ mode: "100644", name: "old.ts", oid: oldBlob.oid }]);
+    const vendorTree = await treeObject([{ mode: "100644", name: "old.ts", oid: victimBlob.oid }]);
+    const baseTree = await treeObject([
+      { mode: "40000", name: "lib", oid: libTree.oid },
+      { mode: "40000", name: "vendor", oid: vendorTree.oid },
+    ]);
+    const base = await commitObject({
+      tree: baseTree.oid,
+      parents: [],
+      message: "base",
+      timestamp: 1700000000,
+    });
+
+    // Workspace: lib becomes a symlink to vendor; lib/old.ts is gone.
+    const linkBlob = await blobObject(enc("vendor"));
+    const wsTree = await treeObject([
+      { mode: "120000", name: "lib", oid: linkBlob.oid },
+      { mode: "40000", name: "vendor", oid: vendorTree.oid },
+    ]);
+    const ws = await commitObject({
+      tree: wsTree.oid,
+      parents: [base.oid],
+      message: "workspace",
+      timestamp: 1700000001,
+    });
+
+    for (const o of [
+      oldBlob,
+      victimBlob,
+      libTree,
+      vendorTree,
+      baseTree,
+      base,
+      linkBlob,
+      wsTree,
+      ws,
+    ]) {
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
+    }
+    await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
+    await git.checkout({ fs: gitfs, dir, ref: "main" });
+
+    stubReceivePackServer(base.oid);
+    const result = await squashMerge(
+      fs,
+      dir,
+      ws.oid,
+      "https://example.test/git/project.git",
+      "token",
+      author,
+      logger,
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    const commit = await git.readCommit({ fs: gitfs, dir, oid: result.data });
+    expect(commit.commit.tree).toBe(wsTree.oid);
+    // The same-named file inside the link's target must survive untouched.
+    const victim = await raw.promises.readFile("/vendor/old.ts", "utf8");
+    expect(victim.success && victim.data === "do not delete\n").toBe(true);
+  });
+
   it("returns the current head untouched when nothing changed", async () => {
     const raw = new MemoryFS();
     const fs = raw.toNodeFS() as unknown as NodeFS;
