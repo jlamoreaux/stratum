@@ -34,6 +34,20 @@ export type RepoFilesReader = (
   ref?: string,
 ) => Promise<Result<Map<string, string>, AppError>>;
 
+/**
+ * Derives a pass ratio from a test runner's own summary line.
+ *
+ * Scored from the summary rather than the exit code because the exit code is
+ * binary: a suite where 99 of 100 tests pass is indistinguishable from one
+ * where none do. Both patterns are tried because runners disagree on whether
+ * a clean run prints a "failed" count at all — vitest and jest omit it, so
+ * "N passed" alone has to be accepted, with `failed` re-matched separately
+ * rather than assumed zero from the first pattern.
+ *
+ * Returns `null`, never 0, when nothing parses: an unrecognised format means
+ * the score is *unknown*, and reporting that as a zero would fail a change on
+ * the runner's output format instead of on its tests.
+ */
 function parseTestOutput(stdout: string, stderr: string): number | null {
   const combined = `${stdout}\n${stderr}`;
 
@@ -76,6 +90,20 @@ export class SandboxEvaluator implements Evaluator {
     private readFiles: RepoFilesReader = readRepoFiles,
   ) {}
 
+  /**
+   * Runs the configured command against the full evaluated tree in a sandbox.
+   *
+   * The `_diff` argument is ignored on purpose. The evaluator that this
+   * replaced reconstructed a pseudo-tree from the diff's `+` lines, which
+   * could not run any real suite — no base tree, no untouched sources, no
+   * `package.json` unless it happened to change. The tree is read from the
+   * pinned commit instead, so the sandbox holds exactly what the merge would
+   * land. The parameter stays because it is part of the `Evaluator` contract
+   * shared with the diff-based evaluators.
+   *
+   * Every failure path scores 0 and `passed: false` rather than returning an
+   * error: an evaluation that could not run must not read as one that passed.
+   */
   async evaluate(
     _diff: string,
     policy: EvalPolicy,

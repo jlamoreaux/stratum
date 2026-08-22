@@ -54,6 +54,15 @@ export async function resolveProjectHead(
   return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
 }
 
+/**
+ * Stands in for an evaluator whose prerequisites are missing.
+ *
+ * Exists so a misconfigured policy fails closed. Dropping the evaluator from
+ * the list instead would let a change be scored — and merged — by whichever
+ * evaluators happened to be wired up, with nothing in the result showing that
+ * a required one never ran. Scoring 0 with the reason naming the missing
+ * prerequisite turns silent under-evaluation into a visible failure.
+ */
 export class UnavailableEvaluator implements Evaluator {
   constructor(
     private evaluatorType: string,
