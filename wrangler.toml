@@ -130,7 +130,7 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # REFERRAL_SERVICE_URL = "https://your-referral-service.example.com"
 
 # Secrets — set via: wrangler secret put <NAME>
-# POSTHOG_API_KEY =
+# POSTHOG_API_KEY =  # telemetry sends route patterns only, never concrete paths
 # STRATUM_TELEMETRY_DISABLED = "true"  # uncomment to disable telemetry for self-hosted
 # GITHUB_CLIENT_ID =
 # GITHUB_CLIENT_SECRET =

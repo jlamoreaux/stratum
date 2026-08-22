@@ -8,7 +8,7 @@ import {
   freshRepoToken,
 } from "../storage/git-ops";
 import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
-import { getUserByToken } from "../storage/users";
+import { getUser, getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
 import {
@@ -157,10 +157,32 @@ async function authenticate(
 
   if (token.startsWith("stratum_user_")) {
     const result = await getUserByToken(c.env.DB, token, logger);
-    return result.success ? { userId: result.data.id } : null;
+    // A soft-deleting account's credentials stop working immediately over git
+    // too — the HTTP middleware rejects it, but git smart-HTTP owns its own auth
+    // and must apply the same gate, or an erasure-requested user keeps clone/push
+    // access until the cascade lands.
+    if (!result.success || result.data.deletingAt) return null;
+    return { userId: result.data.id };
   }
   const result = await getAgentByToken(c.env.DB, token, logger);
-  return result.success ? { agentId: result.data.id, agentOwnerId: result.data.ownerId } : null;
+  if (!result.success) return null;
+  // An agent inherits its owner's access, so a deleting owner's agent must stop
+  // working too — otherwise it's an authenticated git write channel that outlives
+  // the account it belongs to. Fail CLOSED on the owner lookup: an unresolved or
+  // deleting owner yields no identity. getUser can reject on a D1 error, which
+  // would otherwise escape authenticate's documented no-500 contract, so catch it.
+  let owner: Awaited<ReturnType<typeof getUser>>;
+  try {
+    owner = await getUser(c.env.DB, result.data.ownerId, logger);
+  } catch (err) {
+    logger.warn("Agent owner lookup threw during git auth; failing closed", {
+      ownerId: result.data.ownerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  if (!owner.success || owner.data.deletingAt) return null;
+  return { agentId: result.data.id, agentOwnerId: result.data.ownerId };
 }
 
 function basicAuthHeader(artifactsToken: string): string {
