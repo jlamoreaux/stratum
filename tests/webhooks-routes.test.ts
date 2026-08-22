@@ -217,6 +217,29 @@ describe("webhook management routes — project-id scoping (SA-1)", () => {
     expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
+  it("marks the JSON creation response no-store too — it also returns the secret", async () => {
+    vi.mocked(createWebhook).mockResolvedValue({
+      success: true,
+      data: webhook({ secret: "stm_whsec_0123456789abcdef0123456789abcdef" }),
+    });
+
+    const res = await makeApp().fetch(
+      new Request("http://localhost/@alice/api/webhooks", {
+        method: "POST",
+        headers: { ...AUTH, "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "https://hooks.example.com/x" }),
+      }),
+      env,
+    );
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { webhook: { secret?: string } };
+    // The JSON body carries the secret, which is why the header cannot live on
+    // the HTML branch alone.
+    expect(body.webhook.secret).toBe("stm_whsec_0123456789abcdef0123456789abcdef");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
   it("falls back to the name for a legacy webhook with no project_id", async () => {
     vi.mocked(getWebhook).mockResolvedValue({
       success: true,
