@@ -431,6 +431,107 @@ describe("squashMerge preserves file modes and symlinks", () => {
     expect(victim.success && victim.data === "do not delete\n").toBe(true);
   });
 
+  // squashMerge takes the NodeFS interface, and node's readdir FOLLOWS a
+  // directory symlink where MemoryFS's reports ENOTDIR. This wrapper gives the
+  // node semantics so the subtree walk is exercised the way it would behave on
+  // a real filesystem: without the lstat gate, removeSubtree recurses into the
+  // link's target and deletes files that were never part of the merge.
+  function withNativeReaddir(raw: MemoryFS, fs: NodeFS): NodeFS {
+    // Resolve symlinks along `count` leading components, node-style. readdir
+    // follows the whole path including a trailing link; unlink resolves the
+    // ancestors but removes the link itself rather than its target.
+    const resolve = async (path: string, keepLast: boolean): Promise<string> => {
+      const parts = path.split("/").filter(Boolean);
+      const limit = keepLast ? parts.length - 1 : parts.length;
+      let cur = "";
+      for (let i = 0; i < parts.length; i++) {
+        const next = `${cur}/${parts[i]}`;
+        if (i >= limit) {
+          cur = next;
+          continue;
+        }
+        const link = await raw.readlink(next);
+        cur = link.success ? `${cur}/${link.data}` : next;
+      }
+      return cur || "/";
+    };
+    return {
+      promises: {
+        ...fs.promises,
+        readdir: async (path: string) => fs.promises.readdir(await resolve(path, false)),
+        unlink: async (path: string) => fs.promises.unlink(await resolve(path, true)),
+      },
+    } as NodeFS;
+  }
+
+  it("does not empty a symlink's target when replacing a directory", async () => {
+    const raw = new MemoryFS();
+    const base = raw.toNodeFS() as unknown as NodeFS;
+    const fs = withNativeReaddir(raw, base);
+    const gitfs = base as unknown as Parameters<typeof git.init>[0]["fs"];
+    const dir = "/";
+    const gitdir = "/.git";
+    await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+    // Base: `lib` is a symlink to vendor/, and vendor/ holds a file that must
+    // survive. The workspace turns `lib` into a real directory.
+    const keepBlob = await blobObject(enc("must survive\n"));
+    const vendorTree = await treeObject([{ mode: "100644", name: "keep.ts", oid: keepBlob.oid }]);
+    const linkBlob = await blobObject(enc("vendor"));
+    const baseTree = await treeObject([
+      { mode: "120000", name: "lib", oid: linkBlob.oid },
+      { mode: "40000", name: "vendor", oid: vendorTree.oid },
+    ]);
+    const baseCommit = await commitObject({
+      tree: baseTree.oid,
+      parents: [],
+      message: "base",
+      timestamp: 1700000000,
+    });
+
+    // `lib` itself becomes a regular file, so clearConflictingPathShape calls
+    // removeSubtree directly ON the symlink -- the only path where a following
+    // readdir would descend into vendor/.
+    const newBlob = await blobObject(enc("now a file\n"));
+    const wsTree = await treeObject([
+      { mode: "100644", name: "lib", oid: newBlob.oid },
+      { mode: "40000", name: "vendor", oid: vendorTree.oid },
+    ]);
+    const ws = await commitObject({
+      tree: wsTree.oid,
+      parents: [baseCommit.oid],
+      message: "workspace",
+      timestamp: 1700000001,
+    });
+
+    for (const o of [keepBlob, vendorTree, linkBlob, baseTree, baseCommit, newBlob, wsTree, ws]) {
+      await placeLooseObject(base as FsLike, gitdir, o.oid, o.bytes);
+    }
+    await git.writeRef({
+      fs: gitfs,
+      dir,
+      ref: "refs/heads/main",
+      value: baseCommit.oid,
+      force: true,
+    });
+    await git.checkout({ fs: gitfs, dir, ref: "main" });
+
+    stubReceivePackServer(baseCommit.oid);
+    const result = await squashMerge(
+      fs,
+      dir,
+      ws.oid,
+      "https://example.test/git/project.git",
+      "token",
+      author,
+      logger,
+    );
+    expect(result.success).toBe(true);
+    // The link target's contents must be untouched.
+    const survivor = await raw.readFile("/vendor/keep.ts", "utf8");
+    expect(survivor.success && survivor.data === "must survive\n").toBe(true);
+  });
+
   it("returns the current head untouched when nothing changed", async () => {
     const raw = new MemoryFS();
     const fs = raw.toNodeFS() as unknown as NodeFS;

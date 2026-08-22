@@ -1184,17 +1184,28 @@ export async function batchMergeStagedTrees(
 /**
  * Removes a real directory subtree, leaf-first.
  *
- * `readdir` reports ENOTDIR for both files and symlinks and never follows a
- * link, so recursion only ever descends into genuine directories — a symlink
- * encountered here is left for the caller to unlink rather than having its
- * target emptied.
+ * The `lstat` gate is load-bearing, not a fast path. `MemoryFS.readdir` happens
+ * to report ENOTDIR for a symlink, but node's own `readdir` FOLLOWS a directory
+ * symlink — and `squashMerge` takes the `NodeFS` interface, not `MemoryFS`.
+ * Recursing on `readdir` alone would therefore walk into a link's target and
+ * delete files that were never part of this merge. Checking the entry first and
+ * descending only into real directories leaves any symlink for the caller to
+ * unlink, whichever implementation is behind the interface.
  */
 async function removeSubtree(fs: NodeFS, full: string): Promise<void> {
+  let stat: { isDirectory(): boolean };
+  try {
+    stat = await fs.promises.lstat(full);
+  } catch {
+    return; // absent
+  }
+  if (!stat.isDirectory()) return; // file or symlink: the caller's unlink handles it
+
   let entries: string[];
   try {
     entries = await fs.promises.readdir(full);
   } catch {
-    return; // not a directory: the caller's unlink handles it
+    return;
   }
   for (const entry of entries) {
     const child = `${full}/${entry}`;
