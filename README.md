@@ -136,6 +136,11 @@ npx wrangler d1 migrations apply stratum --remote  # for production
 
 ## Documentation
 
+The user and API documentation below is also published at
+[docs.usestratum.dev](https://docs.usestratum.dev), built from
+[`website/`](website/) (Astro Starlight) — see
+[`website/README.md`](website/README.md) for local development and deployment.
+
 ### User Documentation
 
 - [Getting Started Guide](docs/user-guide/getting-started.md) - Your first project
