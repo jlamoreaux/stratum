@@ -2194,6 +2194,9 @@ describe("POST /api/changes/:id/github-pr", () => {
     ["an embedded username only", "https://user@github.com/acme/widgets/pull/42"],
     ["a query string", "https://github.com/acme/widgets/pull/42?token=secret"],
     ["a fragment", "https://github.com/acme/widgets/pull/42#diff-abc"],
+    // hostname drops the port, so a non-default port needs `host` to be caught.
+    ["a non-default port", "https://github.com:8443/acme/widgets/pull/42"],
+    ["a trailing slash", "https://github.com/acme/widgets/pull/42/"],
   ])("502s when GitHub returns %s as html_url", async (_label, htmlUrl) => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ number: 42, html_url: htmlUrl, state: "open" }), {

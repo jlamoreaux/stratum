@@ -1473,11 +1473,19 @@ function isUsableGithubUrl(raw: string, target: GithubRepoTarget, prNumber: numb
   } catch {
     return false;
   }
-  if (url.protocol !== "https:" || url.hostname !== "github.com") return false;
+  // `host`, not `hostname`: hostname discards the port entirely, so
+  // `https://github.com:8443/o/r/pull/1` would pass a hostname check. `host`
+  // keeps a non-default port and still normalises the default `:443` away, so
+  // the canonical form is unaffected.
+  if (url.protocol !== "https:" || url.host !== "github.com") return false;
   if (url.username !== "" || url.password !== "") return false;
   if (url.search !== "" || url.hash !== "") return false;
-  const path = url.pathname.replace(/\/$/, "");
-  return path.toLowerCase() === `/${target.owner}/${target.repo}/pull/${prNumber}`.toLowerCase();
+  // Compared as-is rather than after trimming a trailing slash: a canonical
+  // html_url has none, and this value is persisted and handed back, so the
+  // stored string should be the canonical one rather than a variant of it.
+  return (
+    url.pathname.toLowerCase() === `/${target.owner}/${target.repo}/pull/${prNumber}`.toLowerCase()
+  );
 }
 
 /**
