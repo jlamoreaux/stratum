@@ -251,7 +251,7 @@ describe("cloneRepo includeTags", () => {
     });
     mockFetch.mockResolvedValue({});
 
-    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, undefined, {
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
       includeTags: true,
     });
     expect(result.success).toBe(true);
@@ -269,7 +269,7 @@ describe("cloneRepo includeTags", () => {
     });
     mockFetch.mockResolvedValue({});
 
-    await cloneRepo("https://r.example/repo.git", "tok", logger, undefined, {
+    await cloneRepo("https://r.example/repo.git", "tok", logger, {
       fullHistory: true,
       includeTags: true,
     });
@@ -293,7 +293,7 @@ describe("cloneRepo includeTags", () => {
     });
     mockFetch.mockRejectedValue(new Error("network down"));
 
-    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, undefined, {
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
       includeTags: true,
     });
     expect(result.success).toBe(false);

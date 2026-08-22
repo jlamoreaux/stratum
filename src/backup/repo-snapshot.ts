@@ -306,11 +306,11 @@ export async function walkRepoObjects(
 }
 
 /**
- * Builds a repository snapshot from walked objects and project metadata.
+ * Builds a repository snapshot from walked objects and capture metadata.
  *
  * Pure, and the unit most of the snapshot tests exercise directly. The manifest
  * carries `tipSha` and the whole project record rather than just an id, because
- * restore has to work without consulting live state -- a snapshot must stay
+ * restore has to work without consulting live state — a snapshot must stay
  * restorable after the project entry has changed or been deleted.
  *
  * @param project - The project associated with the snapshot
@@ -377,7 +377,7 @@ export async function snapshotRepo(
   // bounded/streaming fetch that aborts mid-clone would be the real fix (tracked
   // as a follow-up); for now MAX_BACKUP_BYTES should be set well under the
   // Worker's memory budget so a normal repo never approaches it.
-  const clone = await cloneRepo(project.remote, token.data, logger, undefined, {
+  const clone = await cloneRepo(project.remote, token.data, logger, {
     fullHistory: true,
     includeTags: true,
   });
