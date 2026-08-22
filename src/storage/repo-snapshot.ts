@@ -152,7 +152,7 @@ export async function writeSnapshotFromRepo(
       });
       return;
     }
-    const cloneResult = await cloneRepo(project.remote, tokenResult.data, logger, undefined, {
+    const cloneResult = await cloneRepo(project.remote, tokenResult.data, logger, {
       // Imported repos keep the source's default branch name; "main" otherwise.
       ref: project.defaultBranch ?? "main",
     });

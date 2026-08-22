@@ -168,7 +168,7 @@ describe("cloneRepo ref threading", () => {
 
   it("passes opts.ref through (and drops depth for fullHistory)", async () => {
     h.servers.set("https://r/master.git", { branch: "master", commits: [{ "a.txt": "1\n" }] });
-    const result = await cloneRepo("https://r/master.git", "tok", logger, undefined, {
+    const result = await cloneRepo("https://r/master.git", "tok", logger, {
       ref: "master",
       fullHistory: true,
     });

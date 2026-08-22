@@ -253,10 +253,14 @@ export async function freshRepoToken(
 }
 
 /**
- * Push the local default-branch ref (its objects + the ref) to an Artifacts
- * remote. Used by backup restore to publish a reconstructed repo. `force`
- * overwrites a non-empty remote (restore-over-existing behind an explicit
- * opt-in). `branch` defaults to "main" for repos with a main default.
+ * Publishes the local default branch to a remote repository.
+ *
+ * `force` is opt-in because it overwrites the remote's default branch outright
+ * — the project's canonical branch — so defaulting it on would discard any
+ * commits pushed by someone else since this clone was taken.
+ *
+ * @param opts - Controls whether the existing remote branch may be overwritten, and which branch to push (default `main`, since imported repos keep their source branch name).
+ * @returns No value on success, or an application error if the push fails.
  */
 export async function pushMain(
   remote: string,
@@ -286,6 +290,61 @@ export async function pushMain(
   return ok(undefined);
 }
 
+/**
+ * Pushes the local `main` branch to a branch on an external remote — e.g.
+ * GitHub's `stratum/<changeId>` ref before a PR is opened (#189).
+ *
+ * Auth is HTTP basic with the token as the password; GitHub accepts any
+ * username alongside a token. `force` defaults to false because `remoteRef` is
+ * caller-supplied and could name a branch this app does not own — a defaulted
+ * force-push there would destroy someone else's work. Pass `force: true`
+ * explicitly, and only when overwriting a ref Stratum owns (re-promotion).
+ *
+ * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
+ * @returns A successful result when the push completes, or an application error when it fails.
+ */
+export async function pushBranchToRemote(
+  fs: NodeFS,
+  dir: string,
+  opts: { url: string; remoteRef: string; token: string; force?: boolean },
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  const res = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: opts.url,
+      ref: "main",
+      remoteRef: opts.remoteRef,
+      onAuth: () => ({ username: "x-access-token", password: opts.token }),
+      force: opts.force ?? false,
+    }),
+  );
+  if (!res.success) {
+    const cause = res.error instanceof Error ? res.error.message : String(res.error);
+    logger.error("Failed to push branch to remote", res.error, {
+      url: opts.url,
+      remoteRef: opts.remoteRef,
+    });
+    return err(new ExternalServiceError("Git", `Failed to push branch: ${cause}`, res.error));
+  }
+  return ok(undefined);
+}
+
+/**
+ * Initializes a repository with the supplied files, commits them, and pushes the commit to `main`.
+ *
+ * Only valid against a remote with no history: this builds the root commit, so
+ * running it on a populated repository would orphan whatever is already there.
+ *
+ * @param remote - The remote repository URL
+ * @param token - The authentication token for the remote repository
+ * @param files - Files to add to the initial commit, keyed by path
+ * @param message - The commit message
+ * @param author - The commit author
+ * @returns The SHA of the pushed commit
+ */
 export async function initAndPush(
   remote: string,
   token: string,
@@ -349,12 +408,26 @@ export async function initAndPush(
   return ok(commitResult.data);
 }
 
+/**
+ * Clones the `main` branch of a repository into an in-memory filesystem.
+ *
+ * The whole tree lands in worker memory, which is what makes the depth choice
+ * a real tradeoff rather than a preference — see the `fullHistory` branch at
+ * the `depth` option for why backup needs full history and merges do not.
+ *
+ * @param remote - The repository URL to clone
+ * @param token - The authentication token for the repository
+ * @param opts - Clone options
+ * @param opts.fullHistory - Whether to clone the complete reachable history; otherwise, clone the most recent 50 commits
+ * @param opts.ref - The branch to clone; defaults to `main`, but imported repos keep their source branch name (master/trunk/…)
+ * @returns The cloned filesystem and its working directory, or an application error
+ */
 export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  httpClient: HttpClient = http,
   opts: { fullHistory?: boolean; ref?: string } = {},
+  httpClient: HttpClient = http,
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
 
@@ -468,7 +541,7 @@ export async function mergeWorkspaceIntoProject(
     timer ? timer.measure(name, fn) : fn();
 
   const cloneResult = await measure("projectCloneMs", () =>
-    cloneRepo(projectRemote, projectToken, logger, undefined, { ref: branch }),
+    cloneRepo(projectRemote, projectToken, logger, { ref: branch }),
   );
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
@@ -690,7 +763,7 @@ export async function fastForwardMerge(
     timer ? timer.measure(name, fn) : fn();
 
   const cloneResult = await measure("workspaceFetchMs", () =>
-    cloneRepo(workspaceRemote, workspaceToken, logger, undefined, { ref: branch }),
+    cloneRepo(workspaceRemote, workspaceToken, logger, { ref: branch }),
   );
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
@@ -1530,7 +1603,7 @@ export async function resolveConflict(
       }
     }
 
-    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, undefined, {
+    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, {
       ref: branch,
     });
     if (!cloneResult.success) return err(cloneResult.error);
@@ -1570,7 +1643,7 @@ export async function resolveConflict(
   }
 
   if (strategy === "accept-project") {
-    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, undefined, {
+    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, {
       ref: branch,
     });
     if (!cloneResult.success) return err(cloneResult.error);
@@ -1628,7 +1701,7 @@ export async function resolveConflict(
   }
 
   if (strategy === "accept-workspace") {
-    const projectClone = await cloneRepo(projectRemote, projectToken, logger, undefined, {
+    const projectClone = await cloneRepo(projectRemote, projectToken, logger, {
       ref: branch,
     });
     if (!projectClone.success) return err(projectClone.error);
@@ -1647,7 +1720,7 @@ export async function resolveConflict(
       );
     }
 
-    const workspaceClone = await cloneRepo(workspaceRemote, workspaceToken, logger, undefined, {
+    const workspaceClone = await cloneRepo(workspaceRemote, workspaceToken, logger, {
       ref: branch,
     });
     if (!workspaceClone.success) return err(workspaceClone.error);
@@ -1778,7 +1851,7 @@ export async function readFileFromRepo(
 ): Promise<Result<string, AppError>> {
   logger.debug("Reading file from repo", { remote, path });
 
-  const cloneResult = await cloneRepo(remote, token, logger, undefined, { ref: branch });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs } = cloneResult.data;
@@ -1804,7 +1877,7 @@ export async function listFilesInRepo(
 ): Promise<Result<string[], AppError>> {
   logger.debug("Listing files in repo", { remote });
 
-  const cloneResult = await cloneRepo(remote, token, logger, undefined, { ref: branch });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs, dir } = cloneResult.data;
@@ -1823,7 +1896,7 @@ export async function readRepoFiles(
 ): Promise<Result<Map<string, string>, AppError>> {
   logger.debug("Reading repo files", { remote });
 
-  const cloneResult = await cloneRepo(remote, token, logger, undefined, { ref: branch });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -1853,7 +1926,7 @@ export async function getCommitParent(
   logger: Logger,
   branch = "main",
 ): Promise<Result<string, AppError>> {
-  const cloneResult = await cloneRepo(remote, token, logger, undefined, { ref: branch });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -1884,7 +1957,7 @@ export async function revertToCommit(
 ): Promise<Result<string, AppError>> {
   logger.info("Reverting repo to commit tree", { remote, targetSha });
 
-  const cloneResult = await cloneRepo(remote, token, logger, undefined, { ref: branch });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -1998,7 +2071,7 @@ export async function getCommitLog(
 ): Promise<Result<CommitLogEntry[], AppError>> {
   logger.debug("Getting commit log", { remote, depth });
 
-  const cloneResult = await cloneRepo(remote, token, logger, undefined, { ref: branch });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs, dir } = cloneResult.data;
@@ -2159,8 +2232,8 @@ export async function getDiffBetweenRepos(
   logger.debug("Getting diff between repos", { baseRemote, workspaceRemote });
 
   const [workspaceCloneResult, baseCloneResult] = await Promise.all([
-    cloneRepo(workspaceRemote, workspaceToken, logger, undefined, { ref: branch }),
-    cloneRepo(baseRemote, baseToken, logger, undefined, { ref: branch }),
+    cloneRepo(workspaceRemote, workspaceToken, logger, { ref: branch }),
+    cloneRepo(baseRemote, baseToken, logger, { ref: branch }),
   ]);
 
   if (!workspaceCloneResult.success) return err(workspaceCloneResult.error);

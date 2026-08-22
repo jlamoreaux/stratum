@@ -178,7 +178,7 @@ export class RepoDO extends DurableObject<Env> {
           const token = await freshRepoToken(this.env.ARTIFACTS, this.projectRemote, "write", log);
           if (!token.success) throw new Error(token.error.message);
           if (!this.warm) {
-            const cloned = await cloneRepo(this.projectRemote, token.data, log, undefined, {
+            const cloned = await cloneRepo(this.projectRemote, token.data, log, {
               ref: this.projectBranch,
             });
             if (!cloned.success) throw new Error(cloned.error.message);

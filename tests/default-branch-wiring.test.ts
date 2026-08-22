@@ -153,7 +153,9 @@ describe("KV repo snapshot passes the default branch to the clone", () => {
       { remote: trunkProject.remote, namespace: "@acme", slug: "web", defaultBranch: "trunk" },
       logger,
     );
-    expect(vi.mocked(cloneRepo).mock.calls[0]?.[4]).toEqual({ ref: "trunk" });
+    // Index 3, not 4: cloneRepo takes (remote, token, logger, opts, httpClient)
+    // since #210 moved opts ahead of the http client.
+    expect(vi.mocked(cloneRepo).mock.calls[0]?.[3]).toEqual({ ref: "trunk" });
   });
 
   it("defaults to main when no defaultBranch is given (regression)", async () => {
@@ -166,7 +168,7 @@ describe("KV repo snapshot passes the default branch to the clone", () => {
       { remote: trunkProject.remote, namespace: "@acme", slug: "web" },
       logger,
     );
-    expect(vi.mocked(cloneRepo).mock.calls[0]?.[4]).toEqual({ ref: "main" });
+    expect(vi.mocked(cloneRepo).mock.calls[0]?.[3]).toEqual({ ref: "main" });
   });
 });
 
@@ -176,7 +178,7 @@ describe("backup snapshot passes the project's default branch to the clone", () 
     const env = { ARTIFACTS: {} } as unknown as Env;
     const result = await snapshotRepo(env, trunkProject, "2026-01-01T00:00:00Z", logger);
     expect(result.success).toBe(false);
-    expect(vi.mocked(cloneRepo).mock.calls[0]?.[4]).toEqual({
+    expect(vi.mocked(cloneRepo).mock.calls[0]?.[3]).toEqual({
       fullHistory: true,
       ref: "trunk",
     });

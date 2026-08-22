@@ -260,7 +260,7 @@ app.post("/:name/commit", async (c) => {
   // A workspace fork copies the project's default branch under the same name, so
   // commits must target that ref ("main" for native repos, master/trunk/… for imports).
   const workspaceBranch = projectDefaultBranch(project);
-  const cloneResult = await cloneRepo(workspace.remote, workspaceToken, logger, undefined, {
+  const cloneResult = await cloneRepo(workspace.remote, workspaceToken, logger, {
     ref: workspaceBranch,
   });
   if (!cloneResult.success) {
