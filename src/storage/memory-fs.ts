@@ -167,11 +167,24 @@ export class MemoryFS {
       if (!mkdirResult.success) return mkdirResult;
     }
 
-    if (this.entries.has(target)) return ok(undefined);
+    const existing = this.entries.get(target);
+    if (existing !== undefined) {
+      // Only an existing *directory* makes mkdir a no-op. Returning ok for a
+      // file or symlink here is what let `writeFile` proceed past a
+      // non-directory parent and strand an entry underneath it.
+      if (existing.kind === "dir") return ok(undefined);
+      return err(fsError("ENOTDIR", `ENOTDIR: not a directory: ${path}`));
+    }
 
-    this.entries.set(target, { kind: "dir", children: new Set(), mtimeMs: Date.now() });
+    // Validate the parent BEFORE mutating. The reverse order leaves the new
+    // entry in `entries` when the parent turns out not to be a directory: the
+    // call reports ENOTDIR while a later read of the same path succeeds, and
+    // `readdir` never lists it because the parent's child set was never
+    // updated. A symlink parent is rejected the same way -- it is not a
+    // directory, and mkdir does not follow links.
     const dirResult = this.getDirResult(parentPath);
     if (!dirResult.success) return dirResult;
+    this.entries.set(target, { kind: "dir", children: new Set(), mtimeMs: Date.now() });
     dirResult.data.children.add(this.basename(target));
     return ok(undefined);
   }
@@ -211,9 +224,10 @@ export class MemoryFS {
           ? existing.mode
           : MODE_FILE;
 
-    this.entries.set(target, { kind: "file", data: bytes, mode, mtimeMs: Date.now() });
+    // Same ordering rule as mkdir: a failed write must leave nothing readable.
     const dirResult = this.getDirResult(parentPath);
     if (!dirResult.success) return dirResult;
+    this.entries.set(target, { kind: "file", data: bytes, mode, mtimeMs: Date.now() });
     dirResult.data.children.add(this.basename(target));
     return ok(undefined);
   }

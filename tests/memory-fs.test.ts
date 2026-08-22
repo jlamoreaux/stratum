@@ -63,6 +63,67 @@ describe("MemoryFS", () => {
     });
   });
 
+  // A failed operation must not leave anything behind. Because the parent's
+  // child set is only updated on success, a stranded entry is invisible to
+  // readdir while still being readable by path -- the worst shape for a bug,
+  // since nothing enumerating the tree would ever surface it.
+  describe("failed writes leave no observable entry", () => {
+    it("writeFile below a file parent fails and strands nothing", async () => {
+      await fs.writeFile("/f.txt", "iam a file");
+      const write = await fs.writeFile("/f.txt/child", "x");
+      expect(write.success).toBe(false);
+      if (!write.success) expect(write.error.code).toBe("ENOTDIR");
+
+      const read = await fs.readFile("/f.txt/child", "utf8");
+      expect(read.success).toBe(false);
+      const stat = await fs.stat("/f.txt/child");
+      expect(stat.success).toBe(false);
+    });
+
+    it("recursive mkdir below a file parent fails and strands nothing", async () => {
+      await fs.writeFile("/f.txt", "iam a file");
+      const made = await fs.mkdir("/f.txt/sub", { recursive: true });
+      expect(made.success).toBe(false);
+      if (!made.success) expect(made.error.code).toBe("ENOTDIR");
+
+      const stat = await fs.stat("/f.txt/sub");
+      expect(stat.success).toBe(false);
+    });
+
+    it("mkdir over an existing file reports ENOTDIR rather than succeeding", async () => {
+      await fs.writeFile("/f.txt", "iam a file");
+      const made = await fs.mkdir("/f.txt", { recursive: true });
+      expect(made.success).toBe(false);
+      if (!made.success) expect(made.error.code).toBe("ENOTDIR");
+      // The file is untouched.
+      const read = await fs.readFile("/f.txt", "utf8");
+      expect(read.success && read.data === "iam a file").toBe(true);
+    });
+
+    // mkdir does not follow links, so a symlink parent is a non-directory.
+    it("writeFile below a symlink parent fails and strands nothing", async () => {
+      await fs.mkdir("/real");
+      await fs.symlink("real", "/link");
+      const write = await fs.writeFile("/link/nested/file.ts", "x");
+      expect(write.success).toBe(false);
+
+      const stat = await fs.stat("/link/nested/file.ts");
+      expect(stat.success).toBe(false);
+      // Nothing leaked into the link's target either.
+      const leaked = await fs.readFile("/real/nested/file.ts", "utf8");
+      expect(leaked.success).toBe(false);
+    });
+
+    it("mkdir over an existing directory stays a no-op", async () => {
+      await fs.mkdir("/d");
+      await fs.writeFile("/d/keep.txt", "kept");
+      const again = await fs.mkdir("/d", { recursive: true });
+      expect(again.success).toBe(true);
+      const read = await fs.readFile("/d/keep.txt", "utf8");
+      expect(read.success && read.data === "kept").toBe(true);
+    });
+  });
+
   describe("writeFile / readFile", () => {
     it("writes and reads a string", async () => {
       const writeResult = await fs.writeFile("/hello.txt", "hello");
