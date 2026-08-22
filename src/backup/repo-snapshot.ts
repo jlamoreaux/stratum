@@ -97,15 +97,67 @@ export async function walkRepoObjects(
     const objects: { oid: string; bytes: Uint8Array }[] = [];
     let byteCount = 0;
 
+    /**
+     * Staging layer for one tag's traversal.
+     *
+     * A tag is only recorded once its whole closure resolves, but the objects
+     * were being added as the walk went. When a later read failed, the tag was
+     * skipped while its objects and bytes stayed behind — junk in the pack that
+     * nothing references, and, worse, bytes that could push `byteCount` past
+     * `maxBytes` and turn a skippable tag into a whole-backup `tooLarge`.
+     *
+     * While staged, `add` never reports over-budget: whether the tag resolves
+     * at all is what decides between `tooLarge` and skipping it, and that is
+     * only known once the walk finishes. The verdict moves to `commitStaged`.
+     */
+    let staged: {
+      seen: Set<string>;
+      objects: { oid: string; bytes: Uint8Array }[];
+      bytes: number;
+      over: boolean;
+    } | null = null;
+
+    const beginStaged = (): void => {
+      staged = { seen: new Set(), objects: [], bytes: 0, over: false };
+    };
+    const rollbackStaged = (): void => {
+      staged = null;
+    };
+    /** Merge the staged objects into the snapshot; false = over budget. */
+    const commitStaged = (): boolean => {
+      const s = staged;
+      staged = null;
+      if (!s || s.over) return !s;
+      for (const o of s.objects) {
+        seen.add(o.oid);
+        objects.push(o);
+        byteCount += o.bytes.byteLength;
+      }
+      return true;
+    };
+
+    const has = (oid: string): boolean => seen.has(oid) || staged?.seen.has(oid) === true;
+
     const add = (oid: string, bytes: Uint8Array): boolean => {
-      if (seen.has(oid)) return true;
+      if (has(oid)) return true;
+      if (staged) {
+        staged.seen.add(oid);
+        // Past the budget we stop retaining bytes but keep walking, so memory
+        // stays bounded while the walk still settles whether the tag resolves.
+        if (!staged.over) {
+          staged.objects.push({ oid, bytes });
+          staged.bytes += bytes.byteLength;
+          if (byteCount + staged.bytes > maxBytes) staged.over = true;
+        }
+        return true;
+      }
       seen.add(oid);
       objects.push({ oid, bytes });
       byteCount += bytes.byteLength;
       return byteCount <= maxBytes;
     };
 
-    /** Add one object's wrapped bytes; false = over budget. */
+    /** Add one object's wrapped bytes; false = over budget (never while staged). */
     const addWrapped = async (oid: string): Promise<boolean> => {
       const obj = await git.readObject({ fs, dir, oid, format: "wrapped" });
       return add(oid, obj.object as Uint8Array);
@@ -119,7 +171,7 @@ export async function walkRepoObjects(
     ): Promise<boolean> => {
       const entries = prefetched ?? (await git.log({ fs, dir, ref: tip, depth: -1 }));
       for (const entry of entries) {
-        if (seen.has(entry.oid)) continue;
+        if (has(entry.oid)) continue;
         if (!(await addWrapped(entry.oid))) return false;
         for (const o of await extractTreeObjects(fs, dir, entry.commit.tree)) {
           if (!add(o.oid, o.bytes)) return false;
@@ -155,6 +207,11 @@ export async function walkRepoObjects(
         logger.warn("Backup: skipping unreadable tag ref", { name });
         continue;
       }
+      // Staged: nothing this tag adds reaches the snapshot until its whole
+      // closure resolves, so a tag skipped below leaves no objects and spends
+      // no budget. The over-budget verdict comes from commitStaged, not from
+      // the add calls, which is why none of them are checked here.
+      beginStaged();
       try {
         // Peel annotated tags (adding each tag object in the chain) down to the
         // target, then close the pack over the target's reachability. A
@@ -168,7 +225,7 @@ export async function walkRepoObjects(
           visited.add(current);
           const parsed = await git.readObject({ fs, dir, oid: current });
           if (parsed.type === "tag") {
-            if (!(await addWrapped(current))) return ok({ tooLarge: true });
+            await addWrapped(current);
             current = (parsed.object as { object: string }).object;
           } else {
             target = current;
@@ -176,16 +233,19 @@ export async function walkRepoObjects(
         }
         const targetType = (await git.readObject({ fs, dir, oid: target })).type;
         if (targetType === "commit") {
-          if (!(await addCommitHistory(target))) return ok({ tooLarge: true });
+          await addCommitHistory(target);
         } else if (targetType === "tree") {
           for (const o of await extractTreeObjects(fs, dir, target)) {
-            if (!add(o.oid, o.bytes)) return ok({ tooLarge: true });
+            add(o.oid, o.bytes);
           }
-        } else if (!(await addWrapped(target))) {
-          return ok({ tooLarge: true });
+        } else {
+          await addWrapped(target);
         }
+        // The tag resolved, so its bytes are real and the budget applies.
+        if (!commitStaged()) return ok({ tooLarge: true });
         tags.push({ name, oid: refOid });
       } catch (error) {
+        rollbackStaged();
         logger.warn("Backup: skipping unresolvable tag", {
           name,
           error: error instanceof Error ? error.message : String(error),

@@ -236,6 +236,47 @@ describe("backup walk with tags", () => {
     return { fs };
   }
 
+  it("skips an unresolvable tag without spending its bytes against the cap", async () => {
+    // The tag's own object is large and reads fine; the target it points at is
+    // missing, so the tag is skipped. Those provisional bytes used to stay in
+    // the running total, and if they crossed maxBytes the whole backup came
+    // back tooLarge instead of just dropping the tag.
+    const headOnly = await buildRepo([{ "a.txt": "one" }]);
+    const headWalk = await walkRepoObjects(headOnly.fs, SRC, 10_000_000, logger);
+    if (!headWalk.success || !("objects" in headWalk.data)) throw new Error("walk failed");
+    const headBytes = headWalk.data.objects.reduce((n, o) => n + o.bytes.byteLength, 0);
+
+    const { fs } = await buildRepo([{ "a.txt": "one" }]);
+    const bloatedTagOid = await git.writeTag({
+      fs,
+      dir: SRC,
+      tag: {
+        object: MISSING_OID,
+        type: "commit",
+        tag: "bloat",
+        tagger: { name: "t", email: "t@x.io", timestamp: 0, timezoneOffset: 0 },
+        message: "z".repeat(5000),
+      },
+    });
+    await git.writeRef({ fs, dir: SRC, ref: "refs/tags/bloat", value: bloatedTagOid, force: true });
+
+    // A cap that HEAD fits inside but the extra tag object would blow past.
+    const walk = await walkRepoObjects(fs, SRC, headBytes + 64, logger);
+
+    expect(walk.success).toBe(true);
+    if (!walk.success) return;
+    // Skipped, not tooLarge.
+    expect("objects" in walk.data).toBe(true);
+    if (!("objects" in walk.data)) return;
+    expect(walk.data.tags).toEqual([]);
+    // Rolled back, not merely unrecorded: the tag object itself is gone too.
+    expect(walk.data.objects.map((o) => o.oid)).not.toContain(bloatedTagOid);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Backup: skipping unresolvable tag",
+      expect.objectContaining({ name: "bloat" }),
+    );
+  });
+
   it("aborts with tooLarge when a blob-only tag overflows the cap", async () => {
     const { fs } = await buildRepo([{ "a.txt": "one" }]);
     // A big blob referenced by NO commit — only the tag reaches it.

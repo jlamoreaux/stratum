@@ -192,7 +192,7 @@ describe("REST GET /api/projects/:namespace/:slug/tags", () => {
 });
 
 describe("UI GET /:namespace/:slug/tags", () => {
-  it("renders the tags table with names, badges, target shas, and messages", async () => {
+  it("renders the tags table with names, badges, target shas, messages, and taggers", async () => {
     const env = makeEnv();
     await seedProject(env);
     const res = await app.fetch(req("/@owner/repo/tags"), env);
@@ -209,6 +209,9 @@ describe("UI GET /:namespace/:slug/tags", () => {
     expect(html).toContain("ancient");
     expect(html).toContain("unresolvable");
     expect(html).toContain("deep");
+    // The collector preserves the annotated tagger, so the page must show it.
+    expect(html).toContain("Tagger");
+    expect(html).toContain("tag@x.com");
   });
 
   it("renders an empty state when the repo has no tags", async () => {

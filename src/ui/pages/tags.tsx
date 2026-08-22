@@ -52,6 +52,7 @@ export const TagsPage: FC<TagsProps> = ({ project, tags, user }) => {
                   <th>Type</th>
                   <th>Target</th>
                   <th>Message</th>
+                  <th>Tagger</th>
                   <th>Tagged</th>
                 </tr>
               </thead>
@@ -76,6 +77,9 @@ export const TagsPage: FC<TagsProps> = ({ project, tags, user }) => {
                       )}
                     </td>
                     <td>{tag.message ?? ""}</td>
+                    {/* Lightweight tags carry no tagger; blank rather than a
+                        placeholder, matching the Message cell above. */}
+                    <td>{tag.tagger ?? ""}</td>
                     <td>{formatTagDate(tag.timestamp)}</td>
                   </tr>
                 ))}
