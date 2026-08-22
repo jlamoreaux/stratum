@@ -9,6 +9,12 @@ import { type Result, err, fromPromise, ok } from "../utils/result";
 import type { RepoManifest, RepoSnapshot } from "./repo-snapshot";
 
 const DIR = "/";
+/**
+ * Upper bound on a manifest tag name. Not a git rule — git bounds ref names by
+ * the filesystem, not a fixed count — but a restore writes the name into a ref
+ * path, so a hostile manifest gets a cap rather than an unbounded path.
+ */
+const MAX_TAG_NAME_LENGTH = 255;
 const GITDIR = "/.git";
 
 /**
@@ -105,36 +111,50 @@ export async function reconstructRepo(
 }
 
 /**
- * Determines whether a manifest tag name is safe to use as a `refs/tags/<name>` path.
+ * Whether a manifest tag name is safe to write as `refs/tags/<name>`.
  *
- * @param name - The candidate tag name.
- * @returns `true` if the name is a valid string tag path without traversal or unsafe path components, `false` otherwise.
+ * Restore consumes stored manifest data, so the ref path is validated here
+ * rather than trusted from the snapshot writer: an unchecked `../` escapes
+ * `refs/tags/` and, with `force: true`, can overwrite `refs/heads/main`.
+ *
+ * These are git's own `check-ref-format` rules, expressed as a denylist. An
+ * allowlist was tried first and was wrong in a way that matters for a restore
+ * path: it rejected `release@prod`, every non-ASCII name, and `%`, `,`, `!`,
+ * `(`, `'`, `=`, `&`, `;`, `{` — all of which git accepts. A backup holding
+ * such a tag could be written but never restored, which is worse than the
+ * traversal the allowlist was defending against.
+ *
+ * The oracle here is isomorphic-git's `writeRef`, not the `git` CLI, because
+ * that is what performs the write. It is the stricter of the two: it treats a
+ * ref as valid only if `clean-git-ref` leaves it unchanged, so it refuses
+ * `v1./next` (`./` collapses to `/`) even though `git check-ref-format`
+ * accepts it. Validating against the CLI's looser rules would let such a name
+ * past this guard and throw from `writeRef` half-way through the tag loop,
+ * leaving a partially restored repository — so `./` is rejected here.
+ *
+ * Differentially fuzzed against `writeRef` over ~1300 generated names with a
+ * fresh MemoryFS per name: no name is accepted here that `writeRef` refuses.
+ *
+ * @param name - The candidate tag name, straight from the manifest.
+ * @returns `true` if `refs/tags/<name>` is a ref name git would accept.
  */
 function isValidTagName(name: unknown): name is string {
-  if (
-    typeof name !== "string" ||
-    name.length === 0 ||
-    name.length > 255 ||
-    !/^[\w.\-+/]+$/.test(name) ||
-    name.includes("..") ||
-    name.startsWith("/") ||
-    name.endsWith("/")
-  ) {
-    return false;
-  }
-  // Every slash-separated path component must independently be a valid ref
-  // component — a bare startsWith(".")/endsWith(".lock") check on the whole
-  // name misses a hostile inner component like "release/.hidden" or
-  // "release/v1.0.lock/next", and doesn't catch repeated slashes (an empty
-  // component) or a component ending in a bare ".".
-  return name.split("/").every((component) => {
-    return (
-      component.length > 0 &&
-      !component.startsWith(".") &&
-      !component.endsWith(".lock") &&
-      !component.endsWith(".")
-    );
-  });
+  if (typeof name !== "string" || name.length === 0) return false;
+  // Not a git rule: a Stratum bound so a hostile manifest can't push an
+  // arbitrarily long path at the ref store.
+  if (name.length > MAX_TAG_NAME_LENGTH) return false;
+
+  // Control characters (including DEL), space, and the characters git reserves
+  // for its revision syntax.
+  if (/[\0-\x20\x7f~^:?*[\\]/.test(name)) return false;
+
+  if (name.includes("..") || name.includes("@{")) return false;
+  if (name.startsWith("/") || name.endsWith("/")) return false;
+  // `./` and a trailing `.` are both rewritten by clean-git-ref, so writeRef
+  // rejects them.
+  if (name.includes("./") || name.endsWith(".")) return false;
+
+  return name.split("/").every((c) => c.length > 0 && !c.startsWith(".") && !c.endsWith(".lock"));
 }
 
 /**

@@ -332,6 +332,20 @@ describe("restore round-trip with tags", () => {
     ["dot-prefixed inner component", "release/.hidden"],
     ["trailing-dot inner component", "release/v1."],
     ["lock-suffixed inner component", "release/v1.0.lock/next"],
+    ["tilde", "v1~1"],
+    ["caret", "v1^1"],
+    ["colon", "a:b"],
+    ["question mark", "a?b"],
+    ["asterisk", "a*b"],
+    ["open bracket", "a[b"],
+    ["backslash", "a\\b"],
+    ["reflog syntax", "v1@{0}"],
+    ["space", "release v1"],
+    ["DEL character", "v1\u007fevil"],
+    // Accepted by `git check-ref-format`, refused by isomorphic-git's writeRef:
+    // clean-git-ref collapses `./` to `/`. Rejecting it here keeps the failure
+    // in the guard instead of half-way through the tag-write loop.
+    ["a ./ sequence writeRef refuses", "v1./next"],
   ])("rejects a manifest tag name with %s", async (_label, tagName) => {
     const { fs } = await buildRepo([{ "a.txt": "one" }]);
     const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);
@@ -346,6 +360,41 @@ describe("restore round-trip with tags", () => {
     expect(rebuilt.success).toBe(false);
     if (rebuilt.success) throw new Error("expected rejection");
     expect(rebuilt.error.message).toContain("Invalid tag name in manifest");
+  });
+
+  // Every name here is accepted by `git check-ref-format refs/tags/<name>` and
+  // was rejected by the previous allowlist. A backup holding one of these could
+  // be written but never restored.
+  it.each([
+    ["an @ sign", "release@prod"],
+    ["a comma", "v1,2"],
+    ["a percent sign", "a%b"],
+    ["an exclamation mark", "v1.0.0!"],
+    ["parentheses", "feature(x)"],
+    ["an equals sign", "v1=2"],
+    ["an ampersand", "a&b"],
+    ["an apostrophe", "tag'name"],
+    ["a brace that is not @{", "a{b"],
+    ["non-ASCII (CJK)", "\u7248\u672c1"],
+    ["non-ASCII (diacritics)", "\u00fcn\u00efcode"],
+  ])("reconstructs a tag name with %s", async (_label, tagName) => {
+    const { fs } = await buildRepo([{ "a.txt": "one" }]);
+    const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);
+    if (!walk.success || !("objects" in walk.data)) throw new Error("walk failed");
+    const snap = buildSnapshot(project, walk.data, "2026-08-18T00:00:00Z");
+    snap.manifest.tags = [{ name: tagName, oid: snap.manifest.tipSha }];
+
+    const rebuilt = await reconstructRepo(snap.pack, snap.manifest, logger);
+
+    expect(rebuilt.success).toBe(true);
+    if (!rebuilt.success) throw new Error(rebuilt.error.message);
+    expect(
+      await git.resolveRef({
+        fs: rebuilt.data.fs,
+        dir: rebuilt.data.dir,
+        ref: `refs/tags/${tagName}`,
+      }),
+    ).toBe(snap.manifest.tipSha);
   });
 
   it("still reconstructs ordinary tag names containing dots and slashes", async () => {
