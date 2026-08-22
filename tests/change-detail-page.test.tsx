@@ -21,6 +21,77 @@ function render(status: string, canReview = true): string {
   );
 }
 
+describe("ChangeDetailPage provenance and merge metadata", () => {
+  it("renders the provenance card when provenance is provided", () => {
+    const html = renderToString(
+      <ChangeDetailPage
+        change={{ ...baseChange, status: "merged", mergedAt: "2026-01-03T10:00:00.000Z" }}
+        evalRuns={[]}
+        provenance={{
+          commitSha: "deadbeefcafe1234",
+          workspace: "fix-bug",
+          agentId: "agent_gpt",
+          evalScore: 0.92,
+          mergedAt: "2026-01-03T10:00:00.000Z",
+        }}
+        user={null}
+      />,
+    );
+    expect(html).toContain("Provenance");
+    expect(html).toContain("deadbeefcafe1234");
+    expect(html).toContain("agent_gpt");
+    expect(html).toContain("<dt>Merged</dt>");
+    expect(html).toContain(new Date("2026-01-03T10:00:00.000Z").toLocaleString());
+  });
+
+  it("omits the provenance card and merged row when absent", () => {
+    const html = render("open");
+    expect(html).not.toContain("Provenance");
+    expect(html).not.toContain("<dt>Merged</dt>");
+  });
+
+  it("renders the Open GitHub PR action from githubPrUrl", () => {
+    const html = renderToString(
+      <ChangeDetailPage
+        change={{
+          ...baseChange,
+          status: "promoted",
+          githubPrUrl: "https://github.com/acme/api/pull/42",
+        }}
+        evalRuns={[]}
+        provenance={null}
+        user={null}
+      />,
+    );
+    expect(html).toContain("Open GitHub PR");
+    expect(html).toContain("https://github.com/acme/api/pull/42");
+  });
+
+  it("renders evaluator issues inside the evidence table", () => {
+    const html = renderToString(
+      <ChangeDetailPage
+        change={{ ...baseChange, status: "needs_changes" }}
+        evalRuns={[
+          {
+            id: "evl_001",
+            evaluatorType: "secret_scan",
+            score: 0,
+            passed: false,
+            reason: "Secrets detected",
+            issues: ["AWS key found in config.ts"],
+            ranAt: "2026-01-02T01:00:00.000Z",
+          },
+        ]}
+        provenance={null}
+        user={null}
+      />,
+    );
+    expect(html).toContain("secret_scan");
+    expect(html).toContain("AWS key found in config.ts");
+    expect(html).toContain("issue-list");
+  });
+});
+
 describe("ChangeDetailPage actions", () => {
   it("offers reject and re-evaluation on an open change", () => {
     const html = render("open");
