@@ -246,9 +246,14 @@ export async function freshRepoToken(
 }
 
 /**
- * Push the local `main` ref (its objects + the ref) to an Artifacts remote.
- * Used by backup restore to publish a reconstructed repo. `force` overwrites a
- * non-empty remote (restore-over-existing behind an explicit opt-in).
+ * Publishes the local `main` branch to a remote repository.
+ *
+ * `force` is opt-in because it overwrites the remote's `main` outright — the
+ * project's canonical branch — so defaulting it on would discard any commits
+ * pushed by someone else since this clone was taken.
+ *
+ * @param opts - Controls whether an existing remote `main` branch may be overwritten.
+ * @returns No value on success, or an application error if the push fails.
  */
 export async function pushMain(
   remote: string,
@@ -277,6 +282,61 @@ export async function pushMain(
   return ok(undefined);
 }
 
+/**
+ * Pushes the local `main` branch to a branch on an external remote — e.g.
+ * GitHub's `stratum/<changeId>` ref before a PR is opened (#189).
+ *
+ * Auth is HTTP basic with the token as the password; GitHub accepts any
+ * username alongside a token. `force` defaults to false because `remoteRef` is
+ * caller-supplied and could name a branch this app does not own — a defaulted
+ * force-push there would destroy someone else's work. Pass `force: true`
+ * explicitly, and only when overwriting a ref Stratum owns (re-promotion).
+ *
+ * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
+ * @returns A successful result when the push completes, or an application error when it fails.
+ */
+export async function pushBranchToRemote(
+  fs: NodeFS,
+  dir: string,
+  opts: { url: string; remoteRef: string; token: string; force?: boolean },
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  const res = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: opts.url,
+      ref: "main",
+      remoteRef: opts.remoteRef,
+      onAuth: () => ({ username: "x-access-token", password: opts.token }),
+      force: opts.force ?? false,
+    }),
+  );
+  if (!res.success) {
+    const cause = res.error instanceof Error ? res.error.message : String(res.error);
+    logger.error("Failed to push branch to remote", res.error, {
+      url: opts.url,
+      remoteRef: opts.remoteRef,
+    });
+    return err(new ExternalServiceError("Git", `Failed to push branch: ${cause}`, res.error));
+  }
+  return ok(undefined);
+}
+
+/**
+ * Initializes a repository with the supplied files, commits them, and pushes the commit to `main`.
+ *
+ * Only valid against a remote with no history: this builds the root commit, so
+ * running it on a populated repository would orphan whatever is already there.
+ *
+ * @param remote - The remote repository URL
+ * @param token - The authentication token for the remote repository
+ * @param files - Files to add to the initial commit, keyed by path
+ * @param message - The commit message
+ * @param author - The commit author
+ * @returns The SHA of the pushed commit
+ */
 export async function initAndPush(
   remote: string,
   token: string,
@@ -340,12 +400,25 @@ export async function initAndPush(
   return ok(commitResult.data);
 }
 
+/**
+ * Clones the `main` branch of a repository into an in-memory filesystem.
+ *
+ * The whole tree lands in worker memory, which is what makes the depth choice
+ * a real tradeoff rather than a preference — see the `fullHistory` branch at
+ * the `depth` option for why backup needs full history and merges do not.
+ *
+ * @param remote - The repository URL to clone
+ * @param token - The authentication token for the repository
+ * @param opts - Clone options
+ * @param opts.fullHistory - Whether to clone the complete reachable history; otherwise, clone the most recent 50 commits
+ * @returns The cloned filesystem and its working directory, or an application error
+ */
 export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  httpClient: HttpClient = http,
   opts: { fullHistory?: boolean } = {},
+  httpClient: HttpClient = http,
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
 
