@@ -146,7 +146,14 @@ tested restore path, documented in `docs/runbooks/backup-restore.md`.
 Yes. Analytics (PostHog) is optional — it only runs if you set a
 `POSTHOG_API_KEY`, and self-hosted instances can set
 `STRATUM_TELEMETRY_DISABLED = "true"` in `wrangler.toml` to switch it off
-entirely.
+entirely. When enabled, each event's request properties are limited to the
+matched route pattern (e.g. `/:namespace/:slug/files`), method, status, and
+latency — never the concrete URL, so namespaces, repo slugs, change ids, and
+file paths are not sent to PostHog. A request that never reached a
+registered route is captured with `route: "*"`; a 404 is excluded entirely
+rather than captured as `"*"`. Events also carry identity attribution: the
+`distinctId` is the acting user or agent id (or `server` for unattributed
+requests, which are marked personless) so usage can be counted per account.
 
 ## What if my policy file has a mistake in it?
 

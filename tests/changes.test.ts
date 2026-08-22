@@ -127,6 +127,15 @@ vi.mock("../src/storage/provenance", () => ({
   recordProvenance: vi.fn().mockResolvedValue({}),
 }));
 
+vi.mock("../src/storage/change-reviews", () => ({
+  dismissApprovals: vi.fn(async () => ({ success: true, data: [] })),
+  countApprovals: vi.fn(async () => ({ success: true, data: 0 })),
+}));
+
+vi.mock("../src/storage/audit", () => ({
+  recordAudit: vi.fn(async () => ({ success: true, data: undefined })),
+}));
+
 vi.mock("../src/queue/events", () => ({
   emitEvent: vi.fn().mockResolvedValue(undefined),
 }));
@@ -146,6 +155,8 @@ vi.mock("../src/storage/agents", () => ({
 import { CompositeEvaluator, SecretScanEvaluator, loadPolicy } from "../src/evaluation";
 import { emitEvent } from "../src/queue/events";
 import { getAgent, getAgentByToken } from "../src/storage/agents";
+import { recordAudit } from "../src/storage/audit";
+import { dismissApprovals } from "../src/storage/change-reviews";
 import {
   createChange,
   getChange,
@@ -157,6 +168,7 @@ import {
 import { isTargetDeleting } from "../src/storage/deletion";
 import { listEvalRuns, recordEvalRuns } from "../src/storage/eval-runs";
 import {
+  MergeConflictError,
   batchMergeStagedTrees,
   freshRepoToken,
   getCommitLog,
@@ -1225,6 +1237,53 @@ describe("POST /api/changes/:id/merge", () => {
     );
   });
 
+  it("returns 409 with the conflicting file list and persists conflict context (#185)", async () => {
+    const approvedChange: Change = { ...mockChange, status: "accepted" };
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: approvedChange,
+    });
+    vi.mocked(mergeWorkspaceIntoProject).mockResolvedValue({
+      success: false,
+      error: new MergeConflictError("Merge failed; workspace may be stale or conflicting", [
+        "src/a.ts",
+        "docs/readme.md",
+      ]),
+    });
+    const put = vi.fn(async (_key: string, _value: string, _opts?: unknown) => undefined);
+    env.STATE = { put } as unknown as KVNamespace;
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
+      env,
+    );
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as {
+      code: string;
+      conflictId: string;
+      conflictingFiles: string[];
+    };
+    expect(body.code).toBe("MERGE_CONFLICT");
+    expect(body.conflictingFiles).toEqual(["src/a.ts", "docs/readme.md"]);
+    expect(body.conflictId).toBeTruthy();
+
+    // The persisted conflict context carries the same file list for the
+    // resolution flow.
+    expect(put).toHaveBeenCalledWith(
+      `conflict:${body.conflictId}`,
+      expect.any(String),
+      expect.objectContaining({ expirationTtl: expect.any(Number) }),
+    );
+    const persisted = JSON.parse(put.mock.calls[0]?.[1] ?? "{}") as {
+      conflictingFiles: string[];
+      workspaceName: string;
+    };
+    expect(persisted.conflictingFiles).toEqual(["src/a.ts", "docs/readme.md"]);
+    expect(persisted.workspaceName).toBe("fix-bug");
+    expect(markChangeMerged).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when merge implementation reports a conflict", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue({
@@ -1463,6 +1522,27 @@ describe("POST /api/changes/:id/merge", () => {
     vi.mocked(loadPolicy).mockResolvedValue({
       evaluators: [],
       merge: { allowForce: true },
+    });
+
+    const res = await app.fetch(
+      request("POST", `/api/changes/${mockChange.id}/merge?force=true`, undefined, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("does not fail a forced merge when the merge.forced audit write fails", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, status: "accepted", evaluatedSha: "sha_evaluated_old" },
+    });
+    vi.mocked(loadPolicy).mockResolvedValue({
+      evaluators: [],
+      merge: { allowForce: true },
+    });
+    vi.mocked(recordAudit).mockResolvedValueOnce({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
     });
 
     const res = await app.fetch(
@@ -1814,6 +1894,30 @@ describe("POST /api/projects/:name/changes/merge-batch", () => {
     expect(gcCalls).toEqual([["fix-bug"]]);
   });
 
+  it("does not throw in deferred persist when a batch merge.forced audit write fails", async () => {
+    vi.mocked(recordAudit).mockResolvedValueOnce({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/projects/my-project/changes/merge-batch",
+        { changeIds: ["chg_b1", "chg_b2", "chg_b1"], force: true },
+        USER_AUTH,
+      ),
+      env,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal ExecutionContext
+      exec() as any,
+    );
+    expect(res.status).toBe(200);
+
+    // The audit failure must not reject the deferred waitUntil work.
+    await expect(Promise.all(waitUntils)).resolves.toBeDefined();
+    expect(gcCalls).toEqual([["fix-bug"]]);
+  });
+
   it("SEC-2: skips a batch change whose staged tree doesn't match the evaluated tree", async () => {
     // Staged tree oid is "a".repeat(40) for every workspace. chg_b1 was evaluated
     // against that tree (matches → merges); chg_b2 was evaluated against a
@@ -1893,5 +1997,190 @@ describe("POST /api/projects/:name/changes/merge-batch", () => {
       exec() as any,
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", () => {
+  let app: ReturnType<typeof makeApp>;
+  let env: Env;
+
+  const evaluatedChange: Change = {
+    ...mockChange,
+    status: "approved",
+    evaluatedSha: "old_sha",
+    evaluatedTreeOid: "old_tree",
+  };
+
+  beforeEach(() => {
+    app = makeApp();
+    env = makeEnv();
+    vi.clearAllMocks();
+    vi.mocked(getUserByToken).mockImplementation(async (_db, token) => {
+      if (token === "stratum_user_testtoken00000000000000000") {
+        return {
+          success: true,
+          data: {
+            id: "user_test",
+            email: "test@example.com",
+            username: "test",
+            tokenHash: "hash",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        };
+      }
+      return { success: false, error: new NotFoundError("User", token) };
+    });
+    vi.mocked(getChange).mockResolvedValue({ success: true, data: evaluatedChange });
+    vi.mocked(getProject).mockResolvedValue({ success: true, data: mockProject });
+    vi.mocked(getWorkspace).mockResolvedValue({ success: true, data: mockWorkspace });
+    vi.mocked(freshRepoToken).mockImplementation(async () => ({
+      success: true,
+      data: "test-token",
+    }));
+    vi.mocked(loadPolicy).mockResolvedValue(mockPolicy);
+    // Re-push landed new commits: the re-evaluated tip differs from old_sha.
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: {
+        diff: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+        workspaceOid: "new_sha",
+        workspaceTreeOid: "new_tree",
+        workspaceSha: "new_sha",
+      },
+    });
+    vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
+    vi.mocked(recordEvalRuns).mockResolvedValue({ success: true, data: [] });
+    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
+    vi.mocked(recordAudit).mockResolvedValue({ success: true, data: undefined });
+    vi.mocked(CompositeEvaluator).mockImplementation(
+      () =>
+        ({
+          aggregate: vi.fn().mockReturnValue(passingEvalResult),
+        }) as unknown as CompositeEvaluator,
+    );
+  });
+
+  it("dismisses stale approvals when re-evaluation lands a new sha", async () => {
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    expect(dismissApprovals).toHaveBeenCalledWith(env.DB, expect.any(Object), "chg_abc123");
+    // Fail-closed ordering: approvals are dropped before the new sha is pinned.
+    const dismissOrder = vi.mocked(dismissApprovals).mock.invocationCallOrder[0] ?? 0;
+    const updateOrder = vi.mocked(updateChangeStatus).mock.invocationCallOrder[0] ?? 0;
+    expect(dismissOrder).toBeLessThan(updateOrder);
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.any(Object),
+      "chg_abc123",
+      "accepted",
+      expect.objectContaining({ evaluatedSha: "new_sha" }),
+    );
+  });
+
+  it("records an audit entry for the dismissal", async () => {
+    vi.mocked(dismissApprovals).mockResolvedValue({
+      success: true,
+      data: ["user_1", "user_2"],
+    });
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    expect(recordAudit).toHaveBeenCalledWith(env.DB, expect.any(Object), {
+      action: "review.approvals_dismissed",
+      actorType: "user",
+      actorId: "user_test",
+      subject: "chg_abc123",
+      detail: {
+        project: "my-project",
+        dismissed: 2,
+        dismissedReviewerIds: ["user_1", "user_2"],
+        previousEvaluatedSha: "old_sha",
+        evaluatedSha: "new_sha",
+      },
+    });
+  });
+
+  it("logs but does not fail the request when auditing the dismissal fails", async () => {
+    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
+    vi.mocked(recordAudit).mockResolvedValue({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+
+    // The dismissal already happened; a failed audit write must not fail the request.
+    expect(res.status).toBe(200);
+    expect(updateChangeStatus).toHaveBeenCalled();
+  });
+
+  it("keeps approvals when the re-evaluated sha is unchanged", async () => {
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: {
+        diff: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+        workspaceOid: "old_sha",
+        workspaceTreeOid: "old_tree",
+        workspaceSha: "old_sha",
+      },
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(dismissApprovals).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it("keeps approvals on a legacy change with no recorded evaluated sha", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, status: "approved" },
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(dismissApprovals).not.toHaveBeenCalled();
+  });
+
+  it("skips the audit entry when there were no approvals to dismiss", async () => {
+    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: [] });
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(dismissApprovals).toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it("fails closed without re-pinning the sha when dismissal fails", async () => {
+    vi.mocked(dismissApprovals).mockResolvedValue({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(500);
+    // The old evaluated sha stays pinned: stale approvals never coexist with a new sha.
+    expect(updateChangeStatus).not.toHaveBeenCalled();
   });
 });

@@ -15,6 +15,7 @@ import {
 } from "../storage/git-ops";
 import { getImportProgress } from "../storage/imports";
 import { getIssueByNumber, listIssues } from "../storage/issues";
+import { getProvenance } from "../storage/provenance";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import {
   getProject,
@@ -548,12 +549,18 @@ app.get("/changes/:id", async (c) => {
     );
   }
 
-  const [evalRunsResult, commentsResult, reviewsResult, costsResult] = await Promise.all([
-    listEvalRuns(c.env.DB, logger, change.id),
-    listComments(c.env.DB, logger, change.id),
-    listReviews(c.env.DB, logger, change.id),
-    getChangeCostSummary(c.env.DB, logger, change.id),
-  ]);
+  const [evalRunsResult, commentsResult, reviewsResult, costsResult, provenanceResult] =
+    await Promise.all([
+      listEvalRuns(c.env.DB, logger, change.id),
+      listComments(c.env.DB, logger, change.id),
+      listReviews(c.env.DB, logger, change.id),
+      getChangeCostSummary(c.env.DB, logger, change.id),
+      getProvenance(c.env.DB, logger, change.id),
+    ]);
+
+  // Provenance only exists once the change has merged; absence is normal, not an
+  // error — the page simply omits the provenance card.
+  const provenance = provenanceResult.success ? provenanceResult.data : null;
 
   // The diff is only renderable while the workspace still exists and the
   // change is still in review; failures degrade to "no diff section".
@@ -601,6 +608,7 @@ app.get("/changes/:id", async (c) => {
         score: run.score,
         passed: run.passed,
         reason: run.reason,
+        ...(run.issues !== undefined ? { issues: run.issues } : {}),
         ranAt: run.ranAt,
       }))
     : [];
@@ -617,9 +625,11 @@ app.get("/changes/:id", async (c) => {
         ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
         ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
         createdAt: change.createdAt,
+        ...(change.mergedAt !== undefined ? { mergedAt: change.mergedAt } : {}),
+        ...(change.githubPrUrl !== undefined ? { githubPrUrl: change.githubPrUrl } : {}),
       }}
       evalRuns={evalRuns}
-      provenance={null}
+      provenance={provenance}
       comments={commentsResult.success ? commentsResult.data : []}
       reviews={reviewsResult.success ? reviewsResult.data : []}
       costs={costsResult.success ? costsResult.data : []}
