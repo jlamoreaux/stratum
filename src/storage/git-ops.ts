@@ -1181,6 +1181,64 @@ export async function batchMergeStagedTrees(
   return ok(results);
 }
 
+/**
+ * Removes a real directory subtree, leaf-first.
+ *
+ * `readdir` reports ENOTDIR for both files and symlinks and never follows a
+ * link, so recursion only ever descends into genuine directories — a symlink
+ * encountered here is left for the caller to unlink rather than having its
+ * target emptied.
+ */
+async function removeSubtree(fs: NodeFS, full: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await fs.promises.readdir(full);
+  } catch {
+    return; // not a directory: the caller's unlink handles it
+  }
+  for (const entry of entries) {
+    const child = `${full}/${entry}`;
+    await removeSubtree(fs, child);
+    await fs.promises.unlink(child).catch(() => {});
+  }
+  await fs.promises.rmdir(full).catch(() => {});
+}
+
+/**
+ * Clears anything whose *path shape* conflicts with what is about to be written.
+ *
+ * Two transitions corrupt the worktree if the old shape is left in place, and
+ * neither is caught by unlinking the target path alone:
+ *
+ * - A symlink at an ANCESTOR silently redirects the write. With `lib` a symlink
+ *   to `real/`, writing `lib/file.ts` lands at `real/file.ts` — verified
+ *   against MemoryFS, which resolves the link during the write. The merge then
+ *   reports success having written to the wrong path.
+ * - Replacing a directory with a symlink leaves the directory's children behind.
+ *   MemoryFS's `unlink` succeeds on a directory without removing descendants, so
+ *   `lib/a.ts` stays readable *through* the new `lib` symlink.
+ *
+ * Ancestors are probed with `readlink` because the `NodeFS` shape has no
+ * `isSymbolicLink()`; it throws for anything that is not a link.
+ */
+async function clearConflictingPathShape(
+  fs: NodeFS,
+  projectDir: string,
+  path: string,
+): Promise<void> {
+  const parts = path.split("/");
+  for (let i = 1; i < parts.length; i++) {
+    const ancestor = `${projectDir}/${parts.slice(0, i).join("/")}`;
+    try {
+      await fs.promises.readlink(ancestor);
+    } catch {
+      continue; // absent, or a real directory
+    }
+    await fs.promises.unlink(ancestor).catch(() => {});
+  }
+  await removeSubtree(fs, `${projectDir}/${path}`);
+}
+
 /** Exported for tests (the workdir copy must preserve file modes and symlinks). */
 export async function squashMerge(
   projectFs: NodeFS,
@@ -1211,6 +1269,16 @@ export async function squashMerge(
     return projectEntry?.oid !== hash || projectEntry?.mode !== mode;
   });
   const deleted = projectFiles.filter(([path]) => !workspaceMap.has(path));
+  // Every directory the workspace tree needs. A project path that is now one of
+  // these is not really deleted -- its *shape* changed. `lib` as a symlink in
+  // the project and `lib/file.ts` in the workspace makes `lib` look deleted,
+  // but writing the file recreates `lib` as a real directory, and unlinking it
+  // afterwards would either fail with EISDIR or destroy what was just written.
+  const workspaceDirs = new Set<string>();
+  for (const [path] of workspaceFiles) {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i++) workspaceDirs.add(parts.slice(0, i).join("/"));
+  }
 
   for (const [path, , mode] of changed) {
     const blobResult = await fromPromise(
@@ -1231,7 +1299,10 @@ export async function squashMerge(
     const fullPath = `${projectDir}/${path}`;
     try {
       // Drop whatever is at the path first so file<->symlink transitions and
-      // stale exec bits can't leak through the overwrite.
+      // stale exec bits can't leak through the overwrite. The shape clear has
+      // to come first: unlinking `fullPath` cannot fix a symlink ancestor that
+      // would redirect the write, nor a directory whose children outlive it.
+      await clearConflictingPathShape(projectFs, projectDir, path);
       await projectFs.promises.unlink(fullPath).catch(() => {});
       if (mode === MODE_SYMLINK) {
         await projectFs.promises.symlink(new TextDecoder().decode(blob), fullPath);
@@ -1257,12 +1328,25 @@ export async function squashMerge(
   }
 
   for (const [path] of deleted) {
-    try {
-      await projectFs.promises.unlink(`${projectDir}/${path}`);
-    } catch (error) {
-      const appError = error instanceof Error ? error : new Error(String(error));
-      logger.error("Failed to unlink file during squash merge", appError, { path, projectRemote });
-      return err(new AppError(`Failed to unlink file: ${path}`, "FS_ERROR", 500));
+    // The worktree removal is conditional; the index removal below never is.
+    // Whatever happened on disk, the entry has to leave the index or the squash
+    // tree keeps a path the workspace does not have.
+    if (!workspaceDirs.has(path)) {
+      try {
+        await projectFs.promises.unlink(`${projectDir}/${path}`);
+      } catch (error) {
+        // Already gone is the desired end state, not a failure:
+        // `clearConflictingPathShape` above may have removed this path while
+        // making room for a changed one.
+        if (!(error instanceof AppError && error.code === "ENOENT")) {
+          const appError = error instanceof Error ? error : new Error(String(error));
+          logger.error("Failed to unlink file during squash merge", appError, {
+            path,
+            projectRemote,
+          });
+          return err(new AppError(`Failed to unlink file: ${path}`, "FS_ERROR", 500));
+        }
+      }
     }
 
     const removeResult = await fromPromise(

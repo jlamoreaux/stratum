@@ -60,7 +60,10 @@ function stubReceivePackServer(mainOid: string) {
     if (url.endsWith("/git-receive-pack")) {
       const report = concat(pkt("unpack ok\n"), pkt("ok refs/heads/main\n"), FLUSH);
       const channel1 = new Uint8Array(1 + report.length);
-      channel1[0] = 1; // side-band channel 1: pack/report data
+      // The advertisement above offers side-band-64k, so the client negotiates
+      // it and demultiplexes the response. The report has to be wrapped in
+      // channel 1 or the client never sees it and the push hangs.
+      channel1[0] = 1;
       channel1.set(report, 1);
       const body = concat(pkt(channel1), FLUSH);
       return new Response(body, {
@@ -171,6 +174,138 @@ describe("squashMerge preserves file modes and symlinks", () => {
     expect(scriptStat.success && scriptStat.data.mode === 0o100755).toBe(true);
   });
 
+  // Both directions of a path-shape change. Unlinking the target path alone
+  // cannot fix either: a symlink ANCESTOR redirects the write somewhere else
+  // entirely, and MemoryFS's unlink succeeds on a directory without removing
+  // its children, so they outlive the directory they belonged to.
+  it("replaces a directory with a symlink without leaving its children behind", async () => {
+    const raw = new MemoryFS();
+    const fs = raw.toNodeFS() as unknown as NodeFS;
+    const gitfs = fs as unknown as Parameters<typeof git.init>[0]["fs"];
+    const dir = "/";
+    const gitdir = "/.git";
+    await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+    // Base: lib/ is a real directory holding one file.
+    const childBlob = await blobObject(enc("child\n"));
+    const libTree = await treeObject([{ mode: "100644", name: "a.ts", oid: childBlob.oid }]);
+    const baseTree = await treeObject([{ mode: "40000", name: "lib", oid: libTree.oid }]);
+    const base = await commitObject({
+      tree: baseTree.oid,
+      parents: [],
+      message: "base",
+      timestamp: 1700000000,
+    });
+
+    // Workspace: lib is a symlink instead.
+    const linkBlob = await blobObject(enc("vendor"));
+    const wsTree = await treeObject([{ mode: "120000", name: "lib", oid: linkBlob.oid }]);
+    const ws = await commitObject({
+      tree: wsTree.oid,
+      parents: [base.oid],
+      message: "workspace",
+      timestamp: 1700000001,
+    });
+
+    for (const o of [childBlob, libTree, baseTree, base, linkBlob, wsTree, ws]) {
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
+    }
+    await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
+    await git.checkout({ fs: gitfs, dir, ref: "main" });
+
+    stubReceivePackServer(base.oid);
+    const result = await squashMerge(
+      fs,
+      dir,
+      ws.oid,
+      "https://example.test/git/project.git",
+      "token",
+      author,
+      logger,
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    const commit = await git.readCommit({ fs: gitfs, dir, oid: result.data });
+    expect(commit.commit.tree).toBe(wsTree.oid);
+    // The orphaned child must not survive underneath the new symlink.
+    const orphan = await raw.promises.readFile("/lib/a.ts");
+    expect(orphan.success).toBe(false);
+  });
+
+  it("writes a file under a path whose old shape was a symlink, not through it", async () => {
+    const raw = new MemoryFS();
+    const fs = raw.toNodeFS() as unknown as NodeFS;
+    const gitfs = fs as unknown as Parameters<typeof git.init>[0]["fs"];
+    const dir = "/";
+    const gitdir = "/.git";
+    await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+    // Base: lib is a symlink to the real/ directory.
+    const decoyBlob = await blobObject(enc("decoy\n"));
+    const realTree = await treeObject([{ mode: "100644", name: "keep.ts", oid: decoyBlob.oid }]);
+    const libLink = await blobObject(enc("real"));
+    const baseTree = await treeObject([
+      { mode: "120000", name: "lib", oid: libLink.oid },
+      { mode: "40000", name: "real", oid: realTree.oid },
+    ]);
+    const base = await commitObject({
+      tree: baseTree.oid,
+      parents: [],
+      message: "base",
+      timestamp: 1700000000,
+    });
+
+    // Workspace: lib becomes a real directory containing file.ts.
+    const fileBlob = await blobObject(enc("content\n"));
+    const newLibTree = await treeObject([{ mode: "100644", name: "file.ts", oid: fileBlob.oid }]);
+    const wsTree = await treeObject([
+      { mode: "40000", name: "lib", oid: newLibTree.oid },
+      { mode: "40000", name: "real", oid: realTree.oid },
+    ]);
+    const ws = await commitObject({
+      tree: wsTree.oid,
+      parents: [base.oid],
+      message: "workspace",
+      timestamp: 1700000001,
+    });
+
+    for (const o of [
+      decoyBlob,
+      realTree,
+      libLink,
+      baseTree,
+      base,
+      fileBlob,
+      newLibTree,
+      wsTree,
+      ws,
+    ]) {
+      await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
+    }
+    await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
+    await git.checkout({ fs: gitfs, dir, ref: "main" });
+
+    stubReceivePackServer(base.oid);
+    const result = await squashMerge(
+      fs,
+      dir,
+      ws.oid,
+      "https://example.test/git/project.git",
+      "token",
+      author,
+      logger,
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    const commit = await git.readCommit({ fs: gitfs, dir, oid: result.data });
+    expect(commit.commit.tree).toBe(wsTree.oid);
+    // The write must not have followed the stale link into real/.
+    const leaked = await raw.promises.readFile("/real/file.ts");
+    expect(leaked.success).toBe(false);
+  });
+
   it("returns the current head untouched when nothing changed", async () => {
     const raw = new MemoryFS();
     const fs = raw.toNodeFS() as unknown as NodeFS;
@@ -234,9 +369,13 @@ describe("squashMerge preserves file modes and symlinks", () => {
     });
     // A gitlink (submodule reference): mode 160000, oid is the submodule's
     // commit — never read as a blob, so it doesn't need to exist as an object.
+    // It lives inside a real `vendor` subtree because a tree entry name cannot
+    // contain a slash; a flat "vendor/lib" entry is a tree git cannot produce,
+    // so the walker would not be exercised the way it is in practice.
+    const vendorTree = await treeObject([{ mode: "160000", name: "lib", oid: "a".repeat(40) }]);
     const wsTree = await treeObject([
       { mode: "100644", name: "file.txt", oid: fileBlob.oid },
-      { mode: "160000", name: "vendor/lib", oid: "a".repeat(40) },
+      { mode: "40000", name: "vendor", oid: vendorTree.oid },
     ]);
     const ws = await commitObject({
       tree: wsTree.oid,
@@ -244,7 +383,7 @@ describe("squashMerge preserves file modes and symlinks", () => {
       message: "add submodule",
       timestamp: 1700000001,
     });
-    for (const o of [fileBlob, baseTree, base, wsTree, ws]) {
+    for (const o of [fileBlob, baseTree, base, vendorTree, wsTree, ws]) {
       await placeLooseObject(fs as FsLike, gitdir, o.oid, o.bytes);
     }
     await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: base.oid, force: true });
