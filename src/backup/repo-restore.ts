@@ -144,9 +144,15 @@ function isValidTagName(name: unknown): name is string {
   // arbitrarily long path at the ref store.
   if (name.length > MAX_TAG_NAME_LENGTH) return false;
 
-  // Control characters (including DEL), space, and the characters git reserves
-  // for its revision syntax.
-  if (/[\0-\x20\x7f~^:?*[\\]/.test(name)) return false;
+  // Control characters (including DEL) and space, compared by code point. A
+  // regex range spanning them is what lint rules about control characters in
+  // patterns object to, and the comparison states the bound outright.
+  for (let i = 0; i < name.length; i++) {
+    const code = name.charCodeAt(i);
+    if (code <= 0x20 || code === 0x7f) return false;
+  }
+  // The characters git reserves for its revision syntax.
+  if (/[~^:?*[\\]/.test(name)) return false;
 
   if (name.includes("..") || name.includes("@{")) return false;
   if (name.startsWith("/") || name.endsWith("/")) return false;

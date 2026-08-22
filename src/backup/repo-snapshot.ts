@@ -180,6 +180,42 @@ export async function walkRepoObjects(
       return true;
     };
 
+    /**
+     * Add a commit and its ancestry, stopping at commits already collected.
+     *
+     * `addCommitHistory` walks the whole history via `git.log` every time it is
+     * called. That is right for HEAD, which is walked once from an already
+     * fetched log, but wrong per tag: N tags on a long history cost N full
+     * walks even when nearly every commit is already collected.
+     *
+     * The stop condition is a frontier, not a single boundary. A merge commit
+     * can have one parent already collected and another not, so every parent is
+     * enqueued and each path stops independently. Stopping at the first
+     * already-collected commit would silently drop the unseen side.
+     *
+     * Sound because whatever added a commit added its full ancestry at the same
+     * time, so an already-collected commit needs no re-walk.
+     */
+    const addCommitAncestry = async (tip: string): Promise<void> => {
+      const queue = [tip];
+      const queued = new Set<string>([tip]);
+      while (queue.length > 0) {
+        const oid = queue.shift() as string;
+        if (has(oid)) continue;
+        const read = await git.readCommit({ fs, dir, oid });
+        await addWrapped(oid);
+        for (const o of await extractTreeObjects(fs, dir, read.commit.tree)) {
+          add(o.oid, o.bytes);
+        }
+        for (const parent of read.commit.parent) {
+          if (!queued.has(parent)) {
+            queued.add(parent);
+            queue.push(parent);
+          }
+        }
+      }
+    };
+
     if (!(await addCommitHistory(tipSha, log))) return ok({ tooLarge: true });
 
     // Tags: walk every refs/tags/* tip too. A tag whose objects are missing
@@ -219,6 +255,9 @@ export async function walkRepoObjects(
         // tag-of-tag chain still snapshots correctly instead of being dropped.
         let current = refOid;
         let target: string | null = null;
+        // The peel already read the target and knows its type; re-reading it
+        // afterwards was a second decode of the same object.
+        let targetType: Awaited<ReturnType<typeof git.readObject>>["type"] | null = null;
         const visited = new Set<string>();
         while (target === null) {
           if (visited.has(current)) throw new Error(`tag ${name}: cyclic tag chain`);
@@ -229,11 +268,11 @@ export async function walkRepoObjects(
             current = (parsed.object as { object: string }).object;
           } else {
             target = current;
+            targetType = parsed.type;
           }
         }
-        const targetType = (await git.readObject({ fs, dir, oid: target })).type;
         if (targetType === "commit") {
-          await addCommitHistory(target);
+          await addCommitAncestry(target);
         } else if (targetType === "tree") {
           for (const o of await extractTreeObjects(fs, dir, target)) {
             add(o.oid, o.bytes);

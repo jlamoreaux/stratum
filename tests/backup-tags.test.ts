@@ -236,6 +236,51 @@ describe("backup walk with tags", () => {
     return { fs };
   }
 
+  it("captures both sides of a merge when a tag's ancestry is walked", async () => {
+    // The tag walk stops at commits already collected. That stop has to be a
+    // frontier: a merge can have one parent already in and the other not, and
+    // halting at the first collected commit would drop the unseen side.
+    const { fs, shas } = await buildRepo([{ "a.txt": "one" }]);
+    const base = shas[0] as string;
+
+    // Two independent children of `base`, then a merge commit joining them.
+    // Parents are overridden explicitly; the tree comes from the index.
+    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
+    await (fs as any).promises.writeFile(`${SRC}/left.txt`, "left");
+    await git.add({ fs, dir: SRC, filepath: "left.txt" });
+    const left = await git.commit({ fs, dir: SRC, message: "left", author, parent: [base] });
+
+    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
+    await (fs as any).promises.writeFile(`${SRC}/right.txt`, "right");
+    await git.add({ fs, dir: SRC, filepath: "right.txt" });
+    const right = await git.commit({ fs, dir: SRC, message: "right", author, parent: [base] });
+
+    // `base` first, deliberately: it is already collected via HEAD, so a walk
+    // that stops the whole queue at the first collected commit — rather than
+    // stopping that path only — would drop `left` and `right` behind it.
+    const merge = await git.commit({
+      fs,
+      dir: SRC,
+      message: "merge",
+      author,
+      parent: [base, left, right],
+    });
+
+    // HEAD stays on `base`, so only the tag reaches the merge and its parents.
+    await git.writeRef({ fs, dir: SRC, ref: "refs/heads/main", value: base, force: true });
+    await git.tag({ fs, dir: SRC, ref: "merged", object: merge });
+
+    const walk = await walkRepoObjects(fs, SRC, 10_000_000, logger);
+    if (!walk.success || !("objects" in walk.data)) throw new Error("walk failed");
+
+    const oids = walk.data.objects.map((o) => o.oid);
+    expect(oids).toContain(merge);
+    expect(oids).toContain(left);
+    expect(oids).toContain(right);
+    expect(oids).toContain(base);
+    expect(walk.data.tags.map((t) => t.name)).toEqual(["merged"]);
+  });
+
   it("skips an unresolvable tag without spending its bytes against the cap", async () => {
     // The tag's own object is large and reads fine; the target it points at is
     // missing, so the tag is skipped. Those provisional bytes used to stay in
