@@ -12,4 +12,3 @@ This directory contains historical documents preserved for reference. These docu
 For current documentation, see:
 - [TODO.md](../../TODO.md) - Current priorities
 - [docs/developer/architecture.md](../developer/architecture.md) - System architecture
-- [docs/CURRENT_CAPABILITIES.md](../CURRENT_CAPABILITIES.md) - Authoritative shipped-feature state

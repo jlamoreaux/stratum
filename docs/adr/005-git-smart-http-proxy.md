@@ -2,9 +2,10 @@
 
 ## Status
 
-Partially accepted — **clone/fetch (slice 1) and workspace push (slice 2a)
-implemented**; the **gated default-branch push (slice 2b / Phase B) remains
-deferred**.
+Accepted — **clone/fetch (slice 1), workspace push (slice 2a), and the gated
+default-branch push (slice 2b) are implemented**; slice 2b ships behind
+`GIT_PUSH_GATED_ENABLED` (staging on, production off until validated against
+real Artifacts).
 
 - **Slice 1 — clone/fetch.** Authenticated `git-upload-pack` proxy: a project is
   a git remote for `git clone` / `git fetch` at `/@ns/slug.git`
@@ -20,14 +21,30 @@ deferred**.
   the client clones the workspace, ref/old-oid semantics line up and Artifacts'
   report-status is the truthful outcome — no pkt-line parsing or report-status
   synthesis needed. A streaming body cap bounds push size.
-- **Slice 2b — gated default-branch push (deferred, Phase B).** Pushing to the
-  **project** URL (`/@ns/slug.git`) is still refused (`403`). Routing a push
-  through the change → eval → MergeQueue gate requires: pinning the evaluated sha
-  and **merging by sha** (not the fork's mutable tip — TOCTOU/gate-bypass);
-  durable async eval (a queue + sweeper + dedupe, not `waitUntil`); idempotent
-  change creation under concurrent pushes (a DB uniqueness constraint); and
-  Gerrit-style `refs/for/main` → `ok` semantics with synthesized report-status.
-  Tracked in #115.
+- **Slice 2b — gated default-branch push (implemented, staging-flagged).**
+  Behind `GIT_PUSH_GATED_ENABLED` ("true" on staging, "false" in production
+  until validated against real Artifacts), a single-ref push to the project's
+  configured default branch (`sourceDefaultBranch` → `githubDefaultBranch` →
+  `main`) on the **project** URL is routed through the change gate:
+  the pack lands on a fresh server-managed workspace fork (a full-repository
+  fork whose default branch sits at the project tip; the original ref and
+  old-oid are forwarded unchanged, so the client's old-oid lines up and the
+  remote's own fast-forward check stays truthful), then the shared change-flow
+  service
+  (`src/services/change-flow.ts` — the same pipeline the REST route runs)
+  creates and synchronously evaluates a change. The client receives a
+  **truthful `ng`** carrying the change id and eval verdict, with side-band
+  detail when the client negotiated it: the default branch does not move until
+  the change is approved and merged, and
+  answering `ok` would corrupt the client's remote-tracking ref. Multi-ref
+  pushes, deletions, and non-default refs keep the in-protocol refusal; a pack
+  the workspace remote itself rejects is relayed verbatim. Evaluation runs
+  synchronously inside the push request — the same latency contract as
+  `POST /changes` — so the durable async-eval queue is an optimization, not a
+  prerequisite. Remaining for #115: answer `ok` by actually merging when policy
+  allows it (eval passed, zero required approvals) and change-per-push
+  idempotency under concurrent identical pushes (today each push opens its own
+  workspace + change, which is safe but can duplicate).
 
 ## Context
 
@@ -109,10 +126,14 @@ funnels it through the existing change → eval → merge-queue pipeline, so a
 `git push` produces exactly the same artifacts as `stratum commit` followed by a
 change:
 
-- Push to the project's default branch → create (or update) a change against an
-  auto-named workspace, run evaluation, and either fast-forward or enqueue on the
-  `MergeQueue` per existing policy. A rejected eval surfaces to the client as a
-  non-zero `git push` exit with the reason in the sideband progress stream.
+- Push to the project's default branch → land the pack on a fresh auto-named
+  workspace fork, create a change, and run evaluation synchronously. The client
+  always receives a truthful per-ref `ng` carrying the change id and eval
+  verdict (with detail in the sideband progress stream): the default branch
+  only moves through the merge gate — under this repo's policy that includes a
+  human approval (`requiredApprovals: 1`). Answering `ok` by merging directly
+  when policy allows it (eval passed, zero required approvals) remains open
+  under #115.
 - Push to `refs/heads/<workspace>` → commit straight to that workspace ref
   (the workspace-commit path), no gate, matching `stratum commit`.
 

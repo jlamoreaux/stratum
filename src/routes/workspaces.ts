@@ -111,7 +111,9 @@ app.post("/:namespace/:slug/workspaces", async (c) => {
   await emitEvent(
     c.env.DB,
     c.env.EVENTS_QUEUE,
-    { type: "workspace.created", project: project.name, workspace: workspaceName },
+    // Canonical `namespace/slug` (the route's own params), matching the other
+    // producer in services/change-flow.ts — not the mutable display name.
+    { type: "workspace.created", project: `${namespace}/${slug}`, workspace: workspaceName },
     actor,
     logger,
     project.id,

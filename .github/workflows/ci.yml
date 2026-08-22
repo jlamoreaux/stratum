@@ -12,12 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - run: npm ci
@@ -30,22 +30,22 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-report
           path: coverage/
 
   packages:
-    name: CLI & Agent Packages
+    name: CLI, Agent & MCP Packages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: CLI — install, typecheck, test, build
         working-directory: cli
@@ -62,6 +62,30 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+
+      - name: MCP — install, typecheck, test, build
+        working-directory: mcp
+        run: |
+          npm install
+          npm run typecheck
+          npm test
+          npm run build
+          # Smoke: the built entrypoint must complete a real MCP initialize
+          # handshake over stdio (it exits 0 on stdin EOF).
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}' \
+            | env STRATUM_API_KEY=smoke-not-a-real-key timeout 30s node dist/index.js > /tmp/mcp-smoke.log 2>&1
+          # Parse the JSON-RPC reply semantically — a grep on raw JSON breaks on
+          # formatting/key-order changes and can match inside other text.
+          node -e '
+            const lines = require("fs").readFileSync("/tmp/mcp-smoke.log", "utf8").split("\n");
+            const ok = lines.some((line) => {
+              try {
+                const msg = JSON.parse(line);
+                return msg.id === 1 && msg.result?.serverInfo?.name === "stratum";
+              } catch { return false; }
+            });
+            if (!ok) { console.error("no initialize reply with serverInfo.name=stratum"); process.exit(1); }
+          '
 
   # ========================================================================
   # Staging Deployment with Automatic Migration
@@ -84,12 +108,12 @@ jobs:
       deployment_url: ${{ steps.deploy.outputs.url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
@@ -103,6 +127,24 @@ jobs:
           echo "Applying D1 migrations for staging..."
           npx wrangler d1 migrations apply stratum-staging --remote --env=staging
           echo "✓ Migrations applied successfully"
+
+      # Staging binds its own -staging queues (see wrangler.toml); a deploy
+      # fails if a bound queue doesn't exist, so create them idempotently.
+      - name: Ensure Staging Queues Exist
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for queue in stratum-events-staging stratum-imports-staging; do
+            if out=$(npx wrangler queues create "$queue" 2>&1); then
+              echo "✓ Created queue $queue"
+            elif echo "$out" | grep -qiE "already (exists|taken)|11009"; then
+              echo "✓ Queue $queue already exists"
+            else
+              echo "$out"
+              exit 1
+            fi
+          done
 
       - name: Deploy to Cloudflare Staging
         id: deploy
@@ -148,12 +190,12 @@ jobs:
       deployment_url: ${{ steps.deploy.outputs.url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
@@ -202,7 +244,7 @@ jobs:
 
       - name: Record deployment summary
         if: success()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const deploymentUrl = '${{ steps.deploy.outputs.url }}';
@@ -225,8 +267,14 @@ jobs:
 
       - name: Notify on failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
+          # Ride out transient GitHub API 5xx (503 brownouts have failed
+          # otherwise-green runs on nothing but the status comment). A retried
+          # POST can rarely duplicate a status comment — accepted trade-off vs.
+          # red runs. Every non-transient 4xx is exempt; 429 stays retryable.
+          retries: 3
+          retry-exempt-status-codes: 400,401,402,403,404,405,406,407,409,410,411,412,413,414,415,416,417,418,421,422,423,424,426,428,431,451
           script: |
             await github.rest.issues.create({
               owner: context.repo.owner,

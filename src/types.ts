@@ -150,6 +150,10 @@ export interface Env {
   MAX_BACKUP_BYTES?: string;
   /** Gates the RepoDO fast-forward path (ADR 004). Off -> classic cold merge. */
   REPO_DO_ENABLED?: string;
+  /** "true" routes a `git push` to a project's default branch through the
+   * change/eval gate (ADR 005 slice 2b) instead of refusing it. Staging-first
+   * rollout flag; off in production until validated end-to-end. */
+  GIT_PUSH_GATED_ENABLED?: string;
   /** Deploy environment: "development" | "staging" | "production". Gates dev-only
    * routes and toggles HSTS. Defaults to production-safe behavior when unset. */
   ENVIRONMENT?: string;

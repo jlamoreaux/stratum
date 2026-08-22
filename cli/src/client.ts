@@ -15,10 +15,15 @@ export interface ProjectRef {
   slug: string;
 }
 
-/** Parse "ns/slug" or "@ns/slug" into a project reference. */
+/**
+ * Parse "ns/slug" or "@ns/slug" into a project reference. Exactly two
+ * non-empty segments — extra segments are rejected rather than silently
+ * dropped, so a command can never operate on a different project than named.
+ */
 export function parseProjectRef(ref: string): ProjectRef {
-  const [nsRaw, slug] = ref.split("/", 2);
-  if (!nsRaw || !slug) {
+  const segments = ref.split("/");
+  const [nsRaw, slug] = segments;
+  if (segments.length !== 2 || !nsRaw || nsRaw === "@" || !slug) {
     throw new Error(`Invalid project reference '${ref}' — expected namespace/slug`);
   }
   return { namespace: nsRaw.startsWith("@") ? nsRaw : `@${nsRaw}`, slug };
@@ -76,10 +81,15 @@ export interface ActivityEvent {
   createdAt: string;
 }
 
+// Change creation runs the full evaluation suite synchronously server-side, so
+// the deadline must comfortably exceed a slow LLM + sandbox run.
+const DEFAULT_TIMEOUT_MS = 120_000;
+
 export class StratumClient {
   constructor(
     private host: string,
     private apiKey: string,
+    private opts: { timeoutMs?: number } = {},
   ) {}
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -89,27 +99,40 @@ export class StratumClient {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error("Stratum API request timed out")),
+      this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
+    // The timer stays armed through body parsing — the signal propagates into
+    // response.json(), so a server that stalls mid-body can't hang the request
+    // past the deadline.
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      let message = `HTTP ${response.status}`;
-      try {
-        const err = (await response.json()) as ApiErrorBody;
-        message = err.error ?? err.message ?? message;
-        if (err.reasons && err.reasons.length > 0) {
-          message += `\n  - ${err.reasons.join("\n  - ")}`;
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try {
+          const err = (await response.json()) as ApiErrorBody;
+          message = err.error ?? err.message ?? message;
+          if (err.reasons && err.reasons.length > 0) {
+            message += `\n  - ${err.reasons.join("\n  - ")}`;
+          }
+        } catch {
+          message = response.statusText || message;
         }
-      } catch {
-        message = response.statusText || message;
+        throw new Error(message);
       }
-      throw new Error(message);
-    }
 
-    return response.json() as Promise<T>;
+      return (await response.json()) as T;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // ── Projects ────────────────────────────────────────────────────────────
@@ -229,7 +252,10 @@ export class StratumClient {
     const params = new URLSearchParams();
     if (opts?.force) params.set("force", "true");
     if (opts?.strategy) params.set("strategy", opts.strategy);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
+    // params.size needs Node >= 18.16; the serialized string works on every
+    // release the engines field allows.
+    const serialized = params.toString();
+    const query = serialized ? `?${serialized}` : "";
     return this.request<{
       merged: boolean;
       commit?: string;

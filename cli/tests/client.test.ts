@@ -17,6 +17,15 @@ describe("parseProjectRef", () => {
   it("rejects malformed references", () => {
     expect(() => parseProjectRef("just-a-name")).toThrow(/namespace\/slug/);
   });
+
+  it("rejects extra path segments instead of silently truncating", () => {
+    expect(() => parseProjectRef("team/repo/extra")).toThrow(/namespace\/slug/);
+  });
+
+  it("rejects an empty namespace", () => {
+    expect(() => parseProjectRef("@/repo")).toThrow(/namespace\/slug/);
+    expect(() => parseProjectRef("/repo")).toThrow(/namespace\/slug/);
+  });
 });
 
 describe("StratumClient", () => {

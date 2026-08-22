@@ -130,7 +130,7 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # REFERRAL_SERVICE_URL = "https://your-referral-service.example.com"
 
 # Secrets — set via: wrangler secret put <NAME>
-# POSTHOG_API_KEY =
+# POSTHOG_API_KEY =  # telemetry sends route patterns only, never concrete paths
 # STRATUM_TELEMETRY_DISABLED = "true"  # uncomment to disable telemetry for self-hosted
 # GITHUB_CLIENT_ID =
 # GITHUB_CLIENT_SECRET =
@@ -235,20 +235,22 @@ DEV_LOGIN_ENABLED = "false"
 # bound" at merge time and workspace staging silently no-ops. The config-guard
 # middleware logs an error if this is set "true" with no bucket bound.
 REPO_DO_ENABLED = "false"
+# Gated git push (ADR 005 slice 2b) — off until validated on staging; pushes to
+# a project URL keep getting the in-protocol refusal pointing at workspaces.
+GIT_PUSH_GATED_ENABLED = "false"
 # Production OAuth callbacks. The matching callback URLs must also be registered
 # in the GitHub and Google OAuth app settings.
 OAUTH_REDIRECT_URI = "https://app.usestratum.dev/auth/github/callback"
 GOOGLE_REDIRECT_URI = "https://app.usestratum.dev/auth/google/callback"
-# Closed beta — invite code required at signup. The gate fails closed, so
-# REFERRAL_SERVICE_URL must point at a LIVE referral service over a real public
-# hostname: Worker->Worker subrequests over *.workers.dev are intermittently
-# 404'd by the edge, so the referral service has its own custom domain
-# (referral.usestratum.dev -> stratum-landing Worker). The apex usestratum.dev
-# is still on the legacy Pages project; fold this into usestratum.dev after that
-# cutover if desired.
-# REFERRAL_SERVICE_SECRET is set out-of-band via `wrangler secret put` and must
-# match the value on the stratum-landing Worker.
-BETA_GATE = "1"
+# Open signup — the closed-beta invite gate is OFF in production ("available
+# today" is the positioning; Origin launched to every paid Cursor plan).
+# To re-enable the invite wall set BETA_GATE = "1"; the gate fails closed and
+# needs REFERRAL_SERVICE_URL live (referral.usestratum.dev -> stratum-landing
+# Worker; *.workers.dev subrequests are intermittently 404'd by the edge, hence
+# the custom domain). REFERRAL_SERVICE_SECRET is set out-of-band via
+# `wrangler secret put` and must match the stratum-landing Worker. Staging keeps
+# the gate ON so the invite path stays exercised end-to-end.
+BETA_GATE = "0"
 REFERRAL_SERVICE_URL = "https://referral.usestratum.dev"
 
 # =============================================================================
@@ -313,25 +315,29 @@ script_name = "stratum-staging"
 binding = "REPO_OBJECTS"
 bucket_name = "stratum-repo-objects-staging"
 
+# Staging gets its own queues: queue names are account-level, so sharing
+# "stratum-events"/"stratum-imports" with production delivered every staging
+# message to the PRODUCTION consumer, whose D1 has no matching outbox row —
+# each one was dropped ("Event row missing for queue message") and staging's
+# 5-minute sweep cron re-enqueued it until its attempt budget ran out. The
+# -staging suffix keeps each environment's producer/consumer pair on its own
+# database. The CI staging deploy creates these queues idempotently.
 [[env.staging.queues.producers]]
 binding = "EVENTS_QUEUE"
-queue = "stratum-events"
+queue = "stratum-events-staging"
 
 [[env.staging.queues.producers]]
 binding = "IMPORT_QUEUE"
-queue = "stratum-imports"
+queue = "stratum-imports-staging"
 
-# Staging queue consumers for testing
-# These are disabled by default to prevent staging from competing with production
-# Enable when running integration tests: wrangler deploy --env=staging
-# [[env.staging.queues.consumers]]
-# queue = "stratum-events-staging"
-#
-# [[env.staging.queues.consumers]]
-# queue = "stratum-imports-staging"
-# max_batch_size = 1
-# max_retries = 3
-# retry_delay = 30
+[[env.staging.queues.consumers]]
+queue = "stratum-events-staging"
+
+[[env.staging.queues.consumers]]
+queue = "stratum-imports-staging"
+max_batch_size = 1
+max_retries = 3
+retry_delay = 30
 
 [[env.staging.send_email]]
 name = "EMAIL"
@@ -343,6 +349,10 @@ DEV_LOGIN_ENABLED = "false"
 # RepoDO + R2 merge path (ADR 004). "true" on staging: workspace commits stage to
 # R2 and merges route through the fetch-free R2 path (cold path as fallback).
 REPO_DO_ENABLED = "true"
+# Gated git push (ADR 005 slice 2b): a push to a project's default branch lands
+# on a server-managed workspace and opens an eval-gated change. Staging-first;
+# flip production once validated end-to-end against real Artifacts.
+GIT_PUSH_GATED_ENABLED = "true"
 OAUTH_REDIRECT_URI = "https://staging.app.usestratum.dev/auth/github/callback"
 EMAIL_FROM_ADDRESS = "noreply@staging.app.usestratum.dev"
 # Closed beta — validate the invite gate on staging before prod. Points at the

@@ -1,6 +1,6 @@
 # Stratum Architecture
 
-**Last Updated:** 2026-08-07  
+**Last Updated:** 2026-08-18  
 **Strategic Position:** Progressive buy-in platform supporting both GitHub layer mode and full alternative mode
 
 ## Overview
@@ -508,33 +508,150 @@ Redirect to dashboard
 
 ## File Structure
 
-A directory-level map (representative, not an exhaustive file list):
-
 ```text
 src/
-├── index.ts        # Hono app entry: middleware chain, route mounts, fetch/scheduled/queue handlers
-├── types.ts        # Shared types (Env bindings, queue message shapes)
-├── scheduled.ts    # Cron → job dispatch (backup, event/deletion sweeps, project sync)
-├── routes/         # HTTP handlers: projects, workspaces, changes, reviews, issues, agents,
-│                   #   orgs, users; auth (login, signup, email-auth, oauth, sessions);
-│                   #   sync + sync-management, webhooks, git-http (smart-HTTP proxy), health,
-│                   #   metrics, audit, backup, restore, deletion-jobs, backfill, ui
-├── storage/        # D1/KV data access (Result-typed): users, sessions, projects, changes,
-│                   #   issues, orgs, teams, provenance, deletion, d1-backup, …
-├── github/         # GitHub bridge: API client, inbound webhooks, bidirectional sync
-├── evaluation/     # Evaluator engine + built-ins (diff, secret-scan, webhook, LLM, sandbox) + policy loader
-├── merge/          # Merge gate: branch-protection enforcement + post-merge hooks
-├── queue/          # Consumers & durable objects: import-queue, event-consumer, merge-queue (DO),
-│                   #   repo-do (DO), deletion-runner, ttl-sweep
-├── backup/         # Backup orchestration + restore: run-backup, repo-snapshot, plan-restore, repo-restore
-├── middleware/     # security-headers, config-guard, auth, csrf, rate-limit, analytics
-├── analytics/      # PostHog event helpers
-├── monitoring/     # Analytics-Engine metrics emission
-├── email/          # Transactional email templates (magic links)
-├── templates/      # Shared server-rendered HTML templates
-├── beta/           # Closed-beta gate (referral-service integration)
-├── ui/             # Server-rendered Hono JSX: layout, styles, components/, pages/
-└── utils/          # errors, logger, result, response, crypto, validation
+├── index.ts                 # Hono app entry
+├── scheduled.ts             # Cron (scheduled event) entry point
+├── types.ts                 # Shared types
+├── analytics/
+│   └── posthog.ts           # PostHog product analytics
+├── backup/
+│   ├── plan-restore.ts      # Restore planning
+│   ├── repo-restore.ts      # Repository restore
+│   ├── repo-snapshot.ts     # Repository snapshotting
+│   └── run-backup.ts        # Backup orchestration
+├── beta/
+│   └── gate.ts              # Beta access gating
+├── email/
+│   └── templates.ts         # Email templates
+├── evaluation/
+│   ├── index.ts
+│   ├── types.ts
+│   ├── composite-evaluator.ts
+│   ├── diff-evaluator.ts
+│   ├── llm-evaluator.ts
+│   ├── sandbox-evaluator.ts
+│   ├── webhook-evaluator.ts
+│   ├── secret-scanner.ts
+│   └── policy-loader.ts     # Evaluation policy loading
+├── github/
+│   ├── client.ts            # GitHub API client
+│   ├── sync.ts              # Bidirectional sync logic
+│   └── webhooks.ts          # Webhook event handling
+├── merge/
+│   ├── post-merge.ts        # Post-merge actions
+│   └── protection.ts        # Merge protection rules
+├── middleware/
+│   ├── analytics.ts         # Analytics tracking
+│   ├── auth.ts              # Auth middleware
+│   ├── config-guard.ts      # Config validation guard
+│   ├── csrf.ts              # CSRF protection
+│   ├── rate-limit.ts        # Rate limiting
+│   └── security-headers.ts  # Security headers
+├── monitoring/
+│   └── analytics.ts         # Operational metrics
+├── queue/
+│   ├── deletion-runner.ts   # Deletion job processing
+│   ├── event-consumer.ts    # Event queue consumer
+│   ├── events.ts            # Event definitions
+│   ├── group-commit.ts      # Grouped commit handling
+│   ├── import-queue.ts      # Import job processor
+│   ├── issue-autoclose.ts   # Auto-close issues on merge
+│   ├── merge-queue.ts       # Merge queue durable object
+│   ├── repo-do.ts           # Repository durable object
+│   ├── ttl-sweep.ts         # TTL cleanup
+│   └── webhook-delivery.ts  # Outbound webhook delivery
+├── routes/
+│   ├── agents.ts            # Agent management
+│   ├── audit.ts             # Audit log
+│   ├── auth.ts              # Main auth routes
+│   ├── backfill.ts          # Backfill operations
+│   ├── backup.ts            # Backup endpoints
+│   ├── bulk-import.ts       # Bulk import functionality
+│   ├── changes.ts           # Change lifecycle
+│   ├── deletion-jobs.ts     # Deletion job management
+│   ├── email-auth.tsx       # Magic link authentication
+│   ├── git-http.ts          # Git smart-HTTP proxy (see ADR 005)
+│   ├── health.ts            # Health check endpoints
+│   ├── issues.ts            # Issue tracking
+│   ├── login.tsx            # Login page
+│   ├── metrics.ts           # Admin metrics
+│   ├── orgs.ts              # Organization management
+│   ├── projects.ts          # Project CRUD
+│   ├── restore.ts           # Restore endpoints
+│   ├── reviews.ts           # Change reviews
+│   ├── sessions.ts          # Session management
+│   ├── signup.tsx           # Signup page
+│   ├── sync-management.ts   # Git sync management
+│   ├── sync.ts              # Sync operations
+│   ├── ui.tsx               # UI routes
+│   ├── users.ts             # User management
+│   ├── webhooks.ts          # Webhook handlers
+│   └── workspaces.ts        # Workspace management
+├── services/
+│   └── change-flow.ts       # Eval-gated change flow orchestration
+├── storage/
+│   ├── git-providers/       # Provider adapters (github.ts, gitlab.ts,
+│   │                        #   bitbucket.ts, index.ts, types.ts)
+│   ├── agents.ts
+│   ├── audit.ts
+│   ├── backfill-plan.ts
+│   ├── backup-store.ts
+│   ├── change-reviews.ts
+│   ├── changes.ts
+│   ├── costs.ts
+│   ├── d1-backup.ts
+│   ├── deletion-jobs.ts
+│   ├── deletion.ts
+│   ├── eval-runs.ts
+│   ├── events.ts
+│   ├── git-objects.ts
+│   ├── git-ops.ts
+│   ├── github-bridge.ts     # GitHub integration storage
+│   ├── imports.ts
+│   ├── issues.ts
+│   ├── kv-backup.ts
+│   ├── magic-links.ts
+│   ├── memory-fs.ts
+│   ├── metrics.ts
+│   ├── object-loader.ts
+│   ├── object-store.ts
+│   ├── orgs.ts
+│   ├── provenance.ts
+│   ├── repo-snapshot.ts
+│   ├── sessions.ts
+│   ├── state.ts             # KV state management
+│   ├── sync.ts              # Sync status tracking
+│   ├── teams.ts
+│   ├── users.ts
+│   └── webhooks.ts
+├── templates/
+│   └── index.ts             # Project templates
+├── ui/
+│   ├── layout.tsx           # Base layout component
+│   ├── styles.ts            # CSS styles
+│   ├── file-content.ts      # File content rendering
+│   ├── file-tree.ts         # File tree rendering
+│   ├── highlight.ts         # Syntax highlighting
+│   ├── components/          # UI components (conflict-resolution.tsx,
+│   │                        #   diff-view.tsx, file-tree.tsx, import-progress.tsx)
+│   └── pages/               # Page components (activity, change-detail, changes,
+│                            #   file-viewer, home, issues, new-project, repo,
+│                            #   settings, sync, webhooks, workspaces)
+└── utils/
+    ├── admin.ts             # Admin helpers
+    ├── authz.ts             # Authorization helpers
+    ├── crypto.ts            # Encryption utilities
+    ├── errors.ts            # Error classes
+    ├── git-protocol.ts      # Git wire protocol helpers
+    ├── html.ts              # HTML helpers
+    ├── ids.ts               # ID generation
+    ├── logger.ts            # Logger setup
+    ├── phase-timer.ts       # Phase timing instrumentation
+    ├── response.ts          # Response helpers
+    ├── result.ts            # Result type
+    ├── username-validation.ts
+    └── validation.ts        # Input validation
 ```
 
 ## Scaling Considerations
@@ -597,7 +714,6 @@ src/
 ## Related Documents
 
 - [TODO.md](../../TODO.md) - Current priorities and roadmap
-- [Current Capabilities](../CURRENT_CAPABILITIES.md) - Authoritative shipped-feature state
 - [Database Schema](database.md) - Detailed D1 schema
 - [Queue Processing](queues.md) - Queue architecture
 - [Testing Guide](testing.md) - Testing patterns

@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from "hono";
+import { routePath } from "hono/route";
 import { createPostHogClient } from "../analytics/posthog";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
@@ -17,10 +18,15 @@ export const analyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (
   const latency = Date.now() - start;
   const userId = c.get("userId");
   const agentId = c.get("agentId");
+  // Report the matched route pattern (e.g. /:namespace/:slug/blob/*), never
+  // the concrete path — namespaces, repo slugs, change ids, and file paths
+  // must not leave the process. Route patterns are source-code literals, so
+  // they carry no request data by construction.
+  const route = routePath(c, -1);
 
   logger.debug("Recording analytics", {
     method: c.req.method,
-    path,
+    route,
     status: c.res.status,
     latency_ms: latency,
     userId,
@@ -34,7 +40,7 @@ export const analyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (
     distinctId,
     properties: {
       method: c.req.method,
-      path,
+      route,
       status: c.res.status,
       latency_ms: latency,
       // Unattributed events would otherwise accrete on a shared "server"
