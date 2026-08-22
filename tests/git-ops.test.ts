@@ -1,14 +1,35 @@
-import { describe, expect, it, vi } from "vitest";
+import git, { Errors as GitErrors } from "isomorphic-git";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  MergeConflictError,
   artifactsRepoNameFromRemote,
   buildUnifiedDiff,
   extractTokenSecret,
   freshRepoToken,
+  mergeWorkspaceIntoProject,
   walkDir,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
 import type { ArtifactsNamespace } from "../src/types";
 import type { Logger } from "../src/utils/logger";
+
+// Mock only the git functions the merge path drives over the network; keep the
+// real Errors classes so classification is exercised against the genuine shapes.
+vi.mock("isomorphic-git", async (importActual) => {
+  const actual = await importActual<typeof import("isomorphic-git")>();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      clone: vi.fn(),
+      addRemote: vi.fn(),
+      fetch: vi.fn(),
+      resolveRef: vi.fn(),
+      merge: vi.fn(),
+      push: vi.fn(),
+    },
+  };
+});
 
 const noopLogger: Logger = {
   debug: () => {},
@@ -226,5 +247,185 @@ describe("buildUnifiedDiff", () => {
     expect(diff).toContain("diff --git a/src/old.ts b/src/old.ts");
     expect(diff).toContain("deleted file mode 100644");
     expect(diff).toContain("-export const old = true;");
+  });
+});
+
+describe("mergeWorkspaceIntoProject merge-failure classification (#185)", () => {
+  const projectRemote = "https://acct.artifacts.cloudflare.net/git/ns/owner__project.git";
+  const workspaceRemote = "https://acct.artifacts.cloudflare.net/git/ns/owner__ws.git";
+
+  const doMerge = () =>
+    mergeWorkspaceIntoProject(projectRemote, "pt", workspaceRemote, "wt", noopLogger);
+
+  beforeEach(() => {
+    vi.mocked(git.clone).mockReset().mockResolvedValue(undefined);
+    vi.mocked(git.addRemote).mockReset().mockResolvedValue(undefined);
+    vi.mocked(git.fetch)
+      .mockReset()
+      .mockResolvedValue({} as Awaited<ReturnType<typeof git.fetch>>);
+    vi.mocked(git.resolveRef).mockReset().mockResolvedValue("ws-sha");
+    vi.mocked(git.merge).mockReset();
+    vi.mocked(git.push)
+      .mockReset()
+      .mockResolvedValue({ ok: true } as unknown as Awaited<ReturnType<typeof git.push>>);
+  });
+
+  it("propagates the exact conflicting file list on a real merge conflict", async () => {
+    vi.mocked(git.merge).mockRejectedValue(
+      new GitErrors.MergeConflictError(
+        ["src/a.ts", "docs/readme.md"],
+        ["src/a.ts", "docs/readme.md"],
+        [],
+        [],
+      ),
+    );
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("MERGE_CONFLICT");
+      expect(result.error.statusCode).toBe(409);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([
+        "src/a.ts",
+        "docs/readme.md",
+      ]);
+    }
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it("merges with abortOnConflict: false so real conflicts carry their file list", async () => {
+    vi.mocked(git.merge).mockResolvedValue({
+      oid: "merged-sha",
+    } as Awaited<ReturnType<typeof git.merge>>);
+
+    await doMerge();
+
+    expect(git.merge).toHaveBeenCalledWith(expect.objectContaining({ abortOnConflict: false }));
+  });
+
+  it("classifies a conflict by code when instanceof fails (duplicate module instance)", async () => {
+    const foreign = Object.assign(new Error("Automatic merge failed: README.md"), {
+      code: "MergeConflictError",
+      data: { filepaths: ["README.md"], bothModified: ["README.md"] },
+    });
+    vi.mocked(git.merge).mockRejectedValue(foreign);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual(["README.md"]);
+    }
+  });
+
+  it("falls back to an empty file list when a code-matched conflict carries no data", async () => {
+    const foreign = Object.assign(new Error("merge conflict"), { code: "MergeConflictError" });
+    vi.mocked(git.merge).mockRejectedValue(foreign);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([]);
+    }
+  });
+
+  it("maps MergeNotSupportedError to a conflict with no file list", async () => {
+    vi.mocked(git.merge).mockRejectedValue(new GitErrors.MergeNotSupportedError());
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect(result.error.statusCode).toBe(409);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([]);
+    }
+  });
+
+  it("classifies MergeNotSupportedError by code when instanceof fails (duplicate module instance)", async () => {
+    const foreign = Object.assign(new Error("merge not supported"), {
+      code: "MergeNotSupportedError",
+    });
+    vi.mocked(git.merge).mockRejectedValue(foreign);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("MERGE_CONFLICT");
+      expect(result.error.statusCode).toBe(409);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([]);
+    }
+  });
+
+  it("does NOT report an operational failure (network) as a merge conflict", async () => {
+    vi.mocked(git.merge).mockRejectedValue(new Error("connect ETIMEDOUT 203.0.113.9:443"));
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).not.toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+      expect(result.error.statusCode).toBe(502);
+      expect(result.error.message).toContain("ETIMEDOUT");
+    }
+  });
+
+  it("does NOT report an HTTP-layer git error as a merge conflict", async () => {
+    vi.mocked(git.merge).mockRejectedValue(
+      new GitErrors.HttpError(502, "Bad Gateway", "upstream unavailable"),
+    );
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).not.toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+      expect(result.error.statusCode).toBe(502);
+    }
+  });
+
+  it("surfaces a push failure after a clean merge as an external service error", async () => {
+    vi.mocked(git.merge).mockResolvedValue({
+      oid: "merged-sha",
+    } as Awaited<ReturnType<typeof git.merge>>);
+    vi.mocked(git.push).mockRejectedValue(new Error("503 Service Unavailable"));
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).not.toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+    }
+  });
+
+  it("errors when the merge succeeds without producing a commit oid", async () => {
+    vi.mocked(git.merge).mockResolvedValue({} as Awaited<ReturnType<typeof git.merge>>);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+  });
+
+  it("returns the merge commit oid and pushes when the merge succeeds", async () => {
+    vi.mocked(git.merge).mockResolvedValue({
+      oid: "merged-sha",
+    } as Awaited<ReturnType<typeof git.merge>>);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toBe("merged-sha");
+    expect(git.push).toHaveBeenCalled();
   });
 });

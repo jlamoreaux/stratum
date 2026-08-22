@@ -1,5 +1,5 @@
 import { createPatch } from "diff";
-import git from "isomorphic-git";
+import git, { Errors as GitErrors } from "isomorphic-git";
 import type { ArtifactsCreateResult, ArtifactsNamespace, Author, CommitLogEntry } from "../types";
 import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -130,6 +130,31 @@ export interface MergeWorkspaceOptions {
    * workspace history, else the merge fails closed.
    */
   workspaceSha?: string;
+}
+
+/**
+ * Matches an isomorphic-git error class by `instanceof` as well as by its
+ * static `code`, so a duplicated module instance (dual ESM/CJS load) still
+ * classifies correctly.
+ */
+function matchesGitError(
+  error: unknown,
+  errorClass: { code: string } & (new (...args: never[]) => unknown),
+): boolean {
+  return (
+    error instanceof errorClass ||
+    (error instanceof Error && (error as { code?: unknown }).code === errorClass.code)
+  );
+}
+
+/**
+ * isomorphic-git reports a genuine content conflict as its own
+ * `MergeConflictError`, carrying the conflicting paths in `data.filepaths`.
+ */
+function isGitMergeConflict(
+  error: unknown,
+): error is InstanceType<typeof GitErrors.MergeConflictError> {
+  return matchesGitError(error, GitErrors.MergeConflictError);
 }
 
 export class MergeConflictError extends AppError {
@@ -541,6 +566,12 @@ export async function mergeWorkspaceIntoProject(
         theirs: workspaceSha,
         author,
         message: "Merge workspace into project",
+        // isomorphic-git defaults to true, which throws the file-list-less
+        // MergeNotSupportedError for any conflict its diff3 algorithm can't
+        // auto-resolve. false lets it write conflict markers instead and throw
+        // MergeConflictError with the real filepaths — safe here since `dir` is
+        // a fresh, throwaway MemoryFS clone discarded after this call returns.
+        abortOnConflict: false,
       }),
     ),
   );
@@ -549,8 +580,33 @@ export async function mergeWorkspaceIntoProject(
     const message =
       mergeResult.error instanceof Error ? mergeResult.error.message : String(mergeResult.error);
     logger.error("Merge failed", mergeResult.error, { projectRemote, workspaceRemote, message });
+    if (isGitMergeConflict(mergeResult.error)) {
+      const filepaths = Array.isArray(mergeResult.error.data?.filepaths)
+        ? mergeResult.error.data.filepaths
+        : [];
+      return err(
+        new MergeConflictError(
+          `Merge failed; workspace may be stale or conflicting: ${message}`,
+          filepaths,
+        ),
+      );
+    }
+    // isomorphic-git throws MergeNotSupportedError for conflict shapes it can't
+    // auto-resolve (e.g. add/add) and for histories with no single merge base —
+    // still content conflicts the caller must resolve, just with no file list.
+    if (matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)) {
+      return err(
+        new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`),
+      );
+    }
+    // Anything else (network, auth, corrupt objects) is an operational failure —
+    // surface it as such rather than telling the client to resolve conflicts.
     return err(
-      new MergeConflictError(`Merge failed; workspace may be stale or conflicting: ${message}`),
+      new ExternalServiceError(
+        "Git",
+        `Merge failed: ${message}`,
+        mergeResult.error instanceof Error ? mergeResult.error : undefined,
+      ),
     );
   }
 
