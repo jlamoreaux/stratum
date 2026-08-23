@@ -7,8 +7,10 @@ import {
   listDeliveries,
   listWebhooks,
   setWebhookActive,
+  webhookBelongsToProject,
   webhookMatchesEvent,
 } from "../src/storage/webhooks";
+import type { Webhook } from "../src/storage/webhooks";
 import type { Env } from "../src/types";
 import type { Logger } from "../src/utils/logger";
 import { validateWebhookUrl } from "../src/utils/validation";
@@ -80,6 +82,29 @@ describe("webhook storage", () => {
     if (!forAlice.success) return;
     expect(forAlice.data).toHaveLength(1);
     expect(forAlice.data[0]?.url).toBe("https://alice.example.com/hook");
+  });
+
+  it("webhookBelongsToProject scopes management by id, not the free-form name", () => {
+    const base: Webhook = {
+      id: "wh_1",
+      project: "api",
+      projectId: "proj_alice",
+      url: "https://alice.example.com/hook",
+      secret: "stm_whsec_x",
+      events: "*",
+      active: true,
+      createdBy: "alice",
+      createdAt: new Date().toISOString(),
+    };
+
+    // Same id → owned.
+    expect(webhookBelongsToProject(base, { id: "proj_alice", name: "api" })).toBe(true);
+    // A different project that merely shares the name must NOT own it (the leak).
+    expect(webhookBelongsToProject(base, { id: "proj_bob", name: "api" })).toBe(false);
+    // Legacy row with no project_id falls back to the name.
+    const legacy: Webhook = { ...base, projectId: undefined };
+    expect(webhookBelongsToProject(legacy, { id: "proj_bob", name: "api" })).toBe(true);
+    expect(webhookBelongsToProject(legacy, { id: "proj_bob", name: "other" })).toBe(false);
   });
 
   it("lists, toggles, and deletes webhooks", async () => {

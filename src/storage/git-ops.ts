@@ -6,7 +6,7 @@ import type { Logger } from "../utils/logger";
 import type { PhaseTimer } from "../utils/phase-timer";
 import { type Result, err, fromPromise, ok } from "../utils/result";
 import { commitObject } from "./git-objects";
-import { MemoryFS } from "./memory-fs";
+import { MODE_SYMLINK, MemoryFS } from "./memory-fs";
 import { packObjects, placeLooseObject, unpackObjects } from "./object-loader";
 
 // Custom HTTP client for Cloudflare Workers
@@ -95,13 +95,15 @@ const DIR = "/";
 export interface NodeFS {
   promises: {
     readFile(path: string, options?: { encoding?: string }): Promise<string | Uint8Array>;
-    writeFile(path: string, data: string | Uint8Array): Promise<void>;
+    writeFile(path: string, data: string | Uint8Array, options?: { mode?: number }): Promise<void>;
     unlink(path: string): Promise<void>;
     readdir(path: string): Promise<string[]>;
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     rmdir(path: string): Promise<void>;
     stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
     lstat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+    readlink(path: string): Promise<string>;
+    symlink(target: string, path: string): Promise<void>;
   };
 }
 
@@ -244,9 +246,16 @@ export async function freshRepoToken(
 }
 
 /**
- * Push the local `main` ref (its objects + the ref) to an Artifacts remote.
- * Used by backup restore to publish a reconstructed repo. `force` overwrites a
- * non-empty remote (restore-over-existing behind an explicit opt-in).
+ * Publishes the local `main` branch to a remote repository.
+ *
+ * `force` is opt-in because it overwrites the remote's `main` outright — the
+ * project's canonical branch — so defaulting it on would discard any commits
+ * pushed by someone else since this clone was taken. Backup restore is the
+ * caller that does pass it, to publish a reconstructed repo over an existing
+ * one; `pushTags` mirrors the same opt-in for the same reason.
+ *
+ * @param opts - Controls whether an existing remote `main` branch may be overwritten.
+ * @returns No value on success, or an application error if the push fails.
  */
 export async function pushMain(
   remote: string,
@@ -275,6 +284,121 @@ export async function pushMain(
   return ok(undefined);
 }
 
+/**
+ * Pushes local `refs/tags/*` to an Artifacts remote.
+ *
+ * Runs after `pushMain` during backup restore so a restored repo carries its
+ * tags; `force` mirrors the same restore-over-existing opt-in `pushMain` uses,
+ * for the same reason.
+ *
+ * @param tagNames - The tag names to push.
+ * @param opts - Controls whether existing remote tags may be replaced.
+ * @returns An empty result on success, or an error describing the first failed tag push.
+ */
+export async function pushTags(
+  remote: string,
+  token: string,
+  fs: NodeFS,
+  dir: string,
+  tagNames: string[],
+  logger: Logger,
+  opts?: { force?: boolean },
+): Promise<Result<void, AppError>> {
+  // Tags are pushed one ref at a time, so a mid-list failure leaves earlier tags
+  // on the remote. Report exactly which ones landed: a forced restore over an
+  // existing repo is not rolled back, and an operator (or a retry, which is
+  // idempotent for already-pushed tags) needs to know how far it got.
+  const pushedTags: string[] = [];
+  for (const [index, name] of tagNames.entries()) {
+    const ref = `refs/tags/${name}`;
+    const res = await fromPromise(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: remote,
+        ref,
+        remoteRef: ref,
+        onAuth: makeAuth(token),
+        force: opts?.force ?? false,
+      }),
+    );
+    if (!res.success) {
+      logger.error("Failed to push tag during restore", res.error, {
+        remote,
+        ref,
+        failedTag: name,
+        pushedTags,
+        unpushedTags: tagNames.slice(index + 1),
+      });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to push tag ${name} during restore (${pushedTags.length}/${tagNames.length} tags pushed before the failure)`,
+          res.error,
+        ),
+      );
+    }
+    pushedTags.push(name);
+  }
+  return ok(undefined);
+}
+
+/**
+ * Pushes the local `main` branch to a branch on an external remote — e.g.
+ * GitHub's `stratum/<changeId>` ref before a PR is opened (#189).
+ *
+ * Auth is HTTP basic with the token as the password; GitHub accepts any
+ * username alongside a token. `force` defaults to false because `remoteRef` is
+ * caller-supplied and could name a branch this app does not own — a defaulted
+ * force-push there would destroy someone else's work. Pass `force: true`
+ * explicitly, and only when overwriting a ref Stratum owns (re-promotion).
+ *
+ * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
+ * @returns A successful result when the push completes, or an application error when it fails.
+ */
+export async function pushBranchToRemote(
+  fs: NodeFS,
+  dir: string,
+  opts: { url: string; remoteRef: string; token: string; force?: boolean },
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  const res = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: opts.url,
+      ref: "main",
+      remoteRef: opts.remoteRef,
+      onAuth: () => ({ username: "x-access-token", password: opts.token }),
+      force: opts.force ?? false,
+    }),
+  );
+  if (!res.success) {
+    const cause = res.error instanceof Error ? res.error.message : String(res.error);
+    logger.error("Failed to push branch to remote", res.error, {
+      url: opts.url,
+      remoteRef: opts.remoteRef,
+    });
+    return err(new ExternalServiceError("Git", `Failed to push branch: ${cause}`, res.error));
+  }
+  return ok(undefined);
+}
+
+/**
+ * Initializes a repository with the supplied files, commits them, and pushes the commit to `main`.
+ *
+ * Only valid against a remote with no history: this builds the root commit, so
+ * running it on a populated repository would orphan whatever is already there.
+ *
+ * @param remote - The remote repository URL
+ * @param token - The authentication token for the remote repository
+ * @param files - Files to add to the initial commit, keyed by path
+ * @param message - The commit message
+ * @param author - The commit author
+ * @returns The SHA of the pushed commit
+ */
 export async function initAndPush(
   remote: string,
   token: string,
@@ -338,12 +462,26 @@ export async function initAndPush(
   return ok(commitResult.data);
 }
 
+/**
+ * Clones the `main` branch of a repository into an in-memory filesystem.
+ *
+ * The whole tree lands in worker memory, which is what makes the depth choice
+ * a real tradeoff rather than a preference — see the `fullHistory` branch at
+ * the `depth` option for why backup needs full history and merges do not.
+ *
+ * @param remote - The repository URL to clone
+ * @param token - The authentication token for the repository
+ * @param opts - Clone options
+ * @param opts.fullHistory - Whether to clone the complete reachable history; otherwise, clone the most recent 50 commits
+ * @param opts.includeTags - Whether to follow the clone with a fetch of `refs/tags/*`; a `singleBranch` clone never brings tags
+ * @returns The cloned filesystem and its working directory, or an application error
+ */
 export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
+  opts: { fullHistory?: boolean; includeTags?: boolean } = {},
   httpClient: HttpClient = http,
-  opts: { fullHistory?: boolean } = {},
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
 
@@ -368,6 +506,30 @@ export async function cloneRepo(
   if (!cloneResult.success) {
     logger.error("Failed to clone repository", cloneResult.error, { remote });
     return err(new ExternalServiceError("Git", "Failed to clone repository", cloneResult.error));
+  }
+
+  // isomorphic-git's singleBranch clone requests ONLY the branch tip — tag refs
+  // are neither advertised locally nor are their objects fetched. Callers that
+  // need tags (tags listing, backup) opt in to a follow-up fetch of every remote
+  // ref with `tags: true`, which writes refs/tags/* and pulls the tag objects
+  // plus their targets (depth-limited unless fullHistory).
+  if (opts.includeTags) {
+    const tagFetch = await fromPromise(
+      git.fetch({
+        fs,
+        http: httpClient,
+        dir: DIR,
+        url: remote,
+        singleBranch: false,
+        tags: true,
+        ...(opts.fullHistory ? {} : { depth: 50 }),
+        onAuth: makeAuth(token),
+      }),
+    );
+    if (!tagFetch.success) {
+      logger.error("Failed to fetch tags after clone", tagFetch.error, { remote });
+      return err(new ExternalServiceError("Git", "Failed to fetch tags", tagFetch.error));
+    }
   }
 
   logger.info("Successfully cloned repository", { remote });
@@ -1192,7 +1354,86 @@ export async function batchMergeStagedTrees(
   return ok(results);
 }
 
-async function squashMerge(
+/**
+ * Removes a real directory subtree, leaf-first.
+ *
+ * The `lstat` gate is load-bearing, not a fast path. `MemoryFS.readdir` happens
+ * to report ENOTDIR for a symlink, but node's own `readdir` FOLLOWS a directory
+ * symlink — and `squashMerge` takes the `NodeFS` interface, not `MemoryFS`.
+ * Recursing on `readdir` alone would therefore walk into a link's target and
+ * delete files that were never part of this merge. Checking the entry first and
+ * descending only into real directories leaves any symlink for the caller to
+ * unlink, whichever implementation is behind the interface.
+ */
+async function removeSubtree(fs: NodeFS, full: string): Promise<void> {
+  let stat: { isDirectory(): boolean };
+  try {
+    stat = await fs.promises.lstat(full);
+  } catch {
+    return; // absent
+  }
+  if (!stat.isDirectory()) return; // file or symlink: the caller's unlink handles it
+
+  let entries: string[];
+  try {
+    entries = await fs.promises.readdir(full);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const child = `${full}/${entry}`;
+    await removeSubtree(fs, child);
+    await fs.promises.unlink(child).catch(() => {});
+  }
+  await fs.promises.rmdir(full).catch(() => {});
+}
+
+/**
+ * Clears anything whose *path shape* conflicts with what is about to be written.
+ *
+ * Two transitions corrupt the worktree if the old shape is left in place, and
+ * neither is caught by unlinking the target path alone:
+ *
+ * - A symlink at an ANCESTOR silently redirects the write. With `lib` a symlink
+ *   to `real/`, writing `lib/file.ts` lands at `real/file.ts` — verified
+ *   against MemoryFS, which resolves the link during the write. The merge then
+ *   reports success having written to the wrong path.
+ * - Replacing a directory with a symlink leaves the directory's children behind.
+ *   MemoryFS's `unlink` succeeds on a directory without removing descendants, so
+ *   `lib/a.ts` stays readable *through* the new `lib` symlink.
+ *
+ * Ancestors are probed with `lstat` and removed unless they are directories.
+ * The `NodeFS` shape has no `isSymbolicLink()`, but it does not need one here:
+ * a plain file blocks a descendant write exactly as a symlink redirects it, so
+ * "not a directory" is the whole test. `readlink` would be the narrower probe
+ * and misses the file case entirely -- it throws EINVAL there.
+ */
+async function clearConflictingPathShape(
+  fs: NodeFS,
+  projectDir: string,
+  path: string,
+): Promise<void> {
+  const parts = path.split("/");
+  for (let i = 1; i < parts.length; i++) {
+    const ancestor = `${projectDir}/${parts.slice(0, i).join("/")}`;
+    let stat: { isDirectory(): boolean };
+    try {
+      stat = await fs.promises.lstat(ancestor);
+    } catch {
+      continue; // absent: the write creates it
+    }
+    // Anything that is not a directory blocks a descendant write. `lstat`
+    // catches files and symlinks alike and does not follow links; probing with
+    // `readlink` would miss a plain file, which fails the write with ENOTDIR
+    // just as surely as a symlink redirects it.
+    if (stat.isDirectory()) continue;
+    await fs.promises.unlink(ancestor).catch(() => {});
+  }
+  await removeSubtree(fs, `${projectDir}/${path}`);
+}
+
+/** Exported for tests (the workdir copy must preserve file modes and symlinks). */
+export async function squashMerge(
   projectFs: NodeFS,
   projectDir: string,
   workspaceSha: string,
@@ -1211,20 +1452,56 @@ async function squashMerge(
 
   const workspaceFiles = workspaceFilesResult.data;
   const projectFiles = projectFilesResult.data;
-  const workspaceMap = new Map(workspaceFiles);
+  const workspaceMap = new Map(workspaceFiles.map(([path, oid]) => [path, oid]));
+  const projectMap = new Map(projectFiles.map(([path, oid, mode]) => [path, { oid, mode }]));
 
-  const changed = workspaceFiles.filter(([path, hash]) => {
-    const projectHash = projectFiles.find(([p]) => p === path)?.[1];
-    return projectHash !== hash;
+  // Compare oid AND mode so a mode-only change (chmod +x, file<->symlink) is
+  // carried over — the blob oid alone is identical in that case.
+  const changed = workspaceFiles.filter(([path, hash, mode]) => {
+    const projectEntry = projectMap.get(path);
+    return projectEntry?.oid !== hash || projectEntry?.mode !== mode;
   });
   const deleted = projectFiles.filter(([path]) => !workspaceMap.has(path));
+  // Every directory the workspace tree needs. A project path that is now one of
+  // these is not really deleted -- its *shape* changed. `lib` as a symlink in
+  // the project and `lib/file.ts` in the workspace makes `lib` look deleted,
+  // but writing the file recreates `lib` as a real directory, and unlinking it
+  // afterwards would either fail with EISDIR or destroy what was just written.
+  const workspaceDirs = new Set<string>();
+  for (const [path] of workspaceFiles) {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i++) workspaceDirs.add(parts.slice(0, i).join("/"));
+  }
 
-  for (const [path] of changed) {
-    const contentResult = await readFileAtCommit(projectFs, workspaceSha, path, logger);
-    if (!contentResult.success) return err(contentResult.error);
+  for (const [path, , mode] of changed) {
+    const blobResult = await fromPromise(
+      git.readBlob({ fs: projectFs, dir: DIR, oid: workspaceSha, filepath: path }),
+    );
+    if (!blobResult.success) {
+      logger.error("Failed to read file at commit", blobResult.error, { workspaceSha, path });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to read file: ${path} at commit: ${workspaceSha}`,
+          blobResult.error,
+        ),
+      );
+    }
+    const blob = blobResult.data.blob;
 
+    const fullPath = `${projectDir}/${path}`;
     try {
-      await projectFs.promises.writeFile(`${projectDir}/${path}`, contentResult.data);
+      // Drop whatever is at the path first so file<->symlink transitions and
+      // stale exec bits can't leak through the overwrite. The shape clear has
+      // to come first: unlinking `fullPath` cannot fix a symlink ancestor that
+      // would redirect the write, nor a directory whose children outlive it.
+      await clearConflictingPathShape(projectFs, projectDir, path);
+      await projectFs.promises.unlink(fullPath).catch(() => {});
+      if (mode === MODE_SYMLINK) {
+        await projectFs.promises.symlink(new TextDecoder().decode(blob), fullPath);
+      } else {
+        await projectFs.promises.writeFile(fullPath, blob, { mode });
+      }
     } catch (error) {
       const appError = error instanceof Error ? error : new Error(String(error));
       logger.error("Failed to write file during squash merge", appError, { path, projectRemote });
@@ -1244,12 +1521,44 @@ async function squashMerge(
   }
 
   for (const [path] of deleted) {
-    try {
-      await projectFs.promises.unlink(`${projectDir}/${path}`);
-    } catch (error) {
-      const appError = error instanceof Error ? error : new Error(String(error));
-      logger.error("Failed to unlink file during squash merge", appError, { path, projectRemote });
-      return err(new AppError(`Failed to unlink file: ${path}`, "FS_ERROR", 500));
+    // The worktree removal is conditional; the index removal below never is.
+    // Whatever happened on disk, the entry has to leave the index or the squash
+    // tree keeps a path the workspace does not have.
+    //
+    // Skip the unlink when the path -- or any ancestor of it -- is something
+    // the workspace now owns, because the entry no longer means what the
+    // project tree said it meant.
+    //
+    // Defensive rather than a fix for a reproducible bug: `MemoryFS.unlink`
+    // resolves paths literally and does not follow a symlink ancestor, so with
+    // `lib` replaced by a link, removing `lib/old.ts` returns ENOENT and leaves
+    // the link target alone (verified). `squashMerge` takes the `NodeFS`
+    // interface though, and node's own `fs` *does* traverse -- there the same
+    // unlink would delete a same-named file inside the target that was never
+    // part of this merge. The guard costs nothing and removes that dependency
+    // on which implementation is behind the interface.
+    const supersededByWorkspace =
+      workspaceDirs.has(path) ||
+      path
+        .split("/")
+        .slice(0, -1)
+        .some((_, i, all) => workspaceMap.has(all.slice(0, i + 1).join("/")));
+    if (!supersededByWorkspace) {
+      try {
+        await projectFs.promises.unlink(`${projectDir}/${path}`);
+      } catch (error) {
+        // Already gone is the desired end state, not a failure:
+        // `clearConflictingPathShape` above may have removed this path while
+        // making room for a changed one.
+        if (!(error instanceof AppError && error.code === "ENOENT")) {
+          const appError = error instanceof Error ? error : new Error(String(error));
+          logger.error("Failed to unlink file during squash merge", appError, {
+            path,
+            projectRemote,
+          });
+          return err(new AppError(`Failed to unlink file: ${path}`, "FS_ERROR", 500));
+        }
+      }
     }
 
     const removeResult = await fromPromise(
@@ -1538,8 +1847,8 @@ async function listFilesAtCommit(
   fs: NodeFS,
   ref: string,
   logger: Logger,
-): Promise<Result<[path: string, oid: string][], AppError>> {
-  const files: [string, string][] = [];
+): Promise<Result<[path: string, oid: string, mode: number][], AppError>> {
+  const files: [string, string, number][] = [];
   const walkResult = await fromPromise(
     git.walk({
       fs,
@@ -1550,7 +1859,14 @@ async function listFilesAtCommit(
         const type = await entry.type();
         if (type === "blob") {
           const oid = await entry.oid();
-          files.push([filepath, oid]);
+          const mode = await entry.mode();
+          files.push([filepath, oid, mode]);
+        } else if (type === "commit") {
+          // Gitlink (submodule reference) — MemoryFS has no checked-out submodule
+          // behind it (see MemoryStats.mode), so silently omitting it here would
+          // let squashMerge's diff miss an added/changed/removed submodule
+          // pointer. Fail closed instead of losing it.
+          throw new Error(`Gitlink (submodule) entry at "${filepath}" is not supported`);
         }
       },
     }),
@@ -1757,7 +2073,8 @@ export async function revertToCommit(
   return ok(revertSha);
 }
 
-async function walkDir(
+/** Exported for tests (mirrors real symlink-as-leaf traversal, no local copy). */
+export async function walkDir(
   fs: NodeFS,
   base: string,
   prefix: string,
@@ -1774,7 +2091,9 @@ async function walkDir(
       const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
 
       try {
-        const stat = await fs.promises.stat(fullPath);
+        // lstat: a symlink is a leaf entry (its own tree object), never recursed
+        // into — and a dangling link must not fail the whole walk via ENOENT.
+        const stat = await fs.promises.lstat(fullPath);
         if (stat.isDirectory()) {
           const subFilesResult = await walkDir(fs, fullPath, `${prefix}${entry}/`, logger);
           if (!subFilesResult.success) return err(subFilesResult.error);
@@ -2237,4 +2556,152 @@ export function buildUnifiedDiff(
   }
 
   return diffParts.join("\n");
+}
+
+/** A tag as listed from a cloned repo (see `collectRepoTags`). */
+export interface RepoTagEntry {
+  /** Tag name without the refs/tags/ prefix. */
+  name: string;
+  /** What refs/tags/<name> points at: the tag object for annotated tags, the
+   * target itself for lightweight ones. */
+  oid: string;
+  /** The peeled target (normally a commit sha), or null when it could not be
+   * determined (the tag object itself is missing locally). */
+  targetSha: string | null;
+  annotated: boolean;
+  /** Annotated-tag message (first tag object in a peel chain). */
+  message?: string;
+  /** Annotated-tag tagger as "Name <email>". */
+  tagger?: string;
+  /** Annotated-tag tagger timestamp (epoch seconds). */
+  timestamp?: number;
+  /** True when the tag's target object is not present locally — e.g. it points
+   * outside the shallow fetch window. The tag is still listed (degraded), never
+   * an error. */
+  unresolvable: boolean;
+}
+
+/**
+ * List every refs/tags/* in an already-cloned repo, dereferencing annotated tags
+ * to their target commit. Per-tag object reads are individually guarded: a tag
+ * whose object (or target) is missing locally — a shallow clone can drop a
+ * target outside the depth window — is returned with `unresolvable: true`
+ * rather than failing the whole listing.
+ */
+export async function collectRepoTags(
+  fs: NodeFS,
+  dir: string,
+  logger?: Logger,
+): Promise<RepoTagEntry[]> {
+  const names = await git.listTags({ fs, dir });
+  const entries: RepoTagEntry[] = [];
+  for (const name of [...names].sort()) {
+    let oid: string;
+    try {
+      oid = await git.resolveRef({ fs, dir, ref: `refs/tags/${name}` });
+    } catch (error) {
+      // Ref file unreadable — nothing meaningful to show for this tag. Logged so
+      // a corrupt ref store is distinguishable from a repo that simply has none.
+      logger?.warn("Skipping tag with unresolvable ref", {
+        tag: name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    const entry: RepoTagEntry = {
+      name,
+      oid,
+      targetSha: null,
+      annotated: false,
+      unresolvable: false,
+    };
+    // Peel annotated tags (a chain, in the degenerate tag-of-tag case) down to
+    // the target object. `current` lives outside the try so a missing TARGET
+    // still yields the intended sha from the tag object we did read.
+    let current = oid;
+    try {
+      // Peel until a non-tag target or a repeated oid (cycle) is hit — a
+      // visited-oid set rather than a fixed hop cap so a valid, unusually long
+      // tag-of-tag chain still resolves instead of being marked unresolvable.
+      const visited = new Set<string>();
+      let hop = 0;
+      while (entry.targetSha === null) {
+        if (visited.has(current)) break;
+        visited.add(current);
+        const obj = await git.readObject({ fs, dir, oid: current });
+        if (obj.type === "tag") {
+          const tag = obj.object as {
+            object: string;
+            message?: string;
+            tagger?: { name: string; email: string; timestamp: number };
+          };
+          entry.annotated = true;
+          if (hop === 0) {
+            if (typeof tag.message === "string") entry.message = tag.message.trim();
+            if (tag.tagger) {
+              entry.tagger = `${tag.tagger.name} <${tag.tagger.email}>`;
+              entry.timestamp = tag.tagger.timestamp;
+            }
+          }
+          current = tag.object;
+          hop++;
+        } else {
+          entry.targetSha = current;
+        }
+      }
+      // A peel chain that never terminated (cycle) is unresolvable too.
+      if (entry.targetSha === null) entry.unresolvable = true;
+    } catch (error) {
+      // The object at `current` is missing locally. If we peeled at least one
+      // tag object, `current` names the intended target — record it, degraded.
+      // Expected for a target outside the shallow window; logged at debug so a
+      // corrupt object store is still traceable.
+      logger?.debug("Tag target not present locally; listing it as unresolvable", {
+        tag: name,
+        oid: current,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      entry.targetSha = current === oid ? null : current;
+      entry.unresolvable = true;
+    }
+    entries.push(entry);
+  }
+  return entries;
+}
+
+/**
+ * Lists the tags in a repository, including entries whose targets cannot be
+ * resolved from the cloned history.
+ *
+ * The clone is shallow but fetches tag refs, so a tag whose target lies outside
+ * the shallow window is reported with `unresolvable: true` rather than raising:
+ * a tag pointing into unfetched history is expected here, not a failure, and
+ * erroring would make the whole listing unavailable because of one old tag.
+ * See `collectRepoTags`.
+ *
+ * @param remote - The repository's remote URL
+ * @param token - The authentication token for the remote
+ * @returns The repository's tag entries
+ */
+export async function listRepoTags(
+  remote: string,
+  token: string,
+  logger: Logger,
+  httpClient: HttpClient = http,
+): Promise<Result<RepoTagEntry[], AppError>> {
+  logger.debug("Listing repo tags", { remote });
+
+  const cloneResult = await cloneRepo(remote, token, logger, { includeTags: true }, httpClient);
+  if (!cloneResult.success) return err(cloneResult.error);
+
+  const collected = await fromPromise(
+    collectRepoTags(cloneResult.data.fs, cloneResult.data.dir, logger),
+  );
+  if (!collected.success) {
+    logger.error("Failed to collect repo tags", collected.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to list tags", collected.error));
+  }
+
+  logger.info("Successfully listed repo tags", { remote, tagCount: collected.data.length });
+  return ok(collected.data);
 }
