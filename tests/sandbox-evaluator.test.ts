@@ -113,6 +113,33 @@ describe("SandboxEvaluator — workspace tree materialization", () => {
     }
   });
 
+  it("waits for every file write to settle before destroying the sandbox", async () => {
+    // The failure this pins: Promise.all rejects on the first failure while its
+    // siblings are still in flight, so the `finally` could destroy the sandbox
+    // mid-write. Here one write rejects immediately and a sibling resolves
+    // slowly; destroy must not run until the slow one has finished.
+    const { binding, instance } = makeMockSandbox({ exitCode: 0 });
+    let slowWriteFinished = false;
+    let destroyedBeforeSlowWriteFinished = false;
+
+    (instance.writeFile as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) => {
+      if (path === "src/math.ts") throw new Error("disk full");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      slowWriteFinished = true;
+    });
+    (instance.destroy as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      if (!slowWriteFinished) destroyedBeforeSlowWriteFinished = true;
+    });
+
+    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles());
+    const result = await evaluator.evaluate("ignored diff", makePolicy(), mockLogger);
+
+    expect(destroyedBeforeSlowWriteFinished).toBe(false);
+    expect(slowWriteFinished).toBe(true);
+    // The write failure still surfaces — settling the batch must not swallow it.
+    expect(result.success).toBe(false);
+  });
+
   it("passes ref: undefined through when no commit is pinned", async () => {
     const { binding } = makeMockSandbox({ exitCode: 0 });
     const readFiles = makeReadFiles();

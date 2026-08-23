@@ -103,14 +103,17 @@ export class SandboxEvaluator implements Evaluator {
    *
    * Two kinds of failure, deliberately distinguished:
    *
-   * - The suite ran and did not pass, or could not run *inside* the sandbox
-   *   (install failed, no binding, no repo access): score 0 with
-   *   `passed: false`. An evaluation that could not run must never read as
-   *   one that passed, so these are verdicts, not errors.
-   * - The evaluated tree could not be reached or read at all, or the sandbox
-   *   itself threw: `err(ExternalServiceError)`. There is no verdict to give
-   *   here — the caller decides whether to retry or surface the failure, and
-   *   scoring 0 would fabricate a judgement about code we never saw.
+   * - The suite ran and did not pass, or a dependency install failed: score 0
+   *   with `passed: false`. An evaluation that could not run must never read
+   *   as one that passed, so these are verdicts, not errors.
+   * - The evaluated tree could not be reached or read, or the sandbox itself
+   *   threw: `err(ExternalServiceError)`. There is no verdict to give here —
+   *   the caller decides whether to retry or surface the failure, and scoring
+   *   0 would fabricate a judgement about code we never saw.
+   *
+   * A missing SANDBOX binding or missing repo access never reaches this method
+   * at all: `buildEvaluators` substitutes an `UnavailableEvaluator` at
+   * construction, which is what fails those closed.
    */
   async evaluate(
     _diff: string,
@@ -167,11 +170,17 @@ export class SandboxEvaluator implements Evaluator {
       const WRITE_CONCURRENCY = 16;
       const entries = [...files];
       for (let i = 0; i < entries.length; i += WRITE_CONCURRENCY) {
-        await Promise.all(
+        // allSettled, not all: `all` rejects on the first failure while its
+        // siblings are still in flight, and the `finally` below would then
+        // destroy the sandbox out from under them. Wait for the whole batch to
+        // settle, then surface the first failure.
+        const settled = await Promise.allSettled(
           entries
             .slice(i, i + WRITE_CONCURRENCY)
             .map(([path, content]) => instance.writeFile(path, content)),
         );
+        const failed = settled.find((r) => r.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
       }
       logger.debug("Files written to sandbox", { fileCount: files.size });
 
