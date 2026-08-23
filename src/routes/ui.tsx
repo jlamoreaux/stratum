@@ -887,10 +887,14 @@ app.get("/:namespace/:slug/tags", async (c) => {
 });
 
 /**
- * Loads the authenticated user and project context for an issue page after validating the project path and read access.
+ * Three issue routes share the same preamble, and getting it wrong leaks
+ * project existence. A private project must 404 rather than 403, so an
+ * unreadable project is indistinguishable from a missing one — that is why
+ * both the lookup miss and the authz failure return the same 404 here, and
+ * why this is one helper rather than three copies that could drift apart.
  *
- * @param c - The request context containing route parameters, authentication identifiers, environment services, and request metadata.
- * @returns The project page context, or an error status when the path is invalid or the project is unavailable or inaccessible.
+ * Returns `{ errorStatus }` instead of throwing so each caller renders the
+ * error in its own page shell.
  */
 async function loadIssuePageContext(c: {
   env: Env;
