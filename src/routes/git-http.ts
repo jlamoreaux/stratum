@@ -12,6 +12,7 @@ import { getUser, getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry } from "../types";
 import { projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
+import { getWaitUntil } from "../utils/execution-ctx";
 import {
   buildReportStatus,
   parseReceivePackRequest,
@@ -733,6 +734,7 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
     workspaceName: forkedName,
     workspaceRemote: forkResult.data.remote,
     actor,
+    waitUntil: getWaitUntil(c),
   });
   if (!outcome.success) {
     logger.error("Gated push change creation failed", outcome.error);
