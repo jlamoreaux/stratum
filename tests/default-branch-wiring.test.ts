@@ -178,9 +178,14 @@ describe("backup snapshot passes the project's default branch to the clone", () 
     const env = { ARTIFACTS: {} } as unknown as Env;
     const result = await snapshotRepo(env, trunkProject, "2026-01-01T00:00:00Z", logger);
     expect(result.success).toBe(false);
+    // Deep-equal on purpose: this guards the whole option set, so a future
+    // change that silently drops `ref` fails here. `includeTags` arrived with
+    // tag-aware backups (#182) — backups must capture tags, so it belongs in
+    // the expectation rather than being loosened away with objectContaining.
     expect(vi.mocked(cloneRepo).mock.calls[0]?.[3]).toEqual({
       fullHistory: true,
       ref: "trunk",
+      includeTags: true,
     });
   });
 });
