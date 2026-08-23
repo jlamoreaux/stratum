@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { artifactsRepoNameFromRemote, importFromGitHub, syncFromGitHub } from "../storage/git-ops";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
-import { listProjects } from "../storage/state";
+import { listProjects, setProject } from "../storage/state";
 import { checkForSyncUpdates, getProjectSourceUrl, updateProjectAfterSync } from "../storage/sync";
 import { type Env, artifactsRepoName } from "../types";
 import { createLogger } from "../utils/logger";
@@ -119,6 +119,26 @@ export async function syncAllProjects(
           if (!updateResult.success) {
             failed++;
             projectLogger.error("Failed to record sync metadata", updateResult.error);
+            continue;
+          }
+        } else if (syncedRemote !== project.remote) {
+          // No commit sha to record, but the fallback import minted a NEW
+          // Artifacts repo. The remote must still be persisted on its own:
+          // leaving it unwritten sends the next cron run down the legacy
+          // branch again, and importFromGitHub deletes the repo it just
+          // created. No provider returns hasUpdates without a latestCommit
+          // today, so this is a guard against that invariant drifting, not a
+          // live path — hence remote-only, with lastSyncedCommit left alone
+          // rather than stamped with a placeholder that would poison the
+          // next comparison.
+          const setResult = await setProject(
+            env.STATE,
+            { ...project, remote: syncedRemote },
+            projectLogger,
+          );
+          if (!setResult.success) {
+            failed++;
+            projectLogger.error("Failed to persist imported remote", setResult.error);
             continue;
           }
         }
