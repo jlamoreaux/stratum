@@ -101,8 +101,16 @@ export class SandboxEvaluator implements Evaluator {
    * land. The parameter stays because it is part of the `Evaluator` contract
    * shared with the diff-based evaluators.
    *
-   * Every failure path scores 0 and `passed: false` rather than returning an
-   * error: an evaluation that could not run must not read as one that passed.
+   * Two kinds of failure, deliberately distinguished:
+   *
+   * - The suite ran and did not pass, or could not run *inside* the sandbox
+   *   (install failed, no binding, no repo access): score 0 with
+   *   `passed: false`. An evaluation that could not run must never read as
+   *   one that passed, so these are verdicts, not errors.
+   * - The evaluated tree could not be reached or read at all, or the sandbox
+   *   itself threw: `err(ExternalServiceError)`. There is no verdict to give
+   *   here — the caller decides whether to retry or surface the failure, and
+   *   scoring 0 would fabricate a judgement about code we never saw.
    */
   async evaluate(
     _diff: string,
