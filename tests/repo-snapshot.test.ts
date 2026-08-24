@@ -84,5 +84,36 @@ describe("repo snapshot capture", () => {
     expect(walk.success).toBe(true);
     if (!walk.success) return;
     expect("empty" in walk.data).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  // #251: a repo with no branch ref (unborn HEAD) but a tag pointing at a
+  // commit is reported empty and its tag-reachable objects are skipped. The
+  // full fix is a backup-format migration (tracked separately); this is the
+  // interim "loud, explicit skip" — the drop must be logged, not silent.
+  it("logs a loud warning naming the dropped tags for a tag-only repo (unborn HEAD)", async () => {
+    const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }]);
+    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
+    const gfs = fs as any;
+    await git.tag({ fs: gfs, dir: DIR, ref: "v1", object: tipSha });
+    // Remove the only branch ref directly (not via git.deleteBranch, which
+    // detaches HEAD onto the sha instead of leaving it unborn) so HEAD stays
+    // an unresolvable symref, mirroring a remote whose sole ref is a tag: the
+    // tagged commit stays reachable only via refs/tags/v1.
+    await gfs.promises.unlink(`${DIR}/.git/refs/heads/main`);
+
+    const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
+    expect(walk.success).toBe(true);
+    if (!walk.success) return;
+    expect("empty" in walk.data).toBe(true);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const [message, meta] = (logger.warn as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(message).toMatch(/dropping/i);
+    expect(message).toMatch(/tag/i);
+    expect(meta.tags).toEqual(["v1"]);
   });
 });

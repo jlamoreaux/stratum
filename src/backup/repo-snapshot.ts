@@ -81,7 +81,27 @@ export async function walkRepoObjects(
     log = await git.log({ fs, dir, depth: -1 });
   } catch (error) {
     if (error instanceof Error && error.name === "NotFoundError") {
-      logger.debug("Repo has no commits; skipping as empty", { dir });
+      // No HEAD history, but the repo can still have tag refs pointing at
+      // objects reached no other way (unborn HEAD, tag-only repo — #251).
+      // The full fix (a backup-format migration: optional tipSha, restore
+      // without refs/heads/main) is a product decision tracked separately;
+      // until then this loses those objects, so make the loss explicit and
+      // loud instead of a silent "empty" debug line.
+      let tagNames: string[] = [];
+      try {
+        tagNames = await git.listTags({ fs, dir });
+      } catch {
+        // Unreadable ref store on an already-unborn HEAD: nothing more to
+        // report than "no commits", so fall through to the debug case below.
+      }
+      if (tagNames.length > 0) {
+        logger.warn(
+          "Repo has no commits (unborn HEAD) but has tag refs; skipping as empty and DROPPING these tags — tag-only backup is not yet supported (#251)",
+          { dir, tags: [...tagNames].sort() },
+        );
+      } else {
+        logger.debug("Repo has no commits; skipping as empty", { dir });
+      }
       return ok({ empty: true });
     }
     logger.error("Failed to read repo log", error instanceof Error ? error : undefined, { dir });
