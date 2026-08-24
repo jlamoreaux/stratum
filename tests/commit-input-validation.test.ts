@@ -219,6 +219,21 @@ describe("S7 — commit route identifier validation", () => {
     expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
   });
 
+  // The aggregate guard used to live only INSIDE the file loop, so an empty
+  // file map skipped it entirely and an oversized message reached the token
+  // mint and the clone. The message-budget test above missed this because its
+  // one-entry map made the loop run.
+  it("counts the message when there are NO files at all", async () => {
+    const env = await makeSeededEnv();
+    const res = await app.fetch(
+      commitReq({ files: {}, message: "m".repeat(26 * 1024 * 1024) }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("too large");
+    expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
+  });
+
   it("rejects a payload over the total byte cap before cloning", async () => {
     const env = await makeSeededEnv();
     // Four 9 MiB files: each under the per-file cap, 36 MiB in aggregate.

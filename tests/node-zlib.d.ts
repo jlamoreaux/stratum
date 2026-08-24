@@ -5,4 +5,5 @@
 declare module "node:zlib" {
   export function gzipSync(data: Uint8Array): Uint8Array;
   export function deflateSync(data: Uint8Array): Uint8Array;
+  export function deflateRawSync(data: Uint8Array): Uint8Array;
 }

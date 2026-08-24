@@ -449,6 +449,12 @@ async function readCappedBody(
 const MAX_COMMAND_SECTION_BYTES = 1024 * 1024;
 
 /**
+ * The formats DecompressionStream accepts here. Declared locally: the Workers
+ * type surface does not export a name for it.
+ */
+type DecompressFormat = "gzip" | "deflate" | "deflate-raw";
+
+/**
  * The bytes the receive-pack command list is parsed from: the body itself when
  * it is plain, or a bounded inflated prefix when the client sent
  * `Content-Encoding: gzip|deflate` (git can compress request bodies; the proxy
@@ -474,6 +480,29 @@ async function commandSectionBytes(
   }
   if (encoding !== "gzip" && encoding !== "x-gzip" && encoding !== "deflate") return null;
 
+  // `Content-Encoding: deflate` is defined as zlib-wrapped (RFC 9110), but real
+  // clients also send RAW deflate under that name. DecompressionStream("deflate")
+  // rejects the raw form outright, and this helper fails closed, so a legitimate
+  // push from such a client was refused as unreadable. Try the wrapped format
+  // first (the spec-correct one), then the raw one.
+  const formats: DecompressFormat[] =
+    encoding === "deflate" ? ["deflate", "deflate-raw"] : ["gzip"];
+  for (const format of formats) {
+    const inflated = await inflateBounded(body, format);
+    if (inflated) return inflated;
+  }
+  return null;
+}
+
+/**
+ * Inflate at most `MAX_COMMAND_SECTION_BYTES` of `body` under one format, or
+ * `null` if the stream is not that format. Each attempt builds its own stream:
+ * a ReadableStream is single-use, so a retry cannot reuse the failed one.
+ */
+async function inflateBounded(
+  body: ArrayBuffer,
+  format: DecompressFormat,
+): Promise<Uint8Array | null> {
   try {
     // A ReadableStream over the existing buffer, not `new Blob([body]).stream()`
     // — the Blob constructor COPIES, so inspecting a 50 MiB push cost a second
@@ -485,9 +514,7 @@ async function commandSectionBytes(
         controller.close();
       },
     });
-    const stream = source.pipeThrough(
-      new DecompressionStream(encoding === "deflate" ? "deflate" : "gzip"),
-    );
+    const stream = source.pipeThrough(new DecompressionStream(format));
     const reader = stream.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;

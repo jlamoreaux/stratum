@@ -1034,6 +1034,33 @@ describe("git smart-HTTP proxy — workspace push ref policy (S3)", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  // `Content-Encoding: deflate` is zlib-wrapped per RFC 9110, but clients in the
+  // wild send RAW deflate under the same name. DecompressionStream("deflate")
+  // throws on those, and this route fails closed, so a legitimate push was
+  // refused as unreadable until the raw format was tried as a fallback.
+  it("RAW deflate body is inspected too, not refused as unreadable", async () => {
+    const { deflateRawSync } = await import("node:zlib");
+    const env = await policyEnv();
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await push(env, new Uint8Array(deflateRawSync(WS_MAIN_PUSH)), {
+      "Content-Encoding": "deflate",
+    });
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("raw deflate cannot smuggle an off-policy command past the parser either", async () => {
+    const { deflateRawSync } = await import("node:zlib");
+    const env = await policyEnv();
+    const fetchMock = stubFetch(() => okUpstream());
+    const body = deflateRawSync(
+      wsPushBody([`${OID_Y} ${ZERO_OID} refs/heads/main\0report-status`]),
+    );
+    const res = await push(env, new Uint8Array(body), { "Content-Encoding": "deflate" });
+    expect(await res.text()).toContain("deletion");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("unknown Content-Encoding fails closed (400), never forwarded", async () => {
     const env = await policyEnv();
     const fetchMock = stubFetch(() => okUpstream());

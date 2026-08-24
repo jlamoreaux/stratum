@@ -226,6 +226,13 @@ app.post("/:name/commit", async (c) => {
   // they count against the budget too — 2000 keys of a megabyte each is 2 GB
   // that an aggregate over VALUES alone would not see.
   let totalBytes = new TextEncoder().encode(body.message).byteLength;
+  // Check the seed BEFORE iterating. The aggregate guard below only runs once
+  // per file, so `{ files: {} }` with an oversized message skipped it entirely
+  // and reached the token mint and the clone — the exact work this block exists
+  // to avoid, reachable by any authenticated caller.
+  if (totalBytes > MAX_COMMIT_BYTES) {
+    return badRequest(`commit payload too large (max ${MAX_COMMIT_BYTES} bytes)`);
+  }
   for (const [path, contents] of Object.entries(body.files)) {
     // S7 (#130): refuse traversal-shaped paths before any git work — the same
     // guard commitAndPush enforces (defense in depth), surfaced early here so
