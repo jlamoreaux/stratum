@@ -152,17 +152,27 @@ describe("S5 — unauthorized vs missing are byte-identical 404s", () => {
 });
 
 describe("S5 — storage failures do not echo tenant identifiers", () => {
-  it("commit against a CORRUPT workspace entry → generic 500, no project id, no KV key", async () => {
-    const env = makeEnv();
-    await seedProject(env);
-    await seedWorkspace(env, "{not json");
-    const res = await app.fetch(commitReq(OTHER_TOKEN), env);
-    expect(res.status).toBe(500);
-    const text = await res.text();
+  // A distinct status for "corrupt" was itself an existence oracle: authorizing
+  // needs the workspace's parent id, so a read that fails cannot be authorized,
+  // and every caller reaching that branch is a stranger. 404-on-corrupt must be
+  // byte-identical to 404-on-missing, or the pair still confirms existence.
+  it("commit: a stranger's CORRUPT response is byte-identical to the MISSING one", async () => {
+    const envCorrupt = makeEnv();
+    await seedProject(envCorrupt);
+    await seedWorkspace(envCorrupt, "{not json");
+    const corrupt = await app.fetch(commitReq(OTHER_TOKEN), envCorrupt);
+
+    const envMissing = makeEnv();
+    await seedProject(envMissing);
+    const missing = await app.fetch(commitReq(OTHER_TOKEN), envMissing);
+
+    expect(corrupt.status).toBe(404);
+    expect(missing.status).toBe(404);
+    const text = await corrupt.text();
+    expect(text).toBe(await missing.text());
     expect(text).not.toContain(PROJECT_ID);
     expect(text).not.toContain("workspace:");
     expect(text).not.toContain("parse");
-    expect(JSON.parse(text)).toEqual({ error: "Internal error" });
   });
 
   it("workspace CREATE against a corrupt project entry → generic 500", async () => {
@@ -214,15 +224,21 @@ describe("S5 — storage failures do not echo tenant identifiers", () => {
     expect(JSON.parse(text)).toEqual({ error: "Internal error" });
   });
 
-  it("delete against a CORRUPT workspace entry → generic 500", async () => {
-    const env = makeEnv();
-    await seedProject(env);
-    await seedWorkspace(env, "{not json");
-    const res = await app.fetch(deleteReq(OTHER_TOKEN), env);
-    expect(res.status).toBe(500);
-    const text = await res.text();
+  it("delete: a stranger's CORRUPT response is byte-identical to the MISSING one", async () => {
+    const envCorrupt = makeEnv();
+    await seedProject(envCorrupt);
+    await seedWorkspace(envCorrupt, "{not json");
+    const corrupt = await app.fetch(deleteReq(OTHER_TOKEN), envCorrupt);
+
+    const envMissing = makeEnv();
+    await seedProject(envMissing);
+    const missing = await app.fetch(deleteReq(OTHER_TOKEN), envMissing);
+
+    expect(corrupt.status).toBe(404);
+    expect(missing.status).toBe(404);
+    const text = await corrupt.text();
+    expect(text).toBe(await missing.text());
     expect(text).not.toContain(PROJECT_ID);
-    expect(JSON.parse(text)).toEqual({ error: "Internal error" });
   });
 });
 

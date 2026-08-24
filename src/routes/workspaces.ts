@@ -29,7 +29,7 @@ import {
   ok,
   unauthorized,
 } from "../utils/response";
-import { isStringRecord, isValidSlug, isValidUuid } from "../utils/validation";
+import { isStringRecord, isTraversalPath, isValidSlug, isValidUuid } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -223,8 +223,8 @@ app.post("/:name/commit", async (c) => {
     // S7 (#130): refuse traversal-shaped paths before any git work — the same
     // guard commitAndPush enforces (defense in depth), surfaced early here so
     // a hostile map doesn't cost a clone first.
-    if (path.includes("../") || path.startsWith("/")) {
-      return badRequest("file paths must be repo-relative (no '../' or leading '/')");
+    if (isTraversalPath(path)) {
+      return badRequest("file paths must be repo-relative (no '..' segment or leading '/')");
     }
     totalBytes += contents.length;
     if (totalBytes > MAX_COMMIT_BYTES) {
@@ -237,11 +237,15 @@ app.post("/:name/commit", async (c) => {
     if (workspaceResult.error.code === "NOT_FOUND") {
       return notFound("Workspace", workspaceName);
     }
-    // S5 (#130): a corrupt/unreadable entry surfaces as a generic 500 — never
-    // the storage message (whose KV key embeds the project id), which would
-    // confirm to a stranger that this workspace exists.
+    // S5 (#130): a corrupt/unreadable entry answers with the SAME 404 as a
+    // missing one. A distinct 500 was itself the oracle: authorization needs
+    // the workspace's parent id, so a read that fails cannot be authorized at
+    // all — every caller reaching here is unauthenticated for this resource,
+    // and telling them "exists but broken" versus "does not exist" confirms
+    // existence. The failure is not lost, it moves to the log where only
+    // operators see it.
     logger.error("Failed to get workspace", workspaceResult.error);
-    return internalError("Internal error");
+    return notFound("Workspace", workspaceName);
   }
   const workspace = workspaceResult.data;
 
@@ -368,7 +372,6 @@ app.delete("/:name", async (c) => {
   // the values reach a KV key.
   if (!isValidSlug(workspaceName)) return badRequest("invalid workspace name");
 
-  // Get projectId from query param
   const projectId = c.req.query("projectId");
   if (!projectId) {
     return badRequest("projectId query parameter is required");
@@ -380,9 +383,9 @@ app.delete("/:name", async (c) => {
     if (workspaceResult.error.code === "NOT_FOUND") {
       return notFound("Workspace", workspaceName);
     }
-    // S5 (#130): generic — see the commit route.
+    // S5 (#130): same 404-on-unreadable rule as the commit route.
     logger.error("Failed to get workspace", workspaceResult.error);
-    return internalError("Internal error");
+    return notFound("Workspace", workspaceName);
   }
   const workspace = workspaceResult.data;
 

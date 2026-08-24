@@ -181,6 +181,19 @@ export function isValidGitHubUrl(value: unknown): value is string {
 // interpolated into `workspace:<projectId>:<name>` keys).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Whether a repo-relative path would escape its root once joined onto a
+ * directory.
+ *
+ * Segment-based on purpose. A substring test like `path.includes("../")`
+ * matches only a `..` followed by a separator, so it lets through every
+ * traversal whose `..` lands last — a bare `..`, `./..`, or `dir/..` — each of
+ * which still resolves above the clone directory.
+ */
+export function isTraversalPath(value: string): boolean {
+  return value.startsWith("/") || value.split("/").includes("..");
+}
+
 /** Whether a value is a canonical UUID string (the shape of project ids). */
 export function isValidUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);

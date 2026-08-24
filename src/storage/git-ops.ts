@@ -5,6 +5,7 @@ import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { PhaseTimer } from "../utils/phase-timer";
 import { type Result, err, fromPromise, ok } from "../utils/result";
+import { isTraversalPath } from "../utils/validation";
 import { commitObject } from "./git-objects";
 import { MODE_SYMLINK, MemoryFS } from "./memory-fs";
 import { packObjects, placeLooseObject, unpackObjects } from "./object-loader";
@@ -397,7 +398,7 @@ export async function commitAndPush(
   // out of the repo tree, and a per-file size cap (the MemoryFS lives in a
   // ~128MB isolate).
   for (const [path, content] of Object.entries(changes)) {
-    if (path.includes("../") || path.startsWith("/")) {
+    if (isTraversalPath(path)) {
       return err(
         new AppError(
           `Invalid file path: ${path} — path traversal is not allowed`,

@@ -148,6 +148,11 @@ describe("S7 — commit route identifier validation", () => {
     ["dot-dot traversal", "../evil.txt"],
     ["nested traversal", "src/../../evil.txt"],
     ["absolute path", "/etc/passwd"],
+    // A trailing `..` has no following separator, so the old
+    // `path.includes("../")` substring test let all three through.
+    ["bare dot-dot", ".."],
+    ["dot-slash dot-dot", "./.."],
+    ["trailing dot-dot segment", "dir/.."],
   ])("rejects a traversal-shaped file key (%s) before cloning", async (_label, key) => {
     const env = await makeSeededEnv();
     const res = await app.fetch(commitReq({ files: { [key]: "x" } }), env);
@@ -204,6 +209,9 @@ describe("S7 — commitAndPush guards (every caller, not just the route)", () =>
     ["dot-dot traversal", "../evil.txt"],
     ["nested traversal", "a/../../b.txt"],
     ["absolute path", "/etc/passwd"],
+    ["bare dot-dot", ".."],
+    ["dot-slash dot-dot", "./.."],
+    ["trailing dot-dot segment", "dir/.."],
   ])("refuses %s with INVALID_INPUT 422", async (_label, key) => {
     const result = await commitAndPush(fs, "/", WS_REMOTE, "tok", { [key]: "x" }, "msg", logger);
     expect(result.success).toBe(false);
