@@ -600,6 +600,30 @@ export async function commitAndPush(
 }
 
 /**
+ * Resolve the tip commit of a ref that was just fetched: prefer `FETCH_HEAD`
+ * (set by the fetch that just ran), falling back to the fetched remote's
+ * tracking ref for backends that don't populate `FETCH_HEAD`.
+ */
+async function resolveFetchedTip(
+  fs: NodeFS,
+  dir: string,
+  remoteTrackingRef: string,
+  logger: Logger,
+  errorMessage: string,
+  logContext: Record<string, unknown>,
+): Promise<Result<string, AppError>> {
+  const fetchHeadResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
+  if (fetchHeadResult.success) return ok(fetchHeadResult.data);
+
+  const remoteRefResult = await fromPromise(git.resolveRef({ fs, dir, ref: remoteTrackingRef }));
+  if (!remoteRefResult.success) {
+    logger.error(errorMessage, remoteRefResult.error, logContext);
+    return err(new ExternalServiceError("Git", errorMessage, remoteRefResult.error));
+  }
+  return ok(remoteRefResult.data);
+}
+
+/**
  * Merges a workspace into its parent project repo.
  *
  * Attempts a true three-way merge via isomorphic-git's multi-remote fetch.
@@ -685,27 +709,16 @@ export async function mergeWorkspaceIntoProject(
     }
     workspaceSha = options.workspaceSha;
   } else {
-    const resolveFetchResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
-    if (resolveFetchResult.success) {
-      workspaceSha = resolveFetchResult.data;
-    } else {
-      const resolveRemoteResult = await fromPromise(
-        git.resolveRef({ fs, dir, ref: `refs/remotes/workspace/${branch}` }),
-      );
-      if (!resolveRemoteResult.success) {
-        logger.error("Failed to resolve workspace ref", resolveRemoteResult.error, {
-          workspaceRemote,
-        });
-        return err(
-          new ExternalServiceError(
-            "Git",
-            "Failed to resolve workspace ref",
-            resolveRemoteResult.error,
-          ),
-        );
-      }
-      workspaceSha = resolveRemoteResult.data;
-    }
+    const tipResult = await resolveFetchedTip(
+      fs,
+      dir,
+      `refs/remotes/workspace/${branch}`,
+      logger,
+      "Failed to resolve workspace ref",
+      { workspaceRemote },
+    );
+    if (!tipResult.success) return err(tipResult.error);
+    workspaceSha = tipResult.data;
   }
 
   // SEC-2: content is content-addressed on the staged paths; the cold path merges
@@ -820,13 +833,18 @@ export interface FastForwardResult {
   commit?: string;
 }
 
+/** Local ref used to push a pinned (non-tip) workspace commit to the project. */
+const PINNED_MERGE_REF = "refs/heads/stratum-pinned-merge";
+
 /**
- * Attempt a fast-forward of the project's main to the workspace tip, skipping the
- * project clone and the in-memory 3-way merge that {@link mergeWorkspaceIntoProject}
- * performs. Correctness does not depend on a cached head: the non-force push is
- * accepted by Artifacts only when the project ref is still `expectedParent` (a
- * true fast-forward). Any race or non-descendant tip returns `fastForwarded:
- * false` so the caller falls back to the proven cold merge.
+ * Attempt a fast-forward of the project's main to the pinned workspace commit
+ * (the evaluated sha, #124) — or the workspace tip for legacy unpinned changes —
+ * skipping the project clone and the in-memory 3-way merge that
+ * {@link mergeWorkspaceIntoProject} performs. Correctness does not depend on a
+ * cached head: the non-force push is accepted by Artifacts only when the project
+ * ref is still `expectedParent` (a true fast-forward). Any race or non-descendant
+ * target returns `fastForwarded: false` so the caller falls back to the proven
+ * cold merge.
  *
  * Note: this still fetches the workspace fork (its objects live in a separate
  * Artifacts repo); what it removes is the project clone (`depth:50`) + `git.merge`.
@@ -839,10 +857,14 @@ export async function fastForwardMerge(
   expectedParent: string,
   logger: Logger,
   timer?: PhaseTimer,
-  /** SEC-2: if set, refuse to fast-forward unless the workspace tip equals this
-   * (the evaluated sha), so a re-committed workspace can't be FF-merged
-   * unevaluated. On mismatch the caller cold-merges, which rejects it. */
-  expectedWorkspaceSha?: string,
+  /** #124: the evaluated workspace commit (`change.workspace_head_sha`). When
+   * set, the fast-forward TARGETS this sha: if the live tip moved past it
+   * (re-push between evaluation and merge), the PINNED sha is pushed — not the
+   * unevaluated tip. If the pinned sha is no longer present in the fetched
+   * workspace history (force-push rewound it), the merge fails closed with
+   * `PINNED_SHA_UNREACHABLE`. Omit for legacy live-tip behavior (changes that
+   * predate migration 024). */
+  pinnedWorkspaceSha?: string,
   /** Default branch shared by the project repo and its workspace fork. */
   branch = "main",
 ): Promise<Result<FastForwardResult, AppError>> {
@@ -861,21 +883,40 @@ export async function fastForwardMerge(
   }
   const workspaceTip = tipResult.data;
 
-  // SEC-2: don't fast-forward a workspace that moved since evaluation. Fall back
-  // to cold merge (pinned) which returns STALE_WORKSPACE.
-  if (expectedWorkspaceSha !== undefined && workspaceTip !== expectedWorkspaceSha) {
-    logger.warn("Workspace tip changed since evaluation; refusing fast-forward", {
+  // The commit this merge will land. Defaults to the live tip (legacy changes
+  // with no pinned sha); a pinned change always lands its EVALUATED commit.
+  let target = workspaceTip;
+  if (pinnedWorkspaceSha !== undefined && pinnedWorkspaceSha !== workspaceTip) {
+    // Re-push between evaluation and merge. The merge gate is only sound if the
+    // commit that lands is the one that was evaluated (#123/#124), so merge the
+    // pinned sha — after proving it still exists in the fetched history.
+    const pinnedResult = await fromPromise(git.readCommit({ fs, dir, oid: pinnedWorkspaceSha }));
+    if (!pinnedResult.success) {
+      logger.error("Pinned workspace sha not reachable in workspace; failing closed", undefined, {
+        workspaceRemote,
+        pinnedWorkspaceSha,
+        workspaceTip,
+      });
+      return err(
+        new AppError(
+          "Evaluated workspace commit is no longer present in the workspace history; re-evaluate the change before merging",
+          "PINNED_SHA_UNREACHABLE",
+          409,
+        ),
+      );
+    }
+    logger.warn("Workspace tip moved since evaluation; fast-forwarding to the pinned sha", {
       workspaceRemote,
-      expected: expectedWorkspaceSha,
-      actual: workspaceTip,
+      pinned: pinnedWorkspaceSha,
+      tip: workspaceTip,
     });
-    return ok({ fastForwarded: false });
+    target = pinnedWorkspaceSha;
   }
 
-  // A fast-forward is only possible if the workspace tip descends from the
+  // A fast-forward is only possible if the merge target descends from the
   // project's current head. If not (or history is too shallow to tell), cold-merge.
   const descResult = await fromPromise(
-    git.isDescendent({ fs, dir, oid: workspaceTip, ancestor: expectedParent, depth: -1 }),
+    git.isDescendent({ fs, dir, oid: target, ancestor: expectedParent, depth: -1 }),
   );
   if (!descResult.success) {
     // Most commonly: expectedParent is older than the shallow workspace clone, so
@@ -883,13 +924,29 @@ export async function fastForwardMerge(
     // never fast-forwards and would otherwise look like the FF path "works".
     logger.warn("Could not determine workspace descent; falling back to cold merge", {
       workspaceRemote,
-      workspaceTip,
+      target,
       expectedParent,
     });
     return ok({ fastForwarded: false });
   }
   if (descResult.data !== true) {
     return ok({ fastForwarded: false });
+  }
+
+  // Push the target. The common case (target === tip) pushes the clone's `main`
+  // exactly as before; a pinned non-tip target is pushed via a local ref written
+  // at the pinned commit — O(1) extra work, no additional network round trips.
+  let pushRef = branch;
+  if (target !== workspaceTip) {
+    const writeRefResult = await fromPromise(
+      git.writeRef({ fs, dir, ref: PINNED_MERGE_REF, value: target, force: true }),
+    );
+    if (!writeRefResult.success) {
+      return err(
+        new ExternalServiceError("Git", "Failed to write pinned merge ref", writeRefResult.error),
+      );
+    }
+    pushRef = PINNED_MERGE_REF;
   }
 
   const pushResult = await measure("pushMs", () =>
@@ -899,7 +956,7 @@ export async function fastForwardMerge(
         dir,
         http,
         url: projectRemote,
-        ref: branch,
+        ref: pushRef,
         remoteRef: branch,
         onAuth: makeAuth(projectToken),
       }),
@@ -910,8 +967,11 @@ export async function fastForwardMerge(
     return ok({ fastForwarded: false });
   }
 
-  logger.info("Fast-forwarded project to workspace tip", { projectRemote, sha: workspaceTip });
-  return ok({ fastForwarded: true, commit: workspaceTip });
+  logger.info("Fast-forwarded project to evaluated workspace commit", {
+    projectRemote,
+    sha: target,
+  });
+  return ok({ fastForwarded: true, commit: target });
 }
 
 export interface BatchWorkspace {
@@ -1174,8 +1234,10 @@ const TREE_OID_HEX_LEN = 40;
 
 /**
  * Stage a workspace's tip TREE to R2 (ADR 004 Task 3): one value =
- * `[40-byte tipTreeOid][packed tree objects]`. Recomputed on every commit so the
- * merge always sees the LIVE tip (no stale snapshot) without fetching the fork.
+ * `[40-byte tipTreeOid][packed tree objects]`. Recomputed on every commit. The
+ * caller stores it under both the latest-tip key (overwritten per commit) and a
+ * sha-keyed copy (`<key>/sha/<commitSha>`, #124) so the merge can consume the
+ * tree of the EVALUATED commit even if the workspace was re-pushed since.
  */
 export async function stageWorkspaceTree(
   bucket: R2Bucket,
@@ -1231,6 +1293,18 @@ export function parseStagedTree(value: Uint8Array): StagedTree {
   return { treeOid, objects };
 }
 
+/** R2 key of the latest-tip staged tree for a workspace (overwritten per commit). */
+export function stagedTreeKey(projectId: string, workspace: string): string {
+  return `repos/${projectId}/ws/${workspace}`;
+}
+
+/** #124: sha-keyed staged-tree copy — immutable per workspace commit, so the
+ * merge can read the EVALUATED commit's tree after a re-push overwrote the
+ * latest-tip key. */
+export function stagedTreeShaKey(projectId: string, workspace: string, sha: string): string {
+  return `${stagedTreeKey(projectId, workspace)}/sha/${sha}`;
+}
+
 /** Load a workspace's staged tip tree from R2 (see stageWorkspaceTree). */
 export async function loadStagedTree(bucket: R2Bucket, key: string): Promise<StagedTree | null> {
   const obj = await bucket.get(key);
@@ -1242,13 +1316,23 @@ export interface StagedTreeItem {
   changeId: string;
   baseSha: string;
   staged: StagedTree;
+  /** #124: tree oid the change was evaluated against. When set, the synthetic
+   * commit is only built and merged if the staged tree matches — validating at
+   * the merge layer that what lands is exactly the evaluated content. */
+  expectedTreeOid?: string;
 }
 
 export interface StagedItemResult {
   changeId: string;
   merged: boolean;
   commit?: string;
+  /** Why the item did not merge (validation failure vs plain conflict). */
+  reason?: string;
 }
+
+/** Reason reported when a staged tree fails the evaluated-tree validation. */
+export const STALE_STAGED_TREE_REASON =
+  "Workspace changed since evaluation: staged tree does not match the evaluated revision";
 
 /**
  * Group-commit batch over R2-staged workspace trees (ADR 004 Task 5): operates on
@@ -1270,33 +1354,52 @@ export async function batchMergeStagedTrees(
 ): Promise<Result<StagedItemResult[], AppError>> {
   const gitdir = `${dir === "/" ? "" : dir}/.git`;
 
+  // #124 validation (O(1) per item — a string compare): a staged tree that does
+  // not match the tree the change was evaluated against must not be synthesized
+  // into a commit, let alone merged. Sha-keyed staging makes this a corruption
+  // guard rather than a common path.
+  const eligible = items.map(
+    (item) => item.expectedTreeOid === undefined || item.staged.treeOid === item.expectedTreeOid,
+  );
+
   // Phase 1 (off the merge critical path): place every item's objects, then build
   // the synthetic commits. The synth SHA-1 (`commitObject`) is async crypto with real
   // per-call overhead — running them sequentially inside the merge loop was the
   // dominant cost; `Promise.all` lets the crypto overlap. (Placement stays sequential:
   // concurrent writes race on MemoryFS object-dir creation.)
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item || !eligible[i]) continue;
     for (const o of item.staged.objects) await placeLooseObject(fs, gitdir, o.oid, o.bytes);
   }
   const synths = await Promise.all(
-    items.map((item) =>
-      commitObject({
-        tree: item.staged.treeOid,
-        parents: [item.baseSha],
-        message: `change ${item.changeId}`,
-        timestamp: Math.floor(Date.now() / 1000),
-      }),
+    items.map((item, i) =>
+      eligible[i]
+        ? commitObject({
+            tree: item.staged.treeOid,
+            parents: [item.baseSha],
+            message: `change ${item.changeId}`,
+            timestamp: Math.floor(Date.now() / 1000),
+          })
+        : Promise.resolve(null),
     ),
   );
-  for (const synth of synths) await placeLooseObject(fs, gitdir, synth.oid, synth.bytes);
+  for (const synth of synths) {
+    if (synth) await placeLooseObject(fs, gitdir, synth.oid, synth.bytes);
+  }
 
   // Phase 2: serial merge loop (the ref advance must be serialized). Checkpoint/
   // restore around each so a conflict can't dirty the next.
   const results: StagedItemResult[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
+    if (!item) continue;
+    if (!eligible[i]) {
+      results.push({ changeId: item.changeId, merged: false, reason: STALE_STAGED_TREE_REASON });
+      continue;
+    }
     const synthOid = synths[i]?.oid;
-    if (!item || !synthOid) continue;
+    if (!synthOid) continue;
     const checkpoint = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
     if (!checkpoint.success) {
       results.push({ changeId: item.changeId, merged: false });
@@ -1973,19 +2076,32 @@ export async function listFilesInRepo(
 
 /**
  * Read the full working tree (paths → text contents) in a single clone.
- * Used by the post-merge smoke check to populate a sandbox.
+ * Used by the post-merge smoke check and the sandbox evaluator to populate a
+ * sandbox. When `ref` (a commit sha) is given, the tree of that commit is read
+ * instead of the clone's HEAD, so callers can pin the exact evaluated commit —
+ * cloned in full, since a pinned sha can fall outside a shallow clone's depth
+ * window; a ref still not reachable after that is an error, never a silent
+ * fall-through to evaluating something else.
  */
 export async function readRepoFiles(
   remote: string,
   token: string,
   logger: Logger,
+  ref?: string,
   branch = "main",
 ): Promise<Result<Map<string, string>, AppError>> {
-  logger.debug("Reading repo files", { remote });
+  logger.debug("Reading repo files", { remote, ref });
 
-  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
+  const cloneResult = await cloneRepo(remote, token, logger, {
+    ref: branch,
+    ...(ref !== undefined ? { fullHistory: true } : {}),
+  });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
+
+  if (ref !== undefined) {
+    return readTreeAtCommit(fs, dir, ref, logger);
+  }
 
   const filesResult = await walkDir(fs, dir, "", logger);
   if (!filesResult.success) return err(filesResult.error);
@@ -2001,6 +2117,46 @@ export async function readRepoFiles(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+  return ok(contents);
+}
+
+/** Every file (path → text contents) in the tree of one commit. Exported for tests. */
+export async function readTreeAtCommit(
+  fs: NodeFS,
+  dir: string,
+  commitSha: string,
+  logger: Logger,
+): Promise<Result<Map<string, string>, AppError>> {
+  const listResult = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
+  if (!listResult.success) {
+    logger.error("Failed to list files at commit", listResult.error, { commitSha });
+    return err(
+      new ExternalServiceError(
+        "Git",
+        `Failed to read tree at commit ${commitSha}`,
+        listResult.error,
+      ),
+    );
+  }
+
+  const contents = new Map<string, string>();
+  for (const path of listResult.data) {
+    const blobResult = await fromPromise(git.readBlob({ fs, dir, oid: commitSha, filepath: path }));
+    if (!blobResult.success) {
+      // A pinned commit's tree is expected to be complete; an unreadable blob
+      // means object corruption, not a benign gap. Fail closed rather than
+      // handing a caller (e.g. the sandbox evaluator) a silently partial tree.
+      logger.error("Unreadable file in commit tree", blobResult.error, { path, commitSha });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to read tree at commit ${commitSha}: unreadable object at ${path}`,
+          blobResult.error,
+        ),
+      );
+    }
+    contents.set(path, new TextDecoder().decode(blobResult.data.blob));
   }
   return ok(contents);
 }
@@ -2265,6 +2421,265 @@ export async function importFromGitHub(
       clearTimeout(timeoutHandle);
     }
   }
+}
+
+/** Depth for the source fetch during an incremental sync — matches the shallow
+ * depth {@link cloneRepo} uses for the local clone it fetches into. */
+const SYNC_FETCH_DEPTH = 50;
+
+export interface SourceSyncResult {
+  /** "up-to-date": main already contains the source tip (no-op, nothing pushed);
+   * "fast-forwarded": main advanced to the source tip; "merged": source commits
+   * and Stratum-native commits were joined by a merge commit. */
+  status: "up-to-date" | "fast-forwarded" | "merged";
+  /** The resulting tip of `main`. */
+  commit: string;
+}
+
+/**
+ * Apply an already-fetched source tip onto the local `main` branch.
+ *
+ * Fast-forwards when main is an ancestor of the source tip, no-ops when the
+ * source tip is already reachable from main (Stratum-native commits ahead), and
+ * otherwise attempts a true three-way merge so native history is PRESERVED
+ * alongside new source commits. If neither is possible — a force-pushed source,
+ * conflicting edits, or shallow/grafted history hiding the common ancestor —
+ * this fails with `SYNC_DIVERGED` and leaves `main` untouched. It never falls
+ * back to any destructive re-import (#190).
+ *
+ * `SYNC_DIVERGED` is reserved for actual divergence. An operational merge
+ * failure (corrupt objects, IO) surfaces as `ExternalServiceError` instead, so
+ * the caller is not told to reconcile history that is in fact fine.
+ */
+export async function applySourceUpdate(
+  fs: NodeFS,
+  dir: string,
+  sourceTip: string,
+  logger: Logger,
+  author: Author = SYSTEM_AUTHOR,
+): Promise<Result<SourceSyncResult, AppError>> {
+  const mergeResult = await fromPromise(
+    git.merge({
+      fs,
+      dir,
+      ours: "main",
+      theirs: sourceTip,
+      author,
+      message: `Sync source commit ${sourceTip.slice(0, 7)} into main`,
+    }),
+  );
+  if (!mergeResult.success) {
+    const cause = mergeResult.error.message;
+    logger.error("Source update could not be applied", mergeResult.error, { sourceTip, cause });
+    // Only a real content divergence earns SYNC_DIVERGED: isomorphic-git throws
+    // MergeConflictError for conflicting edits and MergeNotSupportedError for
+    // conflict shapes it can't auto-resolve or histories with no common
+    // ancestor. Anything else — corrupt objects, IO, OOM — is operational, and
+    // reporting it as "your history diverged" sends the caller to debug the
+    // wrong thing. Same split `mergeWorkspaceIntoProject` already applies.
+    if (
+      isGitMergeConflict(mergeResult.error) ||
+      matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)
+    ) {
+      return err(
+        new AppError(
+          `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
+          "SYNC_DIVERGED",
+          409,
+        ),
+      );
+    }
+    return err(
+      new ExternalServiceError(
+        "Git",
+        `Failed to apply source update: ${cause}`,
+        mergeResult.error instanceof Error ? mergeResult.error : undefined,
+      ),
+    );
+  }
+
+  // git.merge omits `oid` in some no-op cases; fall back to the current head.
+  let commit = mergeResult.data.oid;
+  if (!commit) {
+    const headResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+    if (!headResult.success) {
+      return err(
+        new ExternalServiceError("Git", "Failed to resolve main after sync", headResult.error),
+      );
+    }
+    commit = headResult.data;
+  }
+
+  const status: SourceSyncResult["status"] = mergeResult.data.alreadyMerged
+    ? "up-to-date"
+    : mergeResult.data.fastForward
+      ? "fast-forwarded"
+      : "merged";
+  return ok({ status, commit });
+}
+
+/**
+ * Incremental sync of an EXISTING Artifacts project repo from its source git
+ * URL — the non-destructive replacement for re-running the GitHub import (#190).
+ *
+ * Clones the project's Artifacts repo (shallow), fetches `branch` from the
+ * public source URL into it, fast-forwards or merges it onto `main` via
+ * {@link applySourceUpdate}, and pushes the result back. The repo is NEVER
+ * deleted or recreated: workspace forks keep their ancestry and the project's
+ * remote stays stable. Diverged history fails with `SYNC_DIVERGED`; auth or
+ * network failures propagate as external-service errors.
+ *
+ * A shallow clone can hide the common ancestor, making isomorphic-git report a
+ * merge it cannot compute — which at this layer is indistinguishable from real
+ * divergence. So a `SYNC_DIVERGED` verdict from the shallow pass is retried
+ * ONCE against full history before it is believed. That bound is deliberate:
+ * without it, a genuinely diverged repo could drive unbounded clone work on
+ * every scheduled sync.
+ */
+export async function syncFromGitHub(
+  artifacts: ArtifactsNamespace,
+  remote: string,
+  sourceUrl: string,
+  logger: Logger,
+  branch = "main",
+  depth = SYNC_FETCH_DEPTH,
+): Promise<Result<SourceSyncResult, AppError>> {
+  logger.debug("Incrementally syncing from source", { remote, sourceUrl, branch, depth });
+
+  // One write-scoped token covers both the clone and the push-back.
+  const tokenResult = await freshRepoToken(artifacts, remote, "write", logger);
+  if (!tokenResult.success) return err(tokenResult.error);
+  const token = tokenResult.data;
+
+  /**
+   * Clone, fetch the source branch, and try to apply it — at one history depth.
+   *
+   * Shallow is the fast path and covers the overwhelming majority of syncs.
+   * `fullHistory` re-runs the same work unbounded, which is only worth paying
+   * for when a shallow attempt reported divergence that the missing history
+   * could explain.
+   */
+  const attempt = async (
+    fullHistory: boolean,
+  ): Promise<Result<{ applied: SourceSyncResult; fs: NodeFS; dir: string }, AppError>> => {
+    const cloneResult = await cloneRepo(remote, token, logger, { fullHistory });
+    if (!cloneResult.success) return err(cloneResult.error);
+    const { fs, dir } = cloneResult.data;
+
+    const addRemoteResult = await fromPromise(
+      git.addRemote({ fs, dir, remote: "source", url: sourceUrl }),
+    );
+    if (!addRemoteResult.success) {
+      logger.error("Failed to add source remote", addRemoteResult.error, { sourceUrl });
+      return err(
+        new ExternalServiceError("Git", "Failed to add source remote", addRemoteResult.error),
+      );
+    }
+
+    const fetchResult = await fromPromise(
+      git.fetch({
+        fs,
+        http,
+        dir,
+        remote: "source",
+        ref: branch,
+        singleBranch: true,
+        // Omitting depth entirely fetches the whole branch; passing depth:
+        // undefined is not the same thing to isomorphic-git.
+        ...(fullHistory ? {} : { depth }),
+      }),
+    );
+    if (!fetchResult.success) {
+      const cause = fetchResult.error.message;
+      logger.error("Failed to fetch source branch", fetchResult.error, { sourceUrl, branch });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to fetch ${branch} from source: ${cause}`,
+          fetchResult.error,
+        ),
+      );
+    }
+
+    const tipResult = await resolveFetchedTip(
+      fs,
+      dir,
+      `refs/remotes/source/${branch}`,
+      logger,
+      "Failed to resolve fetched source ref",
+      { sourceUrl, branch },
+    );
+    if (!tipResult.success) return err(tipResult.error);
+
+    const applyResult = await applySourceUpdate(fs, dir, tipResult.data, logger);
+    if (!applyResult.success) return err(applyResult.error);
+    return ok({ applied: applyResult.data, fs, dir });
+  };
+
+  let attemptResult = await attempt(false);
+
+  // A shallow clone can hide the common ancestor, so isomorphic-git reports a
+  // merge it cannot compute — indistinguishable, at this layer, from histories
+  // that genuinely diverged. Retry once with full history before accepting the
+  // verdict: the alternative is failing a sync of perfectly related histories
+  // merely because the branch point sits past the depth window.
+  //
+  // Bounded deliberately at ONE retry, and only for SYNC_DIVERGED. An
+  // operational failure would just fail again more expensively, and a genuinely
+  // diverged repo must not be able to trigger unbounded work.
+  if (!attemptResult.success && attemptResult.error.code === "SYNC_DIVERGED") {
+    logger.warn("Shallow sync reported divergence — retrying with full history", {
+      remote,
+      sourceUrl,
+      branch,
+      shallowDepth: depth,
+    });
+    attemptResult = await attempt(true);
+    if (!attemptResult.success) {
+      logger.error("Sync still failed with full history", attemptResult.error, {
+        remote,
+        sourceUrl,
+      });
+    }
+  }
+
+  if (!attemptResult.success) return err(attemptResult.error);
+  const { applied, fs, dir } = attemptResult.data;
+
+  if (applied.status === "up-to-date") {
+    logger.info("Project already up to date with source", {
+      remote,
+      sourceUrl,
+      commit: applied.commit,
+    });
+    return ok(applied);
+  }
+
+  // Non-force push: a concurrent native merge racing this sync is rejected by
+  // the remote instead of being overwritten; the sync can simply be retried.
+  const pushResult = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: remote,
+      ref: "main",
+      remoteRef: "main",
+      onAuth: makeAuth(token),
+    }),
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push synced history", pushResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to push synced history", pushResult.error));
+  }
+
+  logger.info("Incremental sync complete", {
+    remote,
+    sourceUrl,
+    status: applied.status,
+    commit: applied.commit,
+  });
+  return ok(applied);
 }
 
 /**

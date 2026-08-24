@@ -53,7 +53,15 @@ export async function runPostMergeCheck(
 
   let failureReason: string;
   try {
-    const filesResult = await readRepoFiles(project.remote, projectToken, logger, branch);
+    // `ref` is undefined here on purpose: the smoke check reads the tree the
+    // merge just produced, i.e. the branch tip, not a pinned commit.
+    const filesResult = await readRepoFiles(
+      project.remote,
+      projectToken,
+      logger,
+      undefined,
+      branch,
+    );
     if (!filesResult.success) {
       return {
         status: "skipped",

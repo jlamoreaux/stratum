@@ -134,7 +134,10 @@ describe("post-merge check passes the project's default branch", () => {
     );
 
     expect(result.status).toBe("reverted");
-    expect(vi.mocked(readRepoFiles).mock.calls[0]?.[3]).toBe("trunk");
+    // arg 3 is `ref` (the pinned-commit override, unused by the smoke check);
+    // the default branch is arg 4.
+    expect(vi.mocked(readRepoFiles).mock.calls[0]?.[3]).toBeUndefined();
+    expect(vi.mocked(readRepoFiles).mock.calls[0]?.[4]).toBe("trunk");
     expect(vi.mocked(getCommitParent).mock.calls[0]?.[4]).toBe("trunk");
     expect(vi.mocked(revertToCommit).mock.calls[0]?.[5]).toBe("trunk");
   });

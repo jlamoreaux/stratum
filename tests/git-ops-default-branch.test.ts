@@ -229,7 +229,7 @@ describe("read helpers honor the branch parameter", () => {
   });
 
   it("readRepoFiles reads the whole tree of a master-default repo", async () => {
-    const result = await readRepoFiles(remote, "tok", logger, "master");
+    const result = await readRepoFiles(remote, "tok", logger, undefined, "master");
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.get("a.txt")).toBe("v2\n");
@@ -415,6 +415,41 @@ describe("fastForwardMerge", () => {
     expect(result.data).toEqual({ fastForwarded: true, commit: c2 });
     expect(h.calls.clone[0].ref).toBe("master");
     expect(h.calls.push[0]).toMatchObject({ ref: "master", remoteRef: "master" });
+  });
+
+  // Intersection of #181 (non-main default branch) and #124 (pinned-sha
+  // targeting): when the workspace tip has moved past the evaluated commit, the
+  // fast-forward pushes a LOCAL pinned ref — but the REMOTE ref it lands on is
+  // still the project's default branch, which is not necessarily "main".
+  it("pushes a pinned non-tip target onto the given branch, not main", async () => {
+    const server = {
+      branch: "master",
+      commits: [{ "a.txt": "v1\n" }, { "a.txt": "v2\n" }, { "a.txt": "v3\n" }],
+    };
+    h.servers.set("https://r/ws.git", server);
+    const [c1, c2, c3] = await precomputeShas(server);
+
+    const result = await fastForwardMerge(
+      "https://r/project.git",
+      "ptok",
+      "https://r/ws.git",
+      "wtok",
+      c1 as string,
+      logger,
+      undefined,
+      c2 as string,
+      "master",
+    );
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    // The evaluated commit lands, not the moved tip.
+    expect(result.data).toEqual({ fastForwarded: true, commit: c2 });
+    expect(result.data.commit).not.toBe(c3);
+    expect(h.calls.push[0]).toMatchObject({
+      ref: "refs/heads/stratum-pinned-merge",
+      remoteRef: "master",
+    });
   });
 });
 
