@@ -462,7 +462,16 @@ async function commandSectionBytes(
   contentEncoding: string | undefined,
 ): Promise<Uint8Array | null> {
   const encoding = contentEncoding?.trim().toLowerCase();
-  if (!encoding || encoding === "identity") return new Uint8Array(body);
+  // Cap the uncompressed path too. The compressed branch below stops inflating
+  // at MAX_COMMAND_SECTION_BYTES, so returning the whole body here left the
+  // budget enforced for gzip/deflate senders and unenforced for everyone else.
+  // Truncation is safe for the same reason it is safe there: the command
+  // section ends at the flush-pkt, the parser reads no further, and the
+  // ORIGINAL bytes are what gets forwarded upstream — this view is inspection
+  // only.
+  if (!encoding || encoding === "identity") {
+    return new Uint8Array(body, 0, Math.min(body.byteLength, MAX_COMMAND_SECTION_BYTES));
+  }
   if (encoding !== "gzip" && encoding !== "x-gzip" && encoding !== "deflate") return null;
 
   try {

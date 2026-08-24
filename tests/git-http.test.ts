@@ -993,6 +993,22 @@ describe("git smart-HTTP proxy — workspace push ref policy (S3)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  // The gzip/deflate branch stops inflating at MAX_COMMAND_SECTION_BYTES (1 MiB).
+  // The identity branch used to hand the parser the WHOLE body, so the budget
+  // bound every compressing client and no one else. With both capped, a command
+  // section that runs past 1 MiB before its flush-pkt is truncated out of view
+  // and fails closed — the same answer the compressed path already gave.
+  it("uncompressed body: a command section past the 1 MiB budget fails closed", async () => {
+    const env = await policyEnv();
+    const fetchMock = stubFetch(() => okUpstream());
+    // ~1.1 MiB of otherwise-ALLOWED commands, with the flush-pkt beyond the cap.
+    const line = `${OID_X} ${OID_Y} refs/heads/main`;
+    const count = Math.ceil((1024 * 1024 * 11) / 10 / (line.length + 4));
+    const res = await push(env, wsPushBody(Array.from({ length: count }, () => line)));
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("gzip body: commands are inspected and the COMPRESSED bytes are forwarded", async () => {
     const { gzipSync } = await import("node:zlib");
     const env = await policyEnv();

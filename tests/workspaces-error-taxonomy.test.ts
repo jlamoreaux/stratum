@@ -192,17 +192,27 @@ describe("S5 — storage failures do not echo tenant identifiers", () => {
     expect(JSON.parse(text)).toEqual({ error: "Internal error" });
   });
 
-  it("workspace LIST against a corrupt project entry → generic 500", async () => {
-    const env = makeEnv();
-    await env.STATE.put("project:@owner:repo", "{not json");
-    const res = await app.fetch(
+  // LIST collapses UNAUTHORIZED to a 404 (it treats project existence as
+  // secret), so an unreadable project must collapse there too — otherwise the
+  // 500-vs-404 pair re-opens exactly the gap that collapse closes. CREATE is
+  // deliberately different: it answers 403 for an existing-but-denied project,
+  // so its existence is already disclosed and the 500 above discloses nothing.
+  it("LIST: a stranger's CORRUPT-project response is byte-identical to the MISSING one", async () => {
+    const envCorrupt = makeEnv();
+    await envCorrupt.STATE.put("project:@owner:repo", "{not json");
+    const listReq = () =>
       new Request("http://localhost/api/workspaces/@owner/repo/workspaces", {
-        headers: { Authorization: `Bearer ${OWNER_TOKEN}` },
-      }),
-      env,
-    );
-    expect(res.status).toBe(500);
-    expect(JSON.parse(await res.text())).toEqual({ error: "Internal error" });
+        headers: { Authorization: `Bearer ${OTHER_TOKEN}` },
+      });
+    const corrupt = await app.fetch(listReq(), envCorrupt);
+
+    const missing = await app.fetch(listReq(), makeEnv());
+
+    expect(corrupt.status).toBe(404);
+    expect(missing.status).toBe(404);
+    const text = await corrupt.text();
+    expect(text).toBe(await missing.text());
+    expect(text).not.toContain("project:");
   });
 
   it("workspace LIST when the KV list itself fails → generic 500", async () => {

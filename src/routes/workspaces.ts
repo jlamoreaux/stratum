@@ -151,9 +151,10 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
     if (projectResult.error.code === "NOT_FOUND") {
       return notFound("Project", `${namespace}/${slug}`);
     }
-    // S5 (#130): generic — see the create route.
+    // S5 (#130): this route collapses UNAUTHORIZED to the same 404 (below), so
+    // a distinct 500 here would re-open exactly the gap that collapse closes.
     logger.error("Failed to get project", projectResult.error);
-    return internalError("Internal error");
+    return notFound("Project", `${namespace}/${slug}`);
   }
   const project = projectResult.data;
 
@@ -228,7 +229,11 @@ app.post("/:name/commit", async (c) => {
     if (isTraversalPath(path)) {
       return badRequest("file paths must be repo-relative (no '..' segment or leading '/')");
     }
-    totalBytes += contents.length;
+    // UTF-8 bytes, not UTF-16 code units: the cap is advertised in bytes and
+    // commitAndPush measures per-file size the same way. `.length` undercounts
+    // every multibyte character — a CJK payload is 3 bytes per unit counted as
+    // one — so string length would let a commit past three times the limit.
+    totalBytes += new TextEncoder().encode(contents).byteLength;
     if (totalBytes > MAX_COMMIT_BYTES) {
       return badRequest(`commit payload too large (max ${MAX_COMMIT_BYTES} bytes)`);
     }
@@ -259,8 +264,10 @@ app.post("/:name/commit", async (c) => {
   const projectResult = await getProjectById(c.env.STATE, workspace.parent, logger);
   if (!projectResult.success) {
     if (projectResult.error.code === "NOT_FOUND") return notFound("Workspace", workspaceName);
+    // Same 404-on-unreadable rule as the workspace read above: this block's own
+    // contract is that every failure is indistinguishable from "does not exist".
     logger.error("Failed to resolve project for commit authz", projectResult.error);
-    return internalError("Internal error");
+    return notFound("Workspace", workspaceName);
   }
   const project = projectResult.data;
 
@@ -414,8 +421,9 @@ app.delete("/:name", async (c) => {
   const projectResult = await getProjectById(c.env.STATE, workspace.parent, logger);
   if (!projectResult.success) {
     if (projectResult.error.code === "NOT_FOUND") return notFound("Workspace", workspaceName);
+    // Same 404-on-unreadable rule as the commit route.
     logger.error("Failed to resolve project for delete authz", projectResult.error);
-    return internalError("Internal error");
+    return notFound("Workspace", workspaceName);
   }
   const project = projectResult.data;
 

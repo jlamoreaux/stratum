@@ -161,6 +161,19 @@ describe("S7 — commit route identifier validation", () => {
     expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
   });
 
+  // 9 MiB of U+4E00: 9M UTF-16 code units (under the 25 MiB cap by string
+  // length) but 27 MiB of UTF-8 (over it). Counting `.length` let this through.
+  it("rejects a MULTIBYTE payload whose UTF-8 size exceeds the cap", async () => {
+    const env = await makeSeededEnv();
+    const res = await app.fetch(
+      commitReq({ files: { "cjk.txt": "\u4e00".repeat(9 * 1024 * 1024) } }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("too large");
+    expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
+  });
+
   it("rejects a payload over the total byte cap before cloning", async () => {
     const env = await makeSeededEnv();
     const res = await app.fetch(
