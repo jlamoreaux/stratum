@@ -898,10 +898,20 @@ describe("git smart-HTTP proxy — workspace push ref policy (S3)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("refuses tag pushes (refs/tags/*)", async () => {
+  // #182 shipped tag pushes to a workspace fork as a verbatim proxy before this
+  // policy existed; the policy must not revoke it. Deletion stays refused.
+  it("forwards tag pushes (refs/tags/*) to the fork", async () => {
     const env = await policyEnv();
     const fetchMock = stubFetch(() => okUpstream());
     const res = await push(env, wsPushBody([`${OID_X} ${OID_Y} refs/tags/v1\0report-status`]));
+    expect(await res.text()).not.toContain("ng refs/tags/v1");
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("refuses a tag DELETION", async () => {
+    const env = await policyEnv();
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await push(env, wsPushBody([`${OID_X} ${ZERO_OID} refs/tags/v1\0report-status`]));
     expect(await res.text()).toContain("ng refs/tags/v1");
     expect(fetchMock).not.toHaveBeenCalled();
   });

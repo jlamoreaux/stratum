@@ -159,9 +159,11 @@ describe("POST /api/workspaces/:name/commit — authorization", () => {
     expect(res.status).toBe(200);
 
     // Latest-tip staging (existing behavior) ...
-    expect(vi.mocked(stageWorkspaceTree).mock.calls[0]?.[1]).toBe("repos/proj_1/ws/fix-bug");
+    expect(vi.mocked(stageWorkspaceTree).mock.calls[0]?.[1]).toBe(`repos/${PROJECT_ID}/ws/fix-bug`);
     // ... plus the sha-keyed copy of the same value, keyed by the new commit sha.
-    expect(puts).toEqual([{ key: "repos/proj_1/ws/fix-bug/sha/sha_new", value: stagedValue }]);
+    expect(puts).toEqual([
+      { key: `repos/${PROJECT_ID}/ws/fix-bug/sha/sha_new`, value: stagedValue },
+    ]);
     // The DO hot index is still seeded.
     expect(stageTree).toHaveBeenCalledTimes(1);
   });

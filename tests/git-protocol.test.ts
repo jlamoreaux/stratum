@@ -157,12 +157,41 @@ describe("checkWorkspacePushPolicy (S3)", () => {
     }
   });
 
-  it("refuses off-branch heads, tags, and arbitrary refs", () => {
-    for (const ref of ["refs/heads/other", "refs/tags/v1", "refs/evil/x", "HEAD"]) {
+  it("refuses off-branch heads and arbitrary refs", () => {
+    for (const ref of ["refs/heads/other", "refs/evil/x", "HEAD"]) {
       const verdict = checkWorkspacePushPolicy([update(ref)], "myws");
       expect(verdict.allowed).toBe(false);
       if (!verdict.allowed) expect(verdict.ref).toBe(ref);
     }
+  });
+
+  // #182 shipped workspace tag pushes as a verbatim proxy before this policy
+  // existed. Refusing them would revoke a released feature, so tag writes pass
+  // — a tag only names a commit already in the fork, so it opens no path around
+  // the change gate. Deletion stays refused: dropping a tag discards a release
+  // marker just as surely as deleting a branch breaks the merge flows.
+  it("allows tag creates and updates", () => {
+    for (const ref of ["refs/tags/v1", "refs/tags/v1.0.0", "refs/tags/release/2026-08"]) {
+      expect(checkWorkspacePushPolicy([update(ref)], "myws").allowed).toBe(true);
+    }
+  });
+
+  it("still refuses a tag DELETION", () => {
+    const verdict = checkWorkspacePushPolicy([del("refs/tags/v1.0.0")], "myws");
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) {
+      expect(verdict.ref).toBe("refs/tags/v1.0.0");
+      expect(verdict.reason).toContain("deletion");
+    }
+  });
+
+  it("refuses a batch mixing an allowed tag with an off-policy head", () => {
+    const verdict = checkWorkspacePushPolicy(
+      [update("refs/tags/v1.0.0"), update("refs/heads/other")],
+      "myws",
+    );
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.ref).toBe("refs/heads/other");
   });
 
   it("refuses when any one command in a batch is off-policy", () => {

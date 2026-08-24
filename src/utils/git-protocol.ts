@@ -124,10 +124,16 @@ export type PushPolicyVerdict = { allowed: true } | { allowed: false; ref: strin
  * workspace branch name (`WorkspaceEntry.branchName`, falling back to the
  * workspace name). Everything else is refused:
  *
- *  - ref DELETION (all-zero new-oid) — even of the working branch — because
- *    merge/eval/staging flows assume the branch exists;
- *  - any other ref (other branches, tags, refs/anything) — the fork is not a
+ *  - ref DELETION (all-zero new-oid) — even of the working branch or a tag —
+ *    because merge/eval/staging flows assume the branch exists, and dropping a
+ *    tag silently discards a release marker;
+ *  - any other ref (other branches, refs/anything) — the fork is not a
  *    general-purpose remote and hidden refs would bypass the change gate.
+ *
+ * `refs/tags/*` creates and updates ARE allowed: #182 shipped workspace tag
+ * pushes as a verbatim proxy, and this policy landed afterwards. Refusing them
+ * would revoke a released feature rather than harden it. A tag names a commit
+ * that is already in the fork, so it opens no path around the change gate.
  *
  * Force-pushes BY THE OWNER to the working branch remain allowed: ownership is
  * enforced by the caller's authz, the fork is the owner's own line of work, and
@@ -147,11 +153,11 @@ export function checkWorkspacePushPolicy(
         reason: "ref deletion is not permitted on a workspace fork",
       };
     }
-    if (!allowedRefs.has(command.ref)) {
+    if (!allowedRefs.has(command.ref) && !command.ref.startsWith("refs/tags/")) {
       return {
         allowed: false,
         ref: command.ref,
-        reason: `only the workspace branch may be pushed (${[...allowedRefs].join(" or ")})`,
+        reason: `only the workspace branch or a tag may be pushed (${[...allowedRefs].join(" or ")} or refs/tags/*)`,
       };
     }
   }
