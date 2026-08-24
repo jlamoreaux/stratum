@@ -178,6 +178,53 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     expect(git.push).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
     expect(importFn).not.toHaveBeenCalled();
+    // Bounded: the shallow attempt plus exactly one full-history retry. A
+    // genuinely diverged repo must not be able to drive unbounded clone work.
+    expect(git.clone).toHaveBeenCalledTimes(2);
+    expect(git.merge).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries with full history when a shallow clone hid the common ancestor", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    // Shallow depth hides the branch point, so isomorphic-git cannot compute
+    // the merge and reports what looks like divergence. With full history the
+    // same merge succeeds — the histories were related all along.
+    vi.mocked(git.merge)
+      .mockRejectedValueOnce(new GitErrors.MergeNotSupportedError())
+      .mockResolvedValueOnce({ oid: "merged1", fastForward: false, alreadyMerged: false });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.status).toBe("merged");
+
+    // First clone is shallow, second asks for full history.
+    expect(git.clone).toHaveBeenCalledTimes(2);
+    const secondClone = vi.mocked(git.clone).mock.calls[1]?.[0];
+    expect(secondClone).not.toHaveProperty("depth");
+
+    // The retry fetch must also be unbounded, or deepening the Artifacts side
+    // alone still leaves the source shallow and the ancestor unreachable.
+    const secondFetch = vi.mocked(git.fetch).mock.calls[1]?.[0];
+    expect(secondFetch).not.toHaveProperty("depth");
+
+    // Still non-destructive on the way through.
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("does not retry an operational merge failure", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.merge).mockRejectedValue(new Error("ENOSPC: no space left on device"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.code).not.toBe("SYNC_DIVERGED");
+    // A full clone would just fail the same way, more expensively.
+    expect(git.clone).toHaveBeenCalledTimes(1);
   });
 
   it("reports a generic merge rejection as operational, not divergence", async () => {
