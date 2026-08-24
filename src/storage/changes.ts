@@ -3,6 +3,7 @@ import { AppError, NotFoundError } from "../utils/errors";
 import { newId } from "../utils/ids";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
+import { buildDismissApprovalsStatement } from "./change-reviews";
 
 interface ChangeRow {
   id: string;
@@ -279,29 +280,77 @@ export async function getChangeByGitHubBranch(
   }
 }
 
+export interface UpdateChangeStatusOpts {
+  evalScore?: number;
+  evalPassed?: boolean;
+  evalReason?: string;
+  evaluatedSha?: string;
+  evaluatedTreeOid?: string;
+  workspaceHeadSha?: string;
+  mergedAt?: string;
+  githubOwner?: string;
+  githubRepo?: string;
+  githubBranch?: string;
+  githubPrNumber?: number;
+  githubPrUrl?: string;
+  githubPrState?: string;
+  githubHeadSha?: string;
+  promotedAt?: string;
+  promotedBy?: string;
+}
+
+/**
+ * Build (without running) the `UPDATE changes` statement for a status/opts
+ * transition. Shared by `updateChangeStatus` and the atomic
+ * `dismissApprovalsAndUpdateStatus` batch below (#238) so both paths update
+ * with the exact same column mapping.
+ */
+function buildUpdateChangeStatusStatement(
+  db: D1Database,
+  id: string,
+  status: Change["status"],
+  opts?: UpdateChangeStatusOpts,
+): D1PreparedStatement {
+  const assignments = ["status = ?"];
+  const bindings: unknown[] = [status];
+
+  const addOptional = (column: string, value: unknown) => {
+    if (value === undefined) return;
+    assignments.push(`${column} = ?`);
+    bindings.push(value);
+  };
+
+  addOptional("eval_score", opts?.evalScore);
+  addOptional(
+    "eval_passed",
+    opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : undefined,
+  );
+  addOptional("eval_reason", opts?.evalReason);
+  addOptional("evaluated_sha", opts?.evaluatedSha);
+  addOptional("evaluated_tree_oid", opts?.evaluatedTreeOid);
+  addOptional("workspace_head_sha", opts?.workspaceHeadSha);
+  addOptional("merged_at", opts?.mergedAt);
+  addOptional("github_owner", opts?.githubOwner);
+  addOptional("github_repo", opts?.githubRepo);
+  addOptional("github_branch", opts?.githubBranch);
+  addOptional("github_pr_number", opts?.githubPrNumber);
+  addOptional("github_pr_url", opts?.githubPrUrl);
+  addOptional("github_pr_state", opts?.githubPrState);
+  addOptional("github_head_sha", opts?.githubHeadSha);
+  addOptional("promoted_at", opts?.promotedAt);
+  addOptional("promoted_by", opts?.promotedBy);
+
+  bindings.push(id);
+
+  return db.prepare(`UPDATE changes SET ${assignments.join(", ")} WHERE id = ?`).bind(...bindings);
+}
+
 export async function updateChangeStatus(
   db: D1Database,
   logger: Logger,
   id: string,
   status: Change["status"],
-  opts?: {
-    evalScore?: number;
-    evalPassed?: boolean;
-    evalReason?: string;
-    evaluatedSha?: string;
-    evaluatedTreeOid?: string;
-    workspaceHeadSha?: string;
-    mergedAt?: string;
-    githubOwner?: string;
-    githubRepo?: string;
-    githubBranch?: string;
-    githubPrNumber?: number;
-    githubPrUrl?: string;
-    githubPrState?: string;
-    githubHeadSha?: string;
-    promotedAt?: string;
-    promotedBy?: string;
-  },
+  opts?: UpdateChangeStatusOpts,
 ): Promise<Result<void, NotFoundError | AppError>> {
   try {
     // First check if the change exists
@@ -315,41 +364,7 @@ export async function updateChangeStatus(
       return err(notFoundError);
     }
 
-    const assignments = ["status = ?"];
-    const bindings: unknown[] = [status];
-
-    const addOptional = (column: string, value: unknown) => {
-      if (value === undefined) return;
-      assignments.push(`${column} = ?`);
-      bindings.push(value);
-    };
-
-    addOptional("eval_score", opts?.evalScore);
-    addOptional(
-      "eval_passed",
-      opts?.evalPassed !== undefined ? (opts.evalPassed ? 1 : 0) : undefined,
-    );
-    addOptional("eval_reason", opts?.evalReason);
-    addOptional("evaluated_sha", opts?.evaluatedSha);
-    addOptional("evaluated_tree_oid", opts?.evaluatedTreeOid);
-    addOptional("workspace_head_sha", opts?.workspaceHeadSha);
-    addOptional("merged_at", opts?.mergedAt);
-    addOptional("github_owner", opts?.githubOwner);
-    addOptional("github_repo", opts?.githubRepo);
-    addOptional("github_branch", opts?.githubBranch);
-    addOptional("github_pr_number", opts?.githubPrNumber);
-    addOptional("github_pr_url", opts?.githubPrUrl);
-    addOptional("github_pr_state", opts?.githubPrState);
-    addOptional("github_head_sha", opts?.githubHeadSha);
-    addOptional("promoted_at", opts?.promotedAt);
-    addOptional("promoted_by", opts?.promotedBy);
-
-    bindings.push(id);
-
-    await db
-      .prepare(`UPDATE changes SET ${assignments.join(", ")} WHERE id = ?`)
-      .bind(...bindings)
-      .run();
+    await buildUpdateChangeStatusStatement(db, id, status, opts).run();
 
     logger.debug("Change status updated", { changeId: id, status, opts });
     return ok(undefined);
@@ -364,6 +379,85 @@ export async function updateChangeStatus(
             { operation: "updateChangeStatus", changeId: id, status },
           );
     logger.error("Failed to update change status", appError, { changeId: id, status });
+    return err(appError);
+  }
+}
+
+export interface DismissApprovalsAndUpdateStatusResult {
+  dismissedReviewerIds: string[];
+}
+
+/**
+ * Atomically dismiss any stale 'approve' verdicts on a change and re-pin its
+ * evaluated sha/status, as one D1 batch (#238).
+ *
+ * Before this, the re-evaluate route ran `dismissApprovals` (a DELETE on
+ * change_reviews) and `updateChangeStatus` (an UPDATE on changes) as two
+ * separate round trips. If the DELETE landed but the UPDATE then failed
+ * (e.g. a transient D1 error), the request errored out with approvals
+ * already gone while the OLD evaluatedSha stayed pinned — a retry against
+ * that same old sha would see zero approvals, permanently lost, even though
+ * the re-pin never actually happened.
+ *
+ * Both statements below run against the same D1 database (`changes` and
+ * `change_reviews` are both D1 tables — see rowToChange/ChangeRow above and
+ * the reviews rows in storage/change-reviews.ts), so `D1Database.batch()`
+ * gives real transactional atomicity here: per Cloudflare's D1 batch
+ * semantics, every statement in the list commits, or none of them do, if any
+ * statement throws. That makes the lost-approvals window above impossible —
+ * the delete and the re-pin now land, or fail, together.
+ */
+export async function dismissApprovalsAndUpdateStatus(
+  db: D1Database,
+  logger: Logger,
+  id: string,
+  status: Change["status"],
+  opts?: UpdateChangeStatusOpts,
+): Promise<Result<DismissApprovalsAndUpdateStatusResult, NotFoundError | AppError>> {
+  try {
+    // First check if the change exists (matches updateChangeStatus above).
+    const existingRow = await db
+      .prepare("SELECT id FROM changes WHERE id = ?")
+      .bind(id)
+      .first<{ id: string }>();
+    if (!existingRow) {
+      const notFoundError = new NotFoundError("Change", id);
+      logger.debug("Change not found for atomic dismiss+update", { changeId: id });
+      return err(notFoundError);
+    }
+
+    const dismissStmt = buildDismissApprovalsStatement(db, id);
+    const updateStmt = buildUpdateChangeStatusStatement(db, id, status, opts);
+
+    const [dismissResult] = await db.batch([dismissStmt, updateStmt]);
+    const dismissedReviewerIds = (
+      (dismissResult?.results ?? []) as Array<{ reviewer_id: string }>
+    ).map((row) => row.reviewer_id);
+
+    if (dismissedReviewerIds.length > 0) {
+      logger.info("Stale approvals dismissed", {
+        changeId: id,
+        dismissed: dismissedReviewerIds.length,
+      });
+    }
+    logger.debug("Change status updated", { changeId: id, status, opts });
+    return ok({ dismissedReviewerIds });
+  } catch (error) {
+    const appError =
+      error instanceof AppError
+        ? error
+        : new AppError(
+            error instanceof Error
+              ? error.message
+              : "Failed to dismiss approvals and update change status",
+            "DATABASE_ERROR",
+            500,
+            { operation: "dismissApprovalsAndUpdateStatus", changeId: id, status },
+          );
+    logger.error("Failed to atomically dismiss approvals and update change status", appError, {
+      changeId: id,
+      status,
+    });
     return err(appError);
   }
 }
