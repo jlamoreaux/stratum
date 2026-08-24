@@ -1,0 +1,132 @@
+# Hourly nudge that keeps the CodeRabbit review backlog moving without a human
+# (or an agent session) being awake for it.
+#
+# Why this exists: CodeRabbit allows roughly one included review per hour for
+# the org, so a PR that is otherwise finished can sit blocked for days simply
+# because nobody fired a trigger during an open window. Every missed window is
+# an hour of throughput that cannot be recovered.
+#
+# Deliberately uses no third-party actions — only curl and jq, which are
+# preinstalled on ubuntu-latest — so there is nothing to pin and no new
+# supply-chain surface (see the pinning convention in ci.yml).
+#
+# NOTE: scheduled workflows only run from the DEFAULT branch. This file has no
+# effect until it is on main.
+
+name: CodeRabbit drain
+
+on:
+  schedule:
+    # Hourly at :17 — off the :00 mark, where every scheduled job on GitHub piles up.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to target (default: auto-pick the first blocked one)"
+        required: false
+        type: string
+      dry_run:
+        description: "Log the decision without posting a comment"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: coderabbit-drain
+  cancel-in-progress: false
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pick one blocked PR and trigger its review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_PR: ${{ inputs.pr }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          api() {
+            curl -sS --fail-with-body \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$@"
+          }
+
+          if [ -n "${TARGET_PR}" ]; then
+            candidates="${TARGET_PR}"
+          else
+            # Oldest first: a PR that has waited longest has usually absorbed the
+            # most review rounds already and is closest to done.
+            candidates=$(api "https://api.github.com/repos/${REPO}/pulls?state=open&sort=created&direction=asc&per_page=100" \
+              | jq -r '.[] | select(.draft == false) | .number')
+          fi
+
+          for pr in ${candidates}; do
+            meta=$(api "https://api.github.com/repos/${REPO}/pulls/${pr}")
+            head=$(jq -r '.head.sha' <<<"${meta}")
+            mstate=$(jq -r '.mergeable_state // "unknown"' <<<"${meta}")
+
+            # A conflicted PR needs a human merge, not a review.
+            if [ "${mstate}" = "dirty" ]; then
+              echo "PR #${pr}: skipping, merge conflict"
+              continue
+            fi
+
+            reviews=$(api "https://api.github.com/repos/${REPO}/pulls/${pr}/reviews?per_page=100")
+
+            approved_on_head=$(jq -r --arg h "${head}" \
+              '[.[] | select(.state == "APPROVED" and .commit_id == $h)] | length' <<<"${reviews}")
+            if [ "${approved_on_head}" -gt 0 ]; then
+              echo "PR #${pr}: already approved on ${head:0:7}, nothing to do"
+              continue
+            fi
+
+            # THE important distinction, learned the hard way. An incremental
+            # review only examines commits since the last reviewed sha. It
+            # therefore cannot supersede a standing CHANGES_REQUESTED — whether
+            # that block sits on an older commit (no path back to it) or on the
+            # current head (no new commits to look at). Either way it answers
+            # "No actionable comments were generated", posts no formal review
+            # row, and the PR stays blocked with the hour spent for nothing.
+            #
+            # So: if the PR is blocked at all, always spend the hour on a full
+            # review. It is the only form that reliably clears a block, and the
+            # allowance is one review — there is no cheaper second attempt.
+            blocked=$(jq -r '[.[] | select(.state == "CHANGES_REQUESTED")] | length' <<<"${reviews}")
+            if [ "${blocked}" -gt 0 ]; then
+              trigger="@coderabbitai full review"
+              why="standing CHANGES_REQUESTED (${blocked}) to supersede"
+            else
+              trigger="@coderabbitai review"
+              why="never blocked; incremental is enough"
+            fi
+
+            echo "PR #${pr}: ${why} -> ${trigger}"
+
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "dry run, not posting"
+              exit 0
+            fi
+
+            # Body must be the trigger line and nothing conversational before
+            # it — extra prose gets parsed as chat and produces no review.
+            body=$(printf '%s\n\n---\n_Posted by the scheduled CodeRabbit drain workflow._' "${trigger}")
+            api -X POST \
+              -d "$(jq -n --arg b "${body}" '{body: $b}')" \
+              "https://api.github.com/repos/${REPO}/issues/${pr}/comments" > /dev/null
+
+            echo "Triggered review on PR #${pr}"
+            # One trigger per run: the hourly allowance is one review, and a
+            # second attempt in the same window is refused noise.
+            exit 0
+          done
+
+          echo "No PR needed a trigger this run."
