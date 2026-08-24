@@ -97,6 +97,11 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     expect(git.push).toHaveBeenCalledWith(
       expect.objectContaining({ url: REMOTE, ref: "main", remoteRef: "main" }),
     );
+    // Non-force is the invariant that makes a concurrent Stratum-native merge
+    // lose the race rather than get silently overwritten. objectContaining
+    // ignores unlisted keys, so `force: true` would slip past the assertion
+    // above — assert its absence explicitly.
+    expect(vi.mocked(git.push).mock.calls[0]?.[0]).not.toHaveProperty("force", true);
     // The destructive delete/re-import cycle must never run.
     expect(del).not.toHaveBeenCalled();
     expect(importFn).not.toHaveBeenCalled();
