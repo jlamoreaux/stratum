@@ -719,6 +719,9 @@ export interface FastForwardResult {
   commit?: string;
 }
 
+/** Local ref used to push a pinned (non-tip) workspace commit to the project. */
+const PINNED_MERGE_REF = "refs/heads/stratum-pinned-merge";
+
 /**
  * Attempt a fast-forward of the project's main to the pinned workspace commit
  * (the evaluated sha, #124) — or the workspace tip for legacy unpinned changes —
@@ -732,9 +735,6 @@ export interface FastForwardResult {
  * Note: this still fetches the workspace fork (its objects live in a separate
  * Artifacts repo); what it removes is the project clone (`depth:50`) + `git.merge`.
  */
-/** Local ref used to push a pinned (non-tip) workspace commit to the project. */
-const PINNED_MERGE_REF = "refs/heads/stratum-pinned-merge";
-
 export async function fastForwardMerge(
   projectRemote: string,
   projectToken: string,

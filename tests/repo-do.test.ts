@@ -327,6 +327,32 @@ describe("RepoDO.advance sha pinning (#124)", () => {
     expect(vi.mocked(fastForwardMerge).mock.calls[0]?.[7]).toBe("eval-sha");
   });
 
+  it("cold fallback pins with evaluatedSha when workspaceHeadSha is absent", async () => {
+    // The fast path pins with `workspaceHeadSha ?? evaluatedSha`. The cold
+    // options used to read workspaceHeadSha alone, so an evaluatedSha-only
+    // change got a pinned fast-forward but an unpinned cold merge — fail-closed
+    // via expectedWorkspaceSha, but unable to land the very commit the fast
+    // path lands. Both paths must pin the same revision.
+    setChange("base1", { evaluatedSha: "eval-sha" });
+    vi.mocked(fastForwardMerge).mockResolvedValue({
+      success: true,
+      data: { fastForwarded: false },
+    });
+    const { ctx, store } = makeCtx();
+    store.set("head", "base1");
+    const repo = new RepoDO(ctx, env);
+
+    await repo.advance("chg_1");
+
+    expect(mergeWorkspaceIntoProject).toHaveBeenCalledTimes(1);
+    const opts = vi.mocked(mergeWorkspaceIntoProject).mock.calls[0]?.[5] as {
+      workspaceSha?: string;
+      expectedWorkspaceSha?: string;
+    };
+    expect(opts.workspaceSha).toBe("eval-sha");
+    expect(opts.expectedWorkspaceSha).toBe("eval-sha");
+  });
+
   it("legacy change (no pinned fields): fast-forward runs unpinned (live tip)", async () => {
     setChange("base1");
     const { ctx, store } = makeCtx();
@@ -448,6 +474,42 @@ describe("RepoDO.mergeViaR2 sha-keyed staged trees (#124)", () => {
     // Head cache advanced; both staged-tree copies GC'd.
     expect(store.get("head")).toBe("r2-commit");
     expect(deleted.sort()).toEqual([LATEST_KEY, SHA_KEY].sort());
+  });
+
+  it("corrupt sha-keyed object falls back to the git path instead of throwing", async () => {
+    // parseStagedTree throws on a truncated header or malformed oid, and
+    // nothing up the stack catches it — routes/changes.ts awaits mergeViaR2
+    // bare — so an unguarded parse turned one corrupt object into a 500 on an
+    // otherwise mergeable change. The batch route already skips such items.
+    vi.mocked(loadStagedTree).mockImplementation(async (_bucket, key: string) => {
+      if (key === SHA_KEY) throw new Error("Invalid staged tree: truncated header");
+      return { treeOid: NEWER_TREE, objects: [] };
+    });
+    const { ctx } = makeCtx();
+    const repo = new RepoDO(ctx, r2env);
+
+    const result = await repo.mergeViaR2("chg_1");
+
+    // Falls back to the git path, which merges the pinned sha without R2.
+    expect(result).toEqual({ fallback: true });
+    expect(batchMergeStagedTrees).not.toHaveBeenCalled();
+    expect(markChangeMerged).not.toHaveBeenCalled();
+    // Nothing GC'd: no merge happened.
+    expect(deleted).toEqual([]);
+  });
+
+  it("corrupt LATEST object also falls back rather than throwing", async () => {
+    vi.mocked(loadStagedTree).mockImplementation(async (_bucket, key: string) => {
+      if (key === SHA_KEY) return null;
+      throw new Error("Invalid staged tree: malformed tree oid");
+    });
+    const { ctx } = makeCtx();
+    const repo = new RepoDO(ctx, r2env);
+
+    const result = await repo.mergeViaR2("chg_1");
+
+    expect(result).toEqual({ fallback: true });
+    expect(batchMergeStagedTrees).not.toHaveBeenCalled();
   });
 
   it("sha key missing and latest tree is NOT the evaluated content: falls back (nothing merged via R2)", async () => {

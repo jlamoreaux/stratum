@@ -242,10 +242,31 @@ export class RepoDO extends DurableObject<Env> {
         ? stagedTreeShaKey(project.id, change.workspace, pinnedSha)
         : undefined;
 
+    // parseStagedTree throws on a truncated header or a malformed tree oid, and
+    // the sha-keyed object is written best-effort by the commit route, so a
+    // partial write is reachable. Nothing up the stack catches it — the caller
+    // in `routes/changes.ts` awaits mergeViaR2 bare — so an unguarded parse
+    // turns one corrupt object into a 500 on an otherwise mergeable change.
+    // The batch route already skips such items; do the equivalent here by
+    // treating a corrupt object as "not staged" and falling back to the git
+    // path, which merges the pinned sha and does not depend on R2 at all.
+    const readStaged = async (key: string): Promise<StagedTree | null> => {
+      try {
+        return await loadStagedTree(bucket, key);
+      } catch (error) {
+        log.error("Corrupt staged tree; falling back to the git path", undefined, {
+          key,
+          changeId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    };
+
     let staged: StagedTree | null = null;
-    if (shaKey !== undefined) staged = await loadStagedTree(bucket, shaKey);
+    if (shaKey !== undefined) staged = await readStaged(shaKey);
     if (!staged) {
-      const latest = await loadStagedTree(bucket, latestKey);
+      const latest = await readStaged(latestKey);
       if (!latest) return { fallback: true }; // not staged → cold path
       if (pinnedSha !== undefined) {
         // No sha-keyed tree (staged before sha-keying shipped, or evicted). The
@@ -542,7 +563,12 @@ export class RepoDO extends DurableObject<Env> {
             // Merge the exact evaluated commit (#115/#124) AND assert the pinned
             // revision matches what was evaluated (SEC-2) — the same pinning the
             // cold route/MergeQueue paths apply. Legacy changes skip both.
-            ...(change.workspaceHeadSha ? { workspaceSha: change.workspaceHeadSha } : {}),
+            // pinnedSha, not workspaceHeadSha: a change carrying only
+            // evaluatedSha would otherwise get a pinned fast-forward but an
+            // unpinned cold merge. expectedWorkspaceSha keeps that fail-closed
+            // rather than unsafe, but the cold path could not land the
+            // evaluated commit the fast path lands. Same value, both paths.
+            ...(pinnedSha !== undefined ? { workspaceSha: pinnedSha } : {}),
             ...(change.evaluatedSha !== undefined
               ? { expectedWorkspaceSha: change.evaluatedSha }
               : {}),
