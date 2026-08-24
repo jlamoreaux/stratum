@@ -165,10 +165,39 @@ describe("S7 — commit route identifier validation", () => {
   // length) but 27 MiB of UTF-8 (over it). Counting `.length` let this through.
   it("rejects a MULTIBYTE payload whose UTF-8 size exceeds the cap", async () => {
     const env = await makeSeededEnv();
+    // Spread across files that each sit UNDER the per-file cap, so this
+    // exercises the AGGREGATE accounting rather than the per-file guard:
+    // 4 x 3M chars = 12M UTF-16 units (under 25 MiB by string length) but
+    // 4 x 9 MiB = 36 MiB of UTF-8 (over it).
+    const cjk: Record<string, string> = {};
+    for (let i = 0; i < 4; i++) cjk[`cjk${i}.txt`] = "\u4e00".repeat(3 * 1024 * 1024);
+    const res = await app.fetch(commitReq({ files: cjk }), env);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("too large");
+    expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
+  });
+
+  // The per-file cap lives at the commitAndPush choke point; before this it was
+  // not surfaced here, so a single oversized file minted a token and cloned the
+  // repo before being refused — the work this block exists to prevent.
+  it("rejects an oversized SINGLE file before cloning, not just the aggregate", async () => {
+    const env = await makeSeededEnv();
+    // Over the 10 MiB per-file cap, but well under the 25 MiB aggregate.
     const res = await app.fetch(
-      commitReq({ files: { "cjk.txt": "\u4e00".repeat(9 * 1024 * 1024) } }),
+      commitReq({ files: { "big.bin": "x".repeat(11 * 1024 * 1024) } }),
       env,
     );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("per-file");
+    expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
+  });
+
+  it("counts path keys toward the aggregate budget", async () => {
+    const env = await makeSeededEnv();
+    // Values are tiny; the KEYS alone exceed the aggregate cap.
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 30; i++) files[`${"k".repeat(1024 * 1024)}${i}.txt`] = "x";
+    const res = await app.fetch(commitReq({ files }), env);
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("too large");
     expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
@@ -176,10 +205,10 @@ describe("S7 — commit route identifier validation", () => {
 
   it("rejects a payload over the total byte cap before cloning", async () => {
     const env = await makeSeededEnv();
-    const res = await app.fetch(
-      commitReq({ files: { "big.bin": "x".repeat(25 * 1024 * 1024 + 1) } }),
-      env,
-    );
+    // Four 9 MiB files: each under the per-file cap, 36 MiB in aggregate.
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 4; i++) files[`big${i}.bin`] = "x".repeat(9 * 1024 * 1024);
+    const res = await app.fetch(commitReq({ files }), env);
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("too large");
     expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();

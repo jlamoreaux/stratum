@@ -475,9 +475,19 @@ async function commandSectionBytes(
   if (encoding !== "gzip" && encoding !== "x-gzip" && encoding !== "deflate") return null;
 
   try {
-    const stream = new Blob([body])
-      .stream()
-      .pipeThrough(new DecompressionStream(encoding === "deflate" ? "deflate" : "gzip"));
+    // A ReadableStream over the existing buffer, not `new Blob([body]).stream()`
+    // — the Blob constructor COPIES, so inspecting a 50 MiB push cost a second
+    // 50 MiB. This route exists to bound request resource use; allocating a
+    // full duplicate to enforce that bound defeats the point.
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(body));
+        controller.close();
+      },
+    });
+    const stream = source.pipeThrough(
+      new DecompressionStream(encoding === "deflate" ? "deflate" : "gzip"),
+    );
     const reader = stream.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { type EventActor, emitEvent } from "../queue/events";
 import { isTargetDeleting } from "../storage/deletion";
 import {
+  MAX_FILE_BYTES,
   artifactsRepoNameFromRemote,
   cloneRepo,
   commitAndPush,
@@ -221,7 +222,10 @@ app.post("/:name/commit", async (c) => {
   if (fileCount > MAX_COMMIT_FILES) {
     return badRequest(`too many files in one commit (max ${MAX_COMMIT_FILES})`);
   }
-  let totalBytes = 0;
+  // The message and the path keys are part of the payload the isolate holds, so
+  // they count against the budget too — 2000 keys of a megabyte each is 2 GB
+  // that an aggregate over VALUES alone would not see.
+  let totalBytes = new TextEncoder().encode(body.message).byteLength;
   for (const [path, contents] of Object.entries(body.files)) {
     // S7 (#130): refuse traversal-shaped paths before any git work — the same
     // guard commitAndPush enforces (defense in depth), surfaced early here so
@@ -233,7 +237,15 @@ app.post("/:name/commit", async (c) => {
     // commitAndPush measures per-file size the same way. `.length` undercounts
     // every multibyte character — a CJK payload is 3 bytes per unit counted as
     // one — so string length would let a commit past three times the limit.
-    totalBytes += new TextEncoder().encode(contents).byteLength;
+    const fileBytes = new TextEncoder().encode(contents).byteLength;
+    // Surface commitAndPush's PER-FILE cap here too. Only the aggregate was
+    // checked, so a single 20 MiB file passed this loop, minted a token and
+    // cloned the repo, and was refused afterwards — the expensive work this
+    // block exists to avoid.
+    if (fileBytes > MAX_FILE_BYTES) {
+      return badRequest(`file ${path} exceeds the ${MAX_FILE_BYTES}-byte per-file limit`);
+    }
+    totalBytes += fileBytes + new TextEncoder().encode(path).byteLength;
     if (totalBytes > MAX_COMMIT_BYTES) {
       return badRequest(`commit payload too large (max ${MAX_COMMIT_BYTES} bytes)`);
     }

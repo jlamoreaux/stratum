@@ -35,6 +35,7 @@ vi.mock("../src/utils/authz", () => ({
   canReadProject: vi.fn(),
 }));
 vi.mock("../src/storage/git-ops", () => ({
+  MAX_FILE_BYTES: 10 * 1024 * 1024,
   artifactsRepoNameFromRemote: vi.fn(() => "fork-repo"),
   cloneRepo: vi.fn(async () => ({ success: true, data: { fs: {}, dir: "/" } })),
   commitAndPush: vi.fn(async () => ({ success: true, data: "sha_new" })),

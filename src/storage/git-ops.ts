@@ -1735,7 +1735,9 @@ export async function squashMerge(
 }
 
 const MAX_REPO_FILES = 500;
-const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+/** Per-file ceiling for a commit. Exported so the workspace route enforces the
+ * SAME number this choke point does, instead of a copy that can drift. */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 export interface ResolveConflictOpts {
   projectRemote: string;
