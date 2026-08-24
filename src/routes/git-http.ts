@@ -11,6 +11,7 @@ import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/stat
 import { getUser, getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
+import { getWaitUntil } from "../utils/execution-ctx";
 import {
   ZERO_OID,
   buildReportStatus,
@@ -31,7 +32,10 @@ import { createLogger } from "../utils/logger";
  *    change is created + evaluated, and the client gets a truthful per-ref
  *    `ng` carrying the change id (main only moves through the merge gate).
  *    With the flag off — and for multi-ref/delete/non-default pushes — the
- *    push is refused in-protocol with sideband guidance.
+ *    push is refused in-protocol with sideband guidance. Refs are proxied
+ *    unfiltered on the read path, so refs/tags/* are advertised and fetchable;
+ *    tag pushes to the project remote are refused with tag-specific guidance
+ *    (#182 — the change gate cannot represent a tag).
  *  - Workspace URL `/@ns/slug/workspaces/<ws>.git` — clone/fetch (read) AND
  *    `git push` (write), proxied to the workspace's Artifacts fork. The push's
  *    command list is parsed first and held to a ref policy (S3, #130): only
@@ -679,6 +683,29 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
       }),
     );
 
+  // Tag policy (#182): tag READS work everywhere — info/refs and upload-pack are
+  // proxied unfiltered, so refs/tags/* are advertised and fetchable on both the
+  // project and workspace remotes, and tag PUSHES to workspace forks proxy
+  // verbatim. A tag push to the PROJECT remote, however, is refused explicitly:
+  // the project repo's refs only move through Stratum's gates, and the change
+  // gate cannot represent a tag (a change is an evaluated diff against the
+  // default branch; a tag ref has nothing to evaluate or merge). Refusing with a
+  // tag-specific reason beats the generic branch guidance, which would
+  // misleadingly suggest the gate could carry the tag through.
+  const tagRefs = commands.filter((cmd) => cmd.ref.startsWith("refs/tags/"));
+  if (tagRefs.length > 0) {
+    logger.info("Refusing project tag push in-protocol", {
+      refs: tagRefs.map((cmd) => cmd.ref),
+    });
+    return refuseAll(
+      "tag pushes to the project remote are not supported — push tags to a workspace remote",
+      [
+        "Project tags are read-only over this remote (clone/fetch delivers them).",
+        `Push tags to a workspace remote instead: /${namespace}/${slug}/workspaces/<ws>.git`,
+      ],
+    );
+  }
+
   const gatedEnabled = c.env.GIT_PUSH_GATED_ENABLED === "true";
   // Same default-branch resolution the merge/sync paths use — a repo imported
   // with a `master` or `trunk` default must gate pushes to THAT ref, not to a
@@ -769,6 +796,7 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
     workspaceName: forkedName,
     workspaceRemote: forkResult.data.remote,
     actor,
+    waitUntil: getWaitUntil(c),
   });
   if (!outcome.success) {
     logger.error("Gated push change creation failed", outcome.error);
