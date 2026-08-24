@@ -34,6 +34,7 @@ vi.mock("../src/storage/git-ops", async (importActual) => {
     cloneRepo: vi.fn(async () => ({ success: true, data: { fs: {}, dir: "/" } })),
     batchMergeStagedTrees: vi.fn(),
     pushBranchToRemote: vi.fn(async () => ({ success: true, data: undefined })),
+    resolveLocalTip: vi.fn(),
   };
 });
 
@@ -178,6 +179,7 @@ import {
   getDiffBetweenRepos,
   mergeWorkspaceIntoProject,
   pushBranchToRemote,
+  resolveLocalTip,
 } from "../src/storage/git-ops";
 import { packObjects } from "../src/storage/object-loader";
 import { recordProvenance } from "../src/storage/provenance";
@@ -2204,6 +2206,96 @@ describe("POST /api/changes/:id/github-pr", () => {
         promotedBy: "user_test",
       }),
     );
+  });
+
+  // #243: the evaluation gate is only meaningful if the code published to
+  // GitHub is the code that was evaluated. change.evaluatedSha is the pinned
+  // revision; the clone above is a live read of the workspace, which can have
+  // advanced since evaluation ran.
+  describe("evaluatedSha gate (#243)", () => {
+    it("pushes and promotes, recording the published sha, when the workspace tip matches evaluatedSha", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-evaluated" });
+
+      const res = await promote();
+      expect(res.status).toBe(200);
+      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/");
+
+      // The gate runs strictly before the push (before anything is published).
+      const tipOrder = vi.mocked(resolveLocalTip).mock.invocationCallOrder[0] ?? -1;
+      const pushOrder = vi.mocked(pushBranchToRemote).mock.invocationCallOrder[0] ?? -1;
+      expect(tipOrder).toBeGreaterThan(0);
+      expect(tipOrder).toBeLessThan(pushOrder);
+
+      expect(updateChangeStatus).toHaveBeenCalledWith(
+        env.DB,
+        expect.anything(),
+        "chg_abc123",
+        "promoted",
+        expect.objectContaining({ githubHeadSha: "sha-evaluated" }),
+      );
+    });
+
+    it("rejects the promotion with a structured error when the workspace tip has moved past evaluatedSha", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-advanced" });
+
+      const res = await promote();
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as {
+        error: string;
+        code: string;
+        evaluatedSha: string;
+        currentTip: string;
+      };
+      expect(body.code).toBe("STALE_WORKSPACE");
+      expect(body.evaluatedSha).toBe("sha-evaluated");
+      expect(body.currentTip).toBe("sha-advanced");
+      // Fails closed BEFORE anything is published or persisted.
+      expect(pushBranchToRemote).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    });
+
+    it("502s without pushing when the local tip can't be resolved", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({
+        success: false,
+        error: new AppError(
+          "Git error: Failed to resolve local tip",
+          "EXTERNAL_SERVICE_ERROR",
+          502,
+        ),
+      });
+
+      const res = await promote();
+      expect(res.status).toBe(502);
+      expect(pushBranchToRemote).not.toHaveBeenCalled();
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    });
+
+    it("skips the gate (legacy live-tip behavior) when the change has no evaluatedSha", async () => {
+      // acceptedChange has no evaluatedSha.
+      const res = await promote();
+      expect(res.status).toBe(200);
+      expect(resolveLocalTip).not.toHaveBeenCalled();
+      expect(updateChangeStatus).toHaveBeenCalledWith(
+        env.DB,
+        expect.anything(),
+        "chg_abc123",
+        "promoted",
+        expect.not.objectContaining({ githubHeadSha: expect.anything() }),
+      );
+    });
   });
 
   it("promotes a bulk-imported project that only has sourceUrl", async () => {

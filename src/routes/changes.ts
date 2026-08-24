@@ -37,6 +37,7 @@ import {
   mergeWorkspaceIntoProject,
   parseStagedTree,
   pushBranchToRemote,
+  resolveLocalTip,
   stagedTreeKey,
   stagedTreeShaKey,
 } from "../storage/git-ops";
@@ -1663,6 +1664,40 @@ app.post("/changes/:id/github-pr", async (c) => {
   });
   if (!cloneResult.success) return appError(cloneResult.error);
 
+  // The evaluation gate is only meaningful if the code published to GitHub is
+  // the code that was evaluated. The clone above is a live read of the
+  // workspace right now, which can have advanced past `change.evaluatedSha`
+  // between evaluation and this request — same TOCTOU the merge path guards
+  // against a few hundred lines up (SEC-2) and #223 pinned on the R2/DO fast
+  // paths. Reject rather than push+promote against unevaluated content:
+  // fails closed, and is the smaller change than re-targeting the push at the
+  // pinned sha (that needs its own answer for what re-promotion then means).
+  // Legacy changes with no evaluatedSha (pre migration 024) skip the check,
+  // matching the merge path's behavior.
+  let publishedSha: string | undefined;
+  if (change.evaluatedSha !== undefined) {
+    const tipResult = await resolveLocalTip(cloneResult.data.fs, cloneResult.data.dir);
+    if (!tipResult.success) return appError(tipResult.error);
+    publishedSha = tipResult.data;
+    if (publishedSha !== change.evaluatedSha) {
+      logger.warn("Workspace advanced past the evaluated revision; rejecting promotion", {
+        changeId: id,
+        evaluatedSha: change.evaluatedSha,
+        currentTip: publishedSha,
+      });
+      return c.json(
+        {
+          error:
+            "Workspace is stale: it advanced since this change was evaluated. Re-evaluate before promoting.",
+          code: "STALE_WORKSPACE",
+          evaluatedSha: change.evaluatedSha,
+          currentTip: publishedSha,
+        },
+        409,
+      );
+    }
+  }
+
   const pushResult = await pushBranchToRemote(
     cloneResult.data.fs,
     cloneResult.data.dir,
@@ -1867,6 +1902,10 @@ app.post("/changes/:id/github-pr", async (c) => {
     githubPrNumber: pr.number,
     githubPrUrl: pr.html_url,
     githubPrState: pr.state,
+    // The revision actually force-pushed as this PR's head — only known
+    // precisely when the evaluatedSha gate above ran (legacy changes with no
+    // evaluatedSha have no pinned revision to record here).
+    ...(publishedSha !== undefined ? { githubHeadSha: publishedSha } : {}),
     promotedAt,
     promotedBy: userId,
   });

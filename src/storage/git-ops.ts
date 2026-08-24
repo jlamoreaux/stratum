@@ -387,6 +387,24 @@ export async function pushBranchToRemote(
 }
 
 /**
+ * Resolves the tip commit of an already-cloned repository's default branch.
+ *
+ * Distinct from {@link getCommitLog}, which clones fresh: this reads the `fs`/`dir`
+ * of a clone the caller already has open, so it costs no extra network round trip.
+ * Promotion (#243) uses this to confirm the workspace clone it is about to
+ * force-push to GitHub is still the revision recorded as `change.evaluatedSha` —
+ * the clone is a live read of the workspace, which can have advanced since
+ * evaluation ran.
+ */
+export async function resolveLocalTip(fs: NodeFS, dir: string): Promise<Result<string, AppError>> {
+  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+  if (!tipResult.success) {
+    return err(new ExternalServiceError("Git", "Failed to resolve local tip", tipResult.error));
+  }
+  return ok(tipResult.data);
+}
+
+/**
  * Initializes a repository with the supplied files, commits them, and pushes the commit to `main`.
  *
  * Only valid against a remote with no history: this builds the root commit, so
