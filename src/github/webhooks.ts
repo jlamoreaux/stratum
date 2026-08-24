@@ -9,7 +9,7 @@ import { getProjectByGitHubRepo } from "../storage/github-bridge";
 import { createImportJob } from "../storage/imports";
 import { getWorkspace } from "../storage/state";
 import { getSyncStatus, setSyncInProgress } from "../storage/sync";
-import type { Env } from "../types";
+import { type Env, projectDefaultBranch } from "../types";
 import { type Logger, createLogger } from "../utils/logger";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -115,7 +115,7 @@ async function handlePush(
   }
 
   const importId = crypto.randomUUID();
-  const sourceBranch = project.sourceDefaultBranch ?? "main";
+  const sourceBranch = projectDefaultBranch(project);
   const sourceUrl = project.sourceUrl ?? project.remote;
 
   // Enqueue FIRST — only write state flags after a successful send().

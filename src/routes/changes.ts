@@ -1657,8 +1657,10 @@ app.post("/changes/:id/github-pr", async (c) => {
   }
   // projectDefaultBranch rather than the inline chain: it uses `||`, so an
   // empty-string sourceDefaultBranch falls through instead of being sent to
-  // GitHub as a branch name.
-  const base = body.base ?? projectDefaultBranch(project);
+  // GitHub as a branch name. Resolved once: it is both the PR base fallback and
+  // the ref the workspace clone below must ask for.
+  const defaultBranch = projectDefaultBranch(project);
+  const base = body.base ?? defaultBranch;
 
   // GitHub PR creation needs a GitHub credential — the Artifacts repo token (now
   // never persisted) was never valid here. Use the app's configured GitHub token.
@@ -1684,7 +1686,11 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!repoTokenResult.success) return internalError(repoTokenResult.error.message);
   // GitHub shares no objects with the workspace repo, so a shallow clone's
   // history would be incomplete once pushed there — clone in full.
+  // `ref` is the project's default branch, NOT `base`: the workspace fork copies
+  // the parent's default branch under the same name, while `base` may be a
+  // caller-supplied GitHub branch that does not exist in the fork at all.
   const cloneResult = await cloneRepo(workspaceRemote, repoTokenResult.data, logger, {
+    ref: defaultBranch,
     fullHistory: true,
   });
   if (!cloneResult.success) return appError(cloneResult.error);

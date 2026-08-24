@@ -2457,15 +2457,16 @@ export async function applySourceUpdate(
   sourceTip: string,
   logger: Logger,
   author: Author = SYSTEM_AUTHOR,
+  branch = "main",
 ): Promise<Result<SourceSyncResult, AppError>> {
   const mergeResult = await fromPromise(
     git.merge({
       fs,
       dir,
-      ours: "main",
+      ours: branch,
       theirs: sourceTip,
       author,
-      message: `Sync source commit ${sourceTip.slice(0, 7)} into main`,
+      message: `Sync source commit ${sourceTip.slice(0, 7)} into ${branch}`,
     }),
   );
   if (!mergeResult.success) {
@@ -2501,10 +2502,10 @@ export async function applySourceUpdate(
   // git.merge omits `oid` in some no-op cases; fall back to the current head.
   let commit = mergeResult.data.oid;
   if (!commit) {
-    const headResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+    const headResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
     if (!headResult.success) {
       return err(
-        new ExternalServiceError("Git", "Failed to resolve main after sync", headResult.error),
+        new ExternalServiceError("Git", `Failed to resolve ${branch} after sync`, headResult.error),
       );
     }
     commit = headResult.data;
@@ -2562,7 +2563,7 @@ export async function syncFromGitHub(
   const attempt = async (
     fullHistory: boolean,
   ): Promise<Result<{ applied: SourceSyncResult; fs: NodeFS; dir: string }, AppError>> => {
-    const cloneResult = await cloneRepo(remote, token, logger, { fullHistory });
+    const cloneResult = await cloneRepo(remote, token, logger, { ref: branch, fullHistory });
     if (!cloneResult.success) return err(cloneResult.error);
     const { fs, dir } = cloneResult.data;
 
@@ -2611,7 +2612,14 @@ export async function syncFromGitHub(
     );
     if (!tipResult.success) return err(tipResult.error);
 
-    const applyResult = await applySourceUpdate(fs, dir, tipResult.data, logger);
+    const applyResult = await applySourceUpdate(
+      fs,
+      dir,
+      tipResult.data,
+      logger,
+      SYSTEM_AUTHOR,
+      branch,
+    );
     if (!applyResult.success) return err(applyResult.error);
     return ok({ applied: applyResult.data, fs, dir });
   };
@@ -2663,8 +2671,8 @@ export async function syncFromGitHub(
       dir,
       http,
       url: remote,
-      ref: "main",
-      remoteRef: "main",
+      ref: branch,
+      remoteRef: branch,
       onAuth: makeAuth(token),
     }),
   );

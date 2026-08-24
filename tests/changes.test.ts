@@ -2152,7 +2152,9 @@ describe("POST /api/changes/:id/github-pr", () => {
       mockWorkspace.remote,
       "artifacts-token",
       expect.anything(),
-      { fullHistory: true },
+      // #181: the fork copies the parent's default branch under the same name,
+      // so a `develop`-default project has no `main` for the clone to find.
+      { ref: "develop", fullHistory: true },
     );
     // …and its tip is pushed to the Stratum-owned head ref on GitHub.
     expect(pushBranchToRemote).toHaveBeenCalledWith(
@@ -2230,6 +2232,30 @@ describe("POST /api/changes/:id/github-pr", () => {
     );
     const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
     expect(prPayload.base).toBe("trunk"); // sourceDefaultBranch wins
+    // The same resolved branch reaches the workspace clone.
+    expect(cloneRepo).toHaveBeenCalledWith(
+      mockWorkspace.remote,
+      "artifacts-token",
+      expect.anything(),
+      { ref: "trunk", fullHistory: true },
+    );
+  });
+
+  // `base` is caller-supplied and may name a branch that exists on GitHub but
+  // not in the workspace fork. It must never be used as the clone ref — only
+  // the project's own default branch is guaranteed to exist there.
+  it("clones the project default branch even when the caller overrides base", async () => {
+    const res = await promote({ base: "release/2026-08" });
+    expect(res.status).toBe(200);
+
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("release/2026-08");
+    expect(cloneRepo).toHaveBeenCalledWith(
+      mockWorkspace.remote,
+      "artifacts-token",
+      expect.anything(),
+      { ref: "develop", fullHistory: true },
+    );
   });
 
   // A shape-only URL check (github.com suffix + non-empty path) accepts real

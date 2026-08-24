@@ -44,24 +44,21 @@ export async function reconstructRepo(
   branch = "main",
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   try {
-    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    await git.init({ fs: fs as any, dir: DIR, defaultBranch: branch });
+    const fs = new MemoryFS().toNodeFS();
+    await git.init({ fs, dir: DIR, defaultBranch: branch });
 
     for (const obj of unpackObjects(pack)) {
       await placeLooseObject(fs, GITDIR, obj.oid, obj.bytes);
     }
     await git.writeRef({
-      // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-      fs: fs as any,
+      fs,
       dir: DIR,
       ref: `refs/heads/${branch}`,
       value: manifest.tipSha,
       force: true,
     });
 
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    const resolved = await git.resolveRef({ fs: fs as any, dir: DIR, ref: branch });
+    const resolved = await git.resolveRef({ fs, dir: DIR, ref: branch });
     if (resolved !== manifest.tipSha) {
       return err(
         new AppError(
@@ -75,8 +72,7 @@ export async function reconstructRepo(
     // COMMIT OBJECT actually unpacked into the store. readCommit does — it throws
     // if the object (or any pack it needs) is missing, catching a corrupt pack
     // that reconstructs a dangling ref.
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    await git.readCommit({ fs: fs as any, dir: DIR, oid: manifest.tipSha });
+    await git.readCommit({ fs, dir: DIR, oid: manifest.tipSha });
 
     // Tag refs (#182). `tags` is OPTIONAL: manifests from backups taken before
     // tag support omit it, and such a restore must keep working unchanged.
@@ -89,8 +85,7 @@ export async function reconstructRepo(
         return err(new AppError(`Invalid tag name in manifest: ${tag.name}`, "BACKUP_ERROR", 500));
       }
       await git.writeRef({
-        // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-        fs: fs as any,
+        fs,
         dir: DIR,
         ref: `refs/tags/${tag.name}`,
         value: tag.oid,
@@ -98,8 +93,7 @@ export async function reconstructRepo(
       });
       // Same dangling-ref guard as the tip: prove the tag's object (annotated
       // tag object or lightweight target) actually unpacked.
-      // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-      await git.readObject({ fs: fs as any, dir: DIR, oid: tag.oid });
+      await git.readObject({ fs, dir: DIR, oid: tag.oid });
     }
 
     logger.debug("Reconstructed repo", {
