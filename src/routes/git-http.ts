@@ -494,8 +494,14 @@ async function commandSectionBytes(
     let offset = 0;
     for (const chunk of chunks) {
       if (offset >= out.byteLength) break;
-      out.set(chunk.subarray(0, out.byteLength - offset), offset);
-      offset += chunk.byteLength;
+      // Advance by what was actually copied, not the chunk's full length. The
+      // two only differ on the final, truncated chunk — after which the loop
+      // exits — so the emitted bytes were already correct either way. Keeping
+      // `offset` equal to "bytes written" makes that an invariant rather than
+      // something that happens to hold because of the break.
+      const copied = Math.min(chunk.byteLength, out.byteLength - offset);
+      out.set(chunk.subarray(0, copied), offset);
+      offset += copied;
     }
     return out;
   } catch {

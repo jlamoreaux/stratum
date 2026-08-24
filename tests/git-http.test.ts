@@ -492,15 +492,6 @@ describe("git smart-HTTP proxy — receive-pack in-protocol rejection (Task 4)",
   const OID_A = "a".repeat(40);
   const OID_B = "b".repeat(40);
 
-  function pktLine(payload: string): Uint8Array {
-    const data = new TextEncoder().encode(payload);
-    const header = new TextEncoder().encode((data.byteLength + 4).toString(16).padStart(4, "0"));
-    const out = new Uint8Array(data.byteLength + 4);
-    out.set(header, 0);
-    out.set(data, 4);
-    return out;
-  }
-
   function pushBody(caps: string): Uint8Array {
     const line = pktLine(`${OID_A} ${OID_B} refs/heads/main\0${caps}`);
     const flush = new TextEncoder().encode("0000");
@@ -618,7 +609,8 @@ const OID_X = "a".repeat(40);
 const OID_Y = "b".repeat(40);
 const ZERO_OID = "0".repeat(40);
 
-function wsPktLine(payload: string): Uint8Array {
+/** pkt-line framing: 4-byte hex length prefix (inclusive) + payload. */
+function pktLine(payload: string): Uint8Array {
   const data = new TextEncoder().encode(payload);
   const header = new TextEncoder().encode((data.byteLength + 4).toString(16).padStart(4, "0"));
   const out = new Uint8Array(data.byteLength + 4);
@@ -628,7 +620,7 @@ function wsPktLine(payload: string): Uint8Array {
 }
 
 function wsPushBody(lines: string[], pack = "PACKDATA"): Uint8Array {
-  const parts = lines.map((l) => wsPktLine(l));
+  const parts = lines.map((l) => pktLine(l));
   parts.push(new TextEncoder().encode("0000"));
   parts.push(new TextEncoder().encode(pack));
   const total = parts.reduce((n, p) => n + p.byteLength, 0);
@@ -988,7 +980,7 @@ describe("git smart-HTTP proxy — workspace push ref policy (S3)", () => {
     const env = await policyEnv();
     const fetchMock = stubFetch(() => okUpstream());
     // A single command pkt-line with NO flush terminator.
-    const res = await push(env, wsPktLine(`${OID_X} ${OID_Y} refs/heads/main`));
+    const res = await push(env, pktLine(`${OID_X} ${OID_Y} refs/heads/main`));
     expect(res.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -1187,15 +1179,6 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
   const OID_A = "a".repeat(40);
   const OID_B = "b".repeat(40);
   const ZEROS = "0".repeat(40);
-
-  function pktLine(payload: string): Uint8Array {
-    const data = new TextEncoder().encode(payload);
-    const header = new TextEncoder().encode((data.byteLength + 4).toString(16).padStart(4, "0"));
-    const out = new Uint8Array(data.byteLength + 4);
-    out.set(header, 0);
-    out.set(data, 4);
-    return out;
-  }
 
   function pushBody(lines: string[]): Uint8Array {
     const parts = lines.map((l) => pktLine(l));
