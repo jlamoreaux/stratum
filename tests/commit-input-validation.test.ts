@@ -97,14 +97,19 @@ async function makeSeededEnv(): Promise<Env> {
 }
 
 function commitReq(
-  overrides: { name?: string; projectId?: unknown; files?: Record<string, string> } = {},
+  overrides: {
+    name?: string;
+    projectId?: unknown;
+    files?: Record<string, string>;
+    message?: string;
+  } = {},
 ): Request {
   return new Request(`http://localhost/api/workspaces/${overrides.name ?? "myws"}/commit`, {
     method: "POST",
     headers: { Authorization: `Bearer ${OWNER_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       projectId: "projectId" in overrides ? overrides.projectId : PROJECT_ID,
-      message: "m",
+      message: overrides.message ?? "m",
       files: overrides.files ?? { "a.txt": "hi" },
     }),
   });
@@ -198,6 +203,17 @@ describe("S7 — commit route identifier validation", () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 30; i++) files[`${"k".repeat(1024 * 1024)}${i}.txt`] = "x";
     const res = await app.fetch(commitReq({ files }), env);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("too large");
+    expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
+  });
+
+  it("counts the commit message toward the aggregate budget", async () => {
+    const env = await makeSeededEnv();
+    const res = await app.fetch(
+      commitReq({ files: { "a.txt": "x" }, message: "m".repeat(26 * 1024 * 1024) }),
+      env,
+    );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("too large");
     expect(vi.mocked(cloneRepo)).not.toHaveBeenCalled();
