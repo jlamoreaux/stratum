@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { importRateLimitMiddleware, releaseImportLock } from "../middleware/rate-limit";
 import { emitEvent } from "../queue/events";
+import { syncOrImportProject } from "../services/project-sync";
 import { recordAudit } from "../storage/audit";
 import { captureDeletionTarget } from "../storage/deletion";
 import { createDeletionJob } from "../storage/deletion-jobs";
@@ -1663,8 +1664,8 @@ app.get("/:namespace/:slug/sync/status", async (c) => {
   });
 });
 
-// Background sync processing
-async function processSyncJob(
+// Background sync processing (queue-less fallback). Exported for testing.
+export async function processSyncJob(
   env: Env,
   project: ProjectEntry,
   importId: string,
@@ -1686,32 +1687,37 @@ async function processSyncJob(
       "Fetching updates from remote",
     );
 
-    // Perform the sync import
-    const depth = 10; // Default depth
+    // #190: sync is an INCREMENTAL fetch into the existing Artifacts repo —
+    // never delete-and-re-import, which destroyed Stratum-native commits and
+    // orphaned workspace forks. Only projects with no recorded Artifacts remote
+    // (initial import never completed, so no forks can exist) still take the
+    // import path.
+    const depth = 10; // Default depth for the legacy import fallback
 
-    const importResult = await importFromGitHub(
+    const outcome = await syncOrImportProject(
       env.ARTIFACTS,
-      artifactsRepoName,
-      sourceUrl,
+      {
+        remote: project.remote,
+        artifactsRepoName,
+        sourceUrl,
+        branch,
+        depth,
+        logContext: { namespace, slug },
+      },
       logger,
-      branch,
-      depth,
     );
+    const syncedRemote = outcome.remote;
+    const syncError = outcome.error;
 
-    if (!importResult.success) {
-      await updateProjectSyncError(
-        env.STATE,
-        project,
-        `Sync failed: ${importResult.error.message}`,
-        logger,
-      );
+    if (syncError) {
+      await updateProjectSyncError(env.STATE, project, `Sync failed: ${syncError.message}`, logger);
       await updateImportStatus(
         env.DB,
         namespace,
         slug,
         "failed",
         logger,
-        `Sync failed: ${importResult.error.message}`,
+        `Sync failed: ${syncError.message}`,
       );
       return;
     }
@@ -1751,8 +1757,16 @@ async function processSyncJob(
       }
     }
 
-    // Update project
-    await updateProjectAfterSync(env.STATE, project, latestCommit || "unknown", logger);
+    // Update project. The remote only changes on the legacy full-import
+    // fallback — incremental sync keeps the existing repo (and thus the
+    // remote) stable. Persisting it here is required: otherwise the next sync
+    // still sees the legacy remote and re-runs the destructive full import.
+    await updateProjectAfterSync(
+      env.STATE,
+      { ...project, remote: syncedRemote },
+      latestCommit || "unknown",
+      logger,
+    );
 
     // Mark import as complete
     await updateImportStatus(
@@ -1768,7 +1782,7 @@ async function processSyncJob(
     await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
-      { remote: importResult.data.remote, namespace, slug },
+      { remote: syncedRemote, namespace, slug },
       logger,
     );
 

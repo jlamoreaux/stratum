@@ -587,6 +587,30 @@ export async function commitAndPush(
 }
 
 /**
+ * Resolve the tip commit of a ref that was just fetched: prefer `FETCH_HEAD`
+ * (set by the fetch that just ran), falling back to the fetched remote's
+ * tracking ref for backends that don't populate `FETCH_HEAD`.
+ */
+async function resolveFetchedTip(
+  fs: NodeFS,
+  dir: string,
+  remoteTrackingRef: string,
+  logger: Logger,
+  errorMessage: string,
+  logContext: Record<string, unknown>,
+): Promise<Result<string, AppError>> {
+  const fetchHeadResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
+  if (fetchHeadResult.success) return ok(fetchHeadResult.data);
+
+  const remoteRefResult = await fromPromise(git.resolveRef({ fs, dir, ref: remoteTrackingRef }));
+  if (!remoteRefResult.success) {
+    logger.error(errorMessage, remoteRefResult.error, logContext);
+    return err(new ExternalServiceError("Git", errorMessage, remoteRefResult.error));
+  }
+  return ok(remoteRefResult.data);
+}
+
+/**
  * Merges a workspace into its parent project repo.
  *
  * Attempts a true three-way merge via isomorphic-git's multi-remote fetch.
@@ -671,27 +695,16 @@ export async function mergeWorkspaceIntoProject(
     }
     workspaceSha = options.workspaceSha;
   } else {
-    const resolveFetchResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
-    if (resolveFetchResult.success) {
-      workspaceSha = resolveFetchResult.data;
-    } else {
-      const resolveRemoteResult = await fromPromise(
-        git.resolveRef({ fs, dir, ref: "refs/remotes/workspace/main" }),
-      );
-      if (!resolveRemoteResult.success) {
-        logger.error("Failed to resolve workspace ref", resolveRemoteResult.error, {
-          workspaceRemote,
-        });
-        return err(
-          new ExternalServiceError(
-            "Git",
-            "Failed to resolve workspace ref",
-            resolveRemoteResult.error,
-          ),
-        );
-      }
-      workspaceSha = resolveRemoteResult.data;
-    }
+    const tipResult = await resolveFetchedTip(
+      fs,
+      dir,
+      "refs/remotes/workspace/main",
+      logger,
+      "Failed to resolve workspace ref",
+      { workspaceRemote },
+    );
+    if (!tipResult.success) return err(tipResult.error);
+    workspaceSha = tipResult.data;
   }
 
   // SEC-2: content is content-addressed on the staged paths; the cold path merges
@@ -2270,6 +2283,265 @@ export async function importFromGitHub(
       clearTimeout(timeoutHandle);
     }
   }
+}
+
+/** Depth for the source fetch during an incremental sync — matches the shallow
+ * depth {@link cloneRepo} uses for the local clone it fetches into. */
+const SYNC_FETCH_DEPTH = 50;
+
+export interface SourceSyncResult {
+  /** "up-to-date": main already contains the source tip (no-op, nothing pushed);
+   * "fast-forwarded": main advanced to the source tip; "merged": source commits
+   * and Stratum-native commits were joined by a merge commit. */
+  status: "up-to-date" | "fast-forwarded" | "merged";
+  /** The resulting tip of `main`. */
+  commit: string;
+}
+
+/**
+ * Apply an already-fetched source tip onto the local `main` branch.
+ *
+ * Fast-forwards when main is an ancestor of the source tip, no-ops when the
+ * source tip is already reachable from main (Stratum-native commits ahead), and
+ * otherwise attempts a true three-way merge so native history is PRESERVED
+ * alongside new source commits. If neither is possible — a force-pushed source,
+ * conflicting edits, or shallow/grafted history hiding the common ancestor —
+ * this fails with `SYNC_DIVERGED` and leaves `main` untouched. It never falls
+ * back to any destructive re-import (#190).
+ *
+ * `SYNC_DIVERGED` is reserved for actual divergence. An operational merge
+ * failure (corrupt objects, IO) surfaces as `ExternalServiceError` instead, so
+ * the caller is not told to reconcile history that is in fact fine.
+ */
+export async function applySourceUpdate(
+  fs: NodeFS,
+  dir: string,
+  sourceTip: string,
+  logger: Logger,
+  author: Author = SYSTEM_AUTHOR,
+): Promise<Result<SourceSyncResult, AppError>> {
+  const mergeResult = await fromPromise(
+    git.merge({
+      fs,
+      dir,
+      ours: "main",
+      theirs: sourceTip,
+      author,
+      message: `Sync source commit ${sourceTip.slice(0, 7)} into main`,
+    }),
+  );
+  if (!mergeResult.success) {
+    const cause = mergeResult.error.message;
+    logger.error("Source update could not be applied", mergeResult.error, { sourceTip, cause });
+    // Only a real content divergence earns SYNC_DIVERGED: isomorphic-git throws
+    // MergeConflictError for conflicting edits and MergeNotSupportedError for
+    // conflict shapes it can't auto-resolve or histories with no common
+    // ancestor. Anything else — corrupt objects, IO, OOM — is operational, and
+    // reporting it as "your history diverged" sends the caller to debug the
+    // wrong thing. Same split `mergeWorkspaceIntoProject` already applies.
+    if (
+      isGitMergeConflict(mergeResult.error) ||
+      matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)
+    ) {
+      return err(
+        new AppError(
+          `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
+          "SYNC_DIVERGED",
+          409,
+        ),
+      );
+    }
+    return err(
+      new ExternalServiceError(
+        "Git",
+        `Failed to apply source update: ${cause}`,
+        mergeResult.error instanceof Error ? mergeResult.error : undefined,
+      ),
+    );
+  }
+
+  // git.merge omits `oid` in some no-op cases; fall back to the current head.
+  let commit = mergeResult.data.oid;
+  if (!commit) {
+    const headResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+    if (!headResult.success) {
+      return err(
+        new ExternalServiceError("Git", "Failed to resolve main after sync", headResult.error),
+      );
+    }
+    commit = headResult.data;
+  }
+
+  const status: SourceSyncResult["status"] = mergeResult.data.alreadyMerged
+    ? "up-to-date"
+    : mergeResult.data.fastForward
+      ? "fast-forwarded"
+      : "merged";
+  return ok({ status, commit });
+}
+
+/**
+ * Incremental sync of an EXISTING Artifacts project repo from its source git
+ * URL — the non-destructive replacement for re-running the GitHub import (#190).
+ *
+ * Clones the project's Artifacts repo (shallow), fetches `branch` from the
+ * public source URL into it, fast-forwards or merges it onto `main` via
+ * {@link applySourceUpdate}, and pushes the result back. The repo is NEVER
+ * deleted or recreated: workspace forks keep their ancestry and the project's
+ * remote stays stable. Diverged history fails with `SYNC_DIVERGED`; auth or
+ * network failures propagate as external-service errors.
+ *
+ * A shallow clone can hide the common ancestor, making isomorphic-git report a
+ * merge it cannot compute — which at this layer is indistinguishable from real
+ * divergence. So a `SYNC_DIVERGED` verdict from the shallow pass is retried
+ * ONCE against full history before it is believed. That bound is deliberate:
+ * without it, a genuinely diverged repo could drive unbounded clone work on
+ * every scheduled sync.
+ */
+export async function syncFromGitHub(
+  artifacts: ArtifactsNamespace,
+  remote: string,
+  sourceUrl: string,
+  logger: Logger,
+  branch = "main",
+  depth = SYNC_FETCH_DEPTH,
+): Promise<Result<SourceSyncResult, AppError>> {
+  logger.debug("Incrementally syncing from source", { remote, sourceUrl, branch, depth });
+
+  // One write-scoped token covers both the clone and the push-back.
+  const tokenResult = await freshRepoToken(artifacts, remote, "write", logger);
+  if (!tokenResult.success) return err(tokenResult.error);
+  const token = tokenResult.data;
+
+  /**
+   * Clone, fetch the source branch, and try to apply it — at one history depth.
+   *
+   * Shallow is the fast path and covers the overwhelming majority of syncs.
+   * `fullHistory` re-runs the same work unbounded, which is only worth paying
+   * for when a shallow attempt reported divergence that the missing history
+   * could explain.
+   */
+  const attempt = async (
+    fullHistory: boolean,
+  ): Promise<Result<{ applied: SourceSyncResult; fs: NodeFS; dir: string }, AppError>> => {
+    const cloneResult = await cloneRepo(remote, token, logger, { fullHistory });
+    if (!cloneResult.success) return err(cloneResult.error);
+    const { fs, dir } = cloneResult.data;
+
+    const addRemoteResult = await fromPromise(
+      git.addRemote({ fs, dir, remote: "source", url: sourceUrl }),
+    );
+    if (!addRemoteResult.success) {
+      logger.error("Failed to add source remote", addRemoteResult.error, { sourceUrl });
+      return err(
+        new ExternalServiceError("Git", "Failed to add source remote", addRemoteResult.error),
+      );
+    }
+
+    const fetchResult = await fromPromise(
+      git.fetch({
+        fs,
+        http,
+        dir,
+        remote: "source",
+        ref: branch,
+        singleBranch: true,
+        // Omitting depth entirely fetches the whole branch; passing depth:
+        // undefined is not the same thing to isomorphic-git.
+        ...(fullHistory ? {} : { depth }),
+      }),
+    );
+    if (!fetchResult.success) {
+      const cause = fetchResult.error.message;
+      logger.error("Failed to fetch source branch", fetchResult.error, { sourceUrl, branch });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to fetch ${branch} from source: ${cause}`,
+          fetchResult.error,
+        ),
+      );
+    }
+
+    const tipResult = await resolveFetchedTip(
+      fs,
+      dir,
+      `refs/remotes/source/${branch}`,
+      logger,
+      "Failed to resolve fetched source ref",
+      { sourceUrl, branch },
+    );
+    if (!tipResult.success) return err(tipResult.error);
+
+    const applyResult = await applySourceUpdate(fs, dir, tipResult.data, logger);
+    if (!applyResult.success) return err(applyResult.error);
+    return ok({ applied: applyResult.data, fs, dir });
+  };
+
+  let attemptResult = await attempt(false);
+
+  // A shallow clone can hide the common ancestor, so isomorphic-git reports a
+  // merge it cannot compute — indistinguishable, at this layer, from histories
+  // that genuinely diverged. Retry once with full history before accepting the
+  // verdict: the alternative is failing a sync of perfectly related histories
+  // merely because the branch point sits past the depth window.
+  //
+  // Bounded deliberately at ONE retry, and only for SYNC_DIVERGED. An
+  // operational failure would just fail again more expensively, and a genuinely
+  // diverged repo must not be able to trigger unbounded work.
+  if (!attemptResult.success && attemptResult.error.code === "SYNC_DIVERGED") {
+    logger.warn("Shallow sync reported divergence — retrying with full history", {
+      remote,
+      sourceUrl,
+      branch,
+      shallowDepth: depth,
+    });
+    attemptResult = await attempt(true);
+    if (!attemptResult.success) {
+      logger.error("Sync still failed with full history", attemptResult.error, {
+        remote,
+        sourceUrl,
+      });
+    }
+  }
+
+  if (!attemptResult.success) return err(attemptResult.error);
+  const { applied, fs, dir } = attemptResult.data;
+
+  if (applied.status === "up-to-date") {
+    logger.info("Project already up to date with source", {
+      remote,
+      sourceUrl,
+      commit: applied.commit,
+    });
+    return ok(applied);
+  }
+
+  // Non-force push: a concurrent native merge racing this sync is rejected by
+  // the remote instead of being overwritten; the sync can simply be retried.
+  const pushResult = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: remote,
+      ref: "main",
+      remoteRef: "main",
+      onAuth: makeAuth(token),
+    }),
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push synced history", pushResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to push synced history", pushResult.error));
+  }
+
+  logger.info("Incremental sync complete", {
+    remote,
+    sourceUrl,
+    status: applied.status,
+    commit: applied.commit,
+  });
+  return ok(applied);
 }
 
 /**
