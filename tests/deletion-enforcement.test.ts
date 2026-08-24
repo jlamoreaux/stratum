@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import { isTargetDeleting } from "../src/storage/deletion";
 import type { Env, ProjectEntry } from "../src/types";
+import { NotFoundError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
 
 vi.mock("../src/storage/users", () => ({
@@ -139,6 +140,64 @@ describe("deleting enforcement — auth middleware", () => {
       data: { ...liveUser, deletingAt: "2026-06-17T00:00:00.000Z" },
     });
     const res = await makeApp().fetch(request({ Authorization: "Bearer stratum_agent_x" }), env);
+    expect(res.status).toBe(401);
+  });
+
+  it("fails closed: rejects an agent whose owner lookup returns err (not found)", async () => {
+    vi.mocked(getAgentByToken).mockResolvedValue({
+      success: true,
+      data: {
+        id: "agt_1",
+        name: "a",
+        ownerId: "usr_ghost",
+        tokenHash: "h",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    vi.mocked(getUser).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("User", "usr_ghost"),
+    });
+    const res = await makeApp().fetch(request({ Authorization: "Bearer stratum_agent_x" }), env);
+    expect(res.status).toBe(401);
+  });
+
+  it("fails closed: rejects an agent whose owner lookup throws (D1 rejection)", async () => {
+    vi.mocked(getAgentByToken).mockResolvedValue({
+      success: true,
+      data: {
+        id: "agt_1",
+        name: "a",
+        ownerId: "usr_1",
+        tokenHash: "h",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    vi.mocked(getUser).mockRejectedValue(new Error("D1 unavailable"));
+    const res = await makeApp().fetch(request({ Authorization: "Bearer stratum_agent_x" }), env);
+    expect(res.status).toBe(401);
+  });
+
+  it("fails closed: rejects a session whose user lookup returns err (not found)", async () => {
+    vi.mocked(getSession).mockResolvedValue({
+      success: true,
+      data: { id: "sess_1", userId: "usr_ghost", expiresAt: "2099-01-01T00:00:00.000Z" },
+    });
+    vi.mocked(getUser).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("User", "usr_ghost"),
+    });
+    const res = await makeApp().fetch(request({ Cookie: "stratum_session=sess_1" }), env);
+    expect(res.status).toBe(401);
+  });
+
+  it("fails closed: rejects a session whose user lookup throws (D1 rejection)", async () => {
+    vi.mocked(getSession).mockResolvedValue({
+      success: true,
+      data: { id: "sess_1", userId: "usr_1", expiresAt: "2099-01-01T00:00:00.000Z" },
+    });
+    vi.mocked(getUser).mockRejectedValue(new Error("D1 unavailable"));
+    const res = await makeApp().fetch(request({ Cookie: "stratum_session=sess_1" }), env);
     expect(res.status).toBe(401);
   });
 });
