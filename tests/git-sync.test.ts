@@ -130,6 +130,28 @@ describe("applySourceUpdate (real git, in-memory)", () => {
     expect(await git.resolveRef({ fs: gfs, dir: DIR, ref: "main" })).toBe(nativeTip);
   });
 
+  it("reports an operational merge failure as ExternalServiceError, not SYNC_DIVERGED", async () => {
+    // A merge can fail for reasons that have nothing to do with divergence —
+    // corrupt objects, IO. Those must not be dressed up as "your history
+    // diverged", which sends the operator to reconcile history that is fine.
+    const { fs, gfs } = await initRepo();
+    await commitFiles(gfs, { "file.txt": "base\n" }, "base");
+    const sourceTip = await commitFiles(gfs, { "file.txt": "source\n" }, "source");
+
+    const merge = vi.spyOn(git, "merge").mockRejectedValueOnce(new Error("EIO: disk exploded"));
+    try {
+      const result = await applySourceUpdate(fs, DIR, sourceTip, logger);
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.code).not.toBe("SYNC_DIVERGED");
+      expect(result.error.statusCode).not.toBe(409);
+      expect(result.error.message).toContain("disk exploded");
+    } finally {
+      merge.mockRestore();
+    }
+  });
+
   it("fails with SYNC_DIVERGED for unrelated history (force-push rewrite) without touching main", async () => {
     const { fs, gfs } = await initRepo();
     const nativeTip = await commitFiles(gfs, { "file.txt": "base\n" }, "base");

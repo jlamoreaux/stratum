@@ -1,4 +1,4 @@
-import git from "isomorphic-git";
+import git, { Errors as GitErrors } from "isomorphic-git";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { syncFromGitHub } from "../src/storage/git-ops";
 import type { ArtifactsNamespace } from "../src/types";
@@ -7,16 +7,24 @@ import type { Logger } from "../src/utils/logger";
 // Mock the git plumbing so the network-facing wrapper can be exercised without
 // a live Artifacts/GitHub remote. The pure-git decision logic is covered with
 // REAL isomorphic-git in tests/git-sync.test.ts.
-vi.mock("isomorphic-git", () => ({
-  default: {
-    clone: vi.fn(),
-    addRemote: vi.fn(),
-    fetch: vi.fn(),
-    resolveRef: vi.fn(),
-    merge: vi.fn(),
-    push: vi.fn(),
-  },
-}));
+// `Errors` must come from the real module: applySourceUpdate classifies merge
+// failures against the actual isomorphic-git error classes, so a mock without
+// them makes the classification throw instead of discriminating.
+vi.mock("isomorphic-git", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("isomorphic-git")>();
+  return {
+    ...actual,
+    Errors: actual.Errors,
+    default: {
+      clone: vi.fn(),
+      addRemote: vi.fn(),
+      fetch: vi.fn(),
+      resolveRef: vi.fn(),
+      merge: vi.fn(),
+      push: vi.fn(),
+    },
+  };
+});
 
 const logger = {
   trace: vi.fn(),
@@ -148,7 +156,12 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
 
   it("fails with SYNC_DIVERGED on diverged history and never deletes the repo", async () => {
     const { artifacts, del, importFn } = makeArtifacts();
-    vi.mocked(git.merge).mockRejectedValue(new Error("Automatic merge failed"));
+    // A REAL conflict error: only these earn the 409. Previously this test
+    // rejected with a plain Error and still expected SYNC_DIVERGED, which is
+    // precisely the over-broad classification being fixed.
+    vi.mocked(git.merge).mockRejectedValue(
+      new GitErrors.MergeConflictError(["file.txt"], ["file.txt"], [], []),
+    );
 
     const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
 
@@ -156,8 +169,26 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     if (result.success) return;
     expect(result.error.code).toBe("SYNC_DIVERGED");
     expect(result.error.statusCode).toBe(409);
-    expect(result.error.message).toContain("Automatic merge failed");
     expect(result.error.message).toContain("left untouched");
+    expect(git.push).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("reports a generic merge rejection as operational, not divergence", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    vi.mocked(git.merge).mockRejectedValue(new Error("ENOSPC: no space left on device"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    // Telling an operator their history diverged when the disk filled up sends
+    // them to reconcile history that is perfectly fine.
+    expect(result.error.code).not.toBe("SYNC_DIVERGED");
+    expect(result.error.statusCode).not.toBe(409);
+    expect(result.error.message).toContain("no space left on device");
+    // Still non-destructive, whatever the classification.
     expect(git.push).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
     expect(importFn).not.toHaveBeenCalled();

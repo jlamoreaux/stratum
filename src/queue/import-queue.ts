@@ -3,8 +3,9 @@
  * Handles GitHub import jobs from Cloudflare Queue for durable execution
  */
 
+import { syncOrImportProject } from "../services/project-sync";
 import { isTargetDeleting } from "../storage/deletion";
-import { artifactsRepoNameFromRemote, importFromGitHub, syncFromGitHub } from "../storage/git-ops";
+import { importFromGitHub } from "../storage/git-ops";
 import { getProviderFromUrl } from "../storage/git-providers";
 import { deleteImportJob, isImportCancelled, updateImportStatus } from "../storage/imports";
 import {
@@ -449,36 +450,20 @@ async function processSyncJob(
     // orphaned workspace forks. Only projects with no recorded Artifacts remote
     // (initial import never completed, so no forks can exist) still take the
     // import path.
-    let syncedRemote = project.remote;
-    let syncError: Error | undefined;
-    if (artifactsRepoNameFromRemote(project.remote) !== null) {
-      const syncResult = await syncFromGitHub(
-        env.ARTIFACTS,
-        project.remote,
-        githubUrl,
-        logger,
-        branch,
-      );
-      if (!syncResult.success) syncError = syncResult.error;
-    } else {
-      logger.warn("Project has no Artifacts remote — falling back to full import", {
-        namespace,
-        slug,
-      });
-      const importResult = await importFromGitHub(
-        env.ARTIFACTS,
+    const outcome = await syncOrImportProject(
+      env.ARTIFACTS,
+      {
+        remote: project.remote,
         artifactsRepoName,
-        githubUrl,
-        logger,
+        sourceUrl: githubUrl,
         branch,
         depth,
-      );
-      if (importResult.success) {
-        syncedRemote = importResult.data.remote;
-      } else {
-        syncError = importResult.error;
-      }
-    }
+        logContext: { namespace, slug },
+      },
+      logger,
+    );
+    const syncedRemote = outcome.remote;
+    const syncError = outcome.error;
 
     if (syncError) {
       // Check if it was cancelled during the operation

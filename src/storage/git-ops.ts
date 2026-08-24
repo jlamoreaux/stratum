@@ -2308,6 +2308,10 @@ export interface SourceSyncResult {
  * conflicting edits, or shallow/grafted history hiding the common ancestor —
  * this fails with `SYNC_DIVERGED` and leaves `main` untouched. It never falls
  * back to any destructive re-import (#190).
+ *
+ * `SYNC_DIVERGED` is reserved for actual divergence. An operational merge
+ * failure (corrupt objects, IO) surfaces as `ExternalServiceError` instead, so
+ * the caller is not told to reconcile history that is in fact fine.
  */
 export async function applySourceUpdate(
   fs: NodeFS,
@@ -2328,15 +2332,30 @@ export async function applySourceUpdate(
   );
   if (!mergeResult.success) {
     const cause = mergeResult.error.message;
-    logger.error("Source history cannot be fast-forwarded or merged", mergeResult.error, {
-      sourceTip,
-      cause,
-    });
+    logger.error("Source update could not be applied", mergeResult.error, { sourceTip, cause });
+    // Only a real content divergence earns SYNC_DIVERGED: isomorphic-git throws
+    // MergeConflictError for conflicting edits and MergeNotSupportedError for
+    // conflict shapes it can't auto-resolve or histories with no common
+    // ancestor. Anything else — corrupt objects, IO, OOM — is operational, and
+    // reporting it as "your history diverged" sends the caller to debug the
+    // wrong thing. Same split `mergeWorkspaceIntoProject` already applies.
+    if (
+      isGitMergeConflict(mergeResult.error) ||
+      matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)
+    ) {
+      return err(
+        new AppError(
+          `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
+          "SYNC_DIVERGED",
+          409,
+        ),
+      );
+    }
     return err(
-      new AppError(
-        `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
-        "SYNC_DIVERGED",
-        409,
+      new ExternalServiceError(
+        "Git",
+        `Failed to apply source update: ${cause}`,
+        mergeResult.error instanceof Error ? mergeResult.error : undefined,
       ),
     );
   }

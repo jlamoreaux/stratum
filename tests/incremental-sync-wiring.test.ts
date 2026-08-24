@@ -318,6 +318,9 @@ describe("syncAllProjects (daily cron)", () => {
       GITHUB_URL,
       expect.anything(),
       "main",
+      // The cron passes no depth; syncOrImportProject forwards it as undefined
+      // so importFromGitHub applies its own default.
+      undefined,
     );
     // Snapshots refreshed against the surviving remotes.
     expect(writeSnapshotFromRepo).toHaveBeenCalledWith(

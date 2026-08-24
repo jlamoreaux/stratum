@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { artifactsRepoNameFromRemote, importFromGitHub, syncFromGitHub } from "../storage/git-ops";
+import { syncOrImportProject } from "../services/project-sync";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
 import { listProjects, setProject } from "../storage/state";
 import { checkForSyncUpdates, getProjectSourceUrl, updateProjectAfterSync } from "../storage/sync";
@@ -59,34 +59,20 @@ export async function syncAllProjects(
       // never delete-and-re-import, which destroyed Stratum-native commits and
       // orphaned workspace forks. Only projects without a recorded Artifacts
       // remote (no repo to preserve) still take the legacy import path.
-      let succeeded: boolean;
-      let syncedRemote = project.remote;
-      let syncError: Error | undefined;
-      if (artifactsRepoNameFromRemote(project.remote) !== null) {
-        const result = await syncFromGitHub(
-          env.ARTIFACTS,
-          project.remote,
+      const outcome = await syncOrImportProject(
+        env.ARTIFACTS,
+        {
+          remote: project.remote,
+          artifactsRepoName: artifactsRepoName(project),
           sourceUrl,
-          projectLogger,
           branch,
-        );
-        succeeded = result.success;
-        if (!result.success) syncError = result.error;
-      } else {
-        const result = await importFromGitHub(
-          env.ARTIFACTS,
-          artifactsRepoName(project),
-          sourceUrl,
-          projectLogger,
-          branch,
-        );
-        succeeded = result.success;
-        if (result.success) {
-          syncedRemote = result.data.remote;
-        } else {
-          syncError = result.error;
-        }
-      }
+          logContext: { namespace: project.namespace, slug: project.slug },
+        },
+        projectLogger,
+      );
+      const syncedRemote = outcome.remote;
+      const syncError = outcome.error;
+      const succeeded = syncError === undefined;
 
       if (succeeded) {
         projectLogger.info("Project synced successfully");

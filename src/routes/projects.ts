@@ -2,19 +2,18 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { importRateLimitMiddleware, releaseImportLock } from "../middleware/rate-limit";
 import { emitEvent } from "../queue/events";
+import { syncOrImportProject } from "../services/project-sync";
 import { recordAudit } from "../storage/audit";
 import { captureDeletionTarget } from "../storage/deletion";
 import { createDeletionJob } from "../storage/deletion-jobs";
 import { listProjectEvents } from "../storage/events";
 import {
-  artifactsRepoNameFromRemote,
   freshRepoToken,
   getCommitLog,
   importFromGitHub,
   initAndPush,
   listFilesInRepo,
   listRepoTags,
-  syncFromGitHub,
 } from "../storage/git-ops";
 import { buildAuthConfig } from "../storage/git-providers";
 import {
@@ -1695,36 +1694,20 @@ export async function processSyncJob(
     // import path.
     const depth = 10; // Default depth for the legacy import fallback
 
-    let syncedRemote = project.remote;
-    let syncError: Error | undefined;
-    if (artifactsRepoNameFromRemote(project.remote) !== null) {
-      const syncResult = await syncFromGitHub(
-        env.ARTIFACTS,
-        project.remote,
-        sourceUrl,
-        logger,
-        branch,
-      );
-      if (!syncResult.success) syncError = syncResult.error;
-    } else {
-      logger.warn("Project has no Artifacts remote — falling back to full import", {
-        namespace,
-        slug,
-      });
-      const importResult = await importFromGitHub(
-        env.ARTIFACTS,
+    const outcome = await syncOrImportProject(
+      env.ARTIFACTS,
+      {
+        remote: project.remote,
         artifactsRepoName,
         sourceUrl,
-        logger,
         branch,
         depth,
-      );
-      if (importResult.success) {
-        syncedRemote = importResult.data.remote;
-      } else {
-        syncError = importResult.error;
-      }
-    }
+        logContext: { namespace, slug },
+      },
+      logger,
+    );
+    const syncedRemote = outcome.remote;
+    const syncError = outcome.error;
 
     if (syncError) {
       await updateProjectSyncError(env.STATE, project, `Sync failed: ${syncError.message}`, logger);

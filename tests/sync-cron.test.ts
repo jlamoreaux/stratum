@@ -45,17 +45,25 @@ vi.mock("../src/storage/sync", async (importOriginal) => {
   };
 });
 
-import { importFromGitHub } from "../src/storage/git-ops";
+import { importFromGitHub, syncFromGitHub } from "../src/storage/git-ops";
 import { writeSnapshotFromRepo } from "../src/storage/repo-snapshot";
 import { listProjects, setProject } from "../src/storage/state";
 import { checkForSyncUpdates, updateProjectAfterSync } from "../src/storage/sync";
 
 const mockListProjects = vi.mocked(listProjects);
 const mockImport = vi.mocked(importFromGitHub);
+const mockSync = vi.mocked(syncFromGitHub);
 const mockCheck = vi.mocked(checkForSyncUpdates);
 const mockSnapshot = vi.mocked(writeSnapshotFromRepo);
 const mockUpdateAfterSync = vi.mocked(updateProjectAfterSync);
 const mockSetProject = vi.mocked(setProject);
+
+/**
+ * A remote that artifactsRepoNameFromRemote actually parses. Its regex requires
+ * a `/git/<owner>/<repo>` pathname; a bare `/<repo>` returns null and routes the
+ * project down the legacy full-import branch.
+ */
+const ARTIFACTS_REMOTE = "https://acct.artifacts.cloudflare.net/git/alice/alice__my-repo";
 
 function makeProject(overrides: Partial<ProjectEntry> = {}): ProjectEntry {
   return {
@@ -111,6 +119,9 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "main",
+      // The cron passes no depth; the shared helper forwards it as undefined,
+      // so importFromGitHub falls back to its own default.
+      undefined,
     );
     // Snapshot is written from the imported repo's remote for namespace/slug.
     expect(mockSnapshot).toHaveBeenCalledWith(
@@ -139,6 +150,7 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "trunk",
+      undefined,
     );
   });
 
@@ -156,6 +168,7 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "trunk",
+      undefined,
     );
   });
 
@@ -267,6 +280,9 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://gitlab.com/alice/my-repo",
       expect.anything(),
       "main",
+      // The cron passes no depth; the shared helper forwards it as undefined,
+      // so importFromGitHub falls back to its own default.
+      undefined,
     );
   });
 
@@ -284,6 +300,9 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "master",
+      // The cron passes no depth; the shared helper forwards it as undefined,
+      // so importFromGitHub falls back to its own default.
+      undefined,
     );
   });
 
@@ -365,15 +384,29 @@ describe("syncAllProjects (project-sync cron)", () => {
     // Guards the else-if condition: an existing Artifacts remote syncs
     // incrementally, syncedRemote === project.remote, so there is nothing to
     // persist and no redundant KV write should happen.
+    //
+    // The remote MUST be a real Artifacts URL (`/git/<owner>/<repo>`) or
+    // artifactsRepoNameFromRemote returns null and this silently exercises the
+    // legacy import path instead — which is what an earlier version of this
+    // test did, passing for the wrong reason.
     mockCheck.mockResolvedValue({
       success: true,
       data: { hasUpdates: true, commitsBehind: 1 },
     });
-    mockListProjects.mockResolvedValue({ success: true, data: [makeProject()] });
+    mockSync.mockResolvedValue({
+      success: true,
+      data: { status: "fast-forwarded", commit: "abc1234" },
+    } as Awaited<ReturnType<typeof syncFromGitHub>>);
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [makeProject({ remote: ARTIFACTS_REMOTE })],
+    });
 
     const result = await syncAllProjects(makeEnv());
 
     expect(result).toEqual({ synced: 1, failed: 0, skipped: 0 });
+    expect(mockSync).toHaveBeenCalledTimes(1);
+    expect(mockImport).not.toHaveBeenCalled();
     expect(mockSetProject).not.toHaveBeenCalled();
   });
 
