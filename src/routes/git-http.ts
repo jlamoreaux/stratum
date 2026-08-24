@@ -8,9 +8,10 @@ import {
   freshRepoToken,
 } from "../storage/git-ops";
 import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
-import { getUserByToken } from "../storage/users";
+import { getUser, getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
+import { getWaitUntil } from "../utils/execution-ctx";
 import {
   buildReportStatus,
   parseReceivePackRequest,
@@ -29,7 +30,10 @@ import { createLogger } from "../utils/logger";
  *    change is created + evaluated, and the client gets a truthful per-ref
  *    `ng` carrying the change id (main only moves through the merge gate).
  *    With the flag off — and for multi-ref/delete/non-default pushes — the
- *    push is refused in-protocol with sideband guidance.
+ *    push is refused in-protocol with sideband guidance. Refs are proxied
+ *    unfiltered on the read path, so refs/tags/* are advertised and fetchable;
+ *    tag pushes to the project remote are refused with tag-specific guidance
+ *    (#182 — the change gate cannot represent a tag).
  *  - Workspace URL `/@ns/slug/workspaces/<ws>.git` — clone/fetch (read) AND
  *    `git push` (write), proxied verbatim to the workspace's Artifacts fork.
  *    The client clones the workspace, so ref/old-oid semantics line up and
@@ -153,10 +157,32 @@ async function authenticate(
 
   if (token.startsWith("stratum_user_")) {
     const result = await getUserByToken(c.env.DB, token, logger);
-    return result.success ? { userId: result.data.id } : null;
+    // A soft-deleting account's credentials stop working immediately over git
+    // too — the HTTP middleware rejects it, but git smart-HTTP owns its own auth
+    // and must apply the same gate, or an erasure-requested user keeps clone/push
+    // access until the cascade lands.
+    if (!result.success || result.data.deletingAt) return null;
+    return { userId: result.data.id };
   }
   const result = await getAgentByToken(c.env.DB, token, logger);
-  return result.success ? { agentId: result.data.id, agentOwnerId: result.data.ownerId } : null;
+  if (!result.success) return null;
+  // An agent inherits its owner's access, so a deleting owner's agent must stop
+  // working too — otherwise it's an authenticated git write channel that outlives
+  // the account it belongs to. Fail CLOSED on the owner lookup: an unresolved or
+  // deleting owner yields no identity. getUser can reject on a D1 error, which
+  // would otherwise escape authenticate's documented no-500 contract, so catch it.
+  let owner: Awaited<ReturnType<typeof getUser>>;
+  try {
+    owner = await getUser(c.env.DB, result.data.ownerId, logger);
+  } catch (err) {
+    logger.warn("Agent owner lookup threw during git auth; failing closed", {
+      ownerId: result.data.ownerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  if (!owner.success || owner.data.deletingAt) return null;
+  return { agentId: result.data.id, agentOwnerId: result.data.ownerId };
 }
 
 function basicAuthHeader(artifactsToken: string): string {
@@ -594,6 +620,29 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
       }),
     );
 
+  // Tag policy (#182): tag READS work everywhere — info/refs and upload-pack are
+  // proxied unfiltered, so refs/tags/* are advertised and fetchable on both the
+  // project and workspace remotes, and tag PUSHES to workspace forks proxy
+  // verbatim. A tag push to the PROJECT remote, however, is refused explicitly:
+  // the project repo's refs only move through Stratum's gates, and the change
+  // gate cannot represent a tag (a change is an evaluated diff against the
+  // default branch; a tag ref has nothing to evaluate or merge). Refusing with a
+  // tag-specific reason beats the generic branch guidance, which would
+  // misleadingly suggest the gate could carry the tag through.
+  const tagRefs = commands.filter((cmd) => cmd.ref.startsWith("refs/tags/"));
+  if (tagRefs.length > 0) {
+    logger.info("Refusing project tag push in-protocol", {
+      refs: tagRefs.map((cmd) => cmd.ref),
+    });
+    return refuseAll(
+      "tag pushes to the project remote are not supported — push tags to a workspace remote",
+      [
+        "Project tags are read-only over this remote (clone/fetch delivers them).",
+        `Push tags to a workspace remote instead: /${namespace}/${slug}/workspaces/<ws>.git`,
+      ],
+    );
+  }
+
   const gatedEnabled = c.env.GIT_PUSH_GATED_ENABLED === "true";
   // Same default-branch resolution the merge/sync paths use — a repo imported
   // with a `master` or `trunk` default must gate pushes to THAT ref, not to a
@@ -684,6 +733,7 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
     workspaceName: forkedName,
     workspaceRemote: forkResult.data.remote,
     actor,
+    waitUntil: getWaitUntil(c),
   });
   if (!outcome.success) {
     logger.error("Gated push change creation failed", outcome.error);

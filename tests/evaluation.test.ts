@@ -21,8 +21,17 @@ vi.mock("../src/storage/git-ops", () => ({
   readFileFromRepo: vi.fn(),
 }));
 
+// Wrap (not replace) the URL validator so individual tests can force edge-case
+// return shapes; by default it calls through to the real implementation.
+vi.mock("../src/utils/validation", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/utils/validation")>();
+  return { ...actual, validateWebhookUrl: vi.fn(actual.validateWebhookUrl) };
+});
+
 import { readFileFromRepo } from "../src/storage/git-ops";
+import { validateWebhookUrl } from "../src/utils/validation";
 const mockReadFileFromRepo = vi.mocked(readFileFromRepo);
+const mockValidateWebhookUrl = vi.mocked(validateWebhookUrl);
 
 function makeDiff(
   opts: {
@@ -288,6 +297,181 @@ describe("WebhookEvaluator", () => {
 
     expect(capturedHeaders["X-Stratum-Signature"]).toBeDefined();
     expect(capturedHeaders["X-Stratum-Signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
+  });
+
+  it("fails closed with a generic reason when URL validation reports no detail", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    mockValidateWebhookUrl.mockReturnValueOnce({ success: false, error: [] });
+
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+    });
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.score).toBe(0);
+      expect(result.data.reason).toContain("invalid URL");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when no webhook configuration is present", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const policy = makePolicy({ evaluators: [{ type: "diff" }] });
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.score).toBe(0);
+      expect(result.data.reason).toContain("no configuration");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  function stubFetchJson(payload: unknown): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => payload,
+      }),
+    );
+  }
+
+  async function evaluateWithStub(payload: unknown) {
+    stubFetchJson(payload);
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+    });
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error("unreachable");
+    return result.data;
+  }
+
+  it("SEC: fails closed when `passed` is a truthy string instead of a boolean", async () => {
+    const data = await evaluateWithStub({ score: 0.9, passed: "no", reason: "nope" });
+    expect(data.passed).toBe(false);
+    expect(data.score).toBe(0);
+    expect(data.reason).toMatch(/failed closed/i);
+  });
+
+  it("fails closed when `score` is not a number", async () => {
+    const data = await evaluateWithStub({ score: "0.9", passed: true, reason: "ok" });
+    expect(data.passed).toBe(false);
+    expect(data.score).toBe(0);
+    expect(data.reason).toMatch(/failed closed/i);
+  });
+
+  it("fails closed when `score` is not finite", async () => {
+    const data = await evaluateWithStub({
+      score: Number.POSITIVE_INFINITY,
+      passed: true,
+      reason: "ok",
+    });
+    expect(data.passed).toBe(false);
+    expect(data.score).toBe(0);
+  });
+
+  it("fails closed when verdict fields are missing entirely", async () => {
+    const data = await evaluateWithStub({});
+    expect(data.passed).toBe(false);
+    expect(data.score).toBe(0);
+    expect(data.reason).toMatch(/failed closed/i);
+  });
+
+  it("fails closed when the response JSON is not an object", async () => {
+    const data = await evaluateWithStub(null);
+    expect(data.passed).toBe(false);
+    expect(data.score).toBe(0);
+    expect(data.reason).toMatch(/not an object/i);
+  });
+
+  it("fails closed when the response body is not valid JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON");
+        },
+      }),
+    );
+
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+    });
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.score).toBe(0);
+      expect(result.data.reason).toMatch(/not valid JSON/i);
+    }
+  });
+
+  it("clamps an out-of-range score into [0, 1]", async () => {
+    const high = await evaluateWithStub({ score: 999, passed: true, reason: "ok" });
+    expect(high.score).toBe(1);
+    expect(high.passed).toBe(true);
+
+    const low = await evaluateWithStub({ score: -5, passed: false, reason: "bad" });
+    expect(low.score).toBe(0);
+    expect(low.passed).toBe(false);
+  });
+
+  it("defaults `reason` to a string when the response omits it", async () => {
+    const data = await evaluateWithStub({ score: 1, passed: true });
+    expect(data.passed).toBe(true);
+    expect(data.score).toBe(1);
+    expect(data.reason).toBe("Webhook returned no reason.");
+  });
+
+  it("wraps a non-Error fetch rejection in an ExternalServiceError", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue("socket hangup"));
+
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+    });
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("socket hangup");
+    }
+  });
+
+  it("SEC: strips webhook.secret from the outgoing request body", async () => {
+    let capturedBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = init.body as string;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ score: 1, passed: true, reason: "ok" }),
+        });
+      }),
+    );
+
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval", secret: "super-secret" }],
+    });
+    await evaluator.evaluate("diff content", policy, mockLogger);
+
+    expect(capturedBody).not.toContain("super-secret");
+    expect(capturedBody).not.toContain("secret");
+    const payload = JSON.parse(capturedBody) as { diff: string; policy: EvalPolicy };
+    expect(payload.diff).toBe("diff content");
+    expect(payload.policy.evaluators).toEqual([
+      { type: "webhook", url: "https://example.com/eval" },
+    ]);
   });
 });
 
