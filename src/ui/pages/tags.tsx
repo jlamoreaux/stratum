@@ -9,6 +9,12 @@ interface TagsProps {
     slug: string;
   };
   tags: RepoTagEntry[];
+  /** True when the remote had more tags than the fetch cap and the listing
+   * was truncated — surfaced explicitly rather than silently showing a
+   * partial list as complete (#241). */
+  truncated?: boolean;
+  /** Total tags the remote advertised; only meaningful alongside `truncated`. */
+  totalTagCount?: number;
   user?: { id: string; email: string; username: string } | null;
 }
 
@@ -25,7 +31,7 @@ export function formatTagDate(timestamp: number | undefined): string {
   return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
-export const TagsPage: FC<TagsProps> = ({ project, tags, user }) => {
+export const TagsPage: FC<TagsProps> = ({ project, tags, truncated, totalTagCount, user }) => {
   return (
     <Layout title={`Tags — ${project.name}`} user={user}>
       <div class="page-header">
@@ -34,6 +40,13 @@ export const TagsPage: FC<TagsProps> = ({ project, tags, user }) => {
           Back to repo
         </a>
       </div>
+
+      {truncated && (
+        <div class="empty-state-hint" style="margin-bottom: 1rem;">
+          Showing the first {tags.length} of {totalTagCount ?? tags.length} tags. The rest were not
+          fetched.
+        </div>
+      )}
 
       {tags.length === 0 ? (
         <div class="empty-state">

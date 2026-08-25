@@ -13,13 +13,14 @@ import { placeLooseObject } from "../src/storage/object-loader";
 import type { Env, ProjectEntry } from "../src/types";
 import type { Logger } from "../src/utils/logger";
 
-// Partial isomorphic-git mock: `clone`, `fetch`, and `push` are the only
-// network-coupled calls the code under test makes; everything else (init,
-// commit, tag, readObject, …) stays real so the tests exercise genuine git
-// object stores in MemoryFS.
-const { mockClone, mockFetch, mockPush, listTagsOverride } = vi.hoisted(() => ({
+// Partial isomorphic-git mock: `clone`, `fetch`, `getRemoteInfo`, and `push`
+// are the only network-coupled calls the code under test makes; everything
+// else (init, commit, tag, readObject, …) stays real so the tests exercise
+// genuine git object stores in MemoryFS.
+const { mockClone, mockFetch, mockGetRemoteInfo, mockPush, listTagsOverride } = vi.hoisted(() => ({
   mockClone: vi.fn(),
   mockFetch: vi.fn(),
+  mockGetRemoteInfo: vi.fn(),
   mockPush: vi.fn(),
   // When set, replaces git.listTags for a single test (reset in beforeEach).
   listTagsOverride: { fn: null as null | ((args: unknown) => Promise<string[]>) },
@@ -33,6 +34,7 @@ vi.mock("isomorphic-git", async (importActual) => {
       ...actual.default,
       clone: (args: unknown) => mockClone(args),
       fetch: (args: unknown) => mockFetch(args),
+      getRemoteInfo: (args: unknown) => mockGetRemoteInfo(args),
       push: (args: unknown) => mockPush(args),
       listTags: (args: unknown) =>
         listTagsOverride.fn
@@ -41,6 +43,55 @@ vi.mock("isomorphic-git", async (importActual) => {
     },
   };
 });
+
+/** Shape a `getRemoteInfo` mock resolution for a set of tag names, matching
+ * the real nested `{ refs: { tags: { <name>: oid } } }` shape (see git-ops.ts). */
+function remoteInfoWithTags(tags: Record<string, string>) {
+  return { capabilities: [], refs: { tags } };
+}
+
+/**
+ * Recursively copies a git object and everything it reaches (commit parents,
+ * trees, blobs, peeled tags) from one MemoryFS-backed repo into another,
+ * using isomorphic-git's real object store — no synthetic data. Used to give
+ * `mockFetch` genuine "only what was asked for" semantics in tests, so a
+ * fetch that (incorrectly) asked for an unrelated branch's oid would actually
+ * pull that branch's objects, and a correct per-tag fetch provably would not.
+ */
+async function copyReachableObjects(
+  srcFs: NodeFS,
+  srcDir: string,
+  destFs: NodeFS,
+  destDir: string,
+  oid: string,
+  visited: Set<string> = new Set(),
+): Promise<void> {
+  if (visited.has(oid)) return;
+  visited.add(oid);
+  const { type, object } = await git.readObject({ fs: srcFs, dir: srcDir, oid, format: "wrapped" });
+  const gitdir = destDir.endsWith("/") ? `${destDir}.git` : `${destDir}/.git`;
+  await placeLooseObject(
+    destFs as unknown as Parameters<typeof placeLooseObject>[0],
+    gitdir,
+    oid,
+    object as Uint8Array,
+  );
+  if (type === "commit") {
+    const { commit } = await git.readCommit({ fs: srcFs, dir: srcDir, oid });
+    await copyReachableObjects(srcFs, srcDir, destFs, destDir, commit.tree, visited);
+    for (const parent of commit.parent) {
+      await copyReachableObjects(srcFs, srcDir, destFs, destDir, parent, visited);
+    }
+  } else if (type === "tree") {
+    const { tree } = await git.readTree({ fs: srcFs, dir: srcDir, oid });
+    for (const entry of tree) {
+      await copyReachableObjects(srcFs, srcDir, destFs, destDir, entry.oid, visited);
+    }
+  } else if (type === "tag") {
+    const { tag } = await git.readTag({ fs: srcFs, dir: srcDir, oid });
+    await copyReachableObjects(srcFs, srcDir, destFs, destDir, tag.object, visited);
+  }
+}
 
 const logger = {
   trace: vi.fn(),
@@ -77,6 +128,9 @@ async function buildRepo(
 beforeEach(() => {
   vi.clearAllMocks();
   listTagsOverride.fn = null;
+  // Default: no tags advertised. Individual tests override with the tag set
+  // they need before calling cloneRepo/listRepoTags.
+  mockGetRemoteInfo.mockResolvedValue(remoteInfoWithTags({}));
 });
 
 describe("collectRepoTags", () => {
@@ -245,28 +299,45 @@ describe("collectRepoTags", () => {
 });
 
 describe("cloneRepo includeTags", () => {
-  it("follows the singleBranch clone with a tags fetch (shallow by default)", async () => {
+  it("enumerates tags via getRemoteInfo, then fetches each individually (shallow by default)", async () => {
     mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
       await buildRepo(dir, [{ "a.txt": "one" }], fs);
     });
+    mockGetRemoteInfo.mockResolvedValue(
+      remoteInfoWithTags({ "v1.0.0": "a".repeat(40), "v2.0.0": "b".repeat(40) }),
+    );
     mockFetch.mockResolvedValue({});
 
     const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
       includeTags: true,
     });
     expect(result.success).toBe(true);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const args = mockFetch.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(args.tags).toBe(true);
-    expect(args.singleBranch).toBe(false);
-    expect(args.depth).toBe(50);
-    expect(args.url).toBe("https://r.example/repo.git");
+    if (!result.success) return;
+    expect(result.data.tagsTruncated).toBe(false);
+    expect(result.data.totalTagCount).toBe(2);
+
+    expect(mockGetRemoteInfo).toHaveBeenCalledTimes(1);
+    const infoArgs = mockGetRemoteInfo.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(infoArgs.url).toBe("https://r.example/repo.git");
+
+    // One fetch per tag — never a combined all-refs fetch.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    for (const call of mockFetch.mock.calls) {
+      const args = call[0] as Record<string, unknown>;
+      expect(args.tags).toBe(true);
+      expect(args.singleBranch).toBe(true);
+      expect(args.depth).toBe(50);
+      expect(args.url).toBe("https://r.example/repo.git");
+    }
+    const remoteRefs = mockFetch.mock.calls.map((c) => (c[0] as Record<string, unknown>).remoteRef);
+    expect(remoteRefs).toEqual(["refs/tags/v1.0.0", "refs/tags/v2.0.0"]);
   });
 
   it("fetches tags with full history when fullHistory is set (no depth)", async () => {
     mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
       await buildRepo(dir, [{ "a.txt": "one" }], fs);
     });
+    mockGetRemoteInfo.mockResolvedValue(remoteInfoWithTags({ "v1.0.0": "a".repeat(40) }));
     mockFetch.mockResolvedValue({});
 
     await cloneRepo("https://r.example/repo.git", "tok", logger, {
@@ -276,28 +347,170 @@ describe("cloneRepo includeTags", () => {
     const args = mockFetch.mock.calls[0]?.[0] as Record<string, unknown>;
     expect("depth" in args).toBe(false);
     expect(args.tags).toBe(true);
+    expect(args.singleBranch).toBe(true);
   });
 
-  it("does not fetch tags unless asked", async () => {
+  it("filters out peeled-tag `^{}` advertisement keys — they aren't tag names", async () => {
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      await buildRepo(dir, [{ "a.txt": "one" }], fs);
+    });
+    mockGetRemoteInfo.mockResolvedValue(
+      remoteInfoWithTags({ "v1.0.0": "a".repeat(40), "v1.0.0^{}": "b".repeat(40) }),
+    );
+    mockFetch.mockResolvedValue({});
+
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
+      includeTags: true,
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.totalTagCount).toBe(1);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect((mockFetch.mock.calls[0]?.[0] as Record<string, unknown>).remoteRef).toBe(
+      "refs/tags/v1.0.0",
+    );
+  });
+
+  it("does not enumerate or fetch tags unless asked", async () => {
     mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
       await buildRepo(dir, [{ "a.txt": "one" }], fs);
     });
     const result = await cloneRepo("https://r.example/repo.git", "tok", logger);
     expect(result.success).toBe(true);
+    expect(mockGetRemoteInfo).not.toHaveBeenCalled();
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("fails the clone when the tags fetch fails", async () => {
+  it("fails the clone when remote tag enumeration fails", async () => {
     mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
       await buildRepo(dir, [{ "a.txt": "one" }], fs);
     });
-    mockFetch.mockRejectedValue(new Error("network down"));
+    mockGetRemoteInfo.mockRejectedValue(new Error("network down"));
 
     const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
       includeTags: true,
     });
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.message).toContain("Failed to fetch tags");
+    if (!result.success) expect(result.error.message).toContain("Failed to enumerate remote tags");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("fails the clone when an individual tag fetch fails, naming the tag", async () => {
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      await buildRepo(dir, [{ "a.txt": "one" }], fs);
+    });
+    mockGetRemoteInfo.mockResolvedValue(
+      remoteInfoWithTags({ "v1.0.0": "a".repeat(40), "v2.0.0": "b".repeat(40) }),
+    );
+    mockFetch.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("network down"));
+
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
+      includeTags: true,
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("Failed to fetch tag");
+      expect(result.error.message).toContain("v2.0.0");
+    }
+  });
+
+  it("caps the number of tags fetched at MAX_TAGS and reports truncation", async () => {
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      await buildRepo(dir, [{ "a.txt": "one" }], fs);
+    });
+    const MAX_TAGS = 500; // matches the private constant in git-ops.ts
+    const manyTags: Record<string, string> = {};
+    for (let i = 0; i < MAX_TAGS + 37; i++) {
+      manyTags[`t${String(i).padStart(5, "0")}`] = i.toString(16).padStart(40, "0");
+    }
+    mockGetRemoteInfo.mockResolvedValue(remoteInfoWithTags(manyTags));
+    mockFetch.mockResolvedValue({});
+
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
+      includeTags: true,
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.tagsTruncated).toBe(true);
+    expect(result.data.totalTagCount).toBe(MAX_TAGS + 37);
+    // Only the cap's worth of tags were actually fetched — not silently more
+    // or fewer.
+    expect(mockFetch).toHaveBeenCalledTimes(MAX_TAGS);
+  });
+
+  it("does not materialize a large branch's objects that no tag references", async () => {
+    // A "remote" repo, separate from the destination fs, with:
+    //  - main: one commit
+    //  - a tag pointing at that same commit
+    //  - a "big" branch with its own commits/blobs, reachable from no tag
+    const remoteDir = "/remote";
+    const { fs: remoteFs, shas } = await buildRepo(remoteDir, [{ "a.txt": "one" }]);
+    const c1 = shas[0] as string;
+
+    await (
+      remoteFs as unknown as { promises: { writeFile: (p: string, c: string) => Promise<void> } }
+    ).promises.writeFile(`${remoteDir}/big1.txt`, "x".repeat(500));
+    await git.add({ fs: remoteFs, dir: remoteDir, filepath: "big1.txt" });
+    const big1 = await git.commit({
+      fs: remoteFs,
+      dir: remoteDir,
+      message: "big1",
+      author,
+      ref: "refs/heads/big",
+      parent: [c1],
+    });
+
+    await git.tag({ fs: remoteFs, dir: remoteDir, ref: "v1.0.0", object: c1 });
+
+    // The main clone mirrors what a real singleBranch clone would produce:
+    // only main's own object graph.
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      await git.init({ fs, dir, defaultBranch: "main" });
+      await copyReachableObjects(remoteFs, remoteDir, fs, dir, c1);
+      await git.writeRef({ fs, dir, ref: "refs/heads/main", value: c1, force: true });
+    });
+
+    mockGetRemoteInfo.mockResolvedValue(remoteInfoWithTags({ "v1.0.0": c1 }));
+
+    // A faithful per-tag fetch: copy only the requested ref's own object
+    // graph from the "remote" — exactly what a real singleBranch fetch does.
+    mockFetch.mockImplementation(
+      async ({ fs, dir, remoteRef }: { fs: NodeFS; dir: string; remoteRef: string }) => {
+        const name = remoteRef.replace("refs/tags/", "");
+        const oid = await git.resolveRef({
+          fs: remoteFs,
+          dir: remoteDir,
+          ref: `refs/tags/${name}`,
+        });
+        await copyReachableObjects(remoteFs, remoteDir, fs, dir, oid);
+        await git.writeRef({ fs, dir, ref: `refs/tags/${name}`, value: oid, force: true });
+        return {};
+      },
+    );
+
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
+      includeTags: true,
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    // The tag's target is present.
+    await expect(
+      git.readObject({ fs: result.data.fs, dir: result.data.dir, oid: c1 }),
+    ).resolves.toBeDefined();
+    // The untagged branch's own commit was never fetched.
+    await expect(
+      git.readObject({ fs: result.data.fs, dir: result.data.dir, oid: big1 }),
+    ).rejects.toThrow();
+
+    // Every tags-fetch call asked for exactly one tag ref — never a
+    // whole-repo (`singleBranch: false`) fetch, and never the branch ref.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    for (const call of mockFetch.mock.calls) {
+      const args = call[0] as Record<string, unknown>;
+      expect(args.singleBranch).toBe(true);
+      expect(args.remoteRef).toBe("refs/tags/v1.0.0");
+    }
   });
 });
 
@@ -315,14 +528,19 @@ describe("listRepoTags", () => {
         tagger,
       });
     });
+    mockGetRemoteInfo.mockResolvedValue(
+      remoteInfoWithTags({ "v1.0.0": "a".repeat(40), "v2.0.0": "b".repeat(40) }),
+    );
     mockFetch.mockResolvedValue({});
 
     const result = await listRepoTags("https://r.example/repo.git", "tok", logger);
     expect(result.success).toBe(true);
     if (!result.success) return;
-    expect(result.data.map((t) => t.name)).toEqual(["v1.0.0", "v2.0.0"]);
-    expect(result.data[1]?.annotated).toBe(true);
-    expect(result.data[1]?.message).toBe("second");
+    expect(result.data.tags.map((t) => t.name)).toEqual(["v1.0.0", "v2.0.0"]);
+    expect(result.data.tags[1]?.annotated).toBe(true);
+    expect(result.data.tags[1]?.message).toBe("second");
+    expect(result.data.truncated).toBe(false);
+    expect(result.data.totalTagCount).toBe(2);
   });
 
   it("propagates a clone failure", async () => {
@@ -342,6 +560,40 @@ describe("listRepoTags", () => {
     const result = await listRepoTags("https://r.example/repo.git", "tok", logger);
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.message).toContain("Failed to list tags");
+  });
+
+  it("reports truncation and the true remote total when the tag count exceeds MAX_TAGS", async () => {
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      await buildRepo(dir, [{ "a.txt": "one" }], fs);
+    });
+    const MAX_TAGS = 500; // matches the private constant in git-ops.ts
+    const manyTags: Record<string, string> = {};
+    for (let i = 0; i < MAX_TAGS + 10; i++) {
+      manyTags[`t${String(i).padStart(5, "0")}`] = i.toString(16).padStart(40, "0");
+    }
+    mockGetRemoteInfo.mockResolvedValue(remoteInfoWithTags(manyTags));
+    // Each per-tag fetch actually writes the local ref so collectRepoTags has
+    // something to find (pointed at an already-present commit).
+    let mainSha = "";
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      const { shas } = await buildRepo(dir, [{ "a.txt": "one" }], fs);
+      mainSha = shas[0] as string;
+    });
+    mockFetch.mockImplementation(
+      async ({ fs, dir, remoteRef }: { fs: NodeFS; dir: string; remoteRef: string }) => {
+        await git.writeRef({ fs, dir, ref: remoteRef, value: mainSha, force: true });
+        return {};
+      },
+    );
+
+    const result = await listRepoTags("https://r.example/repo.git", "tok", logger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.truncated).toBe(true);
+    expect(result.data.totalTagCount).toBe(MAX_TAGS + 10);
+    // Exactly MAX_TAGS tags were fetched and are therefore listed — the
+    // truncation is real, not just reported while everything still lists.
+    expect(result.data.tags).toHaveLength(MAX_TAGS);
   });
 });
 
@@ -406,6 +658,7 @@ describe("snapshotRepo clones with tags", () => {
         tagger,
       });
     });
+    mockGetRemoteInfo.mockResolvedValue(remoteInfoWithTags({ "v1.0.0": "a".repeat(40) }));
     mockFetch.mockResolvedValue({});
 
     const result = await snapshotRepo(makeEnv(), project, "2026-08-18T00:00:00Z", logger);
@@ -415,11 +668,13 @@ describe("snapshotRepo clones with tags", () => {
     if (result.data.status !== "ok") return;
     expect(result.data.snapshot.manifest.tags?.map((t) => t.name)).toEqual(["v1.0.0"]);
 
-    // The backup clone is full-history AND tag-fetching.
+    // The backup clone is full-history AND tag-fetching, one tag ref at a time.
     const cloneArgs = mockClone.mock.calls[0]?.[0] as Record<string, unknown>;
     expect("depth" in cloneArgs).toBe(false);
     const fetchArgs = mockFetch.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(fetchArgs.tags).toBe(true);
+    expect(fetchArgs.singleBranch).toBe(true);
+    expect(fetchArgs.remoteRef).toBe("refs/tags/v1.0.0");
     expect("depth" in fetchArgs).toBe(false);
   });
 

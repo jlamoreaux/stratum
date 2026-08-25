@@ -16,42 +16,46 @@ vi.mock("../src/storage/git-ops", async (importActual) => {
     freshRepoToken: vi.fn(async () => ({ success: true, data: "mock-token" })),
     listRepoTags: vi.fn(async () => ({
       success: true,
-      data: [
-        {
-          name: "v1.0.0",
-          oid: "c".repeat(40),
-          targetSha: "b".repeat(40),
-          annotated: true,
-          message: "First stable release",
-          tagger: "tagger <tag@x.com>",
-          timestamp: 1_700_000_100,
-          unresolvable: false,
-        },
-        {
-          name: "v0.9.0",
-          oid: "b".repeat(40),
-          targetSha: "b".repeat(40),
-          annotated: false,
-          unresolvable: false,
-        },
-        {
-          name: "ancient",
-          oid: "d".repeat(40),
-          targetSha: null,
-          annotated: false,
-          unresolvable: true,
-        },
-        {
-          // Annotated tag whose TARGET is outside the shallow window: the
-          // intended target sha is known, but the commit itself is missing.
-          name: "deep",
-          oid: "e".repeat(40),
-          targetSha: "a".repeat(40),
-          annotated: true,
-          message: "too deep",
-          unresolvable: true,
-        },
-      ],
+      data: {
+        tags: [
+          {
+            name: "v1.0.0",
+            oid: "c".repeat(40),
+            targetSha: "b".repeat(40),
+            annotated: true,
+            message: "First stable release",
+            tagger: "tagger <tag@x.com>",
+            timestamp: 1_700_000_100,
+            unresolvable: false,
+          },
+          {
+            name: "v0.9.0",
+            oid: "b".repeat(40),
+            targetSha: "b".repeat(40),
+            annotated: false,
+            unresolvable: false,
+          },
+          {
+            name: "ancient",
+            oid: "d".repeat(40),
+            targetSha: null,
+            annotated: false,
+            unresolvable: true,
+          },
+          {
+            // Annotated tag whose TARGET is outside the shallow window: the
+            // intended target sha is known, but the commit itself is missing.
+            name: "deep",
+            oid: "e".repeat(40),
+            targetSha: "a".repeat(40),
+            annotated: true,
+            message: "too deep",
+            unresolvable: true,
+          },
+        ],
+        truncated: false,
+        totalTagCount: 4,
+      },
     })),
   };
 });
@@ -130,10 +134,14 @@ describe("REST GET /api/projects/:namespace/:slug/tags", () => {
       namespace: string;
       slug: string;
       tags: Array<Record<string, unknown>>;
+      truncated: boolean;
+      totalTagCount: number;
     };
     expect(body.namespace).toBe("@owner");
     expect(body.slug).toBe("repo");
     expect(body.tags).toHaveLength(4);
+    expect(body.truncated).toBe(false);
+    expect(body.totalTagCount).toBe(4);
 
     const annotated = body.tags.find((t) => t.name === "v1.0.0");
     expect(annotated?.annotated).toBe(true);
@@ -217,10 +225,39 @@ describe("UI GET /:namespace/:slug/tags", () => {
   it("renders an empty state when the repo has no tags", async () => {
     const env = makeEnv();
     await seedProject(env);
-    vi.mocked(listRepoTags).mockResolvedValueOnce({ success: true, data: [] });
+    vi.mocked(listRepoTags).mockResolvedValueOnce({
+      success: true,
+      data: { tags: [], truncated: false, totalTagCount: 0 },
+    });
     const res = await app.fetch(req("/@owner/repo/tags"), env);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("No tags yet");
+  });
+
+  it("surfaces truncation when the remote has more tags than the fetch cap", async () => {
+    const env = makeEnv();
+    await seedProject(env);
+    vi.mocked(listRepoTags).mockResolvedValueOnce({
+      success: true,
+      data: {
+        tags: [
+          {
+            name: "v1.0.0",
+            oid: "c".repeat(40),
+            targetSha: "b".repeat(40),
+            annotated: false,
+            unresolvable: false,
+          },
+        ],
+        truncated: true,
+        totalTagCount: 600,
+      },
+    });
+    const res = await app.fetch(req("/@owner/repo/tags"), env);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("600");
+    expect(html.toLowerCase()).toContain("not fetched");
   });
 
   it("404s a missing or unreadable project", async () => {
