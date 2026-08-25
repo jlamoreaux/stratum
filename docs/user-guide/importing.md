@@ -100,8 +100,14 @@ curl -X POST "$STRATUM_HOST/api/projects/@username/repo/sync/settings" \
 
 ## Failure notifications
 
-If an import fails, Stratum emails the user who started it, with a copy to the
-instance admin (`ADMIN_EMAIL`) when one is configured.
+If an import fails, Stratum emails the user who started it, plus one operator
+copy. That copy goes to `ADMIN_EMAIL`, or — when `ADMIN_EMAIL` is unset — to
+`EMAIL_FROM_ADDRESS`. Leaving `ADMIN_EMAIL` unconfigured therefore does not
+switch the operator copy off; it redirects it to the sender address. Only when
+neither is set is the notification skipped entirely.
+
+When the initiator's address cannot be resolved, the operator copy is still
+sent, and identical addresses are de-duplicated so nobody is mailed twice.
 
 ## Current limitations
 
