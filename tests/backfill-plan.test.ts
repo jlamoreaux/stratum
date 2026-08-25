@@ -101,9 +101,16 @@ function makeWebhooksD1(rows: FakeWebhookRow[]): D1Database {
       if (sql.includes("UPDATE webhooks SET project_id")) {
         return {
           bind: (projectId: string, id: string) => ({
+            // Mirrors real D1: the statement's `AND project_id IS NULL` guard
+            // means a row another writer already stamped matches nothing, and
+            // `meta.changes` reports 0 for it.
             run: async () => {
               const row = rows.find((r) => r.id === id);
-              if (row && row.project_id === null) row.project_id = projectId;
+              if (row && row.project_id === null) {
+                row.project_id = projectId;
+                return { meta: { changes: 1 } };
+              }
+              return { meta: { changes: 0 } };
             },
           }),
         };
@@ -133,6 +140,42 @@ describe("backfillWebhookProjectIds (apply)", () => {
     expect(result.data.skipped).toEqual([]);
     expect(result.data.remainingNullRows).toBe(0);
     expect(rows[0]?.project_id).toBe("proj_a");
+  });
+
+  it("does not count a row another writer stamped between the read and the write", async () => {
+    // The UPDATE re-asserts `project_id IS NULL`, so a row resolved by a
+    // concurrent run (or an ordinary webhook update) in the gap after the
+    // SELECT matches nothing. `updated` is the number this backfill is
+    // verified against, so it has to be writes actually made, not attempts.
+    const rows: FakeWebhookRow[] = [
+      { id: "wh_race", project: "alpha", project_id: null },
+      { id: "wh_mine", project: "alpha", project_id: null },
+    ];
+    const db = makeWebhooksD1(rows);
+    const raced = { done: false };
+    const realPrepare = db.prepare.bind(db);
+    (db as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      // Simulate the other writer landing right after our SELECT returned
+      // both rows, and before our first UPDATE runs.
+      if (sql.includes("UPDATE webhooks SET project_id") && !raced.done) {
+        raced.done = true;
+        const row = rows.find((r) => r.id === "wh_race");
+        if (row) row.project_id = "proj_a";
+      }
+      return realPrepare(sql);
+    };
+    const env = {
+      DB: db,
+      STATE: makeKV([{ id: "proj_a", name: "alpha" }]),
+    } as unknown as Env;
+
+    const result = await backfillWebhookProjectIds(env, logger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    // Two rows were attempted; only wh_mine was actually written by this run.
+    expect(result.data.updated).toBe(1);
+    expect(result.data.skipped).toEqual([]);
+    expect(result.data.remainingNullRows).toBe(0);
   });
 
   it("leaves an ambiguous name (same name in two namespaces) NULL and reports why", async () => {

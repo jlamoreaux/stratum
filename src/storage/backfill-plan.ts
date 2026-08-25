@@ -160,11 +160,16 @@ export async function backfillWebhookProjectIds(
       }
       // Re-assert `project_id IS NULL` at write time: cheap defense against a
       // concurrent backfill run (or a delivery/update in between) re-stamping
-      // an already-resolved row.
-      await env.DB.prepare("UPDATE webhooks SET project_id = ? WHERE id = ? AND project_id IS NULL")
+      // an already-resolved row. That guard means the UPDATE can legitimately
+      // match nothing, so count what it actually changed rather than how many
+      // times it ran -- `updated` is the step-2 verification number and must
+      // not report writes this run did not make.
+      const result = await env.DB.prepare(
+        "UPDATE webhooks SET project_id = ? WHERE id = ? AND project_id IS NULL",
+      )
         .bind(projectId, row.id)
         .run();
-      updated++;
+      updated += result.meta.changes;
     }
 
     const remaining = await env.DB.prepare(
