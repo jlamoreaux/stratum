@@ -35,8 +35,10 @@ invariants GitHub doesn't have:
 ## Does Stratum replace GitHub Actions?
 
 No. Stratum has no native CI runner — no workflows, hosted runners, matrix
-builds, artifacts, caching, scheduled jobs, CI secrets store, or deployment
-environments. Its code execution is limited to the evaluation pipeline: the
+builds, artifacts, caching, scheduled jobs, CI secrets store, deployment
+environments, or status-check aggregation (it does not collect external CI
+check results the way a GitHub PR's checks tab does). Its code execution is
+limited to the evaluation pipeline: the
 sandbox evaluator (needs the optional `SANDBOX` binding; fails closed without
 it), the `webhook` evaluator (a synchronous call-out to CI *you* host, which
 must answer within the request timeout — default 10s), and the post-merge

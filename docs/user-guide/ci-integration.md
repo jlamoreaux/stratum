@@ -76,7 +76,11 @@ merge:
 - `POST` with `Content-Type: application/json`.
 - Body: `{"diff": "<unified diff of the change>", "policy": {...}}` — the
   policy object is the parsed evaluation policy, so your endpoint can read
-  its own config from `policy.evaluators`.
+  its own config from `policy.evaluators`. It is passed through
+  `sanitizePolicy` first (`src/evaluation/sanitize-policy.ts`), which strips
+  `secret` from every webhook evaluator entry, so no receiver sees any
+  evaluator's signing secret — including its own. Provision your receiver's
+  copy of the secret out of band; do not expect to read it from the payload.
 - If `secret` is set, the header `X-Stratum-Signature: sha256=<hex>` carries
   an HMAC-SHA256 of the exact request body, keyed with the secret. Verify it
   before trusting the payload.
@@ -85,15 +89,9 @@ merge:
   rejected and the evaluation fails closed (score 0). Redirects are **not
   followed**; a 3xx counts as failure.
 
-Three properties of the current contract are worth knowing before you point a
-receiver at it. All three are tracked; this section describes what ships today.
+Two properties of the current contract are worth knowing before you point a
+receiver at it. This section describes what ships today.
 
-- **The policy is sent verbatim, `secret` values included.** Every webhook
-  receiver therefore sees the secrets of *every* webhook evaluator in the
-  policy, not just its own — and a receiver configured without a secret still
-  receives the others'. Until that is fixed ([#273](https://github.com/stratum-eng/stratum/issues/273)), do not configure two
-  webhook evaluators with different trust levels against one policy, and treat
-  a policy secret as shared with every endpoint it names.
 - **`http://` URLs are accepted**, and the HMAC authenticates the body without
   encrypting it. Over plain HTTP the diff and the policy travel in cleartext.
   Use an `https://` URL, and terminate TLS in front of your receiver.
@@ -271,8 +269,22 @@ createServer((req, res) => {
     // 3. Evaluate inside what is left of the request budget, answer, and only
     //    then clean up — the verdict must not wait on `worktree remove`.
     const { result, dir } = evaluate(diff, DEADLINE_MS - (Date.now() - started));
+
+    // Clean up on WHICHEVER comes first: the response finishing, or the
+    // connection closing. If the client disconnects before `res.end`, Node may
+    // never emit 'finish', and the end-callback is a 'finish' listener — so
+    // relying on it alone leaks a worktree per aborted request. `once` makes
+    // the two paths idempotent when both fire.
+    let cleaned = false;
+    const cleanupOnce = () => {
+      if (cleaned) return;
+      cleaned = true;
+      cleanup(dir);
+    };
+    res.on("close", cleanupOnce);
+
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(result), () => cleanup(dir));
+    res.end(JSON.stringify(result), cleanupOnce);
   });
 }).listen(8080);
 ```
@@ -308,6 +320,10 @@ To set expectations, Stratum has none of the following today:
 - Scheduled jobs (cron workflows)
 - A secrets store for CI (the webhook `secret` lives in the policy file)
 - Deployment environments, approvals-per-environment, or deploy gates
+- Status-check aggregation — Stratum does not collect external CI check
+  results the way a GitHub PR's checks tab does. An external system reports a
+  verdict only by answering the webhook evaluator synchronously; a check that
+  reports anywhere else is invisible to the gate.
 
 If you need those, run a real CI system and connect it via the webhook
 evaluator (for gating) or via GitHub sync in layer mode (for everything else).
