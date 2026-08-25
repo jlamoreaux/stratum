@@ -64,12 +64,22 @@ Configure it in `.stratum/policy.yaml`:
 evaluators:
   - type: webhook
     url: https://ci.example.com/stratum-eval
-    secret: <shared-secret>   # optional; enables HMAC signing
+    secret: <shared-secret>   # optional; enables HMAC signing — see the warning
     timeoutMs: 10000          # optional; default 10000 (10s)
 
 merge:
   requiredEvaluators: ["secret_scan", "webhook"]
 ```
+
+> **`secret` is a literal in a committed file.** `EvaluatorConfig` types it as
+> `secret?: string` (`src/evaluation/types.ts`) and the policy loader performs
+> no environment or secret-store lookup, so the only way to enable HMAC signing
+> today is to write the value into `.stratum/policy.yaml` — where every reader
+> of the repository can see it. There is no `.dev.vars` or Wrangler-secret
+> indirection for this field; adding one is an implementation change, not
+> configuration. Until then, treat a signed webhook as authenticating *the
+> repository*, not a confidential channel, and rotate the value if the repo's
+> readership changes.
 
 ### Request (Stratum → your endpoint)
 
@@ -143,13 +153,21 @@ checkout, runs tests, and answers the verdict:
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const SECRET = process.env.STRATUM_WEBHOOK_SECRET;
 if (!SECRET) throw new Error("STRATUM_WEBHOOK_SECRET is required");
+
+// Validate REPO_DIR at STARTUP, not on the first request. Unset or wrong, every
+// `git -C` fails and each request answers a confusing failed verdict; failing
+// here turns a misconfiguration into one loud error before any traffic arrives.
 const REPO_DIR = process.env.REPO_DIR; // a clone kept in sync with the project
+if (!REPO_DIR) throw new Error("REPO_DIR is required");
+if (!existsSync(join(REPO_DIR, ".git"))) {
+  throw new Error(`REPO_DIR is not a git repository: ${REPO_DIR}`);
+}
 
 // Stay under Stratum's timeoutMs (default 10000) with room to send the reply.
 // The budget covers the WHOLE request — checkout, patch, tests — not just the
@@ -163,7 +181,12 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024;
 // An explicit allowlist, never this process's env. A diff can rewrite
 // package.json or a test file, and anything inherited here is handed to that
 // code — including STRATUM_WEBHOOK_SECRET, which would let it forge verdicts.
-const CHILD_ENV = { PATH: process.env.PATH, HOME: process.env.HOME };
+//
+// HOME is a throwaway directory, not the service account's: a real $HOME holds
+// ~/.npmrc, ~/.gitconfig, ~/.ssh and cloud credential caches, and handing that
+// path to code from the diff hands over everything in it.
+const CHILD_HOME = mkdtempSync(join(tmpdir(), "stratum-eval-home-"));
+const CHILD_ENV = { PATH: process.env.PATH, HOME: CHILD_HOME };
 
 function evaluate(diff, budgetMs) {
   const started = Date.now();
@@ -291,7 +314,16 @@ createServer((req, res) => {
 
 The worktree starts without `node_modules`, so give it the dependencies your
 suite needs — share a cache directory, symlink from the primary clone, or bake
-them into the image. Every child here is `execFileSync`, which blocks the event
+them into the image.
+
+**Run this somewhere disposable.** The receiver executes code from the change
+under evaluation — `npm test` is the point, and `git apply` can introduce hooks
+and `.gitattributes` filters that run too. Give it an ephemeral, least-privileged
+container or VM per deployment, with no credentials on the filesystem, no cloud
+metadata reachable, and outbound network restricted to what the suite needs. The
+allowlisted `CHILD_ENV` and throwaway worktree below narrow what one evaluation
+can touch; they do not make a general-purpose host a safe place to run untrusted
+changes. Every child here is `execFileSync`, which blocks the event
 loop — fine for a sketch, but a receiver taking concurrent requests wants the
 async `spawn` equivalents so one evaluation cannot stall another. `createServer`
 here is plain HTTP on purpose: terminate
