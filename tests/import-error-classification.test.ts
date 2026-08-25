@@ -46,6 +46,14 @@ describe("classifyError — Git LFS ordering", () => {
       "the git-lfs project itself",
       "fatal: repository 'https://github.com/git-lfs/git-lfs.git' not found",
     ],
+    // Path-shaped markers are unusable however LFS-specific they look: a
+    // repository URL can contain any path, so an owner/repo pair is free to
+    // spell one out.
+    ["owner info, repo lfs", "repository not found: https://github.com/info/lfs (404)"],
+    [
+      "owner objects, repo batch",
+      "fatal: repository 'https://github.com/objects/batch.git' not found",
+    ],
   ])(
     "classifies a 404 for a repository merely named ...lfs... as NOT_FOUND (%s)",
     (_l, message) => {
