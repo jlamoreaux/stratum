@@ -1,6 +1,5 @@
 import { Hono } from "hono";
-import { SecretScanEvaluator } from "../evaluation/secret-scanner";
-import type { EvalPolicy } from "../evaluation/types";
+import { scanContentForSecrets } from "../evaluation/secret-scanner";
 import { authMiddleware } from "../middleware/auth";
 import { freshRepoToken, resolveConflict } from "../storage/git-ops";
 import { getProject, getProjectByPath, getWorkspace, setProject } from "../storage/state";
@@ -535,30 +534,21 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   // accept-workspace reuse already-committed trees and need no re-scan.)
   if (strategy === "manual") {
     const resolutions = body.resolutions as Array<{ file: string; content: string }>;
-    const syntheticDiff = resolutions
-      .map((r) => {
-        const added = r.content
-          .split("\n")
-          .map((line) => `+${line}`)
-          .join("\n");
-        return `+++ b/${r.file}\n${added}`;
-      })
-      .join("\n");
-    const scan = await new SecretScanEvaluator().evaluate(
-      syntheticDiff,
-      { evaluators: [] } as EvalPolicy,
-      logger,
-    );
-    if (!scan.success) {
-      return c.json({ error: "Secret scan failed to run", code: "SCAN_ERROR" }, 500);
-    }
-    if (!scan.data.passed) {
-      logger.warn("Conflict resolution blocked by secret scan", { conflictId });
+    // Scan the literal content, not a diff synthesised from it. Prefixing each
+    // line with "+" is not reversible: a resolution line that already starts
+    // with "++" would render as "+++…" and be skipped as a diff file header,
+    // so a credential placed on such a line would reach main unscanned.
+    const issues = scanContentForSecrets(resolutions);
+    if (issues.length > 0) {
+      logger.warn("Conflict resolution blocked by secret scan", {
+        conflictId,
+        issueCount: issues.length,
+      });
       return c.json(
         {
-          error: `Resolution rejected: ${scan.data.reason}`,
+          error: `Resolution rejected: ${issues[0]?.split(":")[0] ?? "secret detected"}`,
           code: "SECRET_DETECTED",
-          issues: scan.data.issues ?? [],
+          issues,
         },
         422,
       );

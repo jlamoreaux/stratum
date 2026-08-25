@@ -340,6 +340,48 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
     expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
   });
 
+  it("blocks a secret on a line that itself starts with ++ (no prefix escape)", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+
+    // The scan used to run over a diff synthesised by prefixing every content
+    // line with "+". That encoding is not reversible: this line would become
+    // "+++const k = ..." and be skipped as a unified-diff file header, so the
+    // key landed on the default branch unscanned. Both "++" and "++ " forms are
+    // covered because only the latter also looks like a header after prefixing.
+    for (const content of [
+      '++const k = "AKIAIOSFODNN7EXAMPLE";',
+      '++ const k = "AKIAIOSFODNN7EXAMPLE";',
+    ]) {
+      const res = await app.fetch(
+        new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+          method: "POST",
+          headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            strategy: "manual",
+            resolutions: [{ file: "src/foo.ts", content }],
+          }),
+        }),
+        { STATE: kv, DB: makeDb() },
+      );
+
+      expect(res.status).toBe(422);
+      const body = await res.json<{ code: string; issues: string[] }>();
+      expect(body.code).toBe("SECRET_DETECTED");
+      // Issues are reported per file with a content-relative line number.
+      expect(body.issues[0]).toBe("AWS Access Key: src/foo.ts line 1");
+      expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+    }
+  });
+
   it("allows a manual resolution with clean content (scan passes → pushes)", async () => {
     const kv = makeKv();
     vi.mocked(resolveConflict).mockClear();
