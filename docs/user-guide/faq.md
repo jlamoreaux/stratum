@@ -32,13 +32,28 @@ invariants GitHub doesn't have:
 - A malformed `.stratum/policy.yaml` **fails closed** (blocks merges) instead of
   silently falling back to defaults.
 
+## Does Stratum replace GitHub Actions?
+
+No. Stratum has no native CI runner — no workflows, hosted runners, matrix
+builds, artifacts, caching, scheduled jobs, CI secrets store, deployment
+environments, or status-check aggregation (it does not collect external CI
+check results the way a GitHub PR's checks tab does). Its code execution is
+limited to the evaluation pipeline: the
+sandbox evaluator (needs the optional `SANDBOX` binding; fails closed without
+it), the `webhook` evaluator (a synchronous call-out to CI *you* host, which
+must answer within the request timeout — default 10s), and the post-merge
+smoke command run in a sandbox. Bring your own CI and wire it in via the
+webhook evaluator, or use layer mode and keep running GitHub Actions on the
+promoted PRs. See [CI Integration](ci-integration.md).
+
 ## Do I have to leave GitHub to use it?
 
 No. Stratum supports two modes with the same codebase. In **layer mode**,
 Stratum sits between your agents and GitHub: import the repo, enable
 bidirectional sync (inbound webhooks, outbound PR promotion), and agent work
 goes through Stratum's gates while your team keeps reviewing GitHub PRs —
-evaluation results are posted to the PR as comments and commit statuses. In
+each evaluation of a change with a linked PR posts the verdict to the PR as a
+comment and a `stratum/evaluation` commit status. In
 **alternative mode**, Stratum is the source of truth and GitHub isn't involved
 at all. You choose the level of buy-in, and you can start with layer mode.
 

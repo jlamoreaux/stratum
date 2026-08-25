@@ -315,7 +315,10 @@ const sandboxEvaluator: Evaluator = {
   id: 'tests',
   type: 'sandbox',
   async evaluate(ctx) {
-    // Clone workspace to Sandbox
+    // Materialize the FULL workspace tree at the evaluated commit
+    // (readRepoFiles pinned to evaluated_sha), not just the diff
+    // Install dependencies (npm ci with a lockfile, npm install with
+    // only a package.json, nothing otherwise)
     // Run configured command
     // Capture output and exit code
   }
@@ -325,11 +328,21 @@ const sandboxEvaluator: Evaluator = {
 **Configuration:**
 ```yaml
 evaluators:
-  - id: tests
-    type: sandbox
-    command: "npm test"
-    required: true
+  - type: sandbox
+    command: "npm test"        # default
+    timeoutMs: 60000           # command timeout (default 60s)
+    installTimeoutMs: 120000   # dependency install timeout (default 120s)
+# Pass/fail is decided by the policy-level `minScore` and `requireAll` fields,
+# not by a per-evaluator `required` flag.
 ```
+
+**Fail-closed when unavailable:** the `[[sandboxes]]` binding is commented out
+in `wrangler.toml` (beta feature; enabling it is an ops decision). While it is
+absent, any policy naming a `sandbox` evaluator fails closed — every evaluation
+records `sandbox unavailable: SANDBOX binding is not configured — enable
+[[sandboxes]] in wrangler.toml or remove the sandbox evaluator from the policy`
+with score 0, which blocks the merge. Remove the evaluator from the policy or
+enable the binding.
 
 ### Composite Scoring
 
@@ -379,31 +392,38 @@ app.post('/api/webhooks/github', async (c) => {
 
 ### Outbound Sync (Stratum → GitHub)
 
-**Push Change to PR:**
+**Promote Change to PR** (`POST /changes/:id/github-pr`): pushes the change's
+branch and creates the GitHub PR using the instance-wide `GITHUB_TOKEN`.
+
+**Evaluation verdict reporting** (`src/github/sync.ts`): after every evaluation
+of a change whose project has a GitHub source and which has a linked PR, the
+verdict is reported to GitHub — best-effort, so a GitHub failure never fails
+the evaluation:
+
 ```typescript
-async function pushToGitHub(change: Change): Promise<void> {
-  // Get or create GitHub PR
-  // Push workspace branch to GitHub
-  // Post evaluation results as PR comment
-  // Set commit status (pass/fail)
+async function reportEvaluationToGitHub(env, change, project, evaluation): Promise<void> {
+  // Gate: project must have a GitHub source AND the change a linked PR
+  // Post evaluation results as PR comment (upserted via changes.github_comment_id —
+  //   a re-evaluation edits the prior comment instead of posting a new one)
+  // Set commit status (context "stratum/evaluation", pass/fail) on the PR head
+  //   sha (falls back to the evaluated sha for changes mirrored verbatim)
 }
 ```
 
 **PR Comment Format:**
+
 ```markdown
-## Stratum Evaluation Results
+## ✅ Stratum Evaluation Results
 
-**Composite Score:** 0.92 ✅
+**Composite Score:** 92.0%
+**Status:** PASSED
 
-| Evaluator | Score | Status |
-|-----------|-------|--------|
-| Diff Check | 1.0 | ✅ Pass |
-| Unit Tests | 0.95 | ✅ Pass |
-| LLM Review | 0.82 | ✅ Pass |
+| Evaluator | Score | Status | Details |
+|-----------|-------|--------|---------|
+| secret_scan | 100.0% | ✅ | No secrets detected |
+| diff | 95.0% | ✅ | Diff passed all checks. |
 
-**Objective:** Fix the N+1 query in user loading
-
-[View detailed results in Stratum](https://stratum.dev/...)
+_Evaluation performed by [Stratum](https://stratum.dev)_
 ```
 
 ## Merge Queue
@@ -713,13 +733,13 @@ src/
 
 ## Related Documents
 
-- [TODO.md](/TODO.md) - Current priorities and roadmap
-- [Database Schema](/docs/developer/database.md) - Detailed D1 schema
-- [Queue Processing](/docs/developer/queues.md) - Queue architecture
-- [Testing Guide](/docs/developer/testing.md) - Testing patterns
+- [TODO.md](../../TODO.md) - Current priorities and roadmap
+- [Database Schema](database.md) - Detailed D1 schema
+- [Queue Processing](queues.md) - Queue architecture
+- [Testing Guide](testing.md) - Testing patterns
 
 ## Archived Documents
 
 Historical documents preserved for reference:
-- [Code Review (2026-04-29)](/docs/archive/CODE_REVIEW.md)
-- [Architecture Audit (2026-05-02)](/docs/archive/AUDIT.md)
+- [Code Review (2026-04-29)](../archive/CODE_REVIEW.md)
+- [Architecture Audit (2026-05-02)](../archive/AUDIT.md)
