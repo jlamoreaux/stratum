@@ -1,6 +1,6 @@
 # Remaining Work
 
-Last updated: 2026-08-17
+Last updated: 2026-08-25 — adds the Git LFS feature gap recorded below.
 
 The master-plan feature roadmap (Phases 0–3 plus the code-level Phase 4
 hardening items) is complete as of 2026-06-11. See

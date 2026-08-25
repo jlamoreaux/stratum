@@ -35,6 +35,17 @@ describe("classifyError — Git LFS ordering", () => {
     ["repo name", "Repository not found: https://github.com/acme/lfs-tools (404)"],
     ["owner name", "fatal: repository 'https://github.com/lfs/demo.git' not found"],
     ["branch name", "couldn't find remote ref refs/heads/add-lfs-support (404)"],
+    // "git-lfs" is itself a repository name. A bare-token match — and word
+    // boundaries too, since /\bgit-lfs\b/ matches "git-lfs-tools" — puts these
+    // on the LFS branch and strips the "View Repository" action.
+    [
+      "repo named git-lfs-tools",
+      "Repository not found: https://github.com/acme/git-lfs-tools (404)",
+    ],
+    [
+      "the git-lfs project itself",
+      "fatal: repository 'https://github.com/git-lfs/git-lfs.git' not found",
+    ],
   ])(
     "classifies a 404 for a repository merely named ...lfs... as NOT_FOUND (%s)",
     (_l, message) => {

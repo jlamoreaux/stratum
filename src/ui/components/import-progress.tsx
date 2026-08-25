@@ -42,11 +42,27 @@ interface ErrorInfo {
 }
 
 /**
- * Substrings that identify a genuine Git LFS failure. Deliberately narrower
- * than a bare "lfs": these appear in git-lfs's own output and in LFS endpoint
- * paths, not in repository names that merely contain the letters.
+ * Substrings that identify a genuine Git LFS failure: each appears in git-lfs's
+ * own output or in an LFS endpoint path, and none can appear in a repository
+ * URL.
+ *
+ * The bare token "git-lfs" is deliberately NOT here. `git-lfs` is itself a
+ * repository name, so `github.com/acme/git-lfs-tools` returning 404 would be
+ * answered "this repository uses Git LFS" — and because this branch runs ahead
+ * of not-found, the user would also lose the "View Repository" action.
+ *
+ * Word-boundary matching does not solve that: /\bgit-lfs\b/ still matches
+ * "git-lfs-tools", because a boundary exists between "s" and "-". Only the
+ * forms below, which carry a trailing colon, space, or path separator, cannot
+ * occur inside a URL path segment.
  */
-const LFS_MARKERS = ["git-lfs", "git lfs", "/info/lfs", "objects/batch"];
+const LFS_MARKERS = [
+  "git-lfs:", // git-lfs CLI error prefix
+  "git-lfs filter-process", // smudge/clean filter failure
+  "git lfs ", // spaced prose form; a URL cannot contain a raw space
+  "/info/lfs", // LFS endpoint path
+  "objects/batch", // LFS batch endpoint
+];
 
 /**
  * Map a raw import failure message to user-facing guidance. Exported for tests:
