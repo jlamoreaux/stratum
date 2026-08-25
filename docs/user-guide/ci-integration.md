@@ -143,192 +143,58 @@ A timed-out or errored webhook surfaces as an external-service error for that
 evaluator, and a `merge.requiredEvaluators` entry for `webhook` will keep the
 change unmergeable until a re-evaluation passes.
 
-## Worked example: a generic webhook CI receiver
+## Wiring your CI to the contract
 
-Any HTTPS service works. A minimal Node receiver that applies the diff to a
-checkout, runs tests, and answers the verdict:
+The endpoint's job is narrow: authenticate the request, decide, and answer in
+the verdict shape. A sketch of just that part:
 
 ```js
-// stratum-ci-receiver.mjs — run on your own infrastructure, behind TLS
+// Sketch — the contract, not a deployable receiver. See the note below.
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { createServer } from "node:http";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 const SECRET = process.env.STRATUM_WEBHOOK_SECRET;
-if (!SECRET) throw new Error("STRATUM_WEBHOOK_SECRET is required");
 
-// Validate REPO_DIR at STARTUP, not on the first request. Unset or wrong, every
-// `git -C` fails and each request answers a confusing failed verdict; failing
-// here turns a misconfiguration into one loud error before any traffic arrives.
-const REPO_DIR = process.env.REPO_DIR; // a clone kept in sync with the project
-if (!REPO_DIR) throw new Error("REPO_DIR is required");
-if (!existsSync(join(REPO_DIR, ".git"))) {
-  throw new Error(`REPO_DIR is not a git repository: ${REPO_DIR}`);
+/** Constant-time check of the `sha256=<hex>` header against the raw body. */
+function signatureValid(rawBody, header) {
+  if (!SECRET) return true; // no secret configured: Stratum sends no signature
+  if (typeof header !== "string" || !header.startsWith("sha256=")) return false;
+  const expected = createHmac("sha256", SECRET).update(rawBody).digest();
+  const received = Buffer.from(header.slice("sha256=".length), "hex");
+  // timingSafeEqual throws on a length mismatch, so compare lengths first.
+  return received.length === expected.length && timingSafeEqual(received, expected);
 }
 
-// Stay under Stratum's timeoutMs (default 10000) with room to send the reply.
-// The budget covers the WHOLE request — checkout, patch, tests — not just the
-// test run, or Stratum aborts before the verdict is written.
-const DEADLINE_MS = 9000;
-// Cleanup runs AFTER the verdict is sent, so it cannot delay it — but bound it
-// anyway so a wedged worktree removal cannot stall the next request.
-const CLEANUP_MS = 2000;
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
-
-// An explicit allowlist, never this process's env. A diff can rewrite
-// package.json or a test file, and anything inherited here is handed to that
-// code — including STRATUM_WEBHOOK_SECRET, which would let it forge verdicts.
-//
-// HOME is a throwaway directory, not the service account's: a real $HOME holds
-// ~/.npmrc, ~/.gitconfig, ~/.ssh and cloud credential caches, and handing that
-// path to code from the diff hands over everything in it.
-const CHILD_HOME = mkdtempSync(join(tmpdir(), "stratum-eval-home-"));
-const CHILD_ENV = { PATH: process.env.PATH, HOME: CHILD_HOME };
-
-function evaluate(diff, budgetMs) {
-  const started = Date.now();
-  const left = () => Math.max(1, budgetMs - (Date.now() - started));
-  // `dir` is created INSIDE the try. mkdtempSync throws on a full or
-  // read-only /tmp, and this runs inside a `req.on("end", ...)` handler, so a
-  // throw out here would be an uncaught exception that kills the process
-  // rather than a failed evaluation.
-  let dir = null;
-  let result;
-  try {
-    // A throwaway worktree per request. `git checkout -f .` restores tracked
-    // paths but leaves whatever `git apply` created, so a shared checkout
-    // leaks untracked files from one evaluation into the next.
-    dir = mkdtempSync(join(tmpdir(), "stratum-eval-"));
-    execFileSync("git", ["-C", REPO_DIR, "worktree", "add", "--detach", dir, "HEAD"],
-      { env: CHILD_ENV, timeout: left() });
-    writeFileSync(join(dir, "change.diff"), diff);
-    execFileSync("git", ["-C", dir, "apply", "change.diff"],
-      { env: CHILD_ENV, timeout: left() });
-    execFileSync("npm", ["test", "--prefix", dir], { env: CHILD_ENV, timeout: left() });
-    result = { score: 1, passed: true, reason: "tests passed" };
-  } catch (e) {
-    result = { score: 0, passed: false,
-               reason: String(e.stdout || e.message).slice(0, 500) };
-  }
-  // Deliberately NOT a `finally` that cleans up here: the caller sends the
-  // verdict first and cleans up after. Cleaning up before returning would put
-  // an unbounded `worktree remove` on the path to `res.end`, which is how a
-  // correct verdict arrives after Stratum has already aborted the request.
-  return { result, dir };
-}
-
-function cleanup(dir) {
-  // `dir` is null when mkdtempSync itself failed — nothing was created.
-  if (!dir) return;
-  try {
-    execFileSync("git", ["-C", REPO_DIR, "worktree", "remove", "--force", dir],
-      { env: CHILD_ENV, timeout: CLEANUP_MS });
-  } catch {
-    try { rmSync(dir, { recursive: true, force: true, maxRetries: 2 }); } catch {}
-  }
-}
-
-createServer((req, res) => {
-  const started = Date.now();
-  const chunks = [];
-  let size = 0;
-
-  // An ABSOLUTE deadline, not an inactivity timeout. A sender that dribbles
-  // one byte every few seconds keeps the socket active indefinitely while
-  // holding a connection and the memory behind it; only a wall-clock timer
-  // bounds that. It is cleared on every terminal path so a finished request
-  // cannot be killed after the fact.
-  const deadline = setTimeout(() => {
-    if (!res.writableEnded) res.writeHead(408).end();
-    req.destroy();
-  }, DEADLINE_MS);
-  const done = () => clearTimeout(deadline);
-  req.on("aborted", done);
-  req.on("error", done);
-  res.on("close", done);
-
-  req.on("data", (c) => {
-    // Bound the body BEFORE the signature check: this endpoint is public, and
-    // an unbounded `body += c` lets an unauthenticated sender exhaust memory.
-    size += c.length;
-    if (size > MAX_BODY_BYTES) {
-      done();
-      res.writeHead(413).end();
-      req.destroy();
-      return;
-    }
-    chunks.push(c);
+// rawBody is the exact bytes Stratum sent — verify before parsing, since
+// re-serializing JSON would change what you are authenticating.
+if (!signatureValid(rawBody, headers["x-stratum-signature"])) {
+  respond(401, { error: "bad signature" });
+} else {
+  const { diff, policy } = JSON.parse(rawBody);
+  const verdict = await yourCi(diff, policy); // whatever "run the checks" means for you
+  respond(200, {
+    score: verdict.score,     // 0..100
+    passed: verdict.passed,   // boolean — this is what gates the merge
+    reason: verdict.reason,   // shown in the change UI
   });
-  req.on("end", () => {
-    done();
-    if (res.writableEnded) return;
-    const body = Buffer.concat(chunks);
-
-    // 1. Verify the HMAC over the EXACT bytes received, before parsing them.
-    const expected = "sha256=" +
-      createHmac("sha256", SECRET).update(body).digest("hex");
-    const got = Buffer.from(req.headers["x-stratum-signature"] ?? "");
-    if (got.length !== expected.length ||
-        !timingSafeEqual(got, Buffer.from(expected))) {
-      res.writeHead(401).end();
-      return;
-    }
-
-    // 2. Parse and validate inside error handling. Malformed JSON must be a
-    //    400, not an uncaught throw in an event handler that kills the process.
-    let diff;
-    try {
-      const payload = JSON.parse(body.toString("utf8"));
-      if (typeof payload?.diff !== "string") throw new Error("missing diff");
-      diff = payload.diff;
-    } catch {
-      res.writeHead(400).end();
-      return;
-    }
-
-    // 3. Evaluate inside what is left of the request budget, answer, and only
-    //    then clean up — the verdict must not wait on `worktree remove`.
-    const { result, dir } = evaluate(diff, DEADLINE_MS - (Date.now() - started));
-
-    // Clean up on WHICHEVER comes first: the response finishing, or the
-    // connection closing. If the client disconnects before `res.end`, Node may
-    // never emit 'finish', and the end-callback is a 'finish' listener — so
-    // relying on it alone leaks a worktree per aborted request. `once` makes
-    // the two paths idempotent when both fire.
-    let cleaned = false;
-    const cleanupOnce = () => {
-      if (cleaned) return;
-      cleaned = true;
-      cleanup(dir);
-    };
-    res.on("close", cleanupOnce);
-
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(result), cleanupOnce);
-  });
-}).listen(8080);
+}
 ```
 
-The worktree starts without `node_modules`, so give it the dependencies your
-suite needs — share a cache directory, symlink from the primary clone, or bake
-them into the image.
+**What this deliberately leaves out.** `yourCi` is where the change under
+evaluation actually gets built and tested, and that is the part this guide does
+not attempt to specify. Applying a diff and running its test suite means
+executing attacker-controlled code: `git apply` alone can introduce hooks and
+`.gitattributes` filters, and a test suite can do anything. Doing that safely is
+an infrastructure problem — separate user and PID namespaces so the workload
+cannot read the receiver's environment, a fresh filesystem per evaluation so one
+change cannot observe or poison another, resource and time bounds, no ambient
+credentials, no reachable cloud metadata — and it is not something a copyable
+snippet can be trusted to get right. Run it on disposable, least-privileged
+infrastructure you already trust for untrusted builds. Issue #281 tracks writing
+that guidance up properly.
 
-**Run this somewhere disposable.** The receiver executes code from the change
-under evaluation — `npm test` is the point, and `git apply` can introduce hooks
-and `.gitattributes` filters that run too. Give it an ephemeral, least-privileged
-container or VM per deployment, with no credentials on the filesystem, no cloud
-metadata reachable, and outbound network restricted to what the suite needs. The
-allowlisted `CHILD_ENV` and throwaway worktree below narrow what one evaluation
-can touch; they do not make a general-purpose host a safe place to run untrusted
-changes. Every child here is `execFileSync`, which blocks the event
-loop — fine for a sketch, but a receiver taking concurrent requests wants the
-async `spawn` equivalents so one evaluation cannot stall another. `createServer`
-here is plain HTTP on purpose: terminate
-TLS in front of it (a reverse proxy or load balancer) rather than exposing this
-port directly, since the body carries the change diff.
+Two constraints worth knowing before you build it: the response must arrive
+inside the timeout window described above, and the receiver should sit behind
+TLS you terminate yourself — the body carries the change diff.
 
 ### Using GitHub Actions as the executor
 
