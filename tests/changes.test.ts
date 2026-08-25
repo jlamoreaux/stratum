@@ -155,6 +155,7 @@ vi.mock("../src/storage/agents", () => ({
 }));
 
 import { CompositeEvaluator, SecretScanEvaluator, loadPolicy } from "../src/evaluation";
+import { resetCircuitBreakersForTests } from "../src/github/client";
 import { emitEvent } from "../src/queue/events";
 import { getAgent, getAgentByToken } from "../src/storage/agents";
 import { recordAudit } from "../src/storage/audit";
@@ -2099,6 +2100,12 @@ describe("POST /api/changes/:id/github-pr", () => {
     env = makeEnv();
     env.GITHUB_TOKEN = "ghp_secret_token";
     vi.clearAllMocks();
+    // GitHubClient's circuit breaker is module-level state shared by every
+    // instance — this suite deliberately drives many consecutive GitHub
+    // failures against the same acme/widgets repo across test cases, which
+    // would otherwise trip the breaker and starve later, unrelated
+    // assertions with a spurious 503.
+    resetCircuitBreakersForTests();
     vi.mocked(getUserByToken).mockImplementation(async (_db, token) => {
       if (token === "stratum_user_testtoken00000000000000000") {
         return {
