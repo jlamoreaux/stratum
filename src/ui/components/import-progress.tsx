@@ -42,6 +42,13 @@ interface ErrorInfo {
 }
 
 /**
+ * Substrings that identify a genuine Git LFS failure. Deliberately narrower
+ * than a bare "lfs": these appear in git-lfs's own output and in LFS endpoint
+ * paths, not in repository names that merely contain the letters.
+ */
+const LFS_MARKERS = ["git-lfs", "git lfs", "/info/lfs", "objects/batch"];
+
+/**
  * Map a raw import failure message to user-facing guidance. Exported for tests:
  * the ORDER of these branches is load-bearing, and order is exactly what a
  * rendering test cannot see.
@@ -100,7 +107,12 @@ export function classifyError(errorMessage: string): ErrorInfo {
   // containing both "not found" and "404". Classified below, the one failure
   // this guidance exists to explain would instead tell the user to check the
   // repository URL for typos.
-  if (msg.includes("lfs") || msg.includes("objects/batch")) {
+  //
+  // Match explicit LFS markers only. A bare "lfs" substring also appears in
+  // ordinary repository names and URLs (`github.com/acme/lfs-tools`), and
+  // because this branch sits ahead of not-found, a plain 404 for any such
+  // repository would be answered with "this repository uses Git LFS".
+  if (LFS_MARKERS.some((marker) => msg.includes(marker))) {
     return {
       type: "GIT_ERROR",
       title: "Git LFS Not Supported",
