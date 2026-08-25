@@ -1,5 +1,5 @@
 import git from "isomorphic-git";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildSnapshot, walkRepoObjects } from "../src/backup/repo-snapshot";
 import type { NodeFS } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
@@ -49,6 +49,13 @@ const project: ProjectEntry = {
 };
 
 describe("repo snapshot capture", () => {
+  // The logger mock is module-scoped, so without this each test would see the
+  // previous test's calls and the call-count assertions below would pass or
+  // fail on declaration order rather than on behaviour.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("walks the full reachable object set and preserves the tip sha", async () => {
     const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }, { "b.txt": "two" }]);
     const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
@@ -115,5 +122,37 @@ describe("repo snapshot capture", () => {
     expect(message).toMatch(/dropping/i);
     expect(message).toMatch(/tag/i);
     expect(meta.tags).toEqual(["v1"]);
+    expect(meta.tagCount).toBe(1);
+    expect(meta.tagsTruncated).toBeUndefined();
+  });
+
+  it("caps the named tags but still reports the true count", async () => {
+    // The warning's job is to make the loss visible. An unbounded name list
+    // on a repo with a large tag set would push the entry past the log
+    // pipeline's size limit and drop it entirely -- silence, which is exactly
+    // what this warning exists to prevent. The sample is bounded; the count
+    // is not.
+    const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }]);
+    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
+    const gfs = fs as any;
+    for (let i = 0; i < 60; i++) {
+      await git.tag({ fs: gfs, dir: DIR, ref: `v${String(i).padStart(3, "0")}`, object: tipSha });
+    }
+    await gfs.promises.unlink(`${DIR}/.git/refs/heads/main`);
+
+    const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
+    expect(walk.success).toBe(true);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const [, meta] = (logger.warn as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(meta.tagCount).toBe(60);
+    expect((meta.tags as string[]).length).toBe(50);
+    expect(meta.tagsTruncated).toBe(true);
+    // Sorted, so the sample is the first 50 by name rather than arbitrary.
+    expect((meta.tags as string[])[0]).toBe("v000");
+    expect((meta.tags as string[])[49]).toBe("v049");
   });
 });

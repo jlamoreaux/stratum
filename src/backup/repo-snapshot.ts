@@ -8,6 +8,14 @@ import { type Result, err, ok } from "../utils/result";
 
 export const DEFAULT_MAX_BACKUP_BYTES = 128 * 1024 * 1024;
 
+/**
+ * How many dropped tag names the tag-only-repo warning will name inline.
+ * The count is always reported in full; only the sample is bounded, so a
+ * repo with a very large tag set cannot produce a log entry too big to be
+ * recorded at all.
+ */
+const MAX_LOGGED_TAG_NAMES = 50;
+
 /** A tag ref captured in a snapshot: refs/tags/<name> → oid (the annotated tag
  * object for annotated tags, the target itself for lightweight ones). */
 export interface TagRefRecord {
@@ -95,9 +103,20 @@ export async function walkRepoObjects(
         // report than "no commits", so fall through to the debug case below.
       }
       if (tagNames.length > 0) {
+        // Name the tags, but cap the list: this warning exists to make the
+        // loss visible, and a repo with thousands of tags would push the line
+        // past the log pipeline's per-entry limit and lose the whole thing --
+        // the failure mode the warning is here to prevent. `tagCount` is the
+        // number that always survives; `tags` is the sample.
+        const sorted = [...tagNames].sort();
         logger.warn(
           "Repo has no commits (unborn HEAD) but has tag refs; skipping as empty and DROPPING these tags — tag-only backup is not yet supported (#251)",
-          { dir, tags: [...tagNames].sort() },
+          {
+            dir,
+            tagCount: sorted.length,
+            tags: sorted.slice(0, MAX_LOGGED_TAG_NAMES),
+            ...(sorted.length > MAX_LOGGED_TAG_NAMES ? { tagsTruncated: true } : {}),
+          },
         );
       } else {
         logger.debug("Repo has no commits; skipping as empty", { dir });
