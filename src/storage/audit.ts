@@ -13,6 +13,7 @@ export type AuditAction =
   | "webhook.toggled"
   | "webhook.deleted"
   | "merge.forced"
+  | "review.approvals_dismissed"
   | "backup.run"
   | "deletion.requested"
   | "deletion.started"

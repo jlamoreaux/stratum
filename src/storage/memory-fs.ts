@@ -1,9 +1,20 @@
 import { AppError } from "../utils/errors";
 import { type Result, err, ok } from "../utils/result";
 
-type FileEntry = { kind: "file"; data: Uint8Array; mtimeMs: number };
+type FileEntry = { kind: "file"; data: Uint8Array; mode: number; mtimeMs: number };
+type SymlinkEntry = { kind: "symlink"; target: string; mtimeMs: number };
 type DirEntry = { kind: "dir"; children: Set<string>; mtimeMs: number };
-type Entry = FileEntry | DirEntry;
+type Entry = FileEntry | SymlinkEntry | DirEntry;
+
+// Git tree-entry modes (the only file modes git records).
+export const MODE_FILE = 0o100644;
+export const MODE_EXEC = 0o100755;
+export const MODE_SYMLINK = 0o120000;
+export const MODE_DIR = 0o040000;
+export const MODE_GITLINK = 0o160000;
+
+// Matches Linux's SYMLOOP_MAX-style cap so a symlink cycle errors instead of spinning.
+const MAX_SYMLINK_HOPS = 40;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -13,10 +24,17 @@ function fsError(code: string, message: string): AppError {
 }
 
 class MemoryStats {
+  // isomorphic-git assigns stats.mode after lstat during checkout (0o755 for
+  // executables — a Windows workaround — and 0o160000 for gitlinks); the override
+  // honors those writes on this stats instance so the index records the intended mode.
+  private modeOverride?: number;
+
   constructor(private readonly entry: Entry) {}
 
   get size(): number {
-    return this.entry.kind === "file" ? this.entry.data.byteLength : 0;
+    if (this.entry.kind === "file") return this.entry.data.byteLength;
+    if (this.entry.kind === "symlink") return encoder.encode(this.entry.target).byteLength;
+    return 0;
   }
 
   get mtimeMs(): number {
@@ -28,12 +46,22 @@ class MemoryStats {
   }
 
   get mode(): number {
-    return this.entry.kind === "file" ? 0o100644 : 0o040000;
+    if (this.modeOverride !== undefined) return this.modeOverride;
+    if (this.entry.kind === "file") return this.entry.mode;
+    if (this.entry.kind === "symlink") return MODE_SYMLINK;
+    return MODE_DIR;
   }
 
-  // isomorphic-git sets mode after stat() during checkout; the no-op setter prevents
-  // "Cannot set property mode … only a getter" TypeErrors on those writes.
-  set mode(_value: number) {}
+  set mode(value: number) {
+    if (value === MODE_GITLINK) {
+      // Gitlinks (submodules) are recorded in the index but MemoryFS has no
+      // checked-out submodule behind them — surface it instead of failing silently.
+      console.warn(
+        "MemoryFS: gitlink (submodule) entry encountered; submodules are not fully supported",
+      );
+    }
+    this.modeOverride = value;
+  }
 
   isFile(): boolean {
     return this.entry.kind === "file";
@@ -44,7 +72,7 @@ class MemoryStats {
   }
 
   isSymbolicLink(): boolean {
-    return false;
+    return this.entry.kind === "symlink";
   }
 }
 
@@ -109,6 +137,34 @@ export class MemoryFS {
     return ok(entry);
   }
 
+  /**
+   * Follow a trailing symlink chain to its final path (Node stat/readFile/writeFile
+   * semantics; the final path need not exist). Intermediate components are not
+   * resolved — git working trees never require traversing through symlinked dirs.
+   */
+  private resolveLink(path: string): Result<string, AppError> {
+    let current = this.normalize(path);
+    for (let hops = 0; hops < MAX_SYMLINK_HOPS; hops++) {
+      const entry = this.entries.get(current);
+      if (entry?.kind !== "symlink") return ok(current);
+      current = entry.target.startsWith("/")
+        ? this.normalize(entry.target)
+        : this.normalize(`${this.parent(current)}/${entry.target}`);
+    }
+    return err(fsError("ELOOP", `ELOOP: too many symbolic links encountered: ${path}`));
+  }
+
+  /**
+   * Creates a directory, optionally creating missing ancestors.
+   *
+   * Only an existing *directory* makes this a no-op. An existing file or
+   * symlink is ENOTDIR, because callers treat success here as "a directory is
+   * now at this path" -- `writeFile` in particular calls this for the parent
+   * before writing, and returning ok for a file let writes land underneath a
+   * non-directory.
+   *
+   * Does not follow symlinks: a link is not a directory for this purpose.
+   */
   async mkdir(path: string, options?: { recursive?: boolean }): Promise<Result<void, AppError>> {
     const target = this.normalize(path);
     if (target === "/") return ok(undefined);
@@ -122,20 +178,49 @@ export class MemoryFS {
       if (!mkdirResult.success) return mkdirResult;
     }
 
-    if (this.entries.has(target)) return ok(undefined);
+    const existing = this.entries.get(target);
+    if (existing !== undefined) {
+      // Only an existing *directory* makes mkdir a no-op. Returning ok for a
+      // file or symlink here is what let `writeFile` proceed past a
+      // non-directory parent and strand an entry underneath it.
+      if (existing.kind === "dir") return ok(undefined);
+      return err(fsError("ENOTDIR", `ENOTDIR: not a directory: ${path}`));
+    }
 
-    this.entries.set(target, { kind: "dir", children: new Set(), mtimeMs: Date.now() });
+    // Validate the parent BEFORE mutating. The reverse order leaves the new
+    // entry in `entries` when the parent turns out not to be a directory: the
+    // call reports ENOTDIR while a later read of the same path succeeds, and
+    // `readdir` never lists it because the parent's child set was never
+    // updated. A symlink parent is rejected the same way -- it is not a
+    // directory, and mkdir does not follow links.
     const dirResult = this.getDirResult(parentPath);
     if (!dirResult.success) return dirResult;
+    this.entries.set(target, { kind: "dir", children: new Set(), mtimeMs: Date.now() });
     dirResult.data.children.add(this.basename(target));
     return ok(undefined);
   }
 
+  /**
+   * Writes a file, creating parent directories as needed.
+   *
+   * The parent is validated before `entries` is touched. The reverse order
+   * strands the new entry when the parent turns out not to be a directory: the
+   * call reports ENOTDIR while a later read of the same path succeeds, and
+   * `readdir` never lists it because the parent's child set is only updated on
+   * the success path.
+   *
+   * Mode follows git rather than POSIX -- git records only the exec bit, so any
+   * exec bit becomes 100755. An overwrite without an explicit mode keeps the
+   * file's existing mode, matching Node.
+   */
   async writeFile(
     path: string,
     data: string | Uint8Array | ArrayBuffer,
+    options?: { mode?: number },
   ): Promise<Result<void, AppError>> {
-    const target = this.normalize(path);
+    const resolved = this.resolveLink(path);
+    if (!resolved.success) return resolved;
+    const target = resolved.data;
     const parentPath = this.parent(target);
     const mkdirResult = await this.mkdir(parentPath, { recursive: true });
     if (!mkdirResult.success) return mkdirResult;
@@ -147,12 +232,26 @@ export class MemoryFS {
           ? data
           : new Uint8Array(data);
 
-    if (this.getEntry(target)?.kind === "dir")
+    const existing = this.entries.get(target);
+    if (existing?.kind === "dir")
       return err(fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`));
 
-    this.entries.set(target, { kind: "file", data: bytes, mtimeMs: Date.now() });
+    // isomorphic-git's checkout passes { mode: 0o777 } for executable blobs; git
+    // only records the exec bit, so any exec bit maps to 100755. Without an
+    // explicit mode an overwrite keeps the file's existing mode (Node semantics).
+    const mode =
+      options?.mode !== undefined
+        ? options.mode & 0o111
+          ? MODE_EXEC
+          : MODE_FILE
+        : existing?.kind === "file"
+          ? existing.mode
+          : MODE_FILE;
+
+    // Same ordering rule as mkdir: a failed write must leave nothing readable.
     const dirResult = this.getDirResult(parentPath);
     if (!dirResult.success) return dirResult;
+    this.entries.set(target, { kind: "file", data: bytes, mode, mtimeMs: Date.now() });
     dirResult.data.children.add(this.basename(target));
     return ok(undefined);
   }
@@ -161,7 +260,9 @@ export class MemoryFS {
     path: string,
     options?: string | { encoding?: string },
   ): Promise<Result<string | Uint8Array, AppError>> {
-    const entryResult = this.getEntryResult(path);
+    const resolved = this.resolveLink(path);
+    if (!resolved.success) return resolved;
+    const entryResult = this.getEntryResult(resolved.data);
     if (!entryResult.success) return entryResult;
     const entry = entryResult.data;
     if (entry.kind !== "file")
@@ -182,7 +283,7 @@ export class MemoryFS {
     const entryResult = this.getEntryResult(target);
     if (!entryResult.success) return entryResult;
     const entry = entryResult.data;
-    if (entry.kind !== "file")
+    if (entry.kind === "dir")
       return err(fsError("EISDIR", `EISDIR: illegal operation on a directory: ${path}`));
     this.entries.delete(target);
     const dirResult = this.getDirResult(this.parent(target));
@@ -206,22 +307,46 @@ export class MemoryFS {
   }
 
   async stat(path: string): Promise<Result<MemoryStats, AppError>> {
-    const entryResult = this.getEntryResult(path);
+    const resolved = this.resolveLink(path);
+    if (!resolved.success) return resolved;
+    const entryResult = this.getEntryResult(resolved.data);
     if (!entryResult.success) return entryResult;
     return ok(new MemoryStats(entryResult.data));
   }
 
   async lstat(path: string): Promise<Result<MemoryStats, AppError>> {
-    return this.stat(path);
+    const entryResult = this.getEntryResult(path);
+    if (!entryResult.success) return entryResult;
+    return ok(new MemoryStats(entryResult.data));
   }
 
-  // isomorphic-git requires readlink/symlink to be present. Symlinks aren't representable
-  // in MemoryFS, so silently skip them — the symlink entry is dropped but the clone continues.
   async readlink(path: string): Promise<Result<string, AppError>> {
-    return err(fsError("EINVAL", `EINVAL: invalid argument, readlink '${path}'`));
+    const entryResult = this.getEntryResult(path);
+    if (!entryResult.success) return entryResult;
+    if (entryResult.data.kind !== "symlink")
+      return err(fsError("EINVAL", `EINVAL: invalid argument, readlink '${path}'`));
+    return ok(entryResult.data.target);
   }
 
-  async symlink(_target: string, _path: string): Promise<Result<void, AppError>> {
+  async symlink(target: string, path: string): Promise<Result<void, AppError>> {
+    const linkPath = this.normalize(path);
+    const parentPath = this.parent(linkPath);
+    const mkdirResult = await this.mkdir(parentPath, { recursive: true });
+    if (!mkdirResult.success) return mkdirResult;
+
+    const existing = this.entries.get(linkPath);
+    if (existing?.kind === "dir")
+      return err(
+        fsError("EEXIST", `EEXIST: file already exists, symlink '${target}' -> '${path}'`),
+      );
+
+    // Node's symlink() fails EEXIST on any existing entry, but isomorphic-git's
+    // checkout rewrites a changed symlink in place (writelink without an unlink),
+    // so an existing file/symlink is replaced instead.
+    this.entries.set(linkPath, { kind: "symlink", target, mtimeMs: Date.now() });
+    const dirResult = this.getDirResult(parentPath);
+    if (!dirResult.success) return dirResult;
+    dirResult.data.children.add(this.basename(linkPath));
     return ok(undefined);
   }
 
@@ -235,7 +360,11 @@ export class MemoryFS {
         path: string,
         options?: string | { encoding?: string },
       ) => Promise<string | Uint8Array>;
-      writeFile: (path: string, data: string | Uint8Array) => Promise<void>;
+      writeFile: (
+        path: string,
+        data: string | Uint8Array,
+        options?: { mode?: number },
+      ) => Promise<void>;
       unlink: (path: string) => Promise<void>;
       readdir: (path: string) => Promise<string[]>;
       mkdir: (path: string, options?: { recursive?: boolean }) => Promise<void>;
@@ -253,8 +382,8 @@ export class MemoryFS {
           if (!result.success) throw result.error;
           return result.data;
         },
-        writeFile: async (path: string, data: string | Uint8Array) => {
-          const result = await this.writeFile(path, data);
+        writeFile: async (path: string, data: string | Uint8Array, options?: { mode?: number }) => {
+          const result = await this.writeFile(path, data, options);
           if (!result.success) throw result.error;
         },
         unlink: async (path: string) => {
