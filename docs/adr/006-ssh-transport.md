@@ -55,7 +55,7 @@ The SSH daemon must run somewhere that accepts raw TCP:
 
 | Option | Pros | Cons |
 | --- | --- | --- |
-| **Cloudflare Containers** | Stays in the Cloudflare account/tooling; scales to zero; close to the Worker for the bridge hop | Newer platform; per-instance pricing; still an always-on-ish footprint for interactive SSH latency; TCP ingress specifics to validate |
+| **Cloudflare Containers** | Stays in the Cloudflare account/tooling; scales to zero; close to the Worker for the bridge hop | Newer platform; per-instance pricing; still an always-on-ish footprint for interactive SSH latency; **does not answer public port 22 on its own** — a Container is reached through a Worker binding, so raw SSH needs a separate TCP ingress path in front of it (Spectrum, or another TCP proxy). That is a second product in the dependency chain, not a detail to settle later |
 | **Small VM (e.g. one $5-tier instance)** | Boring, well-understood sshd/ops story; trivial to run a custom SSH server binary | A second deployment target outside `wrangler deploy`; patching, monitoring, host-key custody, HA are all manual; single region unless multiplied |
 
 Either way the cost is dominated by operations, not compute: a git-SSH
@@ -71,10 +71,32 @@ functionally.
   and delete), sitting alongside the existing API-key management in
   settings. (This endpoint does not exist today; it would be new surface.)
 - **Fingerprint → user resolution.** At SSH auth time the bridge computes
-  the offered key's fingerprint and resolves it to a Stratum user; the
-  resolved identity then goes through the same project authorization checks
-  the HTTP router applies (read for `upload-pack`, write for
-  `receive-pack`).
+  the offered key's fingerprint and resolves it to a Stratum user.
+- **Delegating that identity is the hard part, and it is a confused-deputy
+  problem.** The Worker authorizes with `canReadProject` /
+  `canWriteProject` / `canWriteWorkspace` (`src/utils/authz.ts`), each keyed
+  on a `userId`/`agentOwnerId` the HTTP router derives from the caller's own
+  credential. A bridge calling in with a *service* credential presents its
+  own identity, so the user it claims to be acting for arrives as data. If
+  the Worker simply believes that claim, any compromise of the bridge — or
+  any bug in its fingerprint lookup — reads and writes every repository.
+  This repository has already paid for trusting caller-supplied
+  authorization input once (SA-6, #233).
+
+  So the contract has to be explicit, and it is a prerequisite rather than
+  an implementation detail. Either:
+  - the bridge sends a **short-lived assertion binding the resolved
+    `userId`, the repository, the requested scope and an expiry, signed with
+    a key the Worker verifies** before it calls the `authz` helpers — the
+    Worker still makes every authorization decision, the assertion only
+    carries *who is asking*; or
+  - the bridge performs the authorization itself against the same helpers,
+    accepting that the policy now lives in two places (see the scope-parity
+    note below for why that is the worse option).
+
+  Whichever is chosen, the acceptance test is the same and must exist before
+  the path is enabled: **user A's key must not reach user B's private
+  repository**, asserted end to end rather than at the fingerprint lookup.
 
 ### Backend bridge
 
@@ -89,9 +111,30 @@ proxying to Artifacts, exactly as the HTTP proxy does today in
 - Authenticate upstream with HTTP Basic as `x:<secret>`, where the secret
   is `extractTokenSecret(token)` (the portion before `?expires=`) — the
   same header construction the HTTP proxy's `basicAuthHeader` uses.
-- Pipe the SSH channel's stdin/stdout to the smart-HTTP
-  `git-upload-pack` / `git-receive-pack` endpoints (protocol translation:
-  SSH git speaks the same pack protocol, framed differently).
+- Drive the same two-step exchange the HTTP routes drive, rather than
+  relaying stdin/stdout at one endpoint. Git-over-SSH runs one command
+  (`git-upload-pack <repo>` / `git-receive-pack <repo>`) over a single
+  duplex channel; smart HTTP splits that into ref discovery and an RPC, so
+  the bridge has to bridge the shape as well as the framing:
+  1. `GET /info/refs?service=git-upload-pack|git-receive-pack` for the
+     advertisement, forwarding the client's `Git-Protocol` header so
+     protocol-v2 negotiation is preserved (`proxyUpstream` forwards exactly
+     `Git-Protocol`, `Content-Type` and `Content-Encoding`, and never the
+     inbound `Authorization`). Note the advertisement differs between the
+     two transports — SSH has no `# service=` pkt-line banner or flush that
+     smart HTTP prepends — so the bridge strips or synthesizes it.
+  2. `POST` the client's pack negotiation to the matching RPC endpoint.
+     Workers cannot half-duplex stream an outbound `fetch` body, so the
+     request body is buffered whole before it is sent — the same constraint
+     the HTTP path already lives with, and the reason the 50 MB
+     `MAX_GIT_BODY_BYTES` cap exists.
+- Map failures back into the SSH channel deliberately. `proxyUpstream`
+  fails closed on any non-2xx and on redirects (`redirect: "manual"`, so an
+  Artifacts token is never followed to another host); a `receive-pack`
+  refusal instead arrives as an in-protocol `report-status` with per-ref
+  `ng` lines. The bridge must preserve that distinction — a policy refusal
+  has to reach the user as a failed ref update with its reason, not as a
+  dropped connection.
 
 The bridge would either call the Worker's existing `/@ns/slug.git/*` routes
 with a service credential, or (preferably) reuse the Worker as the single

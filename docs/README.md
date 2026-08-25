@@ -124,7 +124,7 @@ docs/
 
 ## Documentation Status
 
-"Last Updated" is the date of the last substantive commit touching the document (as of this table's refresh on 2026-08-18). "Outline" means the document exists but is a short stub that needs to be fleshed out.
+"Last Updated" is the date of the last substantive commit touching the document. The table was last refreshed in full on 2026-08-18; individual rows are updated as their documents change, so a row may be newer than that. "Outline" means the document exists but is a short stub that needs to be fleshed out.
 
 | Document | Status | Priority | Last Updated |
 |----------|--------|----------|--------------|
