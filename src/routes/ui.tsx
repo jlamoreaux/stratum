@@ -11,12 +11,14 @@ import {
   getCommitLog,
   getDiffBetweenRepos,
   listFilesInRepo,
+  listRepoTags,
   readFileFromRepo,
 } from "../storage/git-ops";
 import { getImportProgress } from "../storage/imports";
 import { listIssueComments } from "../storage/issue-comments";
 import { getLabelsForIssues, listIssueLabels } from "../storage/issue-labels";
 import { getIssueByNumber, listIssues } from "../storage/issues";
+import { getProvenance } from "../storage/provenance";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import {
   getProject,
@@ -41,6 +43,7 @@ import { NewProjectPage } from "../ui/pages/new-project";
 import { RepoPage } from "../ui/pages/repo";
 import { SettingsPage } from "../ui/pages/settings";
 import { SyncPage } from "../ui/pages/sync";
+import { TagsPage } from "../ui/pages/tags";
 import { WebhooksPage } from "../ui/pages/webhooks";
 import { WorkspacesPage } from "../ui/pages/workspaces";
 import { canReadProject, canWriteProject, filterMemberProjects } from "../utils/authz";
@@ -157,7 +160,7 @@ app.get("/new", async (c) => {
   }
 
   logger.debug("Rendering new project page");
-  return c.html(<NewProjectPage user={user} />);
+  return c.html(<NewProjectPage user={user} nonce={c.get("cspNonce") ?? ""} />);
 });
 
 async function loadAgentSummaries(
@@ -426,6 +429,7 @@ app.get("/p/:name", async (c) => {
       syncStatus={syncStatus}
       canSync={canSync}
       isOwner={isOwner}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -542,12 +546,18 @@ app.get("/changes/:id", async (c) => {
     );
   }
 
-  const [evalRunsResult, commentsResult, reviewsResult, costsResult] = await Promise.all([
-    listEvalRuns(c.env.DB, logger, change.id),
-    listComments(c.env.DB, logger, change.id),
-    listReviews(c.env.DB, logger, change.id),
-    getChangeCostSummary(c.env.DB, logger, change.id),
-  ]);
+  const [evalRunsResult, commentsResult, reviewsResult, costsResult, provenanceResult] =
+    await Promise.all([
+      listEvalRuns(c.env.DB, logger, change.id),
+      listComments(c.env.DB, logger, change.id),
+      listReviews(c.env.DB, logger, change.id),
+      getChangeCostSummary(c.env.DB, logger, change.id),
+      getProvenance(c.env.DB, logger, change.id),
+    ]);
+
+  // Provenance only exists once the change has merged; absence is normal, not an
+  // error — the page simply omits the provenance card.
+  const provenance = provenanceResult.success ? provenanceResult.data : null;
 
   // The diff is only renderable while the workspace still exists and the
   // change is still in review; failures degrade to "no diff section".
@@ -594,6 +604,7 @@ app.get("/changes/:id", async (c) => {
         score: run.score,
         passed: run.passed,
         reason: run.reason,
+        ...(run.issues !== undefined ? { issues: run.issues } : {}),
         ranAt: run.ranAt,
       }))
     : [];
@@ -610,9 +621,11 @@ app.get("/changes/:id", async (c) => {
         ...(change.evalPassed !== undefined ? { evalPassed: change.evalPassed } : {}),
         ...(change.evalReason !== undefined ? { evalReason: change.evalReason } : {}),
         createdAt: change.createdAt,
+        ...(change.mergedAt !== undefined ? { mergedAt: change.mergedAt } : {}),
+        ...(change.githubPrUrl !== undefined ? { githubPrUrl: change.githubPrUrl } : {}),
       }}
       evalRuns={evalRuns}
-      provenance={null}
+      provenance={provenance}
       comments={commentsResult.success ? commentsResult.data : []}
       reviews={reviewsResult.success ? reviewsResult.data : []}
       costs={costsResult.success ? costsResult.data : []}
@@ -813,7 +826,79 @@ app.get("/:namespace/:slug/activity", async (c) => {
   );
 });
 
-// Shared loader for issue pages: validates path, loads user + project, checks read access.
+// GET /:namespace/:slug/tags — Tags listing (annotated + lightweight, #182)
+app.get("/:namespace/:slug/tags", async (c) => {
+  const { namespace, slug } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const logger = createLogger({ path: c.req.path, userId });
+
+  if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid project path.</div>,
+      400,
+    );
+  }
+
+  const [userResult, projectResult] = await Promise.all([
+    getCurrentUser(c, logger),
+    getProjectByPath(c.env.STATE, namespace, slug, logger),
+  ]);
+
+  if (!projectResult.success) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Project '{namespace}/{slug}' not found.
+      </div>,
+      404,
+    );
+  }
+  const project = projectResult.data;
+
+  if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
+    return c.html(
+      <div style="padding:2rem;font-family:monospace;color:#f87171;">
+        Project '{namespace}/{slug}' not found.
+      </div>,
+      404,
+    );
+  }
+
+  const tagsError = (
+    <div style="padding:2rem;font-family:monospace;color:#f87171;">
+      Error loading tags. Please try again.
+    </div>
+  );
+  const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
+  if (!readToken.success) {
+    logger.error("Failed to mint read token for tags page", readToken.error);
+    return c.html(tagsError, 500);
+  }
+  const tagsResult = await listRepoTags(project.remote, readToken.data, logger);
+  if (!tagsResult.success) {
+    logger.error("Failed to list tags", tagsResult.error);
+    return c.html(tagsError, 500);
+  }
+
+  return c.html(
+    <TagsPage
+      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      tags={tagsResult.data}
+      user={userResult}
+    />,
+  );
+});
+
+/**
+ * Three issue routes share the same preamble, and getting it wrong leaks
+ * project existence. A private project must 404 rather than 403, so an
+ * unreadable project is indistinguishable from a missing one — that is why
+ * both the lookup miss and the authz failure return the same 404 here, and
+ * why this is one helper rather than three copies that could drift apart.
+ *
+ * Returns `{ errorStatus }` instead of throwing so each caller renders the
+ * error in its own page shell.
+ */
 async function loadIssuePageContext(c: {
   env: Env;
   get(key: "userId" | "agentOwnerId"): string | undefined;
@@ -1027,7 +1112,9 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
     );
   }
 
-  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name);
+  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name, {
+    projectId: project.id,
+  });
   if (!webhooksResult.success) {
     logger.error("Failed to list webhooks", webhooksResult.error);
     return c.html(
@@ -1039,7 +1126,9 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
   }
 
   const webhooks = await Promise.all(
-    webhooksResult.data.map(async (webhook) => {
+    // Strip the signing secret before it reaches the HTML — it is shown once on
+    // creation via the JSON API and must never render in the management page.
+    webhooksResult.data.map(async ({ secret: _secret, ...webhook }) => {
       const deliveriesResult = await listDeliveries(c.env.DB, logger, webhook.id, 5);
       return { webhook, deliveries: deliveriesResult.success ? deliveriesResult.data : [] };
     }),
@@ -1195,6 +1284,7 @@ app.get("/:namespace/:slug/sync", async (c) => {
       syncStatus={syncStatus}
       syncHistory={[]}
       user={userResult}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -1455,6 +1545,7 @@ app.get("/:namespace/:slug", async (c) => {
       syncStatus={syncStatus}
       canSync={canSync}
       isOwner={isOwner}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
