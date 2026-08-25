@@ -72,7 +72,7 @@ afterEach(() => {
   for (const db of openDbs.splice(0)) db.close();
 });
 
-describe("migration 036", () => {
+describe("migration 037", () => {
   it("adds the anchor/thread columns to change_comments", () => {
     const { raw } = migratedDb();
     const columns = (raw.prepare("PRAGMA table_info(change_comments)").all() as { name: string }[])
