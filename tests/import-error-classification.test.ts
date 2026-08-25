@@ -35,11 +35,14 @@ describe("classifyError — Git LFS ordering", () => {
     ["repo name", "Repository not found: https://github.com/acme/lfs-tools (404)"],
     ["owner name", "fatal: repository 'https://github.com/lfs/demo.git' not found"],
     ["branch name", "couldn't find remote ref refs/heads/add-lfs-support (404)"],
-  ])("classifies a 404 for a repository merely named ...lfs... as NOT_FOUND (%s)", (_l, message) => {
-    const info = classifyError(message);
-    expect(info.type).toBe("NOT_FOUND");
-    expect(info.title).toBe("Repository Not Found");
-  });
+  ])(
+    "classifies a 404 for a repository merely named ...lfs... as NOT_FOUND (%s)",
+    (_l, message) => {
+      const info = classifyError(message);
+      expect(info.type).toBe("NOT_FOUND");
+      expect(info.title).toBe("Repository Not Found");
+    },
+  );
 
   // The LFS tip used to hang off every git error, so an unrelated clone
   // failure advertised a limitation that had nothing to do with it.
