@@ -26,13 +26,13 @@ export interface SandboxRepoAccess {
   ref?: string;
 }
 
-/** Reads a repo tree into path → contents; injectable for tests. */
+/** Reads a repo tree into path → raw bytes; injectable for tests. */
 export type RepoFilesReader = (
   remote: string,
   token: string,
   logger: Logger,
   ref?: string,
-) => Promise<Result<Map<string, string>, AppError>>;
+) => Promise<Result<Map<string, Uint8Array>, AppError>>;
 
 /**
  * Derives a pass ratio from a test runner's own summary line.
@@ -76,12 +76,86 @@ const NPM_LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"] as const;
  * (unpinned) approximation; without a package.json there is nothing to install,
  * because the repo is not an npm project. `--no-audit --no-fund` skip registry
  * round trips the evaluation has no use for.
+ *
+ * Only checks which manifest paths are *present* in the tree — it never reads
+ * their contents, so no text decode is needed here. `files` carries raw bytes
+ * end to end like the rest of the read path; a manifest's actual contents
+ * would be decoded at the point that genuinely needs text, not here.
  */
-export function installCommandFor(files: ReadonlyMap<string, string>): string | null {
+export function installCommandFor(files: ReadonlyMap<string, Uint8Array>): string | null {
   if (!files.has("package.json")) return null;
   const base = NPM_LOCKFILES.some((lockfile) => files.has(lockfile)) ? "npm ci" : "npm install";
   return `${base} --no-audit --no-fund`;
 }
+
+/**
+ * Encodes bytes as base64 without spreading the whole array onto the call
+ * stack at once (a naive `String.fromCharCode(...bytes)` blows the stack on
+ * large binary files) — chunked through `String.fromCharCode` instead.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK_SIZE = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK_SIZE));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Per-file content the sandbox write boundary sends, plus whether it took the
+ * binary (base64) path.
+ */
+interface SandboxWriteContent {
+  content: string;
+  binary: boolean;
+}
+
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+
+/**
+ * Prepares one file's bytes for `SandboxInstance.writeFile`, whose transport
+ * boundary only carries strings (the default Cloudflare Sandbox HTTP
+ * transport has no binary form for `writeFile`; see `decodeBinaryFilesScript`
+ * below for the matching in-sandbox decode step). Bytes that are valid UTF-8
+ * are decoded directly — lossless, since re-encoding well-formed UTF-8
+ * reproduces the original bytes exactly. Anything else (the common case for a
+ * binary file) is base64-encoded and flagged so the caller can queue it for
+ * in-sandbox decoding.
+ */
+export function encodeForSandboxWrite(bytes: Uint8Array): SandboxWriteContent {
+  try {
+    return { content: strictUtf8Decoder.decode(bytes), binary: false };
+  } catch {
+    return { content: bytesToBase64(bytes), binary: true };
+  }
+}
+
+/**
+ * Where the base64→binary decode manifest and script are staged in the
+ * sandbox tree. Exported so `runPostMergeCheck` (post-merge.ts), which writes
+ * the same tree read path into a sandbox, can decode binaries the same way.
+ */
+export const BINARY_MANIFEST_PATH = ".stratum-binary-manifest.txt";
+export const BINARY_DECODE_SCRIPT_PATH = ".stratum-binary-decode.cjs";
+/** Command that runs the decode script — `.cjs` forces CommonJS regardless of the evaluated repo's own package.json `"type"`. */
+export const BINARY_DECODE_COMMAND = `node ${BINARY_DECODE_SCRIPT_PATH}`;
+
+/**
+ * Reads the newline-delimited manifest this evaluator wrote, base64-decodes
+ * each listed path in place, then removes the manifest and itself. Node is
+ * guaranteed present in the sandbox (the evaluator's own default/most common
+ * commands are `npm ci`/`npm install`/`npm test`).
+ */
+export const decodeBinaryFilesScript = `const fs = require("fs");
+const manifest = fs.readFileSync(${JSON.stringify(BINARY_MANIFEST_PATH)}, "utf8").split("\\n").filter(Boolean);
+for (const p of manifest) {
+  const encoded = fs.readFileSync(p, "utf8");
+  fs.writeFileSync(p, Buffer.from(encoded, "base64"));
+}
+fs.unlinkSync(${JSON.stringify(BINARY_MANIFEST_PATH)});
+fs.unlinkSync(__filename);
+`;
 
 export class SandboxEvaluator implements Evaluator {
   constructor(
@@ -165,26 +239,56 @@ export class SandboxEvaluator implements Evaluator {
       const instance = sb;
       logger.debug("Sandbox created");
 
+      let sandboxMs = 0;
+
       // The full tree can hold thousands of files; one round trip per file
       // dominates evaluation latency, so write in bounded concurrent batches.
+      // The sandbox's default HTTP transport only carries strings through
+      // `writeFile` — text bytes decode directly (lossless: re-encoding
+      // well-formed UTF-8 reproduces the original bytes), anything else goes
+      // through base64 and is queued for the in-sandbox decode step below.
       const WRITE_CONCURRENCY = 16;
       const entries = [...files];
+      const binaryPaths: string[] = [];
       for (let i = 0; i < entries.length; i += WRITE_CONCURRENCY) {
         // allSettled, not all: `all` rejects on the first failure while its
         // siblings are still in flight, and the `finally` below would then
         // destroy the sandbox out from under them. Wait for the whole batch to
         // settle, then surface the first failure.
         const settled = await Promise.allSettled(
-          entries
-            .slice(i, i + WRITE_CONCURRENCY)
-            .map(([path, content]) => instance.writeFile(path, content)),
+          entries.slice(i, i + WRITE_CONCURRENCY).map(([path, bytes]) => {
+            const { content, binary } = encodeForSandboxWrite(bytes);
+            if (binary) binaryPaths.push(path);
+            return instance.writeFile(path, content);
+          }),
         );
         const failed = settled.find((r) => r.status === "rejected");
         if (failed?.status === "rejected") throw failed.reason;
       }
-      logger.debug("Files written to sandbox", { fileCount: files.size });
+      logger.debug("Files written to sandbox", {
+        fileCount: files.size,
+        binaryFileCount: binaryPaths.length,
+      });
 
-      let sandboxMs = 0;
+      // Binary files landed base64-encoded (writeFile has no binary form on
+      // this transport) — decode them back to their real bytes in place
+      // before install/test see the tree, so a corrupted copy never runs.
+      if (binaryPaths.length > 0) {
+        await instance.writeFile(BINARY_MANIFEST_PATH, binaryPaths.join("\n"));
+        await instance.writeFile(BINARY_DECODE_SCRIPT_PATH, decodeBinaryFilesScript);
+        const decodeStartedAt = Date.now();
+        const decodeResult = await sb.run(BINARY_DECODE_COMMAND, { timeout: installTimeoutMs });
+        sandboxMs += Date.now() - decodeStartedAt;
+        if (decodeResult.exitCode !== 0) {
+          const output = (decodeResult.stdout + decodeResult.stderr)
+            .slice(0, MAX_OUTPUT_IN_REASON)
+            .trim();
+          throw new Error(
+            `Failed to decode ${binaryPaths.length} binary file(s) in sandbox: ${output}`,
+          );
+        }
+        logger.debug("Binary files decoded in sandbox", { binaryFileCount: binaryPaths.length });
+      }
 
       const installCommand = installCommandFor(files);
       if (installCommand !== null) {

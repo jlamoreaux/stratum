@@ -85,7 +85,7 @@ describe("runPostMergeCheck", () => {
     vi.clearAllMocks();
     vi.mocked(readRepoFiles).mockResolvedValue({
       success: true,
-      data: new Map([["src/index.ts", "export {};"]]),
+      data: new Map([["src/index.ts", new TextEncoder().encode("export {};")]]),
     });
     vi.mocked(getCommitParent).mockResolvedValue({ success: true, data: "sha_premerge" });
     vi.mocked(revertToCommit).mockResolvedValue({ success: true, data: "sha_revert" });
@@ -219,6 +219,43 @@ describe("runPostMergeCheck", () => {
     expect(result.status).toBe("failed");
     expect(result.reason).toContain("tests failed");
     expect(result.reason).toContain("push rejected");
+  });
+
+  it("base64-encodes a binary file and runs an in-sandbox decode step before the command", async () => {
+    // 00 80 C0 AF FF is not valid UTF-8 — decoding it with a plain TextDecoder
+    // would silently corrupt it (U+FFFD replacement), so it must round-trip
+    // through the sandbox's writeFile (string-only) as base64 instead.
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    vi.mocked(readRepoFiles).mockResolvedValue({
+      success: true,
+      data: new Map([["assets/logo.png", binaryBytes]]),
+    });
+    const { env, run } = makeSandboxEnv({ exitCode: 0, stdout: "ok", stderr: "" });
+    const sandbox = await (env.SANDBOX as { create: () => Promise<SandboxInstance> }).create();
+
+    const result = await runPostMergeCheck(
+      env,
+      project,
+      {
+        changeId: "chg_1",
+        mergeCommit: "sha_merge",
+        policy: policyWith({ postMergeCommand: "npm test" }),
+      },
+      mockLogger,
+    );
+
+    expect(result.status).toBe("passed");
+    // writeFile only ever carries strings; the raw bytes must have been
+    // base64-encoded rather than passed through (or UTF-8-decoded and lost).
+    const writeCalls = vi.mocked(sandbox.writeFile).mock.calls;
+    const logoCall = writeCalls.find(([path]) => path === "assets/logo.png");
+    expect(logoCall?.[1]).toBe(btoa(String.fromCharCode(...binaryBytes)));
+    expect(logoCall?.[1]).not.toContain("�");
+    // The decode step must run before the actual post-merge command.
+    const commands: string[] = run.mock.calls.map(([command]) => command);
+    const decodeIndex = commands.findIndex((c) => c.includes("stratum-binary-decode"));
+    expect(decodeIndex).toBeGreaterThanOrEqual(0);
+    expect(commands.indexOf("npm test")).toBeGreaterThan(decodeIndex);
   });
 
   it("honors a custom timeout", async () => {

@@ -2034,20 +2034,25 @@ export async function listFilesInRepo(
 }
 
 /**
- * Read the full working tree (paths → text contents) in a single clone.
- * Used by the post-merge smoke check and the sandbox evaluator to populate a
- * sandbox. When `ref` (a commit sha) is given, the tree of that commit is read
- * instead of the clone's HEAD, so callers can pin the exact evaluated commit —
- * cloned in full, since a pinned sha can fall outside a shallow clone's depth
+ * Read the full working tree (paths → raw bytes) in a single clone. Used by
+ * the post-merge smoke check and the sandbox evaluator to populate a sandbox.
+ * When `ref` (a commit sha) is given, the tree of that commit is read instead
+ * of the clone's HEAD, so callers can pin the exact evaluated commit — cloned
+ * in full, since a pinned sha can fall outside a shallow clone's depth
  * window; a ref still not reachable after that is an error, never a silent
  * fall-through to evaluating something else.
+ *
+ * Bytes are returned as-is (no UTF-8 decoding): a repo tree can contain
+ * binary files (images, fonts, `.wasm`, compiled fixtures), and `TextDecoder`
+ * is lossy for anything that isn't valid UTF-8. Callers decode to text only
+ * where text is genuinely needed.
  */
 export async function readRepoFiles(
   remote: string,
   token: string,
   logger: Logger,
   ref?: string,
-): Promise<Result<Map<string, string>, AppError>> {
+): Promise<Result<Map<string, Uint8Array>, AppError>> {
   logger.debug("Reading repo files", { remote, ref });
 
   const cloneResult = await cloneRepo(remote, token, logger, { fullHistory: ref !== undefined });
@@ -2061,11 +2066,13 @@ export async function readRepoFiles(
   const filesResult = await walkDir(fs, dir, "", logger);
   if (!filesResult.success) return err(filesResult.error);
 
-  const contents = new Map<string, string>();
+  const contents = new Map<string, Uint8Array>();
   for (const path of filesResult.data) {
     try {
-      const raw = await fs.promises.readFile(`/${path}`, { encoding: "utf8" });
-      contents.set(path, typeof raw === "string" ? raw : new TextDecoder().decode(raw));
+      // No `encoding` option: MemoryFS's readFile returns the raw bytes
+      // unmodified when no encoding is requested.
+      const raw = await fs.promises.readFile(`/${path}`);
+      contents.set(path, typeof raw === "string" ? new TextEncoder().encode(raw) : raw);
     } catch (error) {
       logger.warn("Skipping unreadable file in repo tree", {
         path,
@@ -2076,13 +2083,13 @@ export async function readRepoFiles(
   return ok(contents);
 }
 
-/** Every file (path → text contents) in the tree of one commit. Exported for tests. */
+/** Every file (path → raw bytes) in the tree of one commit. Exported for tests. */
 export async function readTreeAtCommit(
   fs: NodeFS,
   dir: string,
   commitSha: string,
   logger: Logger,
-): Promise<Result<Map<string, string>, AppError>> {
+): Promise<Result<Map<string, Uint8Array>, AppError>> {
   const listResult = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
   if (!listResult.success) {
     logger.error("Failed to list files at commit", listResult.error, { commitSha });
@@ -2095,7 +2102,7 @@ export async function readTreeAtCommit(
     );
   }
 
-  const contents = new Map<string, string>();
+  const contents = new Map<string, Uint8Array>();
   for (const path of listResult.data) {
     const blobResult = await fromPromise(git.readBlob({ fs, dir, oid: commitSha, filepath: path }));
     if (!blobResult.success) {
@@ -2111,7 +2118,7 @@ export async function readTreeAtCommit(
         ),
       );
     }
-    contents.set(path, new TextDecoder().decode(blobResult.data.blob));
+    contents.set(path, blobResult.data.blob);
   }
   return ok(contents);
 }

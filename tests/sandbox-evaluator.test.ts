@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  BINARY_DECODE_COMMAND,
   SandboxEvaluator,
   type SandboxRepoAccess,
   installCommandFor,
@@ -28,15 +29,22 @@ const repo: SandboxRepoAccess = {
 };
 
 /** A realistic workspace tree: sources the diff never touched, manifest, lockfile. */
-const FULL_TREE = new Map<string, string>([
+const FULL_TREE_TEXT: [string, string][] = [
   ["package.json", JSON.stringify({ name: "app", scripts: { test: "vitest run" } })],
   ["package-lock.json", JSON.stringify({ lockfileVersion: 3 })],
   ["src/index.ts", "export { add } from './math';"],
   ["src/math.ts", "export const add = (a: number, b: number) => a + b;"],
   ["tests/math.test.ts", "import { add } from '../src/math';"],
-]);
+];
 
-function makeReadFiles(files: Map<string, string> = FULL_TREE) {
+/** Encodes a path → text map into the raw-bytes contract readRepoFiles returns. */
+function encodeTree(entries: readonly (readonly [string, string])[]): Map<string, Uint8Array> {
+  return new Map(entries.map(([path, content]) => [path, new TextEncoder().encode(content)]));
+}
+
+const FULL_TREE = encodeTree(FULL_TREE_TEXT);
+
+function makeReadFiles(files: Map<string, Uint8Array> = FULL_TREE) {
   return vi.fn().mockResolvedValue(ok(files));
 }
 
@@ -108,7 +116,9 @@ describe("SandboxEvaluator — workspace tree materialization", () => {
     await evaluator.evaluate("diff --git a/src/math.ts b/src/math.ts", makePolicy(), mockLogger);
 
     expect(instance.writeFile).toHaveBeenCalledTimes(FULL_TREE.size);
-    for (const [path, content] of FULL_TREE) {
+    // Every file here is valid UTF-8 text, so it round-trips through the
+    // sandbox write boundary as the original decoded string, not base64.
+    for (const [path, content] of FULL_TREE_TEXT) {
       expect(instance.writeFile).toHaveBeenCalledWith(path, content);
     }
   });
@@ -138,6 +148,74 @@ describe("SandboxEvaluator — workspace tree materialization", () => {
     expect(slowWriteFinished).toBe(true);
     // The write failure still surfaces — settling the batch must not swallow it.
     expect(result.success).toBe(false);
+  });
+
+  it("base64-encodes a binary blob and decodes it in-sandbox before install/test run", async () => {
+    // 00 80 C0 AF FF is not valid UTF-8 (a stray continuation byte, an
+    // overlong encoding, and a byte that's never valid) — a plain TextDecoder
+    // would silently replace it with U+FFFD and the original bytes would be
+    // gone by the time the sandbox saw them.
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    const tree = new Map(FULL_TREE);
+    tree.set("assets/logo.png", binaryBytes);
+    const { binding, instance, runCalls } = makeMockSandbox({ exitCode: 0 });
+    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles(tree));
+
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+
+    expect(result.success).toBe(true);
+    // The sandbox transport only carries strings through writeFile: the binary
+    // file must have gone through as base64, not raw/UTF-8-decoded bytes.
+    const writeCalls = (instance.writeFile as ReturnType<typeof vi.fn>).mock.calls as [
+      string,
+      string,
+    ][];
+    const logoCall = writeCalls.find(([path]) => path === "assets/logo.png");
+    expect(logoCall?.[1]).toBe(btoa(String.fromCharCode(...binaryBytes)));
+    // A manifest + decode script must have been staged, and the decode command
+    // run before the install/test commands.
+    expect(writeCalls.some(([path]) => path === ".stratum-binary-manifest.txt")).toBe(true);
+    expect(writeCalls.some(([path]) => path === ".stratum-binary-decode.cjs")).toBe(true);
+    const commands = runCalls.map((c) => c.command);
+    expect(commands[0]).toBe(BINARY_DECODE_COMMAND);
+    expect(commands.slice(1)).toEqual(["npm ci --no-audit --no-fund", "npm test"]);
+  });
+
+  it("does not stage a decode manifest/script when the tree has no binary files", async () => {
+    const { binding, instance, runCalls } = makeMockSandbox({ exitCode: 0 });
+    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles());
+
+    await evaluator.evaluate("", makePolicy(), mockLogger);
+
+    const writeCalls = (instance.writeFile as ReturnType<typeof vi.fn>).mock.calls as [
+      string,
+      string,
+    ][];
+    expect(writeCalls.some(([path]) => path === ".stratum-binary-manifest.txt")).toBe(false);
+    expect(runCalls.map((c) => c.command)).not.toContain(BINARY_DECODE_COMMAND);
+  });
+
+  it("fails (err) when the in-sandbox binary decode step exits non-zero", async () => {
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    const tree = new Map(FULL_TREE);
+    tree.set("assets/logo.png", binaryBytes);
+    const { binding, runCalls } = makeMockSandbox({
+      exitCode: 0,
+      runResults: {
+        [BINARY_DECODE_COMMAND]: { exitCode: 1, stderr: "ENOENT: no such file" },
+      },
+    });
+    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles(tree));
+
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("Failed to decode");
+      expect(result.error.message).toContain("ENOENT");
+    }
+    // The decode step failing must stop the run before install/test.
+    expect(runCalls.map((c) => c.command)).toEqual([BINARY_DECODE_COMMAND]);
   });
 
   it("passes ref: undefined through when no commit is pinned", async () => {
@@ -194,7 +272,7 @@ describe("SandboxEvaluator — dependency install", () => {
   });
 
   it("skips the install step entirely when there is no package.json", async () => {
-    const tree = new Map([["main.py", "print('hi')"]]);
+    const tree = encodeTree([["main.py", "print('hi')"]]);
     const { binding, runCalls } = makeMockSandbox({ exitCode: 0 });
     const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles(tree));
 
@@ -262,18 +340,18 @@ describe("SandboxEvaluator — dependency install", () => {
 describe("installCommandFor", () => {
   it("maps manifest/lockfile presence to the right command", () => {
     expect(installCommandFor(new Map())).toBeNull();
-    expect(installCommandFor(new Map([["package.json", "{}"]]))).toBe(
+    expect(installCommandFor(encodeTree([["package.json", "{}"]]))).toBe(
       "npm install --no-audit --no-fund",
     );
     expect(
       installCommandFor(
-        new Map([
+        encodeTree([
           ["package.json", "{}"],
           ["package-lock.json", "{}"],
         ]),
       ),
     ).toBe("npm ci --no-audit --no-fund");
-    expect(installCommandFor(new Map([["package-lock.json", "{}"]]))).toBeNull();
+    expect(installCommandFor(encodeTree([["package-lock.json", "{}"]]))).toBeNull();
   });
 
   it("treats npm-shrinkwrap.json as a lockfile", () => {
@@ -282,7 +360,7 @@ describe("installCommandFor", () => {
     // unpinned `npm install`.
     expect(
       installCommandFor(
-        new Map([
+        encodeTree([
           ["package.json", "{}"],
           ["npm-shrinkwrap.json", "{}"],
         ]),
@@ -291,7 +369,7 @@ describe("installCommandFor", () => {
     // Both present is still a frozen install (npm prefers the shrinkwrap).
     expect(
       installCommandFor(
-        new Map([
+        encodeTree([
           ["package.json", "{}"],
           ["npm-shrinkwrap.json", "{}"],
           ["package-lock.json", "{}"],
@@ -299,7 +377,7 @@ describe("installCommandFor", () => {
       ),
     ).toBe("npm ci --no-audit --no-fund");
     // A lockfile alone is still not an npm project.
-    expect(installCommandFor(new Map([["npm-shrinkwrap.json", "{}"]]))).toBeNull();
+    expect(installCommandFor(encodeTree([["npm-shrinkwrap.json", "{}"]]))).toBeNull();
   });
 });
 
@@ -331,7 +409,7 @@ describe("SandboxEvaluator — exit code behaviour", () => {
 });
 
 describe("SandboxEvaluator — test output parsing", () => {
-  const treeWithoutManifest = new Map([["src/app.ts", "export {};"]]);
+  const treeWithoutManifest = encodeTree([["src/app.ts", "export {};"]]);
 
   function evaluatorWithTestOutput(exitCode: number, stdout: string) {
     const { binding } = makeMockSandbox({ exitCode, stdout });

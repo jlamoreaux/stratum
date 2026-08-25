@@ -280,7 +280,7 @@ describe("readTreeAtCommit", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect([...result.data.keys()].sort()).toEqual(["package.json", "src/math.ts"]);
-    expect(result.data.get("src/math.ts")).toBe("export const add = 1;");
+    expect(new TextDecoder().decode(result.data.get("src/math.ts"))).toBe("export const add = 1;");
   });
 
   it("reads the later commit's tree including files it added", async () => {
@@ -289,7 +289,33 @@ describe("readTreeAtCommit", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect([...result.data.keys()].sort()).toEqual(["package.json", "src/math.ts", "src/new.ts"]);
-    expect(result.data.get("src/math.ts")).toBe("export const add = 2;");
+    expect(new TextDecoder().decode(result.data.get("src/math.ts"))).toBe("export const add = 2;");
+  });
+
+  it("carries a binary blob's bytes through byte-for-byte, not UTF-8 decoded", async () => {
+    // 00 80 C0 AF FF is not valid UTF-8 (0x80 is a stray continuation byte,
+    // 0xC0 0xAF is an overlong encoding, 0xFF is never valid) — a TextDecoder
+    // would replace it with U+FFFD and the original bytes would be lost.
+    const { fs } = await makeRepo();
+    const dir = "/";
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    const blobOid = await git.writeBlob({ fs, dir, blob: binaryBytes });
+    const treeOid = await git.writeTree({
+      fs,
+      dir,
+      tree: [{ mode: "100644", path: "binary.dat", oid: blobOid, type: "blob" }],
+    });
+    const author = { name: "Test", email: "test@example.com", timestamp: 0, timezoneOffset: 0 };
+    const commit = await git.writeCommit({
+      fs,
+      dir,
+      commit: { tree: treeOid, parent: [], author, committer: author, message: "binary file" },
+    });
+
+    const result = await readTreeAtCommit(fs, dir, commit, noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.get("binary.dat")).toEqual(binaryBytes);
   });
 
   it("fails closed when a blob in the pinned tree cannot be read", async () => {
