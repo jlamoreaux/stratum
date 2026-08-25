@@ -501,7 +501,13 @@ export class GitHubClient {
    * rejects behaves exactly like a lookup that failed or found nothing open:
    * the ORIGINAL create error is what gets reported, not a new failure about
    * the lookup response, since that's the one call the caller actually asked
-   * for. Defaults to accepting anything the lookup returns.
+   * for.
+   *
+   * Required, deliberately not defaulted. The code this replaced always ran
+   * an owner/repo check on the lookup hit, and a parameter defaulting to
+   * "accept anything" would turn that into something a caller drops by
+   * saying nothing. Reuse means persisting a PR this client did not create
+   * and did not choose; the caller has to name what it will accept.
    *
    * Both requests this makes use `maxRetries: 0`: a create call is not safe
    * to retry blindly on a network-level failure (this client can't tell
@@ -512,7 +518,7 @@ export class GitHubClient {
    */
   async createOrReusePR(
     opts: CreatePROpts,
-    isReusablePr: (pr: unknown) => boolean = () => true,
+    isReusablePr: (pr: unknown) => boolean,
   ): Promise<CreateOrReusePRResult> {
     const result = await this.request<unknown>(
       `/repos/${opts.owner}/${opts.repo}/pulls`,

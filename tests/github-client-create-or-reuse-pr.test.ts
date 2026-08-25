@@ -54,6 +54,13 @@ describe("GitHubClient.createPR", () => {
 });
 
 describe("GitHubClient.createOrReusePR", () => {
+  // These cases are about the create/lookup/error plumbing, not about what a
+  // caller trusts, so they accept whatever the lookup returns. The predicate
+  // is a required argument precisely so that choice is visible here rather
+  // than inherited from a default (the promotion route passes
+  // isUsableGithubPr instead).
+  const acceptAny = () => true;
+
   const opts = {
     owner: "acme",
     repo: "widgets",
@@ -76,7 +83,7 @@ describe("GitHubClient.createOrReusePR", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new GitHubClient("tok", logger);
-    const result = await client.createOrReusePR(opts);
+    const result = await client.createOrReusePR(opts, acceptAny);
 
     expect(result).toEqual({
       success: true,
@@ -110,7 +117,7 @@ describe("GitHubClient.createOrReusePR", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new GitHubClient("tok", logger);
-    const result = await client.createOrReusePR(opts);
+    const result = await client.createOrReusePR(opts, acceptAny);
 
     expect(result).toEqual({
       success: true,
@@ -171,7 +178,7 @@ describe("GitHubClient.createOrReusePR", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new GitHubClient("tok", logger);
-    const result = await client.createOrReusePR(opts);
+    const result = await client.createOrReusePR(opts, acceptAny);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.success).toBe(false);
@@ -186,7 +193,7 @@ describe("GitHubClient.createOrReusePR", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new GitHubClient("tok", logger);
-    const result = await client.createOrReusePR(opts);
+    const result = await client.createOrReusePR(opts, acceptAny);
 
     expect(fetchMock).toHaveBeenCalledTimes(1); // maxRetries: 0 — no automatic retry
     expect(result.success).toBe(false);
@@ -203,7 +210,7 @@ describe("GitHubClient.createOrReusePR", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new GitHubClient("tok", logger);
-    const result = await client.createOrReusePR(opts);
+    const result = await client.createOrReusePR(opts, acceptAny);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.success).toBe(false);
@@ -215,7 +222,7 @@ describe("GitHubClient.createOrReusePR", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new GitHubClient("tok", logger);
-    const result = await client.createOrReusePR(opts);
+    const result = await client.createOrReusePR(opts, acceptAny);
 
     expect(result.success).toBe(false);
     if (!result.success) {
