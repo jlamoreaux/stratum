@@ -45,7 +45,8 @@ docs/
 │   ├── 002-queue-based-imports.md
 │   ├── 003-d1-for-import-state.md
 │   ├── 004-high-frequency-agent-commits.md
-│   └── 005-git-smart-http-proxy.md
+│   ├── 005-git-smart-http-proxy.md
+│   └── 006-ssh-transport.md
 ├── research/                           # Research notes
 │   ├── github-alternatives-pain-points.md
 │   ├── master-plan-alignment.md
@@ -140,7 +141,7 @@ docs/
 | Developer - Queues | 🚧 Outline | Medium | 2026-06-16 |
 | Developer - Testing | 🚧 Outline | Medium | 2026-06-16 |
 | Developer - Deployment | ✅ Complete | Medium | 2026-08-07 |
-| ADRs (001-005) | ✅ Complete | Low | 2026-08-18 |
+| ADRs (001-006) | ✅ Complete | Low | 2026-08-25 |
 
 **Legend:** ✅ Complete | 🚧 Outline / In Progress | 📋 Planned
 
