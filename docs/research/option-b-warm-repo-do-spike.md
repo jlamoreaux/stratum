@@ -151,10 +151,14 @@ Run each mode twice: once with the flag off ("before") and once with
   path).
 - Issue #124 records the thresholds used for the R2/group-commit fast path:
   the group-commit benchmark **must stay ≥ 22.6 c/s**, with **431 c/s** as
-  the then-current group-commit figure. (These two numbers come from the
-  issue text; they are not recorded in ADR 004 or elsewhere in this repo, so
-  treat the staging run — not this citation — as the source of truth when
-  filling the table.)
+  the then-current group-commit figure. The 22.6 floor is also enforced in
+  the repo — `TARGET_CPS` in `tests/group-commit.test.ts` (added by #109) —
+  but that test measures a **local model** of the ref plane (a
+  `GroupCommitCoordinator` over a 50 ms simulated `durableWrite`), not a
+  deployment, so it bounds the batching design, not Stratum's real
+  throughput. The 431 c/s figure appears only in the issue text. Treat the
+  staging run — not either citation — as the source of truth when filling
+  the table.
 
 ## References
 
