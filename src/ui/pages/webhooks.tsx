@@ -8,7 +8,7 @@ interface WebhooksPageProps {
     namespace: string;
     slug: string;
   };
-  webhooks: Array<{ webhook: Webhook; deliveries: WebhookDelivery[] }>;
+  webhooks: Array<{ webhook: Omit<Webhook, "secret">; deliveries: WebhookDelivery[] }>;
   subscribableEvents: string[];
   user?: { id: string; email: string; username: string } | null;
 }
@@ -93,7 +93,7 @@ export const WebhooksPage: FC<WebhooksPageProps> = ({
               </div>
             </div>
             <p class="webhook-meta">
-              Events: <code>{webhook.events}</code> · Secret: <code>{webhook.secret}</code>
+              Events: <code>{webhook.events}</code> · Secret: <code>shown once on creation</code>
             </p>
             {deliveries.length > 0 && (
               <details class="webhook-deliveries">
