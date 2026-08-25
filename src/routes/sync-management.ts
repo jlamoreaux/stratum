@@ -13,9 +13,13 @@ import {
 import type { Env } from "../types";
 import { canWriteProject } from "../utils/authz";
 import { createLogger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import { notFound, ok } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
+
+const MAX_SYNC_SETTINGS_BODY_BYTES = 1024 * 1024;
+const MAX_CONFLICT_RESOLVE_BODY_BYTES = 1024 * 1024;
 
 // Apply auth middleware
 app.use("*", authMiddleware);
@@ -180,10 +184,6 @@ app.post("/projects/:namespace/:slug/sync/settings", async (c) => {
   }
 
   const { namespace, slug } = c.req.param();
-  const body = await c.req.json<{
-    autoSyncEnabled?: boolean;
-    syncFrequency?: number;
-  }>();
 
   const logger = createLogger({
     requestId: crypto.randomUUID(),
@@ -191,6 +191,12 @@ app.post("/projects/:namespace/:slug/sync/settings", async (c) => {
     method: c.req.method,
     userId,
   });
+
+  const body = await readJsonWithLimit<{
+    autoSyncEnabled?: boolean;
+    syncFrequency?: number;
+  }>(c, MAX_SYNC_SETTINGS_BODY_BYTES, logger);
+  if (body instanceof Response) return body;
 
   logger.info("Updating sync settings", {
     namespace,
@@ -457,9 +463,12 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     return c.json({ error: "Corrupt conflict context" }, 500);
   }
 
-  const body: { strategy?: unknown; resolutions?: unknown } = await c.req
-    .json<{ strategy?: unknown; resolutions?: unknown }>()
-    .catch(() => ({ strategy: undefined, resolutions: undefined }));
+  const body = await readJsonWithLimit<{ strategy?: unknown; resolutions?: unknown }>(
+    c,
+    MAX_CONFLICT_RESOLVE_BODY_BYTES,
+    logger,
+  ).catch(() => ({ strategy: undefined, resolutions: undefined }));
+  if (body instanceof Response) return body;
 
   const VALID_STRATEGIES = ["accept-project", "accept-workspace", "manual"] as const;
   type Strategy = (typeof VALID_STRATEGIES)[number];

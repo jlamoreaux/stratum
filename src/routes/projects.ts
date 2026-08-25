@@ -44,6 +44,7 @@ import { getFileContent, isValidFilePath } from "../ui/file-content";
 import { canReadProject, filterReadableProjects, isDirectOwner } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import {
   badRequest,
   created,
@@ -68,6 +69,14 @@ const DEFAULT_FILES: Record<string, string> = {
 };
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Project-create body carries an optional seed file set — no post-parse cap
+// exists today, so this pre-parse ceiling is the only bound on it.
+const MAX_PROJECT_CREATE_BODY_BYTES = 1024 * 1024;
+// Import body is a repo URL + a few short fields.
+const MAX_PROJECT_IMPORT_BODY_BYTES = 1024 * 1024;
+// Delete-confirmation body is a single confirm string.
+const MAX_PROJECT_DELETE_BODY_BYTES = 1024 * 1024;
 
 function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
   const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/\s]+?)(?:\.git|\/)?$/i);
@@ -108,7 +117,9 @@ app.post("/", async (c) => {
   };
   const contentType = c.req.header("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    body = await c.req.json<typeof body>();
+    const parsed = await readJsonWithLimit<typeof body>(c, MAX_PROJECT_CREATE_BODY_BYTES, logger);
+    if (parsed instanceof Response) return parsed;
+    body = parsed;
   } else {
     const form = await c.req.parseBody();
     body = { name: form.name, visibility: form.visibility, seed: form.seed, org: form.org };
@@ -484,7 +495,13 @@ app.post(
       const contentType = c.req.header("content-type") || "";
 
       if (contentType.includes("application/json")) {
-        body = await c.req.json();
+        const parsed = await readJsonWithLimit<typeof body>(
+          c,
+          MAX_PROJECT_IMPORT_BODY_BYTES,
+          logger,
+        );
+        if (parsed instanceof Response) return parsed;
+        body = parsed;
       } else {
         // Form data
         const formData = await c.req.parseBody();
@@ -1901,9 +1918,12 @@ async function handleProjectDelete(c: Context<{ Bindings: Env }>) {
   // Confirm token must EXACTLY equal "@namespace/slug".
   let confirm: unknown;
   if (isJson) {
-    const body = await c.req
-      .json<{ confirm?: unknown }>()
-      .catch(() => ({}) as { confirm?: unknown });
+    const body = await readJsonWithLimit<{ confirm?: unknown }>(
+      c,
+      MAX_PROJECT_DELETE_BODY_BYTES,
+      logger,
+    ).catch(() => ({}) as { confirm?: unknown });
+    if (body instanceof Response) return body;
     confirm = body.confirm;
   } else {
     const form = await c.req.parseBody();

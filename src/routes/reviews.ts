@@ -14,6 +14,7 @@ import type { Change, Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import {
   badRequest,
   created,
@@ -27,6 +28,10 @@ import {
 const app = new Hono<{ Bindings: Env }>();
 
 const MAX_COMMENT_LENGTH = 20_000;
+// Comment/review bodies are short text; cap the raw read well above
+// MAX_COMMENT_LENGTH (which truncates post-parse) but far under the isolate budget.
+const MAX_COMMENT_BODY_BYTES = 1024 * 1024;
+const MAX_REVIEW_BODY_BYTES = 1024 * 1024;
 
 /** Statuses on which a human verdict can still move the change. */
 const REVIEWABLE_STATUSES: Change["status"][] = ["open", "needs_changes", "accepted", "approved"];
@@ -84,7 +89,11 @@ app.post("/changes/:id/comments", async (c) => {
   let body: { body?: unknown };
   const contentType = c.req.header("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    body = await c.req.json<typeof body>().catch(() => ({}));
+    const parsed = await readJsonWithLimit<typeof body>(c, MAX_COMMENT_BODY_BYTES, logger).catch(
+      () => ({}),
+    );
+    if (parsed instanceof Response) return parsed;
+    body = parsed;
   } else {
     const form = await c.req.parseBody();
     body = { body: form.body };
@@ -182,7 +191,11 @@ app.post("/changes/:id/reviews", async (c) => {
   let body: { verdict?: unknown; comment?: unknown };
   const contentType = c.req.header("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    body = await c.req.json<typeof body>().catch(() => ({}));
+    const parsed = await readJsonWithLimit<typeof body>(c, MAX_REVIEW_BODY_BYTES, logger).catch(
+      () => ({}),
+    );
+    if (parsed instanceof Response) return parsed;
+    body = parsed;
   } else {
     const form = await c.req.parseBody();
     body = { verdict: form.verdict, comment: form.comment };

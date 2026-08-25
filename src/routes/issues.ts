@@ -14,6 +14,7 @@ import type { Env, ProjectEntry } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import {
   badRequest,
   created,
@@ -28,6 +29,10 @@ const app = new Hono<{ Bindings: Env }>();
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_BODY_LENGTH = 20_000;
+// Issue title/body are short text; cap the raw read well above MAX_BODY_LENGTH
+// (which truncates post-parse) but far under the isolate budget.
+const MAX_ISSUE_BODY_BYTES = 1024 * 1024;
+const MAX_ISSUE_UPDATE_BODY_BYTES = 1024 * 1024;
 
 /** Default + hard cap for the paginated issues listing (bounds the response). */
 const DEFAULT_ISSUES_PAGE = 100;
@@ -94,7 +99,11 @@ app.post("/:namespace/:slug/issues", async (c) => {
   let body: { title?: unknown; body?: unknown; linkedChangeId?: unknown };
   const contentType = c.req.header("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    body = await c.req.json<typeof body>().catch(() => ({}));
+    const parsed = await readJsonWithLimit<typeof body>(c, MAX_ISSUE_BODY_BYTES, logger).catch(
+      () => ({}),
+    );
+    if (parsed instanceof Response) return parsed;
+    body = parsed;
   } else {
     const form = await c.req.parseBody();
     body = { title: form.title, body: form.body, linkedChangeId: form.linkedChangeId };
@@ -250,9 +259,13 @@ app.patch("/:namespace/:slug/issues/:number", async (c) => {
   const number = parseIssueNumber(c.req.param("number"));
   if (number === null) return badRequest("Invalid issue number");
 
-  const body = await c.req
-    .json<{ title?: unknown; body?: unknown; status?: unknown; linkedChangeId?: unknown }>()
-    .catch(() => ({}) as Record<string, unknown>);
+  const body = await readJsonWithLimit<{
+    title?: unknown;
+    body?: unknown;
+    status?: unknown;
+    linkedChangeId?: unknown;
+  }>(c, MAX_ISSUE_UPDATE_BODY_BYTES, logger).catch(() => ({}) as Record<string, unknown>);
+  if (body instanceof Response) return body;
 
   const updates: {
     title?: string;

@@ -19,10 +19,17 @@ import {
 import { getUserByUsername } from "../storage/users";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import { badRequest, created, notFound, ok } from "../utils/response";
 import { isValidSlug } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Org/team management bodies are a handful of short strings.
+const MAX_ORG_BODY_BYTES = 1024 * 1024;
+const MAX_ORG_MEMBER_BODY_BYTES = 1024 * 1024;
+const MAX_TEAM_BODY_BYTES = 1024 * 1024;
+const MAX_TEAM_MEMBER_BODY_BYTES = 1024 * 1024;
 
 app.post("/", async (c) => {
   const userId = c.get("userId");
@@ -33,7 +40,12 @@ app.post("/", async (c) => {
     userId,
   });
 
-  const body = await c.req.json<{ name?: unknown; slug?: unknown }>();
+  const body = await readJsonWithLimit<{ name?: unknown; slug?: unknown }>(
+    c,
+    MAX_ORG_BODY_BYTES,
+    logger,
+  );
+  if (body instanceof Response) return body;
   if (typeof body.name !== "string" || !body.name.trim()) {
     return badRequest("name is required");
   }
@@ -140,7 +152,12 @@ app.post("/:slug/members", async (c) => {
     return c.json({ error: "Forbidden" }, 403);
   }
 
-  const body = await c.req.json<{ userId?: unknown; role?: unknown }>();
+  const body = await readJsonWithLimit<{ userId?: unknown; role?: unknown }>(
+    c,
+    MAX_ORG_MEMBER_BODY_BYTES,
+    logger,
+  );
+  if (body instanceof Response) return body;
   if (typeof body.userId !== "string" || !body.userId.trim()) {
     return badRequest("userId is required");
   }
@@ -219,7 +236,12 @@ app.post("/:slug/teams", async (c) => {
     return c.json({ error: "Forbidden" }, 403);
   }
 
-  const body = await c.req.json<{ name?: unknown; slug?: unknown; permissions?: unknown }>();
+  const body = await readJsonWithLimit<{
+    name?: unknown;
+    slug?: unknown;
+    permissions?: unknown;
+  }>(c, MAX_TEAM_BODY_BYTES, logger);
+  if (body instanceof Response) return body;
   if (typeof body.name !== "string" || !body.name.trim()) {
     return badRequest("name is required");
   }
@@ -363,7 +385,8 @@ app.post("/:slug/teams/:id/members", async (c) => {
     return notFound("Team", id);
   }
 
-  const body = await c.req.json<{ userId?: unknown }>();
+  const body = await readJsonWithLimit<{ userId?: unknown }>(c, MAX_TEAM_MEMBER_BODY_BYTES, logger);
+  if (body instanceof Response) return body;
   if (typeof body.userId !== "string" || !body.userId.trim()) {
     return badRequest("userId is required");
   }

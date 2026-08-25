@@ -45,6 +45,13 @@ export class ConflictError extends AppError {
   }
 }
 
+export class PayloadTooLargeError extends AppError {
+  constructor(message = "Request body too large") {
+    super(message, "PAYLOAD_TOO_LARGE", 413);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
 export class ExternalServiceError extends AppError {
   constructor(
     service: string,

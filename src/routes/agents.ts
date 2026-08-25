@@ -3,9 +3,13 @@ import { createAgent, deleteAgent, getAgent, listAgents } from "../storage/agent
 import { recordAudit } from "../storage/audit";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import { badRequest, created, ok } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Agent registration body is a handful of short strings.
+const MAX_AGENT_BODY_BYTES = 1024 * 1024;
 
 app.post("/", async (c) => {
   const logger = createLogger({
@@ -20,12 +24,13 @@ app.post("/", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const body = await c.req.json<{
+  const body = await readJsonWithLimit<{
     name?: unknown;
     model?: unknown;
     description?: unknown;
     promptHash?: unknown;
-  }>();
+  }>(c, MAX_AGENT_BODY_BYTES, logger);
+  if (body instanceof Response) return body;
   if (typeof body.name !== "string" || !body.name.trim()) {
     logger.warn("Missing or invalid agent name");
     return badRequest("name is required");

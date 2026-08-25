@@ -1,5 +1,12 @@
 import type { ApiError } from "../types";
-import { AppError, AuthError, ForbiddenError, NotFoundError, ValidationError } from "./errors";
+import {
+  AppError,
+  AuthError,
+  ForbiddenError,
+  NotFoundError,
+  PayloadTooLargeError,
+  ValidationError,
+} from "./errors";
 import type { Logger } from "./logger";
 
 export function ok<T>(data: T, status = 200): Response {
@@ -28,6 +35,10 @@ export function forbidden(message: string): Response {
 
 export function internalError(message: string): Response {
   return error(message, 500);
+}
+
+export function payloadTooLarge(message: string): Response {
+  return appError(new PayloadTooLargeError(message));
 }
 
 /**

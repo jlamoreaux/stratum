@@ -10,10 +10,14 @@ import { getProjectByPath, setProject } from "../storage/state";
 import type { ArtifactsCreateResult, BulkImportJob, Env, ProjectEntry } from "../types";
 import { getArtifactsRepoName } from "../types";
 import { createLogger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
 import { isValidNamespace, isValidSlug } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// At most 50 repo entries (enforced below), each a handful of short strings.
+const MAX_BULK_IMPORT_BODY_BYTES = 1024 * 1024;
 
 // In-memory storage for bulk import jobs (should be moved to D1 in production)
 // Key: jobId, Value: BulkImportJob
@@ -252,7 +256,12 @@ app.post("/", async (c) => {
   const username = c.get("username");
   if (!userId || !username) return unauthorized("Authentication required");
 
-  const body = await c.req.json<{ repos?: RepoImportRequest[] }>();
+  const body = await readJsonWithLimit<{ repos?: RepoImportRequest[] }>(
+    c,
+    MAX_BULK_IMPORT_BODY_BYTES,
+    logger,
+  );
+  if (body instanceof Response) return body;
 
   if (!body.repos || !Array.isArray(body.repos)) {
     return badRequest("repos must be an array");
