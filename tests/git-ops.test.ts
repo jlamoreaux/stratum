@@ -1,13 +1,38 @@
-import { describe, expect, it, vi } from "vitest";
+import git, { Errors as GitErrors } from "isomorphic-git";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  MergeConflictError,
+  type NodeFS,
   artifactsRepoNameFromRemote,
   buildUnifiedDiff,
   extractTokenSecret,
   freshRepoToken,
+  mergeWorkspaceIntoProject,
+  readRepoFiles,
+  readTreeAtCommit,
+  walkDir,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
 import type { ArtifactsNamespace } from "../src/types";
 import type { Logger } from "../src/utils/logger";
+
+// Mock only the git functions the merge path drives over the network; keep the
+// real Errors classes so classification is exercised against the genuine shapes.
+vi.mock("isomorphic-git", async (importActual) => {
+  const actual = await importActual<typeof import("isomorphic-git")>();
+  return {
+    ...actual,
+    default: {
+      ...actual.default,
+      clone: vi.fn(),
+      addRemote: vi.fn(),
+      fetch: vi.fn(),
+      resolveRef: vi.fn(),
+      merge: vi.fn(),
+      push: vi.fn(),
+    },
+  };
+});
 
 const noopLogger: Logger = {
   debug: () => {},
@@ -137,31 +162,33 @@ describe("MemoryFS walkDir (via manual test)", () => {
     await fs.promises.writeFile("/src/utils/helpers.ts", "export {}");
     await fs.promises.writeFile("/README.md", "# Hello");
 
-    const files = await walkDir(fs, "/", "");
-    expect(files).toContain("src/index.ts");
-    expect(files).toContain("src/utils/helpers.ts");
-    expect(files).toContain("README.md");
-    expect(files.some((f) => f.startsWith(".git"))).toBe(false);
+    const result = await walkDir(fs.toNodeFS(), "/", "", noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toContain("src/index.ts");
+    expect(result.data).toContain("src/utils/helpers.ts");
+    expect(result.data).toContain("README.md");
+    expect(result.data.some((f) => f.startsWith(".git"))).toBe(false);
+  });
+
+  it("lists symlinks as leaf entries without recursing or failing on dangling links", async () => {
+    const fs = new MemoryFS();
+    await fs.promises.writeFile("/src/index.ts", "export {}");
+    await fs.promises.symlink("index.ts", "/src/alias.ts");
+    await fs.promises.symlink("missing.ts", "/src/dangling.ts");
+    await fs.promises.symlink("/src", "/srclink");
+
+    const result = await walkDir(fs.toNodeFS(), "/", "", noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toContain("src/index.ts");
+    expect(result.data).toContain("src/alias.ts");
+    expect(result.data).toContain("src/dangling.ts");
+    // A symlink to a directory is a leaf, never recursed into.
+    expect(result.data).toContain("srclink");
+    expect(result.data.some((f) => f.startsWith("srclink/"))).toBe(false);
   });
 });
-
-async function walkDir(fs: MemoryFS, base: string, prefix: string): Promise<string[]> {
-  const nodeFS = fs.toNodeFS();
-  const entries = await nodeFS.promises.readdir(base === "/" ? "/" : base);
-
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry === ".git") continue;
-    const fullPath = base === "/" ? `/${entry}` : `${base}/${entry}`;
-    const stat = await nodeFS.promises.stat(fullPath);
-    if (stat.isDirectory()) {
-      files.push(...(await walkDir(fs, fullPath, `${prefix}${entry}/`)));
-    } else {
-      files.push(`${prefix}${entry}`);
-    }
-  }
-  return files;
-}
 
 describe("commitAndPush path construction", () => {
   it("writeFile path is correct when dir has trailing slash", async () => {
@@ -223,5 +250,290 @@ describe("buildUnifiedDiff", () => {
     expect(diff).toContain("diff --git a/src/old.ts b/src/old.ts");
     expect(diff).toContain("deleted file mode 100644");
     expect(diff).toContain("-export const old = true;");
+  });
+});
+
+describe("readTreeAtCommit", () => {
+  async function makeRepo() {
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const dir = "/";
+    await git.init({ fs, dir, defaultBranch: "main" });
+
+    const author = { name: "Test", email: "test@example.com" };
+    await fs.promises.writeFile("/package.json", '{"name":"app"}');
+    await fs.promises.mkdir("/src");
+    await fs.promises.writeFile("/src/math.ts", "export const add = 1;");
+    await git.add({ fs, dir, filepath: ["package.json", "src/math.ts"] });
+    const first = await git.commit({ fs, dir, message: "first", author });
+
+    await fs.promises.writeFile("/src/math.ts", "export const add = 2;");
+    await fs.promises.writeFile("/src/new.ts", "export const fresh = true;");
+    await git.add({ fs, dir, filepath: ["src/math.ts", "src/new.ts"] });
+    const second = await git.commit({ fs, dir, message: "second", author });
+
+    return { fs, first, second };
+  }
+
+  it("reads the full file set of the pinned commit, not the current HEAD", async () => {
+    const { fs, first } = await makeRepo();
+    const result = await readTreeAtCommit(fs, "/", first, noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect([...result.data.keys()].sort()).toEqual(["package.json", "src/math.ts"]);
+    expect(result.data.get("src/math.ts")).toBe("export const add = 1;");
+  });
+
+  it("reads the later commit's tree including files it added", async () => {
+    const { fs, second } = await makeRepo();
+    const result = await readTreeAtCommit(fs, "/", second, noopLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect([...result.data.keys()].sort()).toEqual(["package.json", "src/math.ts", "src/new.ts"]);
+    expect(result.data.get("src/math.ts")).toBe("export const add = 2;");
+  });
+
+  it("fails closed when a blob in the pinned tree cannot be read", async () => {
+    const { fs } = await makeRepo();
+    const dir = "/";
+    const goodBlob = await git.writeBlob({
+      fs,
+      dir,
+      blob: new TextEncoder().encode("still readable"),
+    });
+    const treeOid = await git.writeTree({
+      fs,
+      dir,
+      tree: [
+        { mode: "100644", path: "good.txt", oid: goodBlob, type: "blob" },
+        // A dangling oid: listed in the tree but the object does not exist.
+        {
+          mode: "100644",
+          path: "missing.txt",
+          oid: "0123456789abcdef0123456789abcdef01234567",
+          type: "blob",
+        },
+      ],
+    });
+    const author = { name: "Test", email: "test@example.com", timestamp: 0, timezoneOffset: 0 };
+    const commit = await git.writeCommit({
+      fs,
+      dir,
+      commit: { tree: treeOid, parent: [], author, committer: author, message: "broken tree" },
+    });
+
+    const result = await readTreeAtCommit(fs, dir, commit, noopLogger);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain(`Failed to read tree at commit ${commit}`);
+    expect(result.error.message).toContain("missing.txt");
+  });
+
+  it("errors when the pinned commit is not present in the clone", async () => {
+    const { fs } = await makeRepo();
+    const missing = "0123456789abcdef0123456789abcdef01234567";
+    const result = await readTreeAtCommit(fs, "/", missing, noopLogger);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain(`Failed to read tree at commit ${missing}`);
+  });
+});
+
+describe("readRepoFiles clone depth", () => {
+  beforeEach(() => {
+    vi.mocked(git.clone).mockReset().mockResolvedValue(undefined);
+  });
+
+  it("clones with full history when pinning a commit sha", async () => {
+    await readRepoFiles("https://example.com/repo.git", "token", noopLogger, "some-sha");
+
+    const cloneOpts = vi.mocked(git.clone).mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(cloneOpts.depth).toBeUndefined();
+  });
+
+  it("clones shallow (depth 50) when reading the live HEAD", async () => {
+    await readRepoFiles("https://example.com/repo.git", "token", noopLogger);
+
+    const cloneOpts = vi.mocked(git.clone).mock.calls[0]?.[0] as unknown as Record<string, unknown>;
+    expect(cloneOpts.depth).toBe(50);
+  });
+});
+
+describe("mergeWorkspaceIntoProject merge-failure classification (#185)", () => {
+  const projectRemote = "https://acct.artifacts.cloudflare.net/git/ns/owner__project.git";
+  const workspaceRemote = "https://acct.artifacts.cloudflare.net/git/ns/owner__ws.git";
+
+  const doMerge = () =>
+    mergeWorkspaceIntoProject(projectRemote, "pt", workspaceRemote, "wt", noopLogger);
+
+  beforeEach(() => {
+    vi.mocked(git.clone).mockReset().mockResolvedValue(undefined);
+    vi.mocked(git.addRemote).mockReset().mockResolvedValue(undefined);
+    vi.mocked(git.fetch)
+      .mockReset()
+      .mockResolvedValue({} as Awaited<ReturnType<typeof git.fetch>>);
+    vi.mocked(git.resolveRef).mockReset().mockResolvedValue("ws-sha");
+    vi.mocked(git.merge).mockReset();
+    vi.mocked(git.push)
+      .mockReset()
+      .mockResolvedValue({ ok: true } as unknown as Awaited<ReturnType<typeof git.push>>);
+  });
+
+  it("propagates the exact conflicting file list on a real merge conflict", async () => {
+    vi.mocked(git.merge).mockRejectedValue(
+      new GitErrors.MergeConflictError(
+        ["src/a.ts", "docs/readme.md"],
+        ["src/a.ts", "docs/readme.md"],
+        [],
+        [],
+      ),
+    );
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("MERGE_CONFLICT");
+      expect(result.error.statusCode).toBe(409);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([
+        "src/a.ts",
+        "docs/readme.md",
+      ]);
+    }
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it("merges with abortOnConflict: false so real conflicts carry their file list", async () => {
+    vi.mocked(git.merge).mockResolvedValue({
+      oid: "merged-sha",
+    } as Awaited<ReturnType<typeof git.merge>>);
+
+    await doMerge();
+
+    expect(git.merge).toHaveBeenCalledWith(expect.objectContaining({ abortOnConflict: false }));
+  });
+
+  it("classifies a conflict by code when instanceof fails (duplicate module instance)", async () => {
+    const foreign = Object.assign(new Error("Automatic merge failed: README.md"), {
+      code: "MergeConflictError",
+      data: { filepaths: ["README.md"], bothModified: ["README.md"] },
+    });
+    vi.mocked(git.merge).mockRejectedValue(foreign);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual(["README.md"]);
+    }
+  });
+
+  it("falls back to an empty file list when a code-matched conflict carries no data", async () => {
+    const foreign = Object.assign(new Error("merge conflict"), { code: "MergeConflictError" });
+    vi.mocked(git.merge).mockRejectedValue(foreign);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([]);
+    }
+  });
+
+  it("maps MergeNotSupportedError to a conflict with no file list", async () => {
+    vi.mocked(git.merge).mockRejectedValue(new GitErrors.MergeNotSupportedError());
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect(result.error.statusCode).toBe(409);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([]);
+    }
+  });
+
+  it("classifies MergeNotSupportedError by code when instanceof fails (duplicate module instance)", async () => {
+    const foreign = Object.assign(new Error("merge not supported"), {
+      code: "MergeNotSupportedError",
+    });
+    vi.mocked(git.merge).mockRejectedValue(foreign);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("MERGE_CONFLICT");
+      expect(result.error.statusCode).toBe(409);
+      expect((result.error as MergeConflictError).conflictingFiles).toEqual([]);
+    }
+  });
+
+  it("does NOT report an operational failure (network) as a merge conflict", async () => {
+    vi.mocked(git.merge).mockRejectedValue(new Error("connect ETIMEDOUT 203.0.113.9:443"));
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).not.toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+      expect(result.error.statusCode).toBe(502);
+      expect(result.error.message).toContain("ETIMEDOUT");
+    }
+  });
+
+  it("does NOT report an HTTP-layer git error as a merge conflict", async () => {
+    vi.mocked(git.merge).mockRejectedValue(
+      new GitErrors.HttpError(502, "Bad Gateway", "upstream unavailable"),
+    );
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).not.toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+      expect(result.error.statusCode).toBe(502);
+    }
+  });
+
+  it("surfaces a push failure after a clean merge as an external service error", async () => {
+    vi.mocked(git.merge).mockResolvedValue({
+      oid: "merged-sha",
+    } as Awaited<ReturnType<typeof git.merge>>);
+    vi.mocked(git.push).mockRejectedValue(new Error("503 Service Unavailable"));
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).not.toBeInstanceOf(MergeConflictError);
+      expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+    }
+  });
+
+  it("errors when the merge succeeds without producing a commit oid", async () => {
+    vi.mocked(git.merge).mockResolvedValue({} as Awaited<ReturnType<typeof git.merge>>);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+  });
+
+  it("returns the merge commit oid and pushes when the merge succeeds", async () => {
+    vi.mocked(git.merge).mockResolvedValue({
+      oid: "merged-sha",
+    } as Awaited<ReturnType<typeof git.merge>>);
+
+    const result = await doMerge();
+
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toBe("merged-sha");
+    expect(git.push).toHaveBeenCalled();
   });
 });

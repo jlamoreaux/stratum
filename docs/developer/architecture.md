@@ -1,6 +1,6 @@
 # Stratum Architecture
 
-**Last Updated:** 2026-05-05  
+**Last Updated:** 2026-08-18  
 **Strategic Position:** Progressive buy-in platform supporting both GitHub layer mode and full alternative mode
 
 ## Overview
@@ -315,7 +315,10 @@ const sandboxEvaluator: Evaluator = {
   id: 'tests',
   type: 'sandbox',
   async evaluate(ctx) {
-    // Clone workspace to Sandbox
+    // Materialize the FULL workspace tree at the evaluated commit
+    // (readRepoFiles pinned to evaluated_sha), not just the diff
+    // Install dependencies (npm ci with a lockfile, npm install with
+    // only a package.json, nothing otherwise)
     // Run configured command
     // Capture output and exit code
   }
@@ -325,11 +328,21 @@ const sandboxEvaluator: Evaluator = {
 **Configuration:**
 ```yaml
 evaluators:
-  - id: tests
-    type: sandbox
-    command: "npm test"
-    required: true
+  - type: sandbox
+    command: "npm test"        # default
+    timeoutMs: 60000           # command timeout (default 60s)
+    installTimeoutMs: 120000   # dependency install timeout (default 120s)
+# Pass/fail is decided by the policy-level `minScore` and `requireAll` fields,
+# not by a per-evaluator `required` flag.
 ```
+
+**Fail-closed when unavailable:** the `[[sandboxes]]` binding is commented out
+in `wrangler.toml` (beta feature; enabling it is an ops decision). While it is
+absent, any policy naming a `sandbox` evaluator fails closed — every evaluation
+records `sandbox unavailable: SANDBOX binding is not configured — enable
+[[sandboxes]] in wrangler.toml or remove the sandbox evaluator from the policy`
+with score 0, which blocks the merge. Remove the evaluator from the policy or
+enable the binding.
 
 ### Composite Scoring
 
@@ -379,31 +392,38 @@ app.post('/api/webhooks/github', async (c) => {
 
 ### Outbound Sync (Stratum → GitHub)
 
-**Push Change to PR:**
+**Promote Change to PR** (`POST /changes/:id/github-pr`): pushes the change's
+branch and creates the GitHub PR using the instance-wide `GITHUB_TOKEN`.
+
+**Evaluation verdict reporting** (`src/github/sync.ts`): after every evaluation
+of a change whose project has a GitHub source and which has a linked PR, the
+verdict is reported to GitHub — best-effort, so a GitHub failure never fails
+the evaluation:
+
 ```typescript
-async function pushToGitHub(change: Change): Promise<void> {
-  // Get or create GitHub PR
-  // Push workspace branch to GitHub
-  // Post evaluation results as PR comment
-  // Set commit status (pass/fail)
+async function reportEvaluationToGitHub(env, change, project, evaluation): Promise<void> {
+  // Gate: project must have a GitHub source AND the change a linked PR
+  // Post evaluation results as PR comment (upserted via changes.github_comment_id —
+  //   a re-evaluation edits the prior comment instead of posting a new one)
+  // Set commit status (context "stratum/evaluation", pass/fail) on the PR head
+  //   sha (falls back to the evaluated sha for changes mirrored verbatim)
 }
 ```
 
 **PR Comment Format:**
+
 ```markdown
-## Stratum Evaluation Results
+## ✅ Stratum Evaluation Results
 
-**Composite Score:** 0.92 ✅
+**Composite Score:** 92.0%
+**Status:** PASSED
 
-| Evaluator | Score | Status |
-|-----------|-------|--------|
-| Diff Check | 1.0 | ✅ Pass |
-| Unit Tests | 0.95 | ✅ Pass |
-| LLM Review | 0.82 | ✅ Pass |
+| Evaluator | Score | Status | Details |
+|-----------|-------|--------|---------|
+| secret_scan | 100.0% | ✅ | No secrets detected |
+| diff | 95.0% | ✅ | Diff passed all checks. |
 
-**Objective:** Fix the N+1 query in user loading
-
-[View detailed results in Stratum](https://stratum.dev/...)
+_Evaluation performed by [Stratum](https://stratum.dev)_
 ```
 
 ## Merge Queue
@@ -511,59 +531,146 @@ Redirect to dashboard
 ```text
 src/
 ├── index.ts                 # Hono app entry
+├── scheduled.ts             # Cron (scheduled event) entry point
 ├── types.ts                 # Shared types
-├── routes/
-│   ├── auth.ts              # Main auth routes
-│   ├── email-auth.ts        # Magic link authentication
-│   ├── sessions.ts          # Session management
-│   ├── projects.ts          # Project CRUD
-│   ├── workspaces.ts        # Workspace management
-│   ├── changes.ts           # Change lifecycle
-│   ├── sync.ts              # Sync operations
-│   ├── sync-management.ts   # Git sync management
-│   ├── bulk-import.ts       # Bulk import functionality
-│   ├── agents.ts            # Agent management
-│   ├── users.ts             # User management
-│   ├── orgs.ts              # Organization management
-│   ├── health.ts            # Health check endpoints
-│   ├── metrics.ts           # Admin metrics
-│   ├── ui.ts                # UI routes
-│   └── webhooks.ts          # Webhook handlers
-├── storage/
-│   ├── state.ts             # KV state management
-│   ├── db.ts                # D1 query helpers
-│   ├── users.ts             # User storage operations
-│   ├── sessions.ts          # Session storage operations
-│   ├── sync.ts              # Sync status tracking
-│   └── github-bridge.ts     # GitHub integration storage
+├── analytics/
+│   └── posthog.ts           # PostHog product analytics
+├── backup/
+│   ├── plan-restore.ts      # Restore planning
+│   ├── repo-restore.ts      # Repository restore
+│   ├── repo-snapshot.ts     # Repository snapshotting
+│   └── run-backup.ts        # Backup orchestration
+├── beta/
+│   └── gate.ts              # Beta access gating
+├── email/
+│   └── templates.ts         # Email templates
+├── evaluation/
+│   ├── index.ts
+│   ├── types.ts
+│   ├── composite-evaluator.ts
+│   ├── diff-evaluator.ts
+│   ├── llm-evaluator.ts
+│   ├── sandbox-evaluator.ts
+│   ├── webhook-evaluator.ts
+│   ├── secret-scanner.ts
+│   └── policy-loader.ts     # Evaluation policy loading
 ├── github/
 │   ├── client.ts            # GitHub API client
-│   ├── webhooks.ts          # Webhook handlers
-│   └── sync.ts              # Bidirectional sync logic
-├── queue/
-│   ├── events.ts            # Event definitions
-│   ├── import-queue.ts      # Import job processor
-│   ├── merge-queue.ts       # Merge queue durable object
-│   └── ttl-sweep.ts         # TTL cleanup
+│   ├── sync.ts              # Bidirectional sync logic
+│   └── webhooks.ts          # Webhook event handling
+├── merge/
+│   ├── post-merge.ts        # Post-merge actions
+│   └── protection.ts        # Merge protection rules
 ├── middleware/
+│   ├── analytics.ts         # Analytics tracking
 │   ├── auth.ts              # Auth middleware
+│   ├── config-guard.ts      # Config validation guard
+│   ├── csrf.ts              # CSRF protection
 │   ├── rate-limit.ts        # Rate limiting
-│   └── analytics.ts         # Analytics tracking
+│   └── security-headers.ts  # Security headers
+├── monitoring/
+│   └── analytics.ts         # Operational metrics
+├── queue/
+│   ├── deletion-runner.ts   # Deletion job processing
+│   ├── event-consumer.ts    # Event queue consumer
+│   ├── events.ts            # Event definitions
+│   ├── group-commit.ts      # Grouped commit handling
+│   ├── import-queue.ts      # Import job processor
+│   ├── issue-autoclose.ts   # Auto-close issues on merge
+│   ├── merge-queue.ts       # Merge queue durable object
+│   ├── repo-do.ts           # Repository durable object
+│   ├── ttl-sweep.ts         # TTL cleanup
+│   └── webhook-delivery.ts  # Outbound webhook delivery
+├── routes/
+│   ├── agents.ts            # Agent management
+│   ├── audit.ts             # Audit log
+│   ├── auth.ts              # Main auth routes
+│   ├── backfill.ts          # Backfill operations
+│   ├── backup.ts            # Backup endpoints
+│   ├── bulk-import.ts       # Bulk import functionality
+│   ├── changes.ts           # Change lifecycle
+│   ├── deletion-jobs.ts     # Deletion job management
+│   ├── email-auth.tsx       # Magic link authentication
+│   ├── git-http.ts          # Git smart-HTTP proxy (see ADR 005)
+│   ├── health.ts            # Health check endpoints
+│   ├── issues.ts            # Issue tracking
+│   ├── login.tsx            # Login page
+│   ├── metrics.ts           # Admin metrics
+│   ├── orgs.ts              # Organization management
+│   ├── projects.ts          # Project CRUD
+│   ├── restore.ts           # Restore endpoints
+│   ├── reviews.ts           # Change reviews
+│   ├── sessions.ts          # Session management
+│   ├── signup.tsx           # Signup page
+│   ├── sync-management.ts   # Git sync management
+│   ├── sync.ts              # Sync operations
+│   ├── ui.tsx               # UI routes
+│   ├── users.ts             # User management
+│   ├── webhooks.ts          # Webhook handlers
+│   └── workspaces.ts        # Workspace management
+├── services/
+│   └── change-flow.ts       # Eval-gated change flow orchestration
+├── storage/
+│   ├── git-providers/       # Provider adapters (github.ts, gitlab.ts,
+│   │                        #   bitbucket.ts, index.ts, types.ts)
+│   ├── agents.ts
+│   ├── audit.ts
+│   ├── backfill-plan.ts
+│   ├── backup-store.ts
+│   ├── change-reviews.ts
+│   ├── changes.ts
+│   ├── costs.ts
+│   ├── d1-backup.ts
+│   ├── deletion-jobs.ts
+│   ├── deletion.ts
+│   ├── eval-runs.ts
+│   ├── events.ts
+│   ├── git-objects.ts
+│   ├── git-ops.ts
+│   ├── github-bridge.ts     # GitHub integration storage
+│   ├── imports.ts
+│   ├── issues.ts
+│   ├── kv-backup.ts
+│   ├── magic-links.ts
+│   ├── memory-fs.ts
+│   ├── metrics.ts
+│   ├── object-loader.ts
+│   ├── object-store.ts
+│   ├── orgs.ts
+│   ├── provenance.ts
+│   ├── repo-snapshot.ts
+│   ├── sessions.ts
+│   ├── state.ts             # KV state management
+│   ├── sync.ts              # Sync status tracking
+│   ├── teams.ts
+│   ├── users.ts
+│   └── webhooks.ts
+├── templates/
+│   └── index.ts             # Project templates
 ├── ui/
 │   ├── layout.tsx           # Base layout component
 │   ├── styles.ts            # CSS styles
-│   ├── components/          # UI components
-│   │   ├── conflict-resolution.tsx
-│   │   └── ...
-│   └── pages/               # Page components
-│       ├── sync.tsx
-│       └── ...
+│   ├── file-content.ts      # File content rendering
+│   ├── file-tree.ts         # File tree rendering
+│   ├── highlight.ts         # Syntax highlighting
+│   ├── components/          # UI components (conflict-resolution.tsx,
+│   │                        #   diff-view.tsx, file-tree.tsx, import-progress.tsx)
+│   └── pages/               # Page components (activity, change-detail, changes,
+│                            #   file-viewer, home, issues, new-project, repo,
+│                            #   settings, sync, webhooks, workspaces)
 └── utils/
-    ├── errors.ts            # Error classes
-    ├── logger.ts            # Logger setup
-    ├── result.ts            # Result type
-    ├── response.ts          # Response helpers
+    ├── admin.ts             # Admin helpers
+    ├── authz.ts             # Authorization helpers
     ├── crypto.ts            # Encryption utilities
+    ├── errors.ts            # Error classes
+    ├── git-protocol.ts      # Git wire protocol helpers
+    ├── html.ts              # HTML helpers
+    ├── ids.ts               # ID generation
+    ├── logger.ts            # Logger setup
+    ├── phase-timer.ts       # Phase timing instrumentation
+    ├── response.ts          # Response helpers
+    ├── result.ts            # Result type
+    ├── username-validation.ts
     └── validation.ts        # Input validation
 ```
 
@@ -675,14 +782,13 @@ direction).
 
 ## Related Documents
 
-- [TODO.md](/TODO.md) - Current priorities and roadmap
-- [PIVOT_SUMMARY.md](/docs/PIVOT_SUMMARY.md) - Strategic pivot explanation
-- [Database Schema](/docs/developer/database.md) - Detailed D1 schema
-- [Queue Processing](/docs/developer/queues.md) - Queue architecture
-- [Testing Guide](/docs/developer/testing.md) - Testing patterns
+- [TODO.md](../../TODO.md) - Current priorities and roadmap
+- [Database Schema](database.md) - Detailed D1 schema
+- [Queue Processing](queues.md) - Queue architecture
+- [Testing Guide](testing.md) - Testing patterns
 
 ## Archived Documents
 
 Historical documents preserved for reference:
-- [Code Review (2026-04-29)](/docs/archive/CODE_REVIEW.md)
-- [Architecture Audit (2026-05-02)](/docs/archive/AUDIT.md)
+- [Code Review (2026-04-29)](../archive/CODE_REVIEW.md)
+- [Architecture Audit (2026-05-02)](../archive/AUDIT.md)
