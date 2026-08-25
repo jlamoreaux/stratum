@@ -104,7 +104,14 @@ representative of Artifacts round-trips.
 | Commits/sec (N=25)          | pending staging benchmark    | pending staging benchmark    | ~20+   |
 | p50 end-to-end latency      | pending staging benchmark    | pending staging benchmark    | —      |
 | p95 end-to-end latency      | pending staging benchmark    | pending staging benchmark    | —      |
-| Clone phase share of total  | pending staging benchmark    | ~0 (removed)                 | —      |
+| Clone phase share of total  | pending staging benchmark    | pending staging benchmark    | —      |
+
+Phase 2 is *designed* to remove the per-request clone by keeping the repo
+resident in the DO, so the expected warm figure is ~0. That is a prediction,
+not a result: the benchmark still has to show that the warmup batch primes the
+DO and that no re-clone happens inside the measured interval. A cold start
+clones once regardless, so if the warm and cold shares turn out to differ,
+report them separately rather than collapsing them into one number.
 
 ### How to produce the numbers
 
@@ -115,11 +122,26 @@ against **staging** (it refuses known production hosts unless
 pushes a real commit):
 
 ```bash
-# Auth: either a session cookie or a bearer token
-STRATUM_URL=https://<staging-host> \
-STRATUM_SESSION=<stratum_session cookie>   # or STRATUM_TOKEN=<bearer token>
+# Export the credentials first, and keep the quotes. An unquoted <...> is a
+# shell redirection, not a placeholder: pasting these as one backslash-
+# continued VAR=value block is a syntax error, not a silent no-op.
+export STRATUM_URL="https://staging-host.example"
+export STRATUM_SESSION="<stratum_session cookie value>"  # or: export STRATUM_TOKEN="<bearer token>"
+
 npx tsx scripts/bench-commit-throughput.ts --n=1,5,25,100 --conflict=none --repeat=3
 ```
+
+Credentials differ by what you are running:
+
+| Run | Needs | How it is sent |
+|-----|-------|----------------|
+| Ordinary benchmark | `STRATUM_SESSION` **or** `STRATUM_TOKEN` | session cookie / bearer token |
+| `--r2-bench` | `STRATUM_ADMIN_KEY` | `X-Admin-API-Key`, compared against the server's `ADMIN_API_KEY` |
+| `GET /api/admin/metrics` | admin rights | the same `X-Admin-API-Key`, **or** a signed-in user whose email equals the server's `ADMIN_EMAIL` |
+
+`--r2-bench` fails fast without `STRATUM_ADMIN_KEY`, and the metrics read
+returns 401 for a non-admin session — so a run can produce throughput numbers
+and still have no per-phase breakdown to go with them.
 
 Flags (defaults in parentheses): `--url` (or `STRATUM_URL`,
 `http://localhost:8787`), `--n` — comma-separated concurrency levels
@@ -136,13 +158,21 @@ Output is a plain-text table:
 `N | mode | landed | failed | wall(ms) | commits/sec | p50/p95/p99(ms)` —
 per-op latency percentiles are reported only at N ≤ 5 (at N ≥ 25 the single
 DO serializes advances, so latency is queue wait, not work). The server-side
-per-phase breakdown (token mint / clone / merge / push) is read separately
-from `GET /api/admin/metrics` (commits block). Note the timing caveat printed
-by the harness: Workers freeze the clock between I/O, so CPU spans are lower
-bounds.
+per-phase breakdown is read separately from `GET /api/admin/metrics` (commits
+block), which reports all eight spans of `CommitPhaseSpans` — token mint,
+project clone, workspace fetch, merge, push, ref advance, D1 update, and
+provenance. Reading only the clone/merge/push subset hides where the rest of
+the wall-clock went; workspace fetch and D1 update in particular are the two
+that move once the repo is warm. Note the timing caveat printed by the
+harness: Workers freeze the clock between I/O, so CPU spans are lower bounds.
 
-Run each mode twice: once with the flag off ("before") and once with
-`REPO_DO_ENABLED` ("after"), per the harness header comment.
+Run each mode twice: once "before" and once "after", per the harness header
+comment. `REPO_DO_ENABLED` is a **server-side** Worker var set per environment
+in `wrangler.toml` — not one of the client `STRATUM_*` variables above — so the
+two runs need two staging configurations (or two deployments), with the flag
+`"false"` for "before" and `"true"` for "after". Record the effective
+`REPO_DO_ENABLED` value next to each result: without it the two columns cannot
+be told apart after the fact.
 
 ### Acceptance thresholds
 
