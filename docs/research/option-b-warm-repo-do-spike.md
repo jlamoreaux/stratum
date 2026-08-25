@@ -125,7 +125,9 @@ report them separately rather than collapsing them into one number.
 ### How to produce the numbers
 
 The harness fires N concurrent commit → merge cycles at one project repo and
-reports commits/sec plus a per-phase breakdown, in both conflict modes. Run it
+reports commits/sec plus a per-phase breakdown. `--conflict` selects ONE mode
+per invocation (`none` or `same`), so covering both means running the harness
+twice and recording the two results separately. Run it
 against **staging** (it refuses known production hosts unless
 `--i-understand-this-writes-real-commits` is passed, because every merge
 pushes a real commit):
@@ -138,6 +140,7 @@ export STRATUM_URL="https://staging-host.example"
 export STRATUM_SESSION="<stratum_session cookie value>"  # or: export STRATUM_TOKEN="<bearer token>"
 
 npx tsx scripts/bench-commit-throughput.ts --n=1,5,25,100 --conflict=none --repeat=3
+npx tsx scripts/bench-commit-throughput.ts --n=1,5,25,100 --conflict=same --repeat=3
 ```
 
 Credentials differ by what you are running:
@@ -172,8 +175,15 @@ block), which reports all eight spans of `CommitPhaseSpans` — token mint,
 project clone, workspace fetch, merge, push, ref advance, D1 update, and
 provenance. Reading only the clone/merge/push subset hides where the rest of
 the wall-clock went; workspace fetch and D1 update in particular are the two
-that move once the repo is warm. Note the timing caveat printed by the
-harness: Workers freeze the clock between I/O, so CPU spans are lower bounds.
+that move once the repo is warm.
+
+Two caveats on those numbers. `getCommitMetrics` takes no project or run filter
+— it averages the most recent rows of `commit_metrics` (default 5000, ordered by
+`recorded_at`) across **every** project on the instance — so the phase breakdown
+is only attributable to this run on a staging instance that is otherwise idle.
+On a busy one, either quiesce it first or treat the breakdown as indicative
+rather than measured. And note the timing caveat the harness prints: Workers
+freeze the clock between I/O, so CPU spans are lower bounds.
 
 Run each mode twice: once "before" and once "after", per the harness header
 comment. `REPO_DO_ENABLED` is a **server-side** Worker var set per environment

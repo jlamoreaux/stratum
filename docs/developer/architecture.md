@@ -678,9 +678,14 @@ src/
 
 ### Scale limits today
 
-All server-side git work runs `isomorphic-git` in-memory inside the Worker
-isolate, and most operations clone the repo per request (`cloneRepo` in
-`src/storage/git-ops.ts`, `depth: 50` unless full history is requested).
+Ordinary server-side git work runs `isomorphic-git` in-memory inside the Worker
+isolate, and those operations clone the repo per request (`cloneRepo` in
+`src/storage/git-ops.ts`, `depth: 50` unless full history is requested). The
+warm `RepoDO` object-plane path is the exception: it builds objects directly
+(`treeObject`/`commitObject`/`blobObject`) and writes them to R2 with
+`putObject` (`src/queue/repo-do.ts`), so it does not clone at all — it keeps
+`cloneRepo` only for the cold fallback when its warm state is empty. The limits
+below describe the cloning paths.
 
 **Clone-per-request paths** (each call to these functions performs its own
 clone, all in `src/storage/git-ops.ts` unless noted):
