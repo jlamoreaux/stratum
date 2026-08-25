@@ -21,10 +21,20 @@ Basic. The user-guide FAQ states plainly: "SSH transport is not supported
 
 ### Why SSH cannot live in the Worker
 
-- **No inbound raw TCP.** Cloudflare Workers accept HTTP(S) requests; there
-  is no way for a Worker to listen on port 22 (or any raw TCP port) for
-  inbound connections. The SSH protocol cannot be terminated in the Worker
-  at all.
+- **No generally available inbound raw TCP.** A Worker is invoked by HTTP(S)
+  requests; it does not bind a listening socket, so nothing in the current
+  deployment can answer port 22. Cloudflare has since added a path for
+  inbound TCP — Spectrum accepting the connection and handing the socket to
+  a Worker — but that is a separate product to configure and its
+  availability must be confirmed before any design leans on it, so it is a
+  prerequisite to establish rather than a capability to assume (the same
+  caveat as the Containers row below).
+
+  The important part is unchanged either way: even with a socket in hand, a
+  Worker is not an SSH server. Terminating SSH means a host key, key
+  exchange, cipher negotiation and channel multiplexing — an implementation
+  that has to live somewhere, and that "somewhere" is the standing service
+  this ADR is weighing.
 - **The storage backend speaks smart-HTTP only.** Repositories live on
   Cloudflare Artifacts, addressed as
   `https://<account>.artifacts.cloudflare.net/git/<namespace>/<repo>.git`
@@ -100,17 +110,30 @@ functionally.
 
 ### Backend bridge
 
-After SSH auth succeeds, the bridge executes the requested git service by
-proxying to Artifacts, exactly as the HTTP proxy does today in
-`src/routes/git-http.ts`:
+After SSH auth succeeds, the bridge asks the **Worker** to execute the
+requested git service; the Worker proxies to Artifacts exactly as it does
+today in `src/routes/git-http.ts`. The bridge does not talk to Artifacts
+itself, and that boundary is not a preference:
 
-- Mint a short-lived, scope-appropriate Artifacts token per operation with
-  `freshRepoToken` (read for `git-upload-pack`, write for
-  `git-receive-pack`); tokens carry an embedded `?expires=` and are never
-  persisted or exposed to the client.
-- Authenticate upstream with HTTP Basic as `x:<secret>`, where the secret
-  is `extractTokenSecret(token)` (the portion before `?expires=`) — the
-  same header construction the HTTP proxy's `basicAuthHeader` uses.
+- **Token minting stays inside the Worker.** `freshRepoToken` takes the
+  `ARTIFACTS` binding as its first argument (`src/storage/git-ops.ts`), and
+  a binding is a Worker-runtime capability — an sshd on a VM or in a
+  Container has no way to hold one. Handing the bridge equivalent
+  credentials would give a standing external service the ability to mint
+  read/write tokens for **every** repository, which is a far larger grant
+  than the transport needs and exactly the blast radius the delegation
+  contract above exists to avoid. The bridge therefore never sees the
+  binding, and never sees an Artifacts token.
+- The Worker keeps doing what it already does per request: authorize, mint
+  a short-lived scope-appropriate token (read for `git-upload-pack`, write
+  for `git-receive-pack`), and authenticate upstream with HTTP Basic as
+  `x:<secret>` where the secret is `extractTokenSecret(token)` — the
+  `basicAuthHeader` construction in `git-http.ts`. Tokens carry an embedded
+  `?expires=`, are never persisted, and are never exposed to the client.
+
+This is the same conclusion the scope-parity and delegation sections reach
+from different directions: the bridge is a protocol translator, not a
+privileged actor. Everything that decides or grants stays in the Worker.
 - Drive the same two-step exchange the HTTP routes drive, rather than
   relaying stdin/stdout at one endpoint. Git-over-SSH runs one command
   (`git-upload-pack <repo>` / `git-receive-pack <repo>`) over a single
