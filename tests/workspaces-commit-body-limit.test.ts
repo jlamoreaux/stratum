@@ -63,7 +63,7 @@ function makeEnv(): Env {
 
 async function seed(env: Env): Promise<void> {
   const project: ProjectEntry = {
-    id: "proj_1",
+    id: "00000000-0000-4000-8000-000000000001",
     name: "repo",
     slug: "repo",
     namespace: "@owner",
@@ -75,11 +75,11 @@ async function seed(env: Env): Promise<void> {
   };
   await env.STATE.put(`project:${project.namespace}:${project.slug}`, JSON.stringify(project));
   await env.STATE.put(
-    "workspace:proj_1:myws",
+    "workspace:00000000-0000-4000-8000-000000000001:myws",
     JSON.stringify({
       name: "myws",
       remote: WS_REMOTE,
-      parent: "proj_1",
+      parent: "00000000-0000-4000-8000-000000000001",
       createdAt: new Date().toISOString(),
       createdByUserId: "user_owner",
     }),
@@ -117,7 +117,11 @@ function smallCommitRequest(): Request {
   return new Request("http://localhost/api/workspaces/myws/commit", {
     method: "POST",
     headers: { Authorization: `Bearer ${OWNER_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ projectId: "proj_1", message: "m", files: { "a.txt": "hi" } }),
+    body: JSON.stringify({
+      projectId: "00000000-0000-4000-8000-000000000001",
+      message: "m",
+      files: { "a.txt": "hi" },
+    }),
   });
 }
 
