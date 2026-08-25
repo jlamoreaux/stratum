@@ -102,10 +102,23 @@ policy decisions — in particular the push gate.
 
 - **Read-only first**: `git-upload-pack` (clone/fetch) for projects and
   workspaces is the low-risk slice.
-- **Push follows the HTTP gate decision**: workspace push proxies verbatim;
-  a default-branch push on the project remote must route through the same
-  gated-push flow as ADR 005 slice 2b (`GIT_PUSH_GATED_ENABLED`), never
-  around it.
+- **Push carries the HTTP path's policy, not just its plumbing.** Neither
+  push route is a straight relay any more:
+  - A **workspace** push has its ref-update commands parsed and checked
+    against `checkWorkspacePushPolicy` before anything reaches upstream
+    (`src/utils/git-protocol.ts`, wired in at the workspace
+    `git-receive-pack` route). The proxy did relay that body verbatim until
+    #130/#216, which is precisely the hole that closed: a fork owner could
+    otherwise delete refs or push arbitrary `refs/*` through their
+    workspace remote. An SSH bridge that "just proxies" reintroduces it.
+  - A **default-branch** push on the project remote must route through the
+    same gated-push flow as ADR 005 slice 2b (`GIT_PUSH_GATED_ENABLED`),
+    never around it.
+
+  This is the strongest argument for the bridge delegating to the Worker
+  rather than reimplementing the proxy: every future ref-policy change lands
+  in one place instead of two, and the SSH path cannot silently fall behind
+  the HTTP path's guarantees.
 
 ## Consequences
 
@@ -151,5 +164,7 @@ policy decisions — in particular the push gate.
 
 - `src/routes/git-http.ts` — smart-HTTP proxy (auth, `proxyUpstream`,
   `basicAuthHeader`)
+- `src/utils/git-protocol.ts` — `parseReceivePackRequest`,
+  `checkWorkspacePushPolicy` (the ref policy an SSH bridge must also honour)
 - `src/storage/git-ops.ts` — `freshRepoToken`, `extractTokenSecret`
 - `docs/user-guide/faq.md` — "SSH transport is not supported"
