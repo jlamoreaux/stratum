@@ -148,6 +148,9 @@ const REPO_DIR = process.env.REPO_DIR; // a clone kept in sync with the project
 // The budget covers the WHOLE request — checkout, patch, tests — not just the
 // test run, or Stratum aborts before the verdict is written.
 const DEADLINE_MS = 9000;
+// Cleanup runs AFTER the verdict is sent, so it cannot delay it — but bound it
+// anyway so a wedged worktree removal cannot stall the next request.
+const CLEANUP_MS = 2000;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 // An explicit allowlist, never this process's env. A diff can rewrite
@@ -162,6 +165,7 @@ function evaluate(diff, budgetMs) {
   const dir = mkdtempSync(join(tmpdir(), "stratum-eval-"));
   const started = Date.now();
   const left = () => Math.max(1, budgetMs - (Date.now() - started));
+  let result;
   try {
     execFileSync("git", ["-C", REPO_DIR, "worktree", "add", "--detach", dir, "HEAD"],
       { env: CHILD_ENV, timeout: left() });
@@ -169,16 +173,24 @@ function evaluate(diff, budgetMs) {
     execFileSync("git", ["-C", dir, "apply", "change.diff"],
       { env: CHILD_ENV, timeout: left() });
     execFileSync("npm", ["test", "--prefix", dir], { env: CHILD_ENV, timeout: left() });
-    return { score: 1, passed: true, reason: "tests passed" };
+    result = { score: 1, passed: true, reason: "tests passed" };
   } catch (e) {
-    return { score: 0, passed: false,
-             reason: String(e.stdout || e.message).slice(0, 500) };
-  } finally {
-    try {
-      execFileSync("git", ["-C", REPO_DIR, "worktree", "remove", "--force", dir]);
-    } catch {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    result = { score: 0, passed: false,
+               reason: String(e.stdout || e.message).slice(0, 500) };
+  }
+  // Deliberately NOT a `finally` that cleans up here: the caller sends the
+  // verdict first and cleans up after. Cleaning up before returning would put
+  // an unbounded `worktree remove` on the path to `res.end`, which is how a
+  // correct verdict arrives after Stratum has already aborted the request.
+  return { result, dir };
+}
+
+function cleanup(dir) {
+  try {
+    execFileSync("git", ["-C", REPO_DIR, "worktree", "remove", "--force", dir],
+      { env: CHILD_ENV, timeout: CLEANUP_MS });
+  } catch {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 2 }); } catch {}
   }
 }
 
@@ -223,17 +235,21 @@ createServer((req, res) => {
       return;
     }
 
-    // 3. Evaluate inside what is left of the request budget.
-    const result = evaluate(diff, DEADLINE_MS - (Date.now() - started));
+    // 3. Evaluate inside what is left of the request budget, answer, and only
+    //    then clean up — the verdict must not wait on `worktree remove`.
+    const { result, dir } = evaluate(diff, DEADLINE_MS - (Date.now() - started));
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(result));
+    res.end(JSON.stringify(result), () => cleanup(dir));
   });
 }).listen(8080);
 ```
 
 The worktree starts without `node_modules`, so give it the dependencies your
 suite needs — share a cache directory, symlink from the primary clone, or bake
-them into the image. `createServer` here is plain HTTP on purpose: terminate
+them into the image. Every child here is `execFileSync`, which blocks the event
+loop — fine for a sketch, but a receiver taking concurrent requests wants the
+async `spawn` equivalents so one evaluation cannot stall another. `createServer`
+here is plain HTTP on purpose: terminate
 TLS in front of it (a reverse proxy or load balancer) rather than exposing this
 port directly, since the body carries the change diff.
 
