@@ -2,11 +2,14 @@ import { Hono } from "hono";
 import { type EventActor, emitEvent } from "../queue/events";
 import { isTargetDeleting } from "../storage/deletion";
 import {
+  MAX_FILE_BYTES,
   artifactsRepoNameFromRemote,
   cloneRepo,
   commitAndPush,
   freshRepoToken,
   stageWorkspaceTree,
+  stagedTreeKey,
+  stagedTreeShaKey,
 } from "../storage/git-ops";
 import {
   deleteWorkspace,
@@ -29,7 +32,7 @@ import {
   ok,
   unauthorized,
 } from "../utils/response";
-import { isStringRecord, isValidSlug } from "../utils/validation";
+import { isStringRecord, isTraversalPath, isValidSlug, isValidUuid } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -58,8 +61,11 @@ app.post("/:namespace/:slug/workspaces", async (c) => {
     if (projectResult.error.code === "NOT_FOUND") {
       return notFound("Project", `${namespace}/${slug}`);
     }
+    // S5 (#130): storage failures stay generic — echoing the storage error
+    // (which can carry KV keys/ids) would let a caller distinguish states the
+    // truth table deliberately collapses.
     logger.error("Failed to get project", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return internalError("Internal error");
   }
   const project = projectResult.data;
 
@@ -100,7 +106,7 @@ app.post("/:namespace/:slug/workspaces", async (c) => {
 
   if (!setResult.success) {
     logger.error("Failed to set workspace", setResult.error);
-    return badRequest(setResult.error.message);
+    return internalError("Internal error");
   }
 
   logger.info("Workspace created", { workspaceName, namespace, slug, projectId: project.id });
@@ -146,8 +152,10 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
     if (projectResult.error.code === "NOT_FOUND") {
       return notFound("Project", `${namespace}/${slug}`);
     }
+    // S5 (#130): this route collapses UNAUTHORIZED to the same 404 (below), so
+    // a distinct 500 here would re-open exactly the gap that collapse closes.
     logger.error("Failed to get project", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return notFound("Project", `${namespace}/${slug}`);
   }
   const project = projectResult.data;
 
@@ -157,7 +165,7 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
   const workspacesResult = await listWorkspaces(c.env.STATE, project.id, logger);
   if (!workspacesResult.success) {
     logger.error("Failed to list workspaces", workspacesResult.error);
-    return badRequest(workspacesResult.error.message);
+    return internalError("Internal error");
   }
 
   logger.info("Workspaces listed", {
@@ -195,12 +203,18 @@ app.post("/:name/commit", async (c) => {
 
   const { name: workspaceName } = c.req.param();
 
+  // S7 (#130): validate identifier shapes BEFORE they are interpolated into
+  // KV keys. Workspace names are slugs by construction; project ids are
+  // crypto.randomUUID() values — anything else (a ':', a path, an empty
+  // string) is a key-injection probe and is rejected outright.
+  if (!isValidSlug(workspaceName)) return badRequest("invalid workspace name");
+
   const body = await c.req.json<{ files?: unknown; message?: unknown; projectId?: unknown }>();
   if (!isStringRecord(body.files))
     return badRequest("files must be an object of string paths to string contents");
   if (typeof body.message !== "string" || !body.message.trim())
     return badRequest("message is required");
-  if (typeof body.projectId !== "string") return badRequest("projectId is required");
+  if (!isValidUuid(body.projectId)) return badRequest("projectId must be a UUID");
 
   // Bound the payload: the commit clones the repo into a ~128MB isolate, so an
   // unbounded file map is a memory/CPU DoS lever.
@@ -208,9 +222,37 @@ app.post("/:name/commit", async (c) => {
   if (fileCount > MAX_COMMIT_FILES) {
     return badRequest(`too many files in one commit (max ${MAX_COMMIT_FILES})`);
   }
-  let totalBytes = 0;
-  for (const contents of Object.values(body.files)) {
-    totalBytes += contents.length;
+  // The message and the path keys are part of the payload the isolate holds, so
+  // they count against the budget too — 2000 keys of a megabyte each is 2 GB
+  // that an aggregate over VALUES alone would not see.
+  let totalBytes = new TextEncoder().encode(body.message).byteLength;
+  // Check the seed BEFORE iterating. The aggregate guard below only runs once
+  // per file, so `{ files: {} }` with an oversized message skipped it entirely
+  // and reached the token mint and the clone — the exact work this block exists
+  // to avoid, reachable by any authenticated caller.
+  if (totalBytes > MAX_COMMIT_BYTES) {
+    return badRequest(`commit payload too large (max ${MAX_COMMIT_BYTES} bytes)`);
+  }
+  for (const [path, contents] of Object.entries(body.files)) {
+    // S7 (#130): refuse traversal-shaped paths before any git work — the same
+    // guard commitAndPush enforces (defense in depth), surfaced early here so
+    // a hostile map doesn't cost a clone first.
+    if (isTraversalPath(path)) {
+      return badRequest("file paths must be repo-relative (no '..' segment or leading '/')");
+    }
+    // UTF-8 bytes, not UTF-16 code units: the cap is advertised in bytes and
+    // commitAndPush measures per-file size the same way. `.length` undercounts
+    // every multibyte character — a CJK payload is 3 bytes per unit counted as
+    // one — so string length would let a commit past three times the limit.
+    const fileBytes = new TextEncoder().encode(contents).byteLength;
+    // Surface commitAndPush's PER-FILE cap here too. Only the aggregate was
+    // checked, so a single 20 MiB file passed this loop, minted a token and
+    // cloned the repo, and was refused afterwards — the expensive work this
+    // block exists to avoid.
+    if (fileBytes > MAX_FILE_BYTES) {
+      return badRequest(`file ${path} exceeds the ${MAX_FILE_BYTES}-byte per-file limit`);
+    }
+    totalBytes += fileBytes + new TextEncoder().encode(path).byteLength;
     if (totalBytes > MAX_COMMIT_BYTES) {
       return badRequest(`commit payload too large (max ${MAX_COMMIT_BYTES} bytes)`);
     }
@@ -221,8 +263,15 @@ app.post("/:name/commit", async (c) => {
     if (workspaceResult.error.code === "NOT_FOUND") {
       return notFound("Workspace", workspaceName);
     }
+    // S5 (#130): a corrupt/unreadable entry answers with the SAME 404 as a
+    // missing one. A distinct 500 was itself the oracle: authorization needs
+    // the workspace's parent id, so a read that fails cannot be authorized at
+    // all — every caller reaching here is unauthenticated for this resource,
+    // and telling them "exists but broken" versus "does not exist" confirms
+    // existence. The failure is not lost, it moves to the log where only
+    // operators see it.
     logger.error("Failed to get workspace", workspaceResult.error);
-    return badRequest(workspaceResult.error.message);
+    return notFound("Workspace", workspaceName);
   }
   const workspace = workspaceResult.data;
 
@@ -234,8 +283,10 @@ app.post("/:name/commit", async (c) => {
   const projectResult = await getProjectById(c.env.STATE, workspace.parent, logger);
   if (!projectResult.success) {
     if (projectResult.error.code === "NOT_FOUND") return notFound("Workspace", workspaceName);
+    // Same 404-on-unreadable rule as the workspace read above: this block's own
+    // contract is that every failure is indistinguishable from "does not exist".
     logger.error("Failed to resolve project for commit authz", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return notFound("Workspace", workspaceName);
   }
   const project = projectResult.data;
 
@@ -284,7 +335,7 @@ app.post("/:name/commit", async (c) => {
   if (c.env.REPO_DO_ENABLED === "true" && c.env.REPO_OBJECTS) {
     const stageResult = await stageWorkspaceTree(
       c.env.REPO_OBJECTS,
-      `repos/${project.id}/ws/${workspaceName}`,
+      stagedTreeKey(project.id, workspaceName),
       fs,
       dir,
       commitResult.data,
@@ -294,20 +345,37 @@ app.post("/:name/commit", async (c) => {
       logger.warn("Failed to stage workspace tree to R2; merge will use cold path", {
         workspaceName,
       });
-    } else if (c.env.REPO_DO) {
-      // Also seed the per-repo DO's local hot index so the batch-merge path reads
-      // staged trees from SQLite (microseconds) instead of R2 (~30ms/change).
-      const stub = c.env.REPO_DO.get(c.env.REPO_DO.idFromName(project.id)) as unknown as {
-        stageTree(workspace: string, value: ArrayBuffer): Promise<void>;
-      };
-      await stub
-        .stageTree(workspaceName, stageResult.data.value.buffer as ArrayBuffer)
-        .catch((error) => {
-          logger.warn("Failed to seed DO hot index; batch merge will skip this change", {
-            workspaceName,
-            error: error instanceof Error ? error.message : String(error),
-          });
+    } else {
+      // #124: also store the tree under an immutable sha-keyed copy. The
+      // latest-tip key above is overwritten by every commit; the merge path
+      // reads the sha-keyed copy for the change's pinned workspace_head_sha, so
+      // a re-push between evaluation and merge cannot change what gets merged.
+      // Best-effort like the rest of staging: on failure the merge falls back
+      // to the git-based pinned path.
+      await c.env.REPO_OBJECTS.put(
+        stagedTreeShaKey(project.id, workspaceName, commitResult.data),
+        stageResult.data.value,
+      ).catch((error) => {
+        logger.warn("Failed to write sha-keyed staged tree; merge will use pinned git path", {
+          workspaceName,
+          error: error instanceof Error ? error.message : String(error),
         });
+      });
+      if (c.env.REPO_DO) {
+        // Also seed the per-repo DO's local hot index so the batch-merge path reads
+        // staged trees from SQLite (microseconds) instead of R2 (~30ms/change).
+        const stub = c.env.REPO_DO.get(c.env.REPO_DO.idFromName(project.id)) as unknown as {
+          stageTree(workspace: string, value: ArrayBuffer): Promise<void>;
+        };
+        await stub
+          .stageTree(workspaceName, stageResult.data.value.buffer as ArrayBuffer)
+          .catch((error) => {
+            logger.warn("Failed to seed DO hot index; batch merge will skip this change", {
+              workspaceName,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      }
     }
   }
 
@@ -345,19 +413,24 @@ app.delete("/:name", async (c) => {
 
   const { name: workspaceName } = c.req.param();
 
-  // Get projectId from query param
+  // S7 (#130): same identifier-shape validation as the commit route, before
+  // the values reach a KV key.
+  if (!isValidSlug(workspaceName)) return badRequest("invalid workspace name");
+
   const projectId = c.req.query("projectId");
   if (!projectId) {
     return badRequest("projectId query parameter is required");
   }
+  if (!isValidUuid(projectId)) return badRequest("projectId must be a UUID");
 
   const workspaceResult = await getWorkspace(c.env.STATE, projectId, workspaceName, logger);
   if (!workspaceResult.success) {
     if (workspaceResult.error.code === "NOT_FOUND") {
       return notFound("Workspace", workspaceName);
     }
+    // S5 (#130): same 404-on-unreadable rule as the commit route.
     logger.error("Failed to get workspace", workspaceResult.error);
-    return badRequest(workspaceResult.error.message);
+    return notFound("Workspace", workspaceName);
   }
   const workspace = workspaceResult.data;
 
@@ -367,8 +440,9 @@ app.delete("/:name", async (c) => {
   const projectResult = await getProjectById(c.env.STATE, workspace.parent, logger);
   if (!projectResult.success) {
     if (projectResult.error.code === "NOT_FOUND") return notFound("Workspace", workspaceName);
+    // Same 404-on-unreadable rule as the commit route.
     logger.error("Failed to resolve project for delete authz", projectResult.error);
-    return badRequest(projectResult.error.message);
+    return notFound("Workspace", workspaceName);
   }
   const project = projectResult.data;
 
@@ -402,7 +476,7 @@ app.delete("/:name", async (c) => {
   const deleteResult = await deleteWorkspace(c.env.STATE, projectId, workspaceName, logger);
   if (!deleteResult.success) {
     logger.error("Failed to delete workspace", deleteResult.error);
-    return badRequest(deleteResult.error.message);
+    return internalError("Internal error");
   }
 
   logger.info("Workspace deleted", { workspaceName, projectId });

@@ -16,11 +16,19 @@ import type { Env, ProjectEntry } from "../src/types";
 
 vi.mock("../src/storage/state", () => ({
   listProjects: vi.fn(),
+  setProject: vi.fn(async () => ({ success: true, data: undefined })),
 }));
 
-vi.mock("../src/storage/git-ops", () => ({
-  importFromGitHub: vi.fn(),
-}));
+// Keep the real artifactsRepoNameFromRemote so the sync-vs-import routing
+// decision is exercised for real; only the network-touching functions are mocked.
+vi.mock("../src/storage/git-ops", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/storage/git-ops")>();
+  return {
+    ...actual,
+    importFromGitHub: vi.fn(),
+    syncFromGitHub: vi.fn(),
+  };
+});
 
 vi.mock("../src/storage/repo-snapshot", () => ({
   writeSnapshotFromRepo: vi.fn(async () => undefined),
@@ -37,16 +45,25 @@ vi.mock("../src/storage/sync", async (importOriginal) => {
   };
 });
 
-import { importFromGitHub } from "../src/storage/git-ops";
+import { importFromGitHub, syncFromGitHub } from "../src/storage/git-ops";
 import { writeSnapshotFromRepo } from "../src/storage/repo-snapshot";
-import { listProjects } from "../src/storage/state";
+import { listProjects, setProject } from "../src/storage/state";
 import { checkForSyncUpdates, updateProjectAfterSync } from "../src/storage/sync";
 
 const mockListProjects = vi.mocked(listProjects);
 const mockImport = vi.mocked(importFromGitHub);
+const mockSync = vi.mocked(syncFromGitHub);
 const mockCheck = vi.mocked(checkForSyncUpdates);
 const mockSnapshot = vi.mocked(writeSnapshotFromRepo);
 const mockUpdateAfterSync = vi.mocked(updateProjectAfterSync);
+const mockSetProject = vi.mocked(setProject);
+
+/**
+ * A remote that artifactsRepoNameFromRemote actually parses. Its regex requires
+ * a `/git/<owner>/<repo>` pathname; a bare `/<repo>` returns null and routes the
+ * project down the legacy full-import branch.
+ */
+const ARTIFACTS_REMOTE = "https://acct.artifacts.cloudflare.net/git/alice/alice__my-repo";
 
 function makeProject(overrides: Partial<ProjectEntry> = {}): ProjectEntry {
   return {
@@ -81,6 +98,11 @@ beforeEach(() => {
     success: true,
     data: { remote: "https://acct.artifacts.cloudflare.net/alice__my-repo" },
   } as Awaited<ReturnType<typeof importFromGitHub>>);
+  // clearAllMocks resets calls but not implementations, so the failure case
+  // below would otherwise leak into every test that follows it.
+  mockSetProject.mockResolvedValue({ success: true, data: undefined } as Awaited<
+    ReturnType<typeof setProject>
+  >);
 });
 
 describe("syncAllProjects (project-sync cron)", () => {
@@ -97,6 +119,9 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "main",
+      // The cron passes no depth; the shared helper forwards it as undefined,
+      // so importFromGitHub falls back to its own default.
+      undefined,
     );
     // Snapshot is written from the imported repo's remote for namespace/slug.
     expect(mockSnapshot).toHaveBeenCalledWith(
@@ -125,6 +150,7 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "trunk",
+      undefined,
     );
   });
 
@@ -142,6 +168,7 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "trunk",
+      undefined,
     );
   });
 
@@ -253,6 +280,9 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://gitlab.com/alice/my-repo",
       expect.anything(),
       "main",
+      // The cron passes no depth; the shared helper forwards it as undefined,
+      // so importFromGitHub falls back to its own default.
+      undefined,
     );
   });
 
@@ -270,6 +300,9 @@ describe("syncAllProjects (project-sync cron)", () => {
       "https://github.com/alice/my-repo",
       expect.anything(),
       "master",
+      // The cron passes no depth; the shared helper forwards it as undefined,
+      // so importFromGitHub falls back to its own default.
+      undefined,
     );
   });
 
@@ -285,6 +318,96 @@ describe("syncAllProjects (project-sync cron)", () => {
     expect(result).toEqual({ synced: 1, failed: 0, skipped: 0 });
     expect(mockSnapshot).toHaveBeenCalledTimes(1);
     expect(mockUpdateAfterSync).not.toHaveBeenCalled();
+  });
+
+  it("persists the imported remote when a legacy fallback import reports no latestCommit", async () => {
+    // The legacy branch is chosen by artifactsRepoNameFromRemote(project.remote)
+    // returning null, and importFromGitHub then mints a NEW Artifacts remote.
+    // With no latestCommit there is no updateProjectAfterSync call to carry that
+    // remote into KV, so it has to be written on its own — otherwise the next
+    // cron run reads the legacy remote, takes the fallback again, and
+    // importFromGitHub deletes the repo this run just created.
+    mockCheck.mockResolvedValue({
+      success: true,
+      data: { hasUpdates: true, commitsBehind: 1 },
+    });
+    mockImport.mockResolvedValue({
+      success: true,
+      data: { remote: "https://acct.artifacts.cloudflare.net/alice__my-repo" },
+    } as Awaited<ReturnType<typeof importFromGitHub>>);
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [makeProject({ remote: "https://legacy.example.com/alice/my-repo" })],
+    });
+
+    const result = await syncAllProjects(makeEnv());
+
+    expect(result).toEqual({ synced: 1, failed: 0, skipped: 0 });
+    expect(mockUpdateAfterSync).not.toHaveBeenCalled();
+    expect(mockSetProject).toHaveBeenCalledTimes(1);
+    expect(mockSetProject).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        remote: "https://acct.artifacts.cloudflare.net/alice__my-repo",
+      }),
+      expect.anything(),
+    );
+    // lastSyncedCommit must stay untouched rather than being stamped with a
+    // placeholder, which would poison the next run's commit comparison.
+    expect(mockSetProject.mock.calls[0]?.[1]).not.toHaveProperty("lastSyncedCommit");
+  });
+
+  it("counts the project as failed when persisting the imported remote fails", async () => {
+    mockCheck.mockResolvedValue({
+      success: true,
+      data: { hasUpdates: true, commitsBehind: 1 },
+    });
+    mockImport.mockResolvedValue({
+      success: true,
+      data: { remote: "https://acct.artifacts.cloudflare.net/alice__my-repo" },
+    } as Awaited<ReturnType<typeof importFromGitHub>>);
+    mockSetProject.mockResolvedValue({
+      success: false,
+      error: new Error("kv down"),
+    } as Awaited<ReturnType<typeof setProject>>);
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [makeProject({ remote: "https://legacy.example.com/alice/my-repo" })],
+    });
+
+    const result = await syncAllProjects(makeEnv());
+
+    expect(result).toEqual({ synced: 0, failed: 1, skipped: 0 });
+  });
+
+  it("does not write the remote separately when the incremental path keeps it stable", async () => {
+    // Guards the else-if condition: an existing Artifacts remote syncs
+    // incrementally, syncedRemote === project.remote, so there is nothing to
+    // persist and no redundant KV write should happen.
+    //
+    // The remote MUST be a real Artifacts URL (`/git/<owner>/<repo>`) or
+    // artifactsRepoNameFromRemote returns null and this silently exercises the
+    // legacy import path instead — which is what an earlier version of this
+    // test did, passing for the wrong reason.
+    mockCheck.mockResolvedValue({
+      success: true,
+      data: { hasUpdates: true, commitsBehind: 1 },
+    });
+    mockSync.mockResolvedValue({
+      success: true,
+      data: { status: "fast-forwarded", commit: "abc1234" },
+    } as Awaited<ReturnType<typeof syncFromGitHub>>);
+    mockListProjects.mockResolvedValue({
+      success: true,
+      data: [makeProject({ remote: ARTIFACTS_REMOTE })],
+    });
+
+    const result = await syncAllProjects(makeEnv());
+
+    expect(result).toEqual({ synced: 1, failed: 0, skipped: 0 });
+    expect(mockSync).toHaveBeenCalledTimes(1);
+    expect(mockImport).not.toHaveBeenCalled();
+    expect(mockSetProject).not.toHaveBeenCalled();
   });
 
   it("counts a thrown exception as failed and continues with the remaining projects", async () => {
