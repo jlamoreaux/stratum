@@ -6,6 +6,7 @@
 import { syncOrImportProject } from "../services/project-sync";
 import { isTargetDeleting } from "../storage/deletion";
 import {
+  type SubmoduleContentReport,
   cloneRepo,
   freshRepoToken,
   importFromGitHub,
@@ -174,6 +175,28 @@ async function checkAndHandleCancellation(
 }
 
 /**
+ * Best-effort read of a just-imported repo's tree for submodule content
+ * (#258). Returns `null` when the guard could not run at all -- the read
+ * token could not be minted, the clone failed, or the tree walk failed -- so
+ * the caller can distinguish "did not scan" from "scanned, found nothing".
+ * Each underlying failure is already logged where it happens; what none of
+ * those sites can say, and the caller does, is that the submodule guard was
+ * therefore skipped for this import.
+ */
+async function readSubmoduleReport(
+  env: Env,
+  remote: string,
+  logger: Logger,
+): Promise<SubmoduleContentReport | null> {
+  const tokenResult = await freshRepoToken(env.ARTIFACTS, remote, "read", logger);
+  if (!tokenResult.success) return null;
+  const cloneResult = await cloneRepo(remote, tokenResult.data, logger);
+  if (!cloneResult.success) return null;
+  const scanResult = await scanForSubmoduleContent(cloneResult.data.fs, "main", logger);
+  return scanResult.success ? scanResult.data : null;
+}
+
+/**
  * Process a GitHub import job
  * This is the core import logic that runs within the queue consumer
  */
@@ -292,49 +315,38 @@ async function processImportJob(
     // which silently drops a gitlink on checkout (see scanForSubmoduleContent's
     // doc comment). This is the last point the imported repo is still
     // disposable, so reject here rather than completing an import a later merge
-    // could then silently corrupt. A failure to even run the scan (token mint or
-    // clone) is logged and does not block the import -- it is the same
-    // best-effort clone `writeSnapshotFromRepo` performs moments later, and an
-    // infra hiccup here should not be indistinguishable from a real rejection.
-    const scanTokenResult = await freshRepoToken(
-      env.ARTIFACTS,
-      importResult.data.remote,
-      "read",
-      logger,
-    );
-    if (scanTokenResult.success) {
-      const scanCloneResult = await cloneRepo(
-        importResult.data.remote,
-        scanTokenResult.data,
-        logger,
+    // could then silently corrupt. A failure to even run the scan does not
+    // block the import -- it is the same best-effort clone
+    // `writeSnapshotFromRepo` performs moments later, and an infra hiccup here
+    // should not be indistinguishable from a real rejection -- but it is said
+    // out loud, because "did not scan" and "scanned, found nothing" are not
+    // the same state and only one of them leaves the guard unenforced.
+    const submoduleReport = await readSubmoduleReport(env, importResult.data.remote, logger);
+    if (submoduleReport === null) {
+      logger.warn(
+        "Submodule guard skipped: could not read the imported tree; import proceeds unscanned",
+        { namespace, slug, remote: importResult.data.remote },
       );
-      if (scanCloneResult.success) {
-        const scanResult = await scanForSubmoduleContent(scanCloneResult.data.fs, "main", logger);
-        if (
-          scanResult.success &&
-          (scanResult.data.gitlinkPaths.length > 0 || scanResult.data.hasGitmodules)
-        ) {
-          const error = submoduleUnsupportedError(scanResult.data);
-          logger.warn("Rejecting import: repository contains unsupported submodule content", {
-            namespace,
-            slug,
-            gitlinkPaths: scanResult.data.gitlinkPaths,
-            hasGitmodules: scanResult.data.hasGitmodules,
-          });
-          await handleImportFailure(env, {
-            importId,
-            namespace,
-            slug,
-            githubUrl,
-            branch,
-            error,
-            startedAt,
-          });
-          await updateImportStatus(env.DB, namespace, slug, "failed", logger, error.message);
-          msg.ack();
-          return;
-        }
-      }
+    } else if (submoduleReport.gitlinkPaths.length > 0 || submoduleReport.hasGitmodules) {
+      const error = submoduleUnsupportedError(submoduleReport);
+      logger.warn("Rejecting import: repository contains unsupported submodule content", {
+        namespace,
+        slug,
+        gitlinkPaths: submoduleReport.gitlinkPaths,
+        hasGitmodules: submoduleReport.hasGitmodules,
+      });
+      await handleImportFailure(env, {
+        importId,
+        namespace,
+        slug,
+        githubUrl,
+        branch,
+        error,
+        startedAt,
+      });
+      await updateImportStatus(env.DB, namespace, slug, "failed", logger, error.message);
+      msg.ack();
+      return;
     }
 
     // Update project with actual repo info and mark import as complete

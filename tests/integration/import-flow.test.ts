@@ -760,7 +760,12 @@ describe("End-to-End Import Flow", () => {
      * runs against genuine tree objects exactly as it would against a real
      * clone of the just-imported repo.
      */
-    async function buildScannedRepo(opts: { gitlink?: boolean; gitmodules?: boolean }) {
+    async function buildScannedRepo(opts: {
+      gitlink?: boolean;
+      gitmodules?: boolean;
+      branch?: string;
+    }) {
+      const branch = opts.branch ?? "main";
       const raw = new MemoryFS();
       const fs = raw.toNodeFS();
       const gitfs = fs;
@@ -804,7 +809,7 @@ describe("End-to-End Import Flow", () => {
       await git.writeRef({
         fs: gitfs,
         dir,
-        ref: "refs/heads/main",
+        ref: `refs/heads/${branch}`,
         value: commit.oid,
         force: true,
       });
@@ -874,6 +879,53 @@ describe("End-to-End Import Flow", () => {
 
       expect(progress.data?.status).toBe("failed");
       expect(progress.data?.logs.some((log) => log.message.includes("submodule"))).toBe(true);
+    });
+
+    it("skips the guard without blocking the import when the scan cannot run", async () => {
+      // The guard is best-effort: an infra failure must not turn a healthy
+      // repo into a failed import. Each of the three ways the scan can fail
+      // to produce a report takes that path. processImportJob also warns that
+      // the guard was skipped, so "did not scan" is not silently
+      // indistinguishable from "scanned, found nothing" -- that line goes to
+      // the pino logger, which this suite has no seam to capture, so only the
+      // skip-does-not-block contract is asserted here.
+      const { freshRepoToken, cloneRepo } = await import("../../src/storage/git-ops");
+      const failure = new AppError("scan unavailable", "EXTERNAL_SERVICE_ERROR", 502);
+      const cases = [
+        {
+          name: "token mint fails",
+          arrange: async () => {
+            vi.mocked(freshRepoToken).mockResolvedValue({ success: false, error: failure });
+          },
+        },
+        {
+          name: "clone fails",
+          arrange: async () => {
+            vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+            vi.mocked(cloneRepo).mockResolvedValue({ success: false, error: failure });
+          },
+        },
+        {
+          // The scan reads the tree at `main`. A repo whose default branch is
+          // `master` has no such ref, so the walk itself fails and the guard
+          // never runs -- the concrete shape the skip takes for any imported
+          // repo that keeps a non-`main` source branch name.
+          name: "tree walk fails (repo's branch is not `main`)",
+          arrange: async () => {
+            vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+            vi.mocked(cloneRepo).mockResolvedValue({
+              success: true,
+              data: await buildScannedRepo({ branch: "master", gitlink: true }),
+            });
+          },
+        },
+      ];
+
+      for (const [index, testCase] of cases.entries()) {
+        await testCase.arrange();
+        const progress = await runImport(`scan-unavailable-${index}`);
+        expect(progress.data?.status, testCase.name).toBe("completed");
+      }
     });
 
     it("completes normally when the tree has neither a gitlink nor .gitmodules", async () => {
