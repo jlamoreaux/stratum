@@ -108,7 +108,7 @@ functionally.
 
   Whichever is chosen, the acceptance test is the same and must exist before
   the path is enabled: **user A's key must not reach user B's private
-  repository**, asserted end to end rather than at the fingerprint lookup.
+  repository**, asserted end-to-end rather than at the fingerprint lookup.
 
 ### Backend bridge
 
@@ -142,12 +142,20 @@ privileged actor. Everything that decides or grants stays in the Worker.
   duplex channel; smart HTTP splits that into ref discovery and an RPC, so
   the bridge has to bridge the shape as well as the framing:
   1. `GET /info/refs?service=git-upload-pack|git-receive-pack` for the
-     advertisement, forwarding the client's `Git-Protocol` header so
-     protocol-v2 negotiation is preserved (`proxyUpstream` forwards exactly
-     `Git-Protocol`, `Content-Type` and `Content-Encoding`, and never the
-     inbound `Authorization`). Note the advertisement differs between the
-     two transports — SSH has no `# service=` pkt-line banner or flush that
-     smart HTTP prepends — so the bridge strips or synthesizes it.
+     advertisement. Protocol-v2 negotiation has to be **translated, not
+     forwarded**: an SSH client sends no HTTP headers, it sets the
+     `GIT_PROTOCOL` environment variable on the remote command, so the
+     bridge reads that and synthesizes `Git-Protocol: version=2` on its
+     request to the Worker. (`proxyUpstream` then forwards the header it is
+     given — `Git-Protocol`, `Content-Type`, `Content-Encoding` — and never
+     the inbound `Authorization`.) Carrying that variable also constrains
+     the sshd: `GIT_PROTOCOL` only reaches the command if the server accepts
+     it (`AcceptEnv GIT_PROTOCOL`), and a bridge that silently drops it
+     leaves every client on v0 with no error to explain the loss.
+
+     The advertisement itself differs between the two transports as well —
+     SSH has no `# service=` pkt-line banner or flush that smart HTTP
+     prepends — so the bridge strips or synthesizes that too.
   2. `POST` the client's pack negotiation to the matching RPC endpoint.
      Workers cannot half-duplex stream an outbound `fetch` body, so the
      request body is buffered whole before it is sent — the same constraint
