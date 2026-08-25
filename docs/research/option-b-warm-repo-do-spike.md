@@ -99,6 +99,13 @@ yet, so every "pending" cell below awaits that run. This table must not be
 filled from local-dev numbers — `wrangler dev` latencies are not
 representative of Artifacts round-trips.
 
+Everything in this section — the table below, the per-phase breakdown, and the
+`REPO_DO_ENABLED` before/after — describes the **ordinary full-merge
+benchmark**, the harness's default mode. The two flag-selected modes take
+different code paths and are reported separately (see "Other harness modes"):
+they return before the ordinary flow runs, so neither produces the
+`commits.phases` payload this section relies on.
+
 | Metric (single repo)        | Before (Phase 0)             | After (Phase 2)              | Target |
 |-----------------------------|------------------------------|------------------------------|--------|
 | Commits/sec (N=25)          | pending staging benchmark    | pending staging benchmark    | ~20+   |
@@ -173,6 +180,22 @@ two runs need two staging configurations (or two deployments), with the flag
 `"false"` for "before" and `"true"` for "after". Record the effective
 `REPO_DO_ENABLED` value next to each result: without it the two columns cannot
 be told apart after the fact.
+
+### Other harness modes
+
+Both flags short-circuit the run before the ordinary commit → merge flow, so
+their numbers are not comparable to the table above and must be recorded on
+their own:
+
+| Mode | Drives | Results read from | Credential |
+|------|--------|-------------------|------------|
+| `--r2-bench` | `GET /api/admin/metrics/bench` per object | `GET /api/admin/metrics/bench-stats?repo=…` (the bench DO's counters) | `STRATUM_ADMIN_KEY` only — it returns before the session check, so `STRATUM_SESSION`/`STRATUM_TOKEN` are not consulted |
+| `--batch` | `POST /api/projects/{name}/changes/merge-batch` | the harness's own table | session or token, like the ordinary mode |
+
+Neither mode reads `GET /api/admin/metrics`, so neither yields the eight-span
+`commits.phases` breakdown. Reporting an `--r2-bench` or `--batch` figure in
+the Results table above would compare different work through different
+endpoints.
 
 ### Acceptance thresholds
 
