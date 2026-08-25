@@ -35,7 +35,12 @@ interface ErrorInfo {
   };
 }
 
-function classifyError(errorMessage: string): ErrorInfo {
+/**
+ * Map a raw import failure message to user-facing guidance. Exported for tests:
+ * the ORDER of these branches is load-bearing, and order is exactly what a
+ * rendering test cannot see.
+ */
+export function classifyError(errorMessage: string): ErrorInfo {
   const msg = errorMessage.toLowerCase();
 
   // Authentication errors
@@ -80,6 +85,26 @@ function classifyError(errorMessage: string): ErrorInfo {
         "Verify your internet connection",
         "The repository host might be experiencing issues - try again in a few minutes",
         "If using a corporate network, check if GitHub access is blocked by a firewall",
+      ],
+    };
+  }
+
+  // Git LFS — deliberately BEFORE the not-found branch. Stratum exposes no
+  // `/objects/lfs` or `objects/batch` route, so an LFS client's batch request
+  // falls through to the app's 404 handler and arrives here as a message
+  // containing both "not found" and "404". Classified below, the one failure
+  // this guidance exists to explain would instead tell the user to check the
+  // repository URL for typos.
+  if (msg.includes("lfs") || msg.includes("objects/batch")) {
+    return {
+      type: "GIT_ERROR",
+      title: "Git LFS Not Supported",
+      description:
+        "This repository uses Git LFS, which Stratum does not support. There is no LFS batch endpoint, so the LFS client's request fails.",
+      tips: [
+        "The rest of the repository still imports — LFS-tracked files arrive as pointer files, not their contents",
+        "Keep large binaries out of Stratum-hosted repositories, or keep an LFS-dependent repository on GitHub in layer mode",
+        "See the Git LFS section of the capabilities guide for the full limitation and workarounds",
       ],
     };
   }
@@ -134,7 +159,6 @@ function classifyError(errorMessage: string): ErrorInfo {
         "Ensure the repository is a valid Git repository",
         "Very large repositories may timeout - try importing with a shallow clone (depth: 1)",
         "Check if the repository has submodules that might be causing issues",
-        "Git LFS is not supported - repositories using LFS import as pointer files, and LFS clones/pushes against Stratum will fail",
       ],
     };
   }

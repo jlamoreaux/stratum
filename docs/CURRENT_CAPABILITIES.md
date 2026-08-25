@@ -1,7 +1,8 @@
 # Stratum Current Capabilities
 
-Last updated: 2026-06-11 — reflects completion of the master-plan feature roadmap
-(Phases 0–3 plus the code-level Phase 4 hardening items).
+Last updated: 2026-08-25 — reflects completion of the master-plan feature roadmap
+(Phases 0–3 plus the code-level Phase 4 hardening items), plus the Git LFS
+limitation recorded below.
 
 ## Core platform
 
