@@ -1523,6 +1523,11 @@ paths:
         project connected to GitHub with a configured GitHub token. Creates a
         (draft by default) PR from branch `stratum/{changeId}` and marks the
         change `promoted`.
+
+        The PR base is always the project's own recorded default branch and is
+        not accepted from the request body: this endpoint acts with the
+        instance-wide GitHub token, so honouring a caller-supplied base would
+        let any caller aim that shared credential at a branch of its choosing.
       requestBody:
         required: false
         content:
@@ -1532,7 +1537,6 @@ paths:
               properties:
                 title: { type: string }
                 body: { type: string }
-                base: { type: string, description: "Defaults to the project's default branch" }
                 draft: { type: boolean, default: true }
       responses:
         "200":
