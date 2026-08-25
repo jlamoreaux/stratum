@@ -7,7 +7,9 @@ import {
   WebhookEvaluator,
   loadPolicy,
 } from "../evaluation";
+import type { SandboxRepoAccess } from "../evaluation/sandbox-evaluator";
 import type { EvalPolicy, EvalResult, Evaluator } from "../evaluation/types";
+import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { type EventActor, emitEvent } from "../queue/events";
 import { getAgent } from "../storage/agents";
 import { createChange, updateChangeStatus } from "../storage/changes";
@@ -53,6 +55,15 @@ export async function resolveProjectHead(
   return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
 }
 
+/**
+ * Stands in for an evaluator whose prerequisites are missing.
+ *
+ * Exists so a misconfigured policy fails closed. Dropping the evaluator from
+ * the list instead would let a change be scored — and merged — by whichever
+ * evaluators happened to be wired up, with nothing in the result showing that
+ * a required one never ran. Scoring 0 with the reason naming the missing
+ * prerequisite turns silent under-evaluation into a visible failure.
+ */
 export class UnavailableEvaluator implements Evaluator {
   constructor(
     private evaluatorType: string,
@@ -76,12 +87,20 @@ export class UnavailableEvaluator implements Evaluator {
  * Build the evaluator set for a policy: the always-on blocking secret scan plus
  * whatever the policy configures. Evaluators whose binding is missing become
  * UnavailableEvaluator (score 0, fail) rather than silently vanishing.
+ *
+ * `workspaceRepo` is read access to the workspace being evaluated (remote +
+ * read token + the pinned evaluated commit); the sandbox evaluator needs it to
+ * materialize the full tree it runs the test command against. Without it — or
+ * without the SANDBOX binding (`[[sandboxes]]` in wrangler.toml, currently an
+ * ops decision) — a policy naming `sandbox` fails closed with a reason that
+ * says exactly which prerequisite is missing.
  */
 export function buildEvaluators(
   env: Env,
   policy: EvalPolicy,
   projectName: string,
   logger: Logger,
+  workspaceRepo?: SandboxRepoAccess,
 ): Array<{ type: string; evaluator: Evaluator }> {
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
@@ -103,15 +122,33 @@ export function buildEvaluators(
             },
           ];
         case "sandbox":
-          if (env.SANDBOX) {
-            return [{ type: "sandbox", evaluator: new SandboxEvaluator(env.SANDBOX) }];
+          if (!env.SANDBOX) {
+            // Fail closed with an actionable reason: the [[sandboxes]] binding
+            // is commented out in wrangler.toml until the beta is enabled, and
+            // any policy naming `sandbox` blocks merges until it is (or the
+            // evaluator is removed from the policy).
+            return [
+              {
+                type: "sandbox",
+                evaluator: new UnavailableEvaluator(
+                  "sandbox",
+                  "SANDBOX binding is not configured — enable [[sandboxes]] in wrangler.toml or remove the sandbox evaluator from the policy",
+                ),
+              },
+            ];
           }
-          return [
-            {
-              type: "sandbox",
-              evaluator: new UnavailableEvaluator("sandbox", "SANDBOX binding is not configured"),
-            },
-          ];
+          if (!workspaceRepo) {
+            return [
+              {
+                type: "sandbox",
+                evaluator: new UnavailableEvaluator(
+                  "sandbox",
+                  "workspace repository access was not provided to the evaluation pipeline",
+                ),
+              },
+            ];
+          }
+          return [{ type: "sandbox", evaluator: new SandboxEvaluator(env.SANDBOX, workspaceRepo) }];
         default:
           logger.warn(
             `Unknown evaluator type "${(cfg as { type: string }).type}" in policy for project ${projectName}`,
@@ -216,9 +253,11 @@ export async function createChangeWithEvaluation(
     workspaceName: string;
     workspaceRemote: string;
     actor: ChangeCreationActor;
+    /** Cloudflare Workers `ExecutionContext.waitUntil`, when the caller has one. */
+    waitUntil?: (promise: Promise<unknown>) => void;
   },
 ): Promise<Result<ChangeCreationOutcome, AppError>> {
-  const { project, projectName, workspaceName, workspaceRemote, actor } = args;
+  const { project, projectName, workspaceName, workspaceRemote, actor, waitUntil } = args;
   const { userId, agentId } = actor;
   // The human author: the acting user, or (for agent-authored changes) the
   // agent's owner. Excluded from the required-approval count at merge time.
@@ -333,7 +372,11 @@ export async function createChangeWithEvaluation(
     workspaceSha: workspaceHeadSha,
   } = diffResult.data;
 
-  const evaluators = buildEvaluators(env, policy, projectName, logger);
+  const evaluators = buildEvaluators(env, policy, projectName, logger, {
+    remote: workspaceRemote,
+    token: workspaceReadToken.data,
+    ref: evaluatedSha,
+  });
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
@@ -405,6 +448,24 @@ export async function createChangeWithEvaluation(
     evaluatedTreeOid,
     ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
   };
+
+  // Layer mode: report the verdict to the change's linked GitHub PR (comment +
+  // commit status). Best-effort by contract — a GitHub failure never fails the
+  // evaluation — and a no-op unless the project has a GitHub source and the
+  // change has a linked PR (freshly created changes normally don't yet).
+  // Scheduled off the request path when the caller has a waitUntil to give us.
+  const reportEvaluation = reportEvaluationToGitHub(
+    env,
+    updatedChange,
+    project,
+    buildEvaluationReport(evalResult, evalRuns),
+    logger,
+  );
+  if (waitUntil) {
+    waitUntil(reportEvaluation);
+  } else {
+    await reportEvaluation;
+  }
 
   logger.info("Change created and evaluated", {
     changeId: change.id,

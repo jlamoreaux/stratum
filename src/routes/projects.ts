@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { importRateLimitMiddleware, releaseImportLock } from "../middleware/rate-limit";
 import { emitEvent } from "../queue/events";
+import { syncOrImportProject } from "../services/project-sync";
 import { recordAudit } from "../storage/audit";
 import { captureDeletionTarget } from "../storage/deletion";
 import { createDeletionJob } from "../storage/deletion-jobs";
@@ -12,6 +13,7 @@ import {
   importFromGitHub,
   initAndPush,
   listFilesInRepo,
+  listRepoTags,
 } from "../storage/git-ops";
 import { buildAuthConfig } from "../storage/git-providers";
 import {
@@ -948,6 +950,52 @@ app.get("/:namespace/:slug/log", async (c) => {
   });
 });
 
+// GET /projects/:namespace/:slug/tags - List git tags (annotated + lightweight).
+// Annotated tags are dereferenced to their target commit; a tag whose target
+// lies outside the shallow clone window comes back with `unresolvable: true`
+// rather than failing the listing (#182).
+app.get("/:namespace/:slug/tags", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    userId: c.get("userId"),
+    path: c.req.path,
+    method: c.req.method,
+  });
+
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const { namespace, slug } = c.req.param();
+
+  const projectResult = await getProjectByPath(c.env.STATE, namespace, slug, logger);
+  if (!projectResult.success) {
+    if (projectResult.error.code === "NOT_FOUND") {
+      return notFound("Project", `${namespace}/${slug}`);
+    }
+    logger.error("Failed to get project", projectResult.error);
+    return internalError(projectResult.error.message);
+  }
+  const project = projectResult.data;
+
+  if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId)))
+    return notFound("Project", `${project.namespace}/${project.slug}`);
+
+  const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
+  if (!readToken.success) return internalError(readToken.error.message);
+  const tagsResult = await listRepoTags(project.remote, readToken.data, logger);
+  if (!tagsResult.success) {
+    logger.error("Failed to list tags", tagsResult.error);
+    return internalError(tagsResult.error.message);
+  }
+
+  logger.info("Tags retrieved", { namespace, slug, tagCount: tagsResult.data.length });
+  return ok({
+    namespace,
+    slug,
+    path: `/${namespace}/${slug}`,
+    tags: tagsResult.data,
+  });
+});
+
 // GET /projects/:namespace/:slug/provenance - Get provenance records
 app.get("/:namespace/:slug/provenance", async (c) => {
   const logger = createLogger({
@@ -1616,8 +1664,8 @@ app.get("/:namespace/:slug/sync/status", async (c) => {
   });
 });
 
-// Background sync processing
-async function processSyncJob(
+// Background sync processing (queue-less fallback). Exported for testing.
+export async function processSyncJob(
   env: Env,
   project: ProjectEntry,
   importId: string,
@@ -1639,32 +1687,37 @@ async function processSyncJob(
       "Fetching updates from remote",
     );
 
-    // Perform the sync import
-    const depth = 10; // Default depth
+    // #190: sync is an INCREMENTAL fetch into the existing Artifacts repo —
+    // never delete-and-re-import, which destroyed Stratum-native commits and
+    // orphaned workspace forks. Only projects with no recorded Artifacts remote
+    // (initial import never completed, so no forks can exist) still take the
+    // import path.
+    const depth = 10; // Default depth for the legacy import fallback
 
-    const importResult = await importFromGitHub(
+    const outcome = await syncOrImportProject(
       env.ARTIFACTS,
-      artifactsRepoName,
-      sourceUrl,
+      {
+        remote: project.remote,
+        artifactsRepoName,
+        sourceUrl,
+        branch,
+        depth,
+        logContext: { namespace, slug },
+      },
       logger,
-      branch,
-      depth,
     );
+    const syncedRemote = outcome.remote;
+    const syncError = outcome.error;
 
-    if (!importResult.success) {
-      await updateProjectSyncError(
-        env.STATE,
-        project,
-        `Sync failed: ${importResult.error.message}`,
-        logger,
-      );
+    if (syncError) {
+      await updateProjectSyncError(env.STATE, project, `Sync failed: ${syncError.message}`, logger);
       await updateImportStatus(
         env.DB,
         namespace,
         slug,
         "failed",
         logger,
-        `Sync failed: ${importResult.error.message}`,
+        `Sync failed: ${syncError.message}`,
       );
       return;
     }
@@ -1704,8 +1757,16 @@ async function processSyncJob(
       }
     }
 
-    // Update project
-    await updateProjectAfterSync(env.STATE, project, latestCommit || "unknown", logger);
+    // Update project. The remote only changes on the legacy full-import
+    // fallback — incremental sync keeps the existing repo (and thus the
+    // remote) stable. Persisting it here is required: otherwise the next sync
+    // still sees the legacy remote and re-runs the destructive full import.
+    await updateProjectAfterSync(
+      env.STATE,
+      { ...project, remote: syncedRemote },
+      latestCommit || "unknown",
+      logger,
+    );
 
     // Mark import as complete
     await updateImportStatus(
@@ -1721,7 +1782,7 @@ async function processSyncJob(
     await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
-      { remote: importResult.data.remote, namespace, slug },
+      { remote: syncedRemote, namespace, slug },
       logger,
     );
 

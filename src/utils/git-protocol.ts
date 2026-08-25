@@ -57,6 +57,9 @@ function concat(parts: Uint8Array[]): Uint8Array {
 
 const OID_RE = /^[0-9a-f]{40}$/;
 
+/** The all-zero oid: as a command's new-oid it requests a ref DELETION. */
+export const ZERO_OID = "0".repeat(40);
+
 /**
  * Parse the command section of a git-receive-pack request body: pkt-lines of
  * `old-oid new-oid refname` (the first carrying `\0capability…`), terminated by
@@ -107,6 +110,58 @@ export function parseReceivePackRequest(body: Uint8Array): Result<ReceivePackReq
     return err(new AppError("receive-pack request contains no commands", "GIT_PROTOCOL", 400));
   }
   return ok({ commands, capabilities });
+}
+
+/** Why (and on which ref) a push was refused by {@link checkWorkspacePushPolicy}. */
+export type PushPolicyVerdict = { allowed: true } | { allowed: false; ref: string; reason: string };
+
+/**
+ * Ref/force-push policy for a push proxied to a workspace fork (S3, #130).
+ *
+ * A workspace fork carries exactly one line of work, so the only refs a push
+ * may touch are the fork's working branch — `main` (what a fresh fork's clone
+ * checks out, and what every server-side flow reads/writes) and the recorded
+ * workspace branch name (`WorkspaceEntry.branchName`, falling back to the
+ * workspace name). Everything else is refused:
+ *
+ *  - ref DELETION (all-zero new-oid) — even of the working branch or a tag —
+ *    because merge/eval/staging flows assume the branch exists, and dropping a
+ *    tag silently discards a release marker;
+ *  - any other ref (other branches, refs/anything) — the fork is not a
+ *    general-purpose remote and hidden refs would bypass the change gate.
+ *
+ * `refs/tags/*` creates and updates ARE allowed: #182 shipped workspace tag
+ * pushes as a verbatim proxy, and this policy landed afterwards. Refusing them
+ * would revoke a released feature rather than harden it. A tag names a commit
+ * that is already in the fork, so it opens no path around the change gate.
+ *
+ * Force-pushes BY THE OWNER to the working branch remain allowed: ownership is
+ * enforced by the caller's authz, the fork is the owner's own line of work, and
+ * evaluation pins the exact sha it evaluated (SEC-2), so a rewritten history
+ * cannot smuggle unevaluated content into a merge.
+ */
+export function checkWorkspacePushPolicy(
+  commands: readonly ReceivePackCommand[],
+  workspaceBranch: string,
+): PushPolicyVerdict {
+  const allowedRefs = new Set(["refs/heads/main", `refs/heads/${workspaceBranch}`]);
+  for (const command of commands) {
+    if (command.newOid === ZERO_OID) {
+      return {
+        allowed: false,
+        ref: command.ref,
+        reason: "ref deletion is not permitted on a workspace fork",
+      };
+    }
+    if (!allowedRefs.has(command.ref) && !command.ref.startsWith("refs/tags/")) {
+      return {
+        allowed: false,
+        ref: command.ref,
+        reason: `only the workspace branch or a tag may be pushed (${[...allowedRefs].join(" or ")} or refs/tags/*)`,
+      };
+    }
+  }
+  return { allowed: true };
 }
 
 // side-band-64k caps a packet's payload at 65519 bytes; one byte carries the band.
