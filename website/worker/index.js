@@ -34,7 +34,15 @@ export default {
 
     if (request.method === "GET" && wantsMarkdown(request.headers.get("accept") ?? "")) {
       const path = url.pathname.replace(/\/+$/, "");
-      const markdownUrl = new URL(`${path === "" ? "/index" : path}.md`, url);
+      // Set `pathname` on a copy rather than resolving a relative URL against
+      // `url`: a request path can begin with `//` (e.g. `//example.com/x`), and
+      // `new URL("//example.com/x.md", url)` is protocol-relative, so it would
+      // resolve to a different origin entirely. Assigning `pathname` cannot
+      // change the origin, so the lookup always stays on this site.
+      const markdownUrl = new URL(url);
+      markdownUrl.pathname = `${path === "" ? "/index" : path}.md`;
+      markdownUrl.search = "";
+      markdownUrl.hash = "";
       const markdown = await env.ASSETS.fetch(new Request(markdownUrl, { method: "GET" }));
       if (markdown.ok) {
         const headers = new Headers(markdown.headers);
