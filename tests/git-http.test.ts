@@ -21,6 +21,11 @@ const OWNER_TOKEN = "stratum_user_owner000000000000000000";
 const OTHER_TOKEN = "stratum_user_other000000000000000000";
 const AGENT_TOKEN = "stratum_agent_agent00000000000000000";
 const INVALID_TOKEN = "stratum_user_invalid0000000000000000";
+// A soft-deleting owner (SA-8) and an agent owned by them: both must lose git access.
+const DELETING_TOKEN = "stratum_user_deleting00000000000000";
+const DELETING_AGENT_TOKEN = "stratum_agent_deleting0000000000000";
+// An agent whose owner cannot be resolved — auth must fail closed.
+const GHOST_AGENT_TOKEN = "stratum_agent_ghost000000000000000";
 
 // The gated-push handler calls the change-flow service; mock its two entry
 // points so these tests exercise the wire protocol, not the eval pipeline
@@ -53,15 +58,33 @@ vi.mock("../src/storage/users", () => ({
       return { success: true, data: { id: "user_owner", email: "o@x.io", username: "owner" } };
     if (token === OTHER_TOKEN)
       return { success: true, data: { id: "user_other", email: "t@x.io", username: "other" } };
+    if (token === DELETING_TOKEN)
+      return {
+        success: true,
+        data: { id: "user_owner", email: "o@x.io", username: "owner", deletingAt: "2026-01-01" },
+      };
     return { success: false, error: { message: "not found" } };
   }),
-  getUser: vi.fn(async () => ({ success: false, error: { message: "not found" } })),
+  getUser: vi.fn(async (_db: unknown, id: string) => {
+    if (id === "user_owner")
+      return { success: true, data: { id, email: "o@x.io", username: "owner" } };
+    if (id === "user_deleting_owner")
+      return {
+        success: true,
+        data: { id, email: "d@x.io", username: "deleter", deletingAt: "2026-01-01" },
+      };
+    return { success: false, error: { message: "not found" } };
+  }),
 }));
 
 vi.mock("../src/storage/agents", () => ({
   getAgentByToken: vi.fn(async (_db: unknown, token: string) => {
     if (token === AGENT_TOKEN)
       return { success: true, data: { id: "agent_1", ownerId: "user_owner" } };
+    if (token === DELETING_AGENT_TOKEN)
+      return { success: true, data: { id: "agent_2", ownerId: "user_deleting_owner" } };
+    if (token === GHOST_AGENT_TOKEN)
+      return { success: true, data: { id: "agent_3", ownerId: "user_ghost" } };
     return { success: false, error: { message: "not found" } };
   }),
 }));
@@ -281,6 +304,33 @@ describe("git smart-HTTP proxy — auth & authorization truth table (Task 2)", (
     stubFetch(() => okUpstream());
     const res = await app.fetch(req(ADVERTISE, { headers: basic(AGENT_TOKEN) }), env);
     expect(res.status).toBe(200);
+  });
+
+  it("soft-deleting owner token + private → treated as anonymous (401), no upstream call", async () => {
+    const env = makeEnv();
+    await seedProject(env, { visibility: "private" });
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await app.fetch(req(ADVERTISE, { headers: basic(DELETING_TOKEN) }), env);
+    expect(res.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("agent whose owner is soft-deleting + private → treated as anonymous (401)", async () => {
+    const env = makeEnv();
+    await seedProject(env, { visibility: "private" });
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await app.fetch(req(ADVERTISE, { headers: basic(DELETING_AGENT_TOKEN) }), env);
+    expect(res.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("agent whose owner cannot be resolved + private → fails closed (401)", async () => {
+    const env = makeEnv();
+    await seedProject(env, { visibility: "private" });
+    const fetchMock = stubFetch(() => okUpstream());
+    const res = await app.fetch(req(ADVERTISE, { headers: basic(GHOST_AGENT_TOKEN) }), env);
+    expect(res.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("non-owner token + private → 404, byte-identical to authed+missing", async () => {

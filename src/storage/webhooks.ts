@@ -95,6 +95,22 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
       );
 }
 
+/**
+ * Does this webhook belong to the given project?
+ *
+ * Scopes by the globally-unique project id when the webhook row carries one,
+ * and falls back to the free-form `project` name only for legacy rows written
+ * before project_id was backfilled. Comparing on name alone lets a same-named
+ * project in another namespace read or mutate this webhook (cross-tenant).
+ */
+export function webhookBelongsToProject(
+  webhook: Webhook,
+  project: { id: string; name: string },
+): boolean {
+  if (webhook.projectId != null) return webhook.projectId === project.id;
+  return webhook.project === project.name;
+}
+
 /** Does this webhook subscribe to the given event type? */
 export function webhookMatchesEvent(webhook: Webhook, eventType: string): boolean {
   if (webhook.events === "*") return true;
