@@ -1,0 +1,14 @@
+# build output
+dist/
+# generated types
+.astro/
+# dependencies
+node_modules/
+# copied from docs/api/openapi.yml by the sync:openapi script — not a source file
+public/openapi.yml
+# environment variables
+.env
+.env.*
+!.env.example
+# macOS-specific files
+.DS_Store

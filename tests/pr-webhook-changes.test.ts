@@ -296,11 +296,12 @@ describe("handlePullRequestReview", () => {
     };
   }
 
-  it("approved updates Change status to accepted", async () => {
+  it("approved does NOT promote the Change (approval is human-only in Stratum)", async () => {
     const env = makeEnv();
     await handlePullRequestReview(env, makeReviewPayload("approved"), logger);
 
-    expect(updateChangeStatus).toHaveBeenCalledWith(env.DB, logger, CHANGE.id, "accepted");
+    // A GitHub approval must never move a Change into a mergeable state (SA-4).
+    expect(updateChangeStatus).not.toHaveBeenCalled();
   });
 
   it("changes_requested updates Change status to needs_changes", async () => {
