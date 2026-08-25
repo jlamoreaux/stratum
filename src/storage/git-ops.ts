@@ -2379,6 +2379,70 @@ export async function importFromGitHub(
  * depth {@link cloneRepo} uses for the local clone it fetches into. */
 const SYNC_FETCH_DEPTH = 50;
 
+/**
+ * Cap on the total fetch window {@link syncFromGitHub} will grow to while
+ * retrying a merge that failed only because a shallow clone hid the common
+ * ancestor. Each retry round doubles the current window (SYNC_FETCH_DEPTH ->
+ * 100 -> 200 -> 400 -> capped here) via `git.fetch`'s `relative: true` option,
+ * which extends the shallow boundary from wherever it currently sits rather
+ * than re-fetching from the tip. 500 is a deliberate bound: large enough to
+ * reach a merge base past a few weeks of active commits on either side, small
+ * enough that a genuinely diverged repo can't drive unbounded clone work on
+ * every scheduled sync.
+ */
+const SYNC_MAX_FETCH_DEPTH = 500;
+
+/**
+ * Whether commits `ours` and `theirs` in `dir` have no single common ancestor
+ * `git.merge` can use as a merge base. isomorphic-git throws the same
+ * `MergeNotSupportedError` both for this AND for conflict shapes its diff3
+ * algorithm can't auto-resolve — the two are indistinguishable from the error
+ * alone, so this recomputes the merge base directly to tell them apart. The
+ * caller uses the result to decide whether deepening the shallow history could
+ * plausibly fix the failure, versus a hard content conflict that more history
+ * can't resolve.
+ */
+async function isMissingMergeBase(
+  fs: NodeFS,
+  dir: string,
+  ours: string,
+  theirs: string,
+): Promise<boolean> {
+  const oursOid = await fromPromise(git.resolveRef({ fs, dir, ref: ours }));
+  if (!oursOid.success) return false;
+  const bases = await fromPromise(git.findMergeBase({ fs, dir, oids: [oursOid.data, theirs] }));
+  // A read failure here isn't proof either way; treat conservatively as "not a
+  // missing-base case" rather than risk looping on an unrelated error.
+  if (!bases.success) return false;
+  return bases.data.length !== 1;
+}
+
+/**
+ * Whether `ref`'s local history currently ends at a shallow-fetch boundary
+ * (recorded in `.git/shallow`) rather than a true root — i.e. whether fetching
+ * more depth for `ref` could reveal additional ancestors. A ref whose full
+ * reachable history is already present locally cannot be deepened any
+ * further, so retrying its fetch would just repeat the same result.
+ */
+async function isRefShallow(fs: NodeFS, dir: string, ref: string): Promise<boolean> {
+  const gitdir = `${dir === "/" ? "" : dir}/.git`;
+  const shallowFile = await fromPromise(
+    fs.promises.readFile(`${gitdir}/shallow`, { encoding: "utf8" }),
+  );
+  if (!shallowFile.success) return false;
+  const boundary = new Set(
+    String(shallowFile.data)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+  if (boundary.size === 0) return false;
+  const log = await fromPromise(git.log({ fs, dir, ref, depth: -1 }));
+  if (!log.success) return false;
+  const oldest = log.data.at(-1);
+  return oldest !== undefined && boundary.has(oldest.oid);
+}
+
 export interface SourceSyncResult {
   /** "up-to-date": main already contains the source tip (no-op, nothing pushed);
    * "fast-forwarded": main advanced to the source tip; "merged": source commits
@@ -2429,15 +2493,30 @@ export async function applySourceUpdate(
     // ancestor. Anything else — corrupt objects, IO, OOM — is operational, and
     // reporting it as "your history diverged" sends the caller to debug the
     // wrong thing. Same split `mergeWorkspaceIntoProject` already applies.
-    if (
-      isGitMergeConflict(mergeResult.error) ||
-      matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)
-    ) {
+    //
+    // `MergeNotSupportedError` alone doesn't say WHICH of those it is, so
+    // `missingMergeBase` is derived independently (via `isMissingMergeBase`)
+    // and carried on the error's context — `syncFromGitHub` uses it to decide
+    // whether deepening the shallow window is worth retrying, versus a hard
+    // conflict that more history can't fix.
+    if (isGitMergeConflict(mergeResult.error)) {
       return err(
         new AppError(
           `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
           "SYNC_DIVERGED",
           409,
+          { missingMergeBase: false },
+        ),
+      );
+    }
+    if (matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)) {
+      const missingMergeBase = await isMissingMergeBase(fs, dir, "main", sourceTip);
+      return err(
+        new AppError(
+          `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
+          "SYNC_DIVERGED",
+          409,
+          { missingMergeBase },
         ),
       );
     }
@@ -2470,6 +2549,83 @@ export async function applySourceUpdate(
   return ok({ status, commit });
 }
 
+/** A deepen callback fetches `depth` MORE commits (relative to the current
+ * shallow boundary) for one side of a sync. Returns void on success so the
+ * caller re-reads history off the shared `fs`/`dir` rather than a return
+ * value. */
+export type DeepenFetch = (depth: number) => Promise<Result<void, AppError>>;
+
+/**
+ * Apply `sourceTip` onto `main` in `fs`/`dir`, retrying with a progressively
+ * deepened fetch window when `applySourceUpdate` reports a missing-merge-base
+ * failure (never for a genuine conflict — more history can't fix that, see
+ * {@link isMissingMergeBase}). Each retry round doubles the window from
+ * `startDepth`, deepening whichever side(s) {@link isRefShallow} confirms are
+ * still shallow via `deepenProject`/`deepenSource`, up to `maxDepth`.
+ * `SYNC_DIVERGED` is returned once a real conflict surfaces, once the cap is
+ * reached, or once neither side has any more local history to reveal.
+ *
+ * Kept independent of the network specifics (the caller supplies the fetch
+ * callbacks) so the retry/doubling/cap logic is testable against a real,
+ * already-populated in-memory repo — see {@link syncFromGitHub} for the
+ * production wiring (`git.fetch` with `relative: true`).
+ */
+export async function applySourceUpdateWithDeepening(
+  fs: NodeFS,
+  dir: string,
+  sourceTip: string,
+  sourceRef: string,
+  startDepth: number,
+  maxDepth: number,
+  deepen: { project: DeepenFetch; source: DeepenFetch },
+  logger: Logger,
+): Promise<Result<SourceSyncResult, AppError>> {
+  let applyResult = await applySourceUpdate(fs, dir, sourceTip, logger);
+  let window = startDepth;
+
+  while (
+    !applyResult.success &&
+    applyResult.error.code === "SYNC_DIVERGED" &&
+    applyResult.error.context?.missingMergeBase === true &&
+    window < maxDepth
+  ) {
+    const nextWindow = Math.min(window * 2, maxDepth);
+    const increment = nextWindow - window;
+
+    const [projectShallow, sourceShallow] = await Promise.all([
+      isRefShallow(fs, dir, "main"),
+      isRefShallow(fs, dir, sourceRef),
+    ]);
+    if (!projectShallow && !sourceShallow) {
+      // Neither side has more history to give — the merge base genuinely
+      // isn't there, no matter how much further we'd retry.
+      break;
+    }
+
+    logger.warn("Merge base not found within the shallow window — deepening and retrying", {
+      sourceRef,
+      window,
+      nextWindow,
+      projectShallow,
+      sourceShallow,
+    });
+
+    if (projectShallow) {
+      const deepened = await deepen.project(increment);
+      if (!deepened.success) return err(deepened.error);
+    }
+    if (sourceShallow) {
+      const deepened = await deepen.source(increment);
+      if (!deepened.success) return err(deepened.error);
+    }
+
+    window = nextWindow;
+    applyResult = await applySourceUpdate(fs, dir, sourceTip, logger);
+  }
+
+  return applyResult;
+}
+
 /**
  * Incremental sync of an EXISTING Artifacts project repo from its source git
  * URL — the non-destructive replacement for re-running the GitHub import (#190).
@@ -2482,11 +2638,17 @@ export async function applySourceUpdate(
  * network failures propagate as external-service errors.
  *
  * A shallow clone can hide the common ancestor, making isomorphic-git report a
- * merge it cannot compute — which at this layer is indistinguishable from real
- * divergence. So a `SYNC_DIVERGED` verdict from the shallow pass is retried
- * ONCE against full history before it is believed. That bound is deliberate:
- * without it, a genuinely diverged repo could drive unbounded clone work on
- * every scheduled sync.
+ * merge it cannot compute — which, from `MergeNotSupportedError` alone, is
+ * indistinguishable from real divergence. `applySourceUpdate` disambiguates the
+ * two independently (`git.findMergeBase`, see `isMissingMergeBase`); when it's
+ * a missing merge base — not a genuine conflict — the fetch window is deepened
+ * via `git.fetch`'s `relative: true`, extending whichever side(s) are actually
+ * shallow (`isRefShallow`) from their current boundary rather than re-fetching
+ * from the tip, and the merge is retried. Each round doubles the window up to
+ * {@link SYNC_MAX_FETCH_DEPTH}; `SYNC_DIVERGED` is only returned once a real
+ * conflict surfaces or the cap is reached with no merge base in sight. That
+ * bound is deliberate: without it, a genuinely diverged repo could drive
+ * unbounded fetch work on every scheduled sync.
  */
 export async function syncFromGitHub(
   artifacts: ArtifactsNamespace,
@@ -2495,40 +2657,84 @@ export async function syncFromGitHub(
   logger: Logger,
   branch = "main",
   depth = SYNC_FETCH_DEPTH,
+  maxDepth = SYNC_MAX_FETCH_DEPTH,
 ): Promise<Result<SourceSyncResult, AppError>> {
   logger.debug("Incrementally syncing from source", { remote, sourceUrl, branch, depth });
 
-  // One write-scoped token covers both the clone and the push-back.
+  // One write-scoped token covers the clone, every deepening fetch of the
+  // Artifacts side, and the push-back.
   const tokenResult = await freshRepoToken(artifacts, remote, "write", logger);
   if (!tokenResult.success) return err(tokenResult.error);
   const token = tokenResult.data;
 
-  /**
-   * Clone, fetch the source branch, and try to apply it — at one history depth.
-   *
-   * Shallow is the fast path and covers the overwhelming majority of syncs.
-   * `fullHistory` re-runs the same work unbounded, which is only worth paying
-   * for when a shallow attempt reported divergence that the missing history
-   * could explain.
-   */
-  const attempt = async (
-    fullHistory: boolean,
-  ): Promise<Result<{ applied: SourceSyncResult; fs: NodeFS; dir: string }, AppError>> => {
-    const cloneResult = await cloneRepo(remote, token, logger, { fullHistory });
-    if (!cloneResult.success) return err(cloneResult.error);
-    const { fs, dir } = cloneResult.data;
+  const cloneResult = await cloneRepo(remote, token, logger, { fullHistory: false });
+  if (!cloneResult.success) return err(cloneResult.error);
+  const { fs, dir } = cloneResult.data;
 
-    const addRemoteResult = await fromPromise(
-      git.addRemote({ fs, dir, remote: "source", url: sourceUrl }),
+  const addRemoteResult = await fromPromise(
+    git.addRemote({ fs, dir, remote: "source", url: sourceUrl }),
+  );
+  if (!addRemoteResult.success) {
+    logger.error("Failed to add source remote", addRemoteResult.error, { sourceUrl });
+    return err(
+      new ExternalServiceError("Git", "Failed to add source remote", addRemoteResult.error),
     );
-    if (!addRemoteResult.success) {
-      logger.error("Failed to add source remote", addRemoteResult.error, { sourceUrl });
+  }
+
+  const fetchResult = await fromPromise(
+    git.fetch({ fs, http, dir, remote: "source", ref: branch, singleBranch: true, depth }),
+  );
+  if (!fetchResult.success) {
+    const cause = fetchResult.error.message;
+    logger.error("Failed to fetch source branch", fetchResult.error, { sourceUrl, branch });
+    return err(
+      new ExternalServiceError(
+        "Git",
+        `Failed to fetch ${branch} from source: ${cause}`,
+        fetchResult.error,
+      ),
+    );
+  }
+
+  const tipResult = await resolveFetchedTip(
+    fs,
+    dir,
+    `refs/remotes/source/${branch}`,
+    logger,
+    "Failed to resolve fetched source ref",
+    { sourceUrl, branch },
+  );
+  if (!tipResult.success) return err(tipResult.error);
+  const sourceTip = tipResult.data;
+
+  // Deepens each side by re-fetching its already-added remote with `relative:
+  // true`, which extends the shallow boundary from wherever it currently sits
+  // instead of re-fetching from the tip. Only invoked when `isRefShallow`
+  // confirms that side actually has more local history to reveal.
+  const deepenProject: DeepenFetch = async (increment) => {
+    const result = await fromPromise(
+      git.fetch({
+        fs,
+        http,
+        dir,
+        remote: "origin",
+        ref: "main",
+        singleBranch: true,
+        depth: increment,
+        relative: true,
+        onAuth: makeAuth(token),
+      }),
+    );
+    if (!result.success) {
+      logger.error("Failed to deepen Artifacts clone history", result.error, { remote, increment });
       return err(
-        new ExternalServiceError("Git", "Failed to add source remote", addRemoteResult.error),
+        new ExternalServiceError("Git", "Failed to deepen Artifacts clone history", result.error),
       );
     }
-
-    const fetchResult = await fromPromise(
+    return ok(undefined);
+  };
+  const deepenSource: DeepenFetch = async (increment) => {
+    const result = await fromPromise(
       git.fetch({
         fs,
         http,
@@ -2536,67 +2742,49 @@ export async function syncFromGitHub(
         remote: "source",
         ref: branch,
         singleBranch: true,
-        // Omitting depth entirely fetches the whole branch; passing depth:
-        // undefined is not the same thing to isomorphic-git.
-        ...(fullHistory ? {} : { depth }),
+        depth: increment,
+        relative: true,
       }),
     );
-    if (!fetchResult.success) {
-      const cause = fetchResult.error.message;
-      logger.error("Failed to fetch source branch", fetchResult.error, { sourceUrl, branch });
+    if (!result.success) {
+      logger.error("Failed to deepen source history", result.error, {
+        sourceUrl,
+        branch,
+        increment,
+      });
       return err(
         new ExternalServiceError(
           "Git",
-          `Failed to fetch ${branch} from source: ${cause}`,
-          fetchResult.error,
+          `Failed to deepen ${branch} history from source`,
+          result.error,
         ),
       );
     }
-
-    const tipResult = await resolveFetchedTip(
-      fs,
-      dir,
-      `refs/remotes/source/${branch}`,
-      logger,
-      "Failed to resolve fetched source ref",
-      { sourceUrl, branch },
-    );
-    if (!tipResult.success) return err(tipResult.error);
-
-    const applyResult = await applySourceUpdate(fs, dir, tipResult.data, logger);
-    if (!applyResult.success) return err(applyResult.error);
-    return ok({ applied: applyResult.data, fs, dir });
+    return ok(undefined);
   };
 
-  let attemptResult = await attempt(false);
+  const applyResult = await applySourceUpdateWithDeepening(
+    fs,
+    dir,
+    sourceTip,
+    `refs/remotes/source/${branch}`,
+    depth,
+    maxDepth,
+    { project: deepenProject, source: deepenSource },
+    logger,
+  );
 
-  // A shallow clone can hide the common ancestor, so isomorphic-git reports a
-  // merge it cannot compute — indistinguishable, at this layer, from histories
-  // that genuinely diverged. Retry once with full history before accepting the
-  // verdict: the alternative is failing a sync of perfectly related histories
-  // merely because the branch point sits past the depth window.
-  //
-  // Bounded deliberately at ONE retry, and only for SYNC_DIVERGED. An
-  // operational failure would just fail again more expensively, and a genuinely
-  // diverged repo must not be able to trigger unbounded work.
-  if (!attemptResult.success && attemptResult.error.code === "SYNC_DIVERGED") {
-    logger.warn("Shallow sync reported divergence — retrying with full history", {
-      remote,
-      sourceUrl,
-      branch,
-      shallowDepth: depth,
-    });
-    attemptResult = await attempt(true);
-    if (!attemptResult.success) {
-      logger.error("Sync still failed with full history", attemptResult.error, {
+  if (!applyResult.success) {
+    if (applyResult.error.code === "SYNC_DIVERGED") {
+      logger.error("Sync diverged: no merge base within the fetch window", applyResult.error, {
         remote,
         sourceUrl,
+        maxDepth,
       });
     }
+    return err(applyResult.error);
   }
-
-  if (!attemptResult.success) return err(attemptResult.error);
-  const { applied, fs, dir } = attemptResult.data;
+  const applied = applyResult.data;
 
   if (applied.status === "up-to-date") {
     logger.info("Project already up to date with source", {

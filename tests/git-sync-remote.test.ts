@@ -22,6 +22,8 @@ vi.mock("isomorphic-git", async (importOriginal) => {
       resolveRef: vi.fn(),
       merge: vi.fn(),
       push: vi.fn(),
+      findMergeBase: vi.fn(),
+      log: vi.fn(),
     },
   };
 });
@@ -38,6 +40,12 @@ const logger = {
 
 const REMOTE = "https://acct.artifacts.cloudflare.net/git/stratum-prod/owner__repo.git";
 const SOURCE_URL = "https://github.com/owner/repo";
+
+/** Just enough of the real (mocked-away) `fs` shape to seed `.git/shallow`
+ * directly in the deepening wiring test below. */
+interface FsWithWrite {
+  promises: { writeFile: (path: string, data: string) => Promise<void> };
+}
 
 function makeArtifacts() {
   const createToken = vi.fn().mockResolvedValue({ plaintext: "tok_secret?expires=123" });
@@ -71,6 +79,12 @@ beforeEach(() => {
   vi.mocked(git.push)
     .mockReset()
     .mockResolvedValue({ ok: true } as never);
+  vi.mocked(git.findMergeBase)
+    .mockReset()
+    .mockResolvedValue([] as never);
+  vi.mocked(git.log)
+    .mockReset()
+    .mockResolvedValue([] as never);
 });
 
 describe("syncFromGitHub (incremental sync wrapper)", () => {
@@ -159,11 +173,11 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     expect(git.push).not.toHaveBeenCalled();
   });
 
-  it("fails with SYNC_DIVERGED on diverged history and never deletes the repo", async () => {
+  it("fails with SYNC_DIVERGED on a genuine conflict without retrying", async () => {
     const { artifacts, del, importFn } = makeArtifacts();
-    // A REAL conflict error: only these earn the 409. Previously this test
-    // rejected with a plain Error and still expected SYNC_DIVERGED, which is
-    // precisely the over-broad classification being fixed.
+    // A REAL conflict error: only these earn the 409. A merge base WAS found
+    // (isomorphic-git only reaches this error shape after that), so more
+    // history cannot fix it — the sync must not retry at all.
     vi.mocked(git.merge).mockRejectedValue(
       new GitErrors.MergeConflictError(["file.txt"], ["file.txt"], [], []),
     );
@@ -178,17 +192,54 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     expect(git.push).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
     expect(importFn).not.toHaveBeenCalled();
-    // Bounded: the shallow attempt plus exactly one full-history retry. A
-    // genuinely diverged repo must not be able to drive unbounded clone work.
-    expect(git.clone).toHaveBeenCalledTimes(2);
-    expect(git.merge).toHaveBeenCalledTimes(2);
+    // A genuine conflict is not a missing-merge-base case, so no deepening
+    // retry is attempted — one clone, one merge attempt.
+    expect(git.clone).toHaveBeenCalledTimes(1);
+    expect(git.merge).toHaveBeenCalledTimes(1);
+    expect(git.findMergeBase).not.toHaveBeenCalled();
   });
 
-  it("retries with full history when a shallow clone hid the common ancestor", async () => {
+  it("does not deepen when local state shows neither side is actually shallow", async () => {
     const { artifacts, del, importFn } = makeArtifacts();
-    // Shallow depth hides the branch point, so isomorphic-git cannot compute
-    // the merge and reports what looks like divergence. With full history the
-    // same merge succeeds — the histories were related all along.
+    // MergeNotSupportedError with no merge base found looks like a missing-
+    // merge-base case, but the (mocked, untouched) local repo has no
+    // `.git/shallow` boundary — i.e. nothing further to reveal by fetching
+    // more. The sync must not waste a fetch round trying anyway.
+    vi.mocked(git.merge).mockRejectedValue(new GitErrors.MergeNotSupportedError());
+    vi.mocked(git.findMergeBase).mockResolvedValue([] as never);
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.code).toBe("SYNC_DIVERGED");
+    expect(git.clone).toHaveBeenCalledTimes(1);
+    expect(git.merge).toHaveBeenCalledTimes(1);
+    // findMergeBase WAS consulted to classify the failure...
+    expect(git.findMergeBase).toHaveBeenCalledTimes(1);
+    // ...but no deepening fetch followed the initial one.
+    expect(git.fetch).toHaveBeenCalledTimes(1);
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("deepens both sides with relative fetches and retries when a shallow clone hid the common ancestor", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    const boundaryOid = "1111111111111111111111111111111111111a";
+
+    // The mocked clone/fetch leave a real `.git/shallow` boundary in the
+    // (otherwise real, in-memory) fs, so `isRefShallow` reports both the
+    // project and source refs as genuinely shallow.
+    vi.mocked(git.clone).mockImplementation((async (args: { fs: FsWithWrite; dir: string }) => {
+      const { fs, dir } = args;
+      const gitdir = `${dir === "/" ? "" : dir}/.git`;
+      await fs.promises.writeFile(`${gitdir}/shallow`, `${boundaryOid}\n`);
+    }) as never);
+    vi.mocked(git.log).mockResolvedValue([{ oid: boundaryOid }] as never);
+    vi.mocked(git.findMergeBase).mockResolvedValue([] as never);
+    // Shallow depth hides the branch point on the first attempt; once both
+    // sides are deepened the same merge succeeds — the histories were
+    // related all along.
     vi.mocked(git.merge)
       .mockRejectedValueOnce(new GitErrors.MergeNotSupportedError())
       .mockResolvedValueOnce({ oid: "merged1", fastForward: false, alreadyMerged: false });
@@ -199,15 +250,18 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     if (!result.success) return;
     expect(result.data.status).toBe("merged");
 
-    // First clone is shallow, second asks for full history.
-    expect(git.clone).toHaveBeenCalledTimes(2);
-    const secondClone = vi.mocked(git.clone).mock.calls[1]?.[0];
-    expect(secondClone).not.toHaveProperty("depth");
+    // No re-clone: the SAME clone is deepened in place.
+    expect(git.clone).toHaveBeenCalledTimes(1);
+    expect(git.merge).toHaveBeenCalledTimes(2);
 
-    // The retry fetch must also be unbounded, or deepening the Artifacts side
-    // alone still leaves the source shallow and the ancestor unreachable.
-    const secondFetch = vi.mocked(git.fetch).mock.calls[1]?.[0];
-    expect(secondFetch).not.toHaveProperty("depth");
+    // One deepening fetch per side, each doubling the 50-commit window by
+    // +50 via `relative: true` rather than jumping to full history.
+    const fetchCalls = vi.mocked(git.fetch).mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const projectDeepen = fetchCalls.find((c) => c.remote === "origin");
+    expect(projectDeepen).toMatchObject({ ref: "main", depth: 50, relative: true });
+    const sourceFetches = fetchCalls.filter((c) => c.remote === "source");
+    expect(sourceFetches).toHaveLength(2);
+    expect(sourceFetches[1]).toMatchObject({ ref: "main", depth: 50, relative: true });
 
     // Still non-destructive on the way through.
     expect(del).not.toHaveBeenCalled();
