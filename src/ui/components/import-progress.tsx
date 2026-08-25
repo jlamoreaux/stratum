@@ -68,6 +68,21 @@ const LFS_MARKERS = [
 ];
 
 /**
+ * git-lfs does not always name itself. A batch-API failure is reported as
+ * `batch response: <error>` next to the endpoint it called, and that message
+ * matches none of {@link LFS_MARKERS} — it is still git-lfs's own output,
+ * which is the rule above, so the rule covered this case and the marker list
+ * did not.
+ *
+ * Neither half is usable alone: "batch response" is ordinary English, and the
+ * endpoint is path-shaped, so on its own it would match a repository at
+ * `github.com/info/lfs/objects/batch`. Required TOGETHER they are
+ * unambiguous — a repository URL does not also carry git-lfs's response
+ * prefix — so this is an ALL-of match, unlike the ANY-of list above.
+ */
+const LFS_BATCH_RESPONSE_MARKERS = ["batch response", "/info/lfs/objects/batch"];
+
+/**
  * Map a raw import failure message to user-facing guidance. Exported for tests:
  * the ORDER of these branches is load-bearing, and order is exactly what a
  * rendering test cannot see.
@@ -131,7 +146,10 @@ export function classifyError(errorMessage: string): ErrorInfo {
   // ordinary repository names and URLs (`github.com/acme/lfs-tools`), and
   // because this branch sits ahead of not-found, a plain 404 for any such
   // repository would be answered with "this repository uses Git LFS".
-  if (LFS_MARKERS.some((marker) => msg.includes(marker))) {
+  if (
+    LFS_MARKERS.some((marker) => msg.includes(marker)) ||
+    LFS_BATCH_RESPONSE_MARKERS.every((marker) => msg.includes(marker))
+  ) {
     return {
       type: "GIT_ERROR",
       title: "Git LFS Not Supported",

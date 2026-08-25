@@ -72,6 +72,35 @@ describe("classifyError — Git LFS ordering", () => {
     expect(info.tips.join(" ").toLowerCase()).not.toContain("lfs");
   });
 
+  // git-lfs reports batch-API failures without naming itself, so this form
+  // matches none of the tool-name markers even though it is git-lfs output.
+  it("classifies a batch-response failure that never names git-lfs", () => {
+    const info = classifyError(
+      "batch response: Repository or object not found: https://github.com/acme/app.git/info/lfs/objects/batch",
+    );
+    expect(info.type).toBe("GIT_ERROR");
+    expect(info.title).toBe("Git LFS Not Supported");
+  });
+
+  it.each([
+    [
+      "endpoint path alone, no batch-response prefix",
+      "fatal: repository 'https://github.com/info/lfs/objects/batch.git' not found (404)",
+    ],
+    [
+      "batch-response prefix alone, unrelated endpoint",
+      "batch response: not found: https://github.com/acme/app.git/objects/info",
+    ],
+  ])("requires BOTH halves before treating a batch response as LFS (%s)", (_label, message) => {
+    // Either half alone is ambiguous: the path is path-shaped and can be a
+    // real repository, and "batch response" is ordinary English. Only the
+    // pair is evidence, so a single half must fall through to not-found and
+    // keep the "View Repository" action.
+    const info = classifyError(message);
+    expect(info.type).toBe("NOT_FOUND");
+    expect(info.title).toBe("Repository Not Found");
+  });
+
   it("still classifies auth failures ahead of everything else", () => {
     expect(classifyError("403 unauthorized").type).toBe("AUTH_ERROR");
   });
