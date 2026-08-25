@@ -3,6 +3,7 @@ import {
   BINARY_DECODE_COMMAND,
   SandboxEvaluator,
   type SandboxRepoAccess,
+  encodeForSandboxWrite,
   installCommandFor,
 } from "../src/evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../src/evaluation/types";
@@ -378,6 +379,28 @@ describe("installCommandFor", () => {
     ).toBe("npm ci --no-audit --no-fund");
     // A lockfile alone is still not an npm project.
     expect(installCommandFor(encodeTree([["npm-shrinkwrap.json", "{}"]]))).toBeNull();
+  });
+});
+
+describe("encodeForSandboxWrite", () => {
+  it("round-trips UTF-8 text byte-for-byte, byte-order mark included", () => {
+    // A UTF-8 BOM is three real bytes of the blob. `TextDecoder`'s default
+    // `ignoreBOM: false` swallows them, so a Windows-authored source file
+    // would reach the sandbox three bytes shorter than it is in the repo --
+    // silently, since the decode still succeeds and the text path is taken.
+    const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("hi\n")]);
+    const encoded = encodeForSandboxWrite(withBom);
+    expect(encoded.binary).toBe(false);
+    expect(new TextEncoder().encode(encoded.content)).toEqual(withBom);
+  });
+
+  it("takes the base64 path for bytes that are not valid UTF-8", () => {
+    // A lone 0xff can never appear in well-formed UTF-8, so the strict
+    // decoder must reject it rather than substitute U+FFFD.
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+    const encoded = encodeForSandboxWrite(bytes);
+    expect(encoded.binary).toBe(true);
+    expect(Uint8Array.from(atob(encoded.content), (c) => c.charCodeAt(0))).toEqual(bytes);
   });
 });
 

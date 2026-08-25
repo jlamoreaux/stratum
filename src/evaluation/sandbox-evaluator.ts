@@ -111,7 +111,12 @@ interface SandboxWriteContent {
   binary: boolean;
 }
 
-const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+// `ignoreBOM: true` is what *keeps* a leading BOM: the option name means
+// "do not treat the BOM specially", so U+FEFF survives into the decoded
+// string and re-encoding restores the original EF BB BF. The default
+// (`false`) strips it, which would silently drop three bytes from every
+// UTF-8-with-BOM file — the exact corruption this read path exists to stop.
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
  * Prepares one file's bytes for `SandboxInstance.writeFile`, whose transport
@@ -119,9 +124,9 @@ const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: fal
  * transport has no binary form for `writeFile`; see `decodeBinaryFilesScript`
  * below for the matching in-sandbox decode step). Bytes that are valid UTF-8
  * are decoded directly — lossless, since re-encoding well-formed UTF-8
- * reproduces the original bytes exactly. Anything else (the common case for a
- * binary file) is base64-encoded and flagged so the caller can queue it for
- * in-sandbox decoding.
+ * reproduces the original bytes exactly, byte-order mark included. Anything
+ * else (the common case for a binary file) is base64-encoded and flagged so
+ * the caller can queue it for in-sandbox decoding.
  */
 export function encodeForSandboxWrite(bytes: Uint8Array): SandboxWriteContent {
   try {
