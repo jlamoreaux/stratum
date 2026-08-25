@@ -106,15 +106,17 @@ different code paths and are reported separately (see "Other harness modes"):
 they return before the ordinary flow runs, so neither produces the
 `commits.phases` payload this section relies on.
 
-| Metric (single repo)        | Before (Phase 0)             | After (Phase 2)              | Target |
+| Metric (single repo)        | Before (Phase 0)             | After (Phase 1–2)            | Target |
 |-----------------------------|------------------------------|------------------------------|--------|
 | Commits/sec (N=25)          | pending staging benchmark    | pending staging benchmark    | ~20+   |
 | p50 end-to-end latency      | pending staging benchmark    | pending staging benchmark    | —      |
 | p95 end-to-end latency      | pending staging benchmark    | pending staging benchmark    | —      |
 | Clone phase share of total  | pending staging benchmark    | pending staging benchmark    | —      |
 
-Phase 2 is *designed* to remove the per-request clone by keeping the repo
-resident in the DO, so the expected warm figure is ~0. That is a prediction,
+Removing the per-request clone is **Phase 1**'s deliverable — the warm
+`RepoDO` cache, whose stated outcome is that "the clone phase drops out of the
+Phase 0 breakdown" — not Phase 2's, which adds fast-forward CAS on top. The
+expected warm figure is therefore ~0 once Phase 1 lands. That is a prediction,
 not a result: the benchmark still has to show that the warmup batch primes the
 DO and that no re-clone happens inside the measured interval. A cold start
 clones once regardless, so if the warm and cold shares turn out to differ,
@@ -189,7 +191,7 @@ their own:
 
 | Mode | Drives | Results read from | Credential |
 |------|--------|-------------------|------------|
-| `--r2-bench` | `GET /api/admin/metrics/bench` per object | `GET /api/admin/metrics/bench-stats?repo=…` (the bench DO's counters) | `STRATUM_ADMIN_KEY` only — it returns before the session check, so `STRATUM_SESSION`/`STRATUM_TOKEN` are not consulted |
+| `--r2-bench` | `POST /api/admin/metrics/bench` per object | `GET /api/admin/metrics/bench-stats?repo=…` (the bench DO's counters) | `STRATUM_ADMIN_KEY` only — it returns before the session check, so `STRATUM_SESSION`/`STRATUM_TOKEN` are not consulted |
 | `--batch` | `POST /api/projects/{name}/changes/merge-batch` | the harness's own table | session or token, like the ordinary mode |
 
 Neither mode reads `GET /api/admin/metrics`, so neither yields the eight-span

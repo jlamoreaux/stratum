@@ -707,7 +707,7 @@ clone, all in `src/storage/git-ops.ts` unless noted):
 | git push command section | 1 MiB (`MAX_COMMAND_SECTION_BYTES`) — the inflated pkt-line command list a push is inspected through, bounded so a compressed body cannot expand without limit | `src/routes/git-http.ts` |
 | REST commit payload | 25 MB aggregate (`MAX_COMMIT_BYTES`), 2000 files (`MAX_COMMIT_FILES`), 10 MB per file (`MAX_FILE_BYTES`) | `src/routes/workspaces.ts` |
 | Conflict resolution repo size | 500 files (`MAX_REPO_FILES`), 10 MB per file (`MAX_FILE_BYTES`) | `src/storage/git-ops.ts` |
-| Worker isolate memory | ~128 MB (Cloudflare Workers platform limit) — everything a request holds at once shares it: **every** clone it opens (diff holds two concurrently), the fetch buffers those clones fill, and the fully-buffered request body. The ceiling applies to their sum, not to any one of them | platform |
+| Worker isolate memory | ~128 MB (Cloudflare Workers platform limit) — the budget belongs to the **whole isolate**, not to one request. Concurrent requests share it, and each contributes every clone it opens (diff holds two at once), the fetch buffers those clones fill, and its fully-buffered request body. Peak usage is the sum across all of them | platform |
 
 `MAX_FILE_BYTES` is one constant, exported from `git-ops.ts` and enforced at
 both the REST commit route and the `commitAndPush` choke point, so the two
