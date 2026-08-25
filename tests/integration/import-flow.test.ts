@@ -9,8 +9,12 @@
  * lifecycle through the queue system.
  */
 
+import git from "isomorphic-git";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleImportQueue, queueImportJob, queueSyncJob } from "../../src/queue/import-queue";
+import { blobObject, commitObject, treeObject } from "../../src/storage/git-objects";
+import { MemoryFS } from "../../src/storage/memory-fs";
+import { placeLooseObject } from "../../src/storage/object-loader";
 import type {
   Env,
   ImportJobMessage,
@@ -194,6 +198,12 @@ vi.mock("../../src/storage/git-ops", async (importActual) => {
     ...actual,
     importFromGitHub: vi.fn(),
     syncFromGitHub: vi.fn(),
+    // Real network cloning has no place in this suite; the submodule-rejection
+    // tests below drive this mock to hand back a fully local MemoryFS clone
+    // (real git objects, no HTTP) so the REAL `scanForSubmoduleContent` runs
+    // against it exactly as it would against a genuine clone.
+    freshRepoToken: vi.fn(),
+    cloneRepo: vi.fn(),
   };
 });
 
@@ -329,12 +339,22 @@ async function createTestImportJob(
 describe("End-to-End Import Flow", () => {
   let env: Env;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     env = makeEnv();
     vi.clearAllMocks();
     mockImportJobs.clear();
     mockProjects.clear();
     mockJobIdCounter = 0;
+
+    // Default the post-import submodule scan's token mint to "fails" so
+    // existing tests that never touch it keep exercising the pre-#258
+    // behavior (the scan is best-effort and skips itself on a mint failure —
+    // see processImportJob). Tests below override this per-case.
+    const { freshRepoToken } = await import("../../src/storage/git-ops");
+    vi.mocked(freshRepoToken).mockResolvedValue({
+      success: false,
+      error: new AppError("no token in this suite", "EXTERNAL_SERVICE_ERROR", 502),
+    });
   });
 
   describe("Happy Path - Successful Import", () => {
@@ -726,6 +746,144 @@ describe("End-to-End Import Flow", () => {
         const progress = await getImportProgress(env.DB, "@userA", slug, logger);
         expect(progress.data?.status).toBe("completed");
       }
+    });
+  });
+
+  describe("Submodule rejection (#258)", () => {
+    const enc = (s: string) => new TextEncoder().encode(s);
+
+    /**
+     * Builds a fully local "clone" (real git objects in a fresh MemoryFS, no
+     * network) with `main` at a single commit, optionally containing a gitlink
+     * tree entry and/or a `.gitmodules` file. Wired in as `cloneRepo`'s mock
+     * implementation so `processImportJob`'s real `scanForSubmoduleContent`
+     * runs against genuine tree objects exactly as it would against a real
+     * clone of the just-imported repo.
+     */
+    async function buildScannedRepo(opts: { gitlink?: boolean; gitmodules?: boolean }) {
+      const raw = new MemoryFS();
+      const fs = raw.toNodeFS();
+      const gitfs = fs;
+      const dir = "/";
+      const gitdir = "/.git";
+      await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+      const entries: { mode: string; name: string; oid: string }[] = [];
+      const objects: { oid: string; bytes: Uint8Array }[] = [];
+
+      const readme = await blobObject(enc("hello\n"));
+      objects.push(readme);
+      entries.push({ mode: "100644", name: "README.md", oid: readme.oid });
+
+      if (opts.gitlink) {
+        // A gitlink lives inside a real subtree because a tree entry name
+        // cannot contain a slash (mirrors tests/squash-merge-modes.test.ts).
+        const vendorTree = await treeObject([{ mode: "160000", name: "lib", oid: "a".repeat(40) }]);
+        objects.push(vendorTree);
+        entries.push({ mode: "40000", name: "vendor", oid: vendorTree.oid });
+      }
+      if (opts.gitmodules) {
+        const gitmodules = await blobObject(
+          enc('[submodule "lib"]\n\tpath = vendor/lib\n\turl = https://example.test/lib.git\n'),
+        );
+        objects.push(gitmodules);
+        entries.push({ mode: "100644", name: ".gitmodules", oid: gitmodules.oid });
+      }
+
+      const tree = await treeObject(entries);
+      objects.push(tree);
+      const commit = await commitObject({
+        tree: tree.oid,
+        parents: [],
+        message: "seed",
+        timestamp: 1700000000,
+      });
+      objects.push(commit);
+
+      for (const o of objects) await placeLooseObject(fs, gitdir, o.oid, o.bytes);
+      await git.writeRef({
+        fs: gitfs,
+        dir,
+        ref: "refs/heads/main",
+        value: commit.oid,
+        force: true,
+      });
+
+      return { fs, dir };
+    }
+
+    async function runImport(slug: string) {
+      const { importFromGitHub } = await import("../../src/storage/git-ops");
+      vi.mocked(importFromGitHub).mockResolvedValue({
+        success: true,
+        data: {
+          remote: `https://artifacts.example.com/repos/test__${slug}`,
+          token: "tok_abc123",
+        },
+      });
+
+      const projectId = "proj_submodule";
+      await createTestImportJob(env, { namespace: "@userA", slug, status: "queued", projectId });
+
+      const message = createMockMessage<ImportJobMessage>({
+        type: "github.import",
+        importId: "import_1",
+        projectId,
+        namespace: "@userA",
+        slug,
+        githubUrl: "https://github.com/test/repo",
+        branch: "main",
+        depth: 10,
+        timestamp: new Date().toISOString(),
+      });
+      await handleImportQueue(createMockBatch([message], "stratum-imports"), env);
+
+      const { getImportProgress } = await import("../../src/storage/imports");
+      const { createLogger } = await import("../../src/utils/logger");
+      const logger = createLogger({ component: "Test" });
+      return getImportProgress(env.DB, "@userA", slug, logger);
+    }
+
+    it("rejects an import whose tree contains a gitlink entry", async () => {
+      const { freshRepoToken, cloneRepo } = await import("../../src/storage/git-ops");
+      vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+      vi.mocked(cloneRepo).mockResolvedValue({
+        success: true,
+        data: await buildScannedRepo({ gitlink: true }),
+      });
+
+      const progress = await runImport("gitlink-project");
+
+      expect(progress.data?.status).toBe("failed");
+      expect(
+        progress.data?.logs.some(
+          (log) => log.message.includes("submodule") || log.message.includes("gitlink"),
+        ),
+      ).toBe(true);
+    });
+
+    it("rejects an import whose tree contains only a .gitmodules file", async () => {
+      const { freshRepoToken, cloneRepo } = await import("../../src/storage/git-ops");
+      vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+      vi.mocked(cloneRepo).mockResolvedValue({
+        success: true,
+        data: await buildScannedRepo({ gitmodules: true }),
+      });
+
+      const progress = await runImport("gitmodules-only-project");
+
+      expect(progress.data?.status).toBe("failed");
+      expect(progress.data?.logs.some((log) => log.message.includes("submodule"))).toBe(true);
+    });
+
+    it("completes normally when the tree has neither a gitlink nor .gitmodules", async () => {
+      const { freshRepoToken, cloneRepo } = await import("../../src/storage/git-ops");
+      vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+      vi.mocked(cloneRepo).mockResolvedValue({ success: true, data: await buildScannedRepo({}) });
+
+      const progress = await runImport("clean-project");
+
+      expect(progress.data?.status).toBe("completed");
     });
   });
 });

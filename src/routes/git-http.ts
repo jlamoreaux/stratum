@@ -737,6 +737,15 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   });
   if (!outcome.success) {
     logger.error("Gated push change creation failed", outcome.error);
+    // Submodules (#258) fail closed deterministically -- re-evaluating never
+    // helps, unlike a transient diff/eval hiccup, so this gets its own
+    // permanent-rejection message instead of the generic "re-evaluate it"
+    // guidance below.
+    if (outcome.error.code === "SUBMODULES_UNSUPPORTED") {
+      return refuseAll(`push rejected: ${outcome.error.message}`, [
+        "Git submodules are not supported. Remove submodules (or flatten them into the repo) and push again.",
+      ]);
+    }
     // Post-creation failures carry the open change's id in the error context;
     // naming it steers the user to re-evaluate rather than open a duplicate.
     const stuckChangeId = outcome.error.context?.changeId;

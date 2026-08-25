@@ -1179,6 +1179,36 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     expect(vi.mocked(env.ARTIFACTS.delete)).not.toHaveBeenCalled();
   });
 
+  it("rejects a push with a permanent, non-re-evaluate message for unsupported submodule content (#258)", async () => {
+    const env = gatedEnv();
+    await seedProject(env);
+    stubFetch(() => upstreamPushOk());
+    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce(
+      err(
+        new AppError(
+          "Repository uses git submodules (found gitlink entry at vendor/lib), which Stratum does not support yet. Remove submodules and retry.",
+          "SUBMODULES_UNSUPPORTED",
+          400,
+          { changeId: "chg_stuck_submodule" },
+        ),
+      ),
+    );
+    const res = await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+    const text = await res.text();
+    expect(text).toContain("push rejected");
+    expect(text).toContain("git submodules");
+    // Unlike a transient processing failure, this is permanent -- the pusher
+    // must not be told to re-evaluate a change that can never pass.
+    expect(text).not.toContain("re-evaluate");
+  });
+
   it("cleans up the fork when the upstream transport fails", async () => {
     const env = gatedEnv();
     await seedProject(env);

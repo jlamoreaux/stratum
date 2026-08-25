@@ -5,7 +5,13 @@
 
 import { syncOrImportProject } from "../services/project-sync";
 import { isTargetDeleting } from "../storage/deletion";
-import { importFromGitHub } from "../storage/git-ops";
+import {
+  cloneRepo,
+  freshRepoToken,
+  importFromGitHub,
+  scanForSubmoduleContent,
+  submoduleUnsupportedError,
+} from "../storage/git-ops";
 import { getProviderFromUrl } from "../storage/git-providers";
 import { deleteImportJob, isImportCancelled, updateImportStatus } from "../storage/imports";
 import {
@@ -277,6 +283,58 @@ async function processImportJob(
       await recordImportCancelled(env.DB, namespace, slug, logger);
       msg.ack();
       return;
+    }
+
+    // Fail closed on git submodules (#258). The raw import above (Artifacts
+    // cloning the source directly) preserves a gitlink entry byte-for-byte, but
+    // every later consumer of this repo's tree -- squash merges, the repo
+    // browser, the sandbox evaluator -- goes through isomorphic-git/MemoryFS,
+    // which silently drops a gitlink on checkout (see scanForSubmoduleContent's
+    // doc comment). This is the last point the imported repo is still
+    // disposable, so reject here rather than completing an import a later merge
+    // could then silently corrupt. A failure to even run the scan (token mint or
+    // clone) is logged and does not block the import -- it is the same
+    // best-effort clone `writeSnapshotFromRepo` performs moments later, and an
+    // infra hiccup here should not be indistinguishable from a real rejection.
+    const scanTokenResult = await freshRepoToken(
+      env.ARTIFACTS,
+      importResult.data.remote,
+      "read",
+      logger,
+    );
+    if (scanTokenResult.success) {
+      const scanCloneResult = await cloneRepo(
+        importResult.data.remote,
+        scanTokenResult.data,
+        logger,
+      );
+      if (scanCloneResult.success) {
+        const scanResult = await scanForSubmoduleContent(scanCloneResult.data.fs, "main", logger);
+        if (
+          scanResult.success &&
+          (scanResult.data.gitlinkPaths.length > 0 || scanResult.data.hasGitmodules)
+        ) {
+          const error = submoduleUnsupportedError(scanResult.data);
+          logger.warn("Rejecting import: repository contains unsupported submodule content", {
+            namespace,
+            slug,
+            gitlinkPaths: scanResult.data.gitlinkPaths,
+            hasGitmodules: scanResult.data.hasGitmodules,
+          });
+          await handleImportFailure(env, {
+            importId,
+            namespace,
+            slug,
+            githubUrl,
+            branch,
+            error,
+            startedAt,
+          });
+          await updateImportStatus(env.DB, namespace, slug, "failed", logger, error.message);
+          msg.ack();
+          return;
+        }
+      }
     }
 
     // Update project with actual repo info and mark import as complete
@@ -906,6 +964,9 @@ function classifyError(error: Error): string {
   }
   if (message.includes("rate limit") || message.includes("429")) {
     return "RATE_LIMITED";
+  }
+  if (message.includes("submodule")) {
+    return "UNSUPPORTED_CONTENT";
   }
   if (message.includes("disk") || message.includes("quota") || message.includes("space")) {
     return "STORAGE_ERROR";

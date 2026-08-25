@@ -44,3 +44,6 @@ codes are in the [OpenAPI specification](openapi.yml).
 - `NOT_REDRIVABLE` — the deletion job is not in an incomplete state
 - `GONE` — the resource was deleted
 - `INVALID_PATH` — the requested path is invalid
+- `SUBMODULES_UNSUPPORTED` — a gitlink entry and/or `.gitmodules` file was
+  found on import or in a pushed workspace; git submodules are not supported
+  (see [Importing from GitHub](../user-guide/importing.md#unsupported-content))

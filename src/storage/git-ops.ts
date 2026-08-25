@@ -1933,6 +1933,87 @@ function mapPushError(error: AppError): Result<never, AppError> {
   return err(error);
 }
 
+export interface SubmoduleContentReport {
+  /** Paths of gitlink (mode 160000 / walk type "commit") tree entries found. */
+  gitlinkPaths: string[];
+  /** Whether a `.gitmodules` file exists at the repo root. */
+  hasGitmodules: boolean;
+}
+
+/**
+ * Scans commit `ref`'s full tree for submodule-related content Stratum does
+ * not support (#258): gitlink entries (the tree-level marker for a submodule
+ * pointer) and a `.gitmodules` file (the config git uses to declare them).
+ *
+ * This walks the TREE OBJECT, not a checked-out working copy. That matters:
+ * isomorphic-git's checkout silently ignores a gitlink entry -- it writes
+ * nothing to the working tree and raises nothing (see the `mkdir-index`/
+ * `commit-tree` cases in its checkout implementation, and MemoryFS's
+ * `MODE_GITLINK` override, which only fires for an index write that never
+ * happens on checkout). A consumer that walked the checked-out filesystem
+ * instead would see an ordinary-looking tree with the submodule quietly
+ * missing -- exactly the silent corruption #258 forbids. Reading the tree
+ * object directly is the only way to reliably detect a gitlink.
+ *
+ * Called at the two points repo content enters Stratum -- GitHub import and a
+ * gated push's change creation -- so an unsupported repo is rejected up front
+ * with a clear, structured error instead of partially importing or reaching a
+ * server-side merge.
+ */
+export async function scanForSubmoduleContent(
+  fs: NodeFS,
+  ref: string,
+  logger: Logger,
+): Promise<Result<SubmoduleContentReport, AppError>> {
+  const gitlinkPaths: string[] = [];
+  let hasGitmodules = false;
+  const walkResult = await fromPromise(
+    git.walk({
+      fs,
+      dir: DIR,
+      trees: [git.TREE({ ref })],
+      map: async (filepath, [entry]) => {
+        if (!entry) return;
+        const type = await entry.type();
+        if (type === "commit") {
+          gitlinkPaths.push(filepath);
+        } else if (type === "blob" && filepath === ".gitmodules") {
+          hasGitmodules = true;
+        }
+      },
+    }),
+  );
+  if (!walkResult.success) {
+    logger.error("Failed to scan tree for submodule content", walkResult.error, { ref });
+    return err(
+      new ExternalServiceError("Git", `Failed to scan tree at commit: ${ref}`, walkResult.error),
+    );
+  }
+  return ok({ gitlinkPaths, hasGitmodules });
+}
+
+/** Builds the standard fail-closed error for submodule content found by
+ * {@link scanForSubmoduleContent} (#258). */
+export function submoduleUnsupportedError(report: SubmoduleContentReport): AppError {
+  const found: string[] = [];
+  if (report.gitlinkPaths.length > 0) {
+    const shown = report.gitlinkPaths.slice(0, 5);
+    const rest = report.gitlinkPaths.length - shown.length;
+    found.push(
+      `gitlink entr${report.gitlinkPaths.length === 1 ? "y" : "ies"} at ${shown.join(", ")}${
+        rest > 0 ? `, and ${rest} more` : ""
+      }`,
+    );
+  }
+  if (report.hasGitmodules) found.push(".gitmodules");
+  return new AppError(
+    `Repository uses git submodules (found ${found.join(" and ")}), which Stratum does not support yet. Remove submodules and retry.`,
+    "SUBMODULES_UNSUPPORTED",
+    422,
+    { gitlinkPaths: report.gitlinkPaths, hasGitmodules: report.hasGitmodules },
+  );
+}
+
 async function listFilesAtCommit(
   fs: NodeFS,
   ref: string,
@@ -2693,6 +2774,23 @@ export async function getDiffBetweenRepos(
 
   const { fs: workspaceFs, dir: workspaceDir } = workspaceCloneResult.data;
   const { fs: baseFs } = baseCloneResult.data;
+
+  // Fail closed on submodule content (#258) before doing any further work: the
+  // base project is already vetted (import and every prior push go through this
+  // same gate), so only the incoming workspace tree needs the check. Scanning
+  // here -- ahead of the full file listing/content read below -- rejects with a
+  // clear, structured error instead of leaving a change record stuck on an
+  // opaque diff failure.
+  const submoduleScan = await scanForSubmoduleContent(workspaceFs, "main", logger);
+  if (!submoduleScan.success) return err(submoduleScan.error);
+  if (submoduleScan.data.gitlinkPaths.length > 0 || submoduleScan.data.hasGitmodules) {
+    logger.warn("Rejecting change: workspace contains unsupported submodule content", {
+      workspaceRemote,
+      gitlinkPaths: submoduleScan.data.gitlinkPaths,
+      hasGitmodules: submoduleScan.data.hasGitmodules,
+    });
+    return err(submoduleUnsupportedError(submoduleScan.data));
+  }
 
   // Resolve the workspace tip + its tree from the SAME clone the diff is computed
   // against, so callers can pin evaluation to this exact revision (#115 selects

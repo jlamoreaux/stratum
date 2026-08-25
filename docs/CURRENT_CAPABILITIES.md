@@ -80,3 +80,11 @@ Last updated: 2026-06-11 — reflects completion of the master-plan feature road
   along with the reachable history of a rotating slice of repos (coverage rotates
   across runs under a per-run cap), with a tested restore path
   (`docs/runbooks/backup-restore.md`).
+- Git submodules are not supported (#258). A gitlink tree entry (mode 160000)
+  or a `.gitmodules` file is detected and rejected at the two points repo
+  content enters Stratum — GitHub import and a gated push — with a structured
+  `SUBMODULES_UNSUPPORTED` (422) error, so a repo using submodules fails
+  closed instead of importing partially and being corrupted by a later
+  server-side merge (isomorphic-git's checkout silently drops a gitlink from
+  the materialized working tree). Recursive submodule clone/browse is future
+  work; see `docs/user-guide/importing.md#unsupported-content`.

@@ -96,3 +96,20 @@ curl -X POST "$STRATUM_HOST/api/projects/@username/repo/sync/settings" \
 Bidirectional GitHub sync — inbound webhooks and outbound PR promotion, i.e.
 **layer mode** — is covered in
 [Getting started](/guides/getting-started/#choose-your-level-of-buy-in-layer-mode-vs-alternative-mode).
+
+## Unsupported content
+
+**Git submodules are not supported.** A repository containing a gitlink tree
+entry (the `160000` mode git uses for a submodule reference) or a
+`.gitmodules` file is detected up front and the import fails with
+`status: "failed"` and a `SUBMODULES_UNSUPPORTED` error — before the project
+is ever marked imported. The same check runs on a gated push to a project's
+default branch, so a workspace containing a submodule can't be merged either.
+
+This is deliberate: git's checkout silently drops a gitlink entry when
+Stratum's server-side git layer materializes a working tree, so partially
+importing a repo with submodules would let a later merge quietly corrupt it
+rather than fail loudly. Remove submodules (or flatten them into the repo)
+before importing, or push to a workspace remote for content that never
+touches the default branch. Full submodule support (recursive clone and
+browsing) is tracked for later.
