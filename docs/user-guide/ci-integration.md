@@ -76,6 +76,23 @@ merge:
   rejected and the evaluation fails closed (score 0). Redirects are **not
   followed**; a 3xx counts as failure.
 
+Three properties of the current contract are worth knowing before you point a
+receiver at it. All three are tracked; this section describes what ships today.
+
+- **The policy is sent verbatim, `secret` values included.** Every webhook
+  receiver therefore sees the secrets of *every* webhook evaluator in the
+  policy, not just its own — and a receiver configured without a secret still
+  receives the others'. Until that is fixed ([#273](https://github.com/stratum-eng/stratum/issues/273)), do not configure two
+  webhook evaluators with different trust levels against one policy, and treat
+  a policy secret as shared with every endpoint it names.
+- **`http://` URLs are accepted**, and the HMAC authenticates the body without
+  encrypting it. Over plain HTTP the diff and the policy travel in cleartext.
+  Use an `https://` URL, and terminate TLS in front of your receiver.
+- **The payload does not name the base commit** the diff was generated
+  against. A receiver that checks out its own `main` may evaluate against a
+  newer tree than Stratum diffed, and `git apply` may succeed against the wrong
+  base. Keep the mirror pinned rather than tracking a moving branch ([#274](https://github.com/stratum-eng/stratum/issues/274)).
+
 ### Response (your endpoint → Stratum)
 
 Reply `200 OK` with JSON:
@@ -115,51 +132,110 @@ Any HTTPS service works. A minimal Node receiver that applies the diff to a
 checkout, runs tests, and answers the verdict:
 
 ```js
-// stratum-ci-receiver.mjs — run on your own infrastructure
+// stratum-ci-receiver.mjs — run on your own infrastructure, behind TLS
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const SECRET = process.env.STRATUM_WEBHOOK_SECRET;
+if (!SECRET) throw new Error("STRATUM_WEBHOOK_SECRET is required");
 const REPO_DIR = process.env.REPO_DIR; // a clone kept in sync with the project
 
+// Stay under Stratum's timeoutMs (default 10000) with room to send the reply.
+// The budget covers the WHOLE request — checkout, patch, tests — not just the
+// test run, or Stratum aborts before the verdict is written.
+const DEADLINE_MS = 9000;
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+// An explicit allowlist, never this process's env. A diff can rewrite
+// package.json or a test file, and anything inherited here is handed to that
+// code — including STRATUM_WEBHOOK_SECRET, which would let it forge verdicts.
+const CHILD_ENV = { PATH: process.env.PATH, HOME: process.env.HOME };
+
+function evaluate(diff, budgetMs) {
+  // A throwaway worktree per request. `git checkout -f .` restores tracked
+  // paths but leaves whatever `git apply` created, so a shared checkout leaks
+  // untracked files from one evaluation into the next.
+  const dir = mkdtempSync(join(tmpdir(), "stratum-eval-"));
+  const started = Date.now();
+  const left = () => Math.max(1, budgetMs - (Date.now() - started));
+  try {
+    execFileSync("git", ["-C", REPO_DIR, "worktree", "add", "--detach", dir, "HEAD"],
+      { env: CHILD_ENV, timeout: left() });
+    writeFileSync(join(dir, "change.diff"), diff);
+    execFileSync("git", ["-C", dir, "apply", "change.diff"],
+      { env: CHILD_ENV, timeout: left() });
+    execFileSync("npm", ["test", "--prefix", dir], { env: CHILD_ENV, timeout: left() });
+    return { score: 1, passed: true, reason: "tests passed" };
+  } catch (e) {
+    return { score: 0, passed: false,
+             reason: String(e.stdout || e.message).slice(0, 500) };
+  } finally {
+    try {
+      execFileSync("git", ["-C", REPO_DIR, "worktree", "remove", "--force", dir]);
+    } catch {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}
+
 createServer((req, res) => {
-  let body = "";
-  req.on("data", (c) => { body += c; });
+  const started = Date.now();
+  const chunks = [];
+  let size = 0;
+  req.on("data", (c) => {
+    // Bound the body BEFORE the signature check: this endpoint is public, and
+    // an unbounded `body += c` lets an unauthenticated sender exhaust memory.
+    size += c.length;
+    if (size > MAX_BODY_BYTES) {
+      res.writeHead(413).end();
+      req.destroy();
+      return;
+    }
+    chunks.push(c);
+  });
   req.on("end", () => {
-    // 1. Verify the HMAC signature
+    if (res.writableEnded) return;
+    const body = Buffer.concat(chunks);
+
+    // 1. Verify the HMAC over the EXACT bytes received, before parsing them.
     const expected = "sha256=" +
       createHmac("sha256", SECRET).update(body).digest("hex");
-    const got = req.headers["x-stratum-signature"] ?? "";
+    const got = Buffer.from(req.headers["x-stratum-signature"] ?? "");
     if (got.length !== expected.length ||
-        !timingSafeEqual(Buffer.from(got), Buffer.from(expected))) {
+        !timingSafeEqual(got, Buffer.from(expected))) {
       res.writeHead(401).end();
       return;
     }
 
-    // 2. Apply the diff and run the checks — fast ones only: the whole
-    //    request must finish inside Stratum's timeoutMs window.
-    const { diff } = JSON.parse(body);
-    let result;
+    // 2. Parse and validate inside error handling. Malformed JSON must be a
+    //    400, not an uncaught throw in an event handler that kills the process.
+    let diff;
     try {
-      execFileSync("git", ["-C", REPO_DIR, "checkout", "-f", "main"]);
-      writeFileSync("/tmp/change.diff", diff);
-      execFileSync("git", ["-C", REPO_DIR, "apply", "/tmp/change.diff"]);
-      execFileSync("npm", ["test", "--prefix", REPO_DIR], { timeout: 8000 });
-      result = { score: 1, passed: true, reason: "tests passed" };
-    } catch (e) {
-      result = { score: 0, passed: false,
-                 reason: String(e.stdout || e.message).slice(0, 500) };
-    } finally {
-      execFileSync("git", ["-C", REPO_DIR, "checkout", "-f", "."]);
+      const payload = JSON.parse(body.toString("utf8"));
+      if (typeof payload?.diff !== "string") throw new Error("missing diff");
+      diff = payload.diff;
+    } catch {
+      res.writeHead(400).end();
+      return;
     }
 
+    // 3. Evaluate inside what is left of the request budget.
+    const result = evaluate(diff, DEADLINE_MS - (Date.now() - started));
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result));
   });
 }).listen(8080);
 ```
+
+The worktree starts without `node_modules`, so give it the dependencies your
+suite needs — share a cache directory, symlink from the primary clone, or bake
+them into the image. `createServer` here is plain HTTP on purpose: terminate
+TLS in front of it (a reverse proxy or load balancer) rather than exposing this
+port directly, since the body carries the change diff.
 
 ### Using GitHub Actions as the executor
 
