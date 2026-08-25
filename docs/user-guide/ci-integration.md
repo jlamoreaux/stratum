@@ -172,7 +172,7 @@ if (!signatureValid(rawBody, headers["x-stratum-signature"])) {
   const { diff, policy } = JSON.parse(rawBody);
   const verdict = await yourCi(diff, policy); // whatever "run the checks" means for you
   respond(200, {
-    score: verdict.score,     // 0..100
+    score: verdict.score,     // 0..1, as in the contract above
     passed: verdict.passed,   // boolean — this is what gates the merge
     reason: verdict.reason,   // shown in the change UI
   });
