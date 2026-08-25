@@ -25,10 +25,12 @@ Basic. The user-guide FAQ states plainly: "SSH transport is not supported
   requests; it does not bind a listening socket, so nothing in the current
   deployment can answer port 22. Cloudflare has since added a path for
   inbound TCP — Spectrum accepting the connection and handing the socket to
-  a Worker — but that is a separate product to configure and its
-  availability must be confirmed before any design leans on it, so it is a
-  prerequisite to establish rather than a capability to assume (the same
-  caveat as the Containers row below).
+  a Worker's `connect(socket)` handler — announced 2026-08-03 and in
+  **private beta** at that point. So it is a separate product to configure
+  *and* an access request to win: a prerequisite to establish before any
+  design leans on it, not a capability to assume. Confirm its current
+  status when this ADR is revisited (the same caveat as the Containers row
+  below).
 
   The important part is unchanged either way: even with a socket in hand, a
   Worker is not an SSH server. Terminating SSH means a host key, key
