@@ -9,10 +9,13 @@ import {
 } from "../storage/git-ops";
 import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
 import { getUser, getUserByToken } from "../storage/users";
-import type { Env, ProjectEntry } from "../types";
+import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
+import { getWaitUntil } from "../utils/execution-ctx";
 import {
+  ZERO_OID,
   buildReportStatus,
+  checkWorkspacePushPolicy,
   parseReceivePackRequest,
   parseReportStatus,
   wantsSideband,
@@ -29,12 +32,17 @@ import { createLogger } from "../utils/logger";
  *    change is created + evaluated, and the client gets a truthful per-ref
  *    `ng` carrying the change id (main only moves through the merge gate).
  *    With the flag off — and for multi-ref/delete/non-default pushes — the
- *    push is refused in-protocol with sideband guidance.
+ *    push is refused in-protocol with sideband guidance. Refs are proxied
+ *    unfiltered on the read path, so refs/tags/* are advertised and fetchable;
+ *    tag pushes to the project remote are refused with tag-specific guidance
+ *    (#182 — the change gate cannot represent a tag).
  *  - Workspace URL `/@ns/slug/workspaces/<ws>.git` — clone/fetch (read) AND
- *    `git push` (write), proxied verbatim to the workspace's Artifacts fork.
- *    The client clones the workspace, so ref/old-oid semantics line up and
- *    Artifacts' own report-status is the truthful outcome — no parsing or
- *    synthesis needed here.
+ *    `git push` (write), proxied to the workspace's Artifacts fork. The push's
+ *    command list is parsed first and held to a ref policy (S3, #130): only
+ *    the fork's working branch may be updated and ref deletion is refused;
+ *    a passing pack is then forwarded unmodified. The client clones the
+ *    workspace, so ref/old-oid semantics line up and Artifacts' own
+ *    report-status is the truthful outcome for forwarded pushes.
  *
  * The router authenticates with the existing API-key system over HTTP Basic,
  * authorizes the caller, mints a short-lived Cloudflare Artifacts token (read or
@@ -330,7 +338,7 @@ async function authorizeWorkspace(
   c: { req: { header(name: string): string | undefined; param(name: string): string }; env: Env },
   scope: "read" | "write",
   logger: ReturnType<typeof createLogger>,
-): Promise<{ remote: string } | Response> {
+): Promise<{ remote: string; workspace: WorkspaceEntry } | Response> {
   const namespace = c.req.param("namespace");
   const slug = normalizeSlug(c.req.param("slug"));
   const workspaceName = normalizeSlug(c.req.param("workspace"));
@@ -392,7 +400,7 @@ async function authorizeWorkspace(
     return gitUnavailable("workspace");
   }
 
-  return { remote: workspace.remote };
+  return { remote: workspace.remote, workspace };
 }
 
 /**
@@ -434,6 +442,117 @@ async function readCappedBody(
   return buffer.buffer;
 }
 
+// The command section of a receive-pack request is one small pkt-line per ref.
+// When the body arrives compressed, only this bounded prefix is inflated to
+// read the commands (the pack that follows is never inflated), so a
+// decompression bomb cannot balloon memory here.
+const MAX_COMMAND_SECTION_BYTES = 1024 * 1024;
+
+/**
+ * The formats DecompressionStream accepts here. Declared locally: the Workers
+ * type surface does not export a name for it.
+ */
+type DecompressFormat = "gzip" | "deflate" | "deflate-raw";
+
+/**
+ * The bytes the receive-pack command list is parsed from: the body itself when
+ * it is plain, or a bounded inflated prefix when the client sent
+ * `Content-Encoding: gzip|deflate` (git can compress request bodies; the proxy
+ * forwards them upstream still compressed). Returns `null` when the body
+ * cannot be inspected (unknown encoding, corrupt stream) — the caller MUST
+ * fail closed, because forwarding an uninspected body would let a compressed
+ * command list bypass the ref policy.
+ */
+async function commandSectionBytes(
+  body: ArrayBuffer,
+  contentEncoding: string | undefined,
+): Promise<Uint8Array | null> {
+  const encoding = contentEncoding?.trim().toLowerCase();
+  // Cap the uncompressed path too. The compressed branch below stops inflating
+  // at MAX_COMMAND_SECTION_BYTES, so returning the whole body here left the
+  // budget enforced for gzip/deflate senders and unenforced for everyone else.
+  // Truncation is safe for the same reason it is safe there: the command
+  // section ends at the flush-pkt, the parser reads no further, and the
+  // ORIGINAL bytes are what gets forwarded upstream — this view is inspection
+  // only.
+  if (!encoding || encoding === "identity") {
+    return new Uint8Array(body, 0, Math.min(body.byteLength, MAX_COMMAND_SECTION_BYTES));
+  }
+  if (encoding !== "gzip" && encoding !== "x-gzip" && encoding !== "deflate") return null;
+
+  // `Content-Encoding: deflate` is defined as zlib-wrapped (RFC 9110), but real
+  // clients also send RAW deflate under that name. DecompressionStream("deflate")
+  // rejects the raw form outright, and this helper fails closed, so a legitimate
+  // push from such a client was refused as unreadable. Try the wrapped format
+  // first (the spec-correct one), then the raw one.
+  const formats: DecompressFormat[] =
+    encoding === "deflate" ? ["deflate", "deflate-raw"] : ["gzip"];
+  for (const format of formats) {
+    const inflated = await inflateBounded(body, format);
+    if (inflated) return inflated;
+  }
+  return null;
+}
+
+/**
+ * Inflate at most `MAX_COMMAND_SECTION_BYTES` of `body` under one format, or
+ * `null` if the stream is not that format. Each attempt builds its own stream:
+ * a ReadableStream is single-use, so a retry cannot reuse the failed one.
+ */
+async function inflateBounded(
+  body: ArrayBuffer,
+  format: DecompressFormat,
+): Promise<Uint8Array | null> {
+  try {
+    // A ReadableStream over the existing buffer, not `new Blob([body]).stream()`
+    // — the Blob constructor COPIES, so inspecting a 50 MiB push cost a second
+    // 50 MiB. This route exists to bound request resource use; allocating a
+    // full duplicate to enforce that bound defeats the point.
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(body));
+        controller.close();
+      },
+    });
+    const stream = source.pipeThrough(new DecompressionStream(format));
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (total < MAX_COMMAND_SECTION_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+    // Stop inflating once the (generous) command-section budget is read; the
+    // parser only consumes up to the flush-pkt anyway.
+    await reader.cancel().catch(() => {});
+    const out = new Uint8Array(Math.min(total, MAX_COMMAND_SECTION_BYTES));
+    let offset = 0;
+    for (const chunk of chunks) {
+      if (offset >= out.byteLength) break;
+      // Advance by what was actually copied, not the chunk's full length. The
+      // two only differ on the final, truncated chunk — after which the loop
+      // exits — so the emitted bytes were already correct either way. Keeping
+      // `offset` equal to "bytes written" makes that an invariant rather than
+      // something that happens to hold because of the break.
+      const copied = Math.min(chunk.byteLength, out.byteLength - offset);
+      out.set(chunk.subarray(0, copied), offset);
+      offset += copied;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function malformedPush(message: string): Response {
+  return new Response(`${message}\n`, {
+    status: 400,
+    headers: { "Content-Type": "text/plain" },
+  });
+}
+
 export const gitHttpRouter = new Hono<{ Bindings: Env }>();
 
 // GET /@:namespace/:slug.git/info/refs?service=git-(upload|receive)-pack
@@ -469,8 +588,6 @@ gitHttpRouter.post("/:namespace/:slug/git-upload-pack", async (c) => {
   const upstreamUrl = `${result.project.remote}/${UPLOAD_PACK}`;
   return proxyUpstream(c, result.project.remote, "read", upstreamUrl, "POST", body, logger);
 });
-
-const ZERO_OID = "0".repeat(40);
 
 /** The report-status Content-Type git expects on the receive-pack reply. */
 function receivePackResult(body: Uint8Array): Response {
@@ -592,13 +709,15 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   const body = await readCappedBody(c, logger);
   if (body instanceof Response) return body;
 
-  const parsed = parseReceivePackRequest(new Uint8Array(body));
+  const section = await commandSectionBytes(body, c.req.header("Content-Encoding"));
+  if (section === null) {
+    logger.warn("Unreadable receive-pack request body (encoding)");
+    return malformedPush("unreadable git-receive-pack request body");
+  }
+  const parsed = parseReceivePackRequest(section);
   if (!parsed.success) {
     logger.warn("Malformed receive-pack request", { error: parsed.error.message });
-    return new Response(`${parsed.error.message}\n`, {
-      status: 400,
-      headers: { "Content-Type": "text/plain" },
-    });
+    return malformedPush(parsed.error.message);
   }
 
   const { commands, capabilities } = parsed.data;
@@ -615,6 +734,29 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
         sideband,
       }),
     );
+
+  // Tag policy (#182): tag READS work everywhere — info/refs and upload-pack are
+  // proxied unfiltered, so refs/tags/* are advertised and fetchable on both the
+  // project and workspace remotes, and tag PUSHES to workspace forks proxy
+  // verbatim. A tag push to the PROJECT remote, however, is refused explicitly:
+  // the project repo's refs only move through Stratum's gates, and the change
+  // gate cannot represent a tag (a change is an evaluated diff against the
+  // default branch; a tag ref has nothing to evaluate or merge). Refusing with a
+  // tag-specific reason beats the generic branch guidance, which would
+  // misleadingly suggest the gate could carry the tag through.
+  const tagRefs = commands.filter((cmd) => cmd.ref.startsWith("refs/tags/"));
+  if (tagRefs.length > 0) {
+    logger.info("Refusing project tag push in-protocol", {
+      refs: tagRefs.map((cmd) => cmd.ref),
+    });
+    return refuseAll(
+      "tag pushes to the project remote are not supported — push tags to a workspace remote",
+      [
+        "Project tags are read-only over this remote (clone/fetch delivers them).",
+        `Push tags to a workspace remote instead: /${namespace}/${slug}/workspaces/<ws>.git`,
+      ],
+    );
+  }
 
   const gatedEnabled = c.env.GIT_PUSH_GATED_ENABLED === "true";
   // Same default-branch resolution the merge/sync paths use — a repo imported
@@ -706,6 +848,7 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
     workspaceName: forkedName,
     workspaceRemote: forkResult.data.remote,
     actor,
+    waitUntil: getWaitUntil(c),
   });
   if (!outcome.success) {
     logger.error("Gated push change creation failed", outcome.error);
@@ -784,6 +927,51 @@ gitHttpRouter.post("/:namespace/:slug/workspaces/:workspace/git-receive-pack", a
 
   const body = await readCappedBody(c, logger);
   if (body instanceof Response) return body;
+
+  // S3 (#130): inspect the client's ref-update commands BEFORE anything is
+  // forwarded — the proxy previously relayed the body verbatim, letting the
+  // fork's owner delete refs or push arbitrary refs/*. An empty body carries
+  // no commands (nothing to police) and is proxied as before; anything else
+  // must parse, pass the ref policy, or be refused without touching upstream.
+  if (body.byteLength > 0) {
+    const section = await commandSectionBytes(body, c.req.header("Content-Encoding"));
+    if (section === null) {
+      logger.warn("Unreadable workspace receive-pack body (encoding)");
+      return malformedPush("unreadable git-receive-pack request body");
+    }
+    const parsed = parseReceivePackRequest(section);
+    if (!parsed.success) {
+      logger.warn("Malformed workspace receive-pack request", { error: parsed.error.message });
+      return malformedPush(parsed.error.message);
+    }
+
+    const branch = result.workspace.branchName || result.workspace.name;
+    const verdict = checkWorkspacePushPolicy(parsed.data.commands, branch);
+    if (!verdict.allowed) {
+      logger.warn("Workspace push refused by ref policy", {
+        ref: verdict.ref,
+        reason: verdict.reason,
+      });
+      // In-protocol refusal (same shape as the gated project path): per-ref ng
+      // so `git push` fails legibly, and the pack is never forwarded.
+      return receivePackResult(
+        buildReportStatus({
+          unpack: "ok",
+          results: parsed.data.commands.map((cmd) => ({
+            ref: cmd.ref,
+            ok: false,
+            reason: verdict.reason,
+          })),
+          messages: [
+            `Refused: ${verdict.reason} (ref ${verdict.ref}).`,
+            "A workspace remote accepts updates to its working branch only.",
+          ],
+          sideband: wantsSideband(parsed.data.capabilities),
+        }),
+      );
+    }
+  }
+
   const upstreamUrl = `${result.remote}/${RECEIVE_PACK}`;
   return proxyUpstream(c, result.remote, "write", upstreamUrl, "POST", body, logger);
 });

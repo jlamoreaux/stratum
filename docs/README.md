@@ -30,6 +30,7 @@ docs/
 │   ├── README.md                       # User guide overview
 │   ├── getting-started.md              # First steps tutorial
 │   ├── importing.md                    # GitHub import guide
+│   ├── ci-integration.md               # Bring-your-own-CI guide
 │   ├── troubleshooting.md              # Problem solving
 │   └── faq.md                          # Frequently asked questions
 ├── developer/                          # Developer Documentation
@@ -45,7 +46,8 @@ docs/
 │   ├── 002-queue-based-imports.md
 │   ├── 003-d1-for-import-state.md
 │   ├── 004-high-frequency-agent-commits.md
-│   └── 005-git-smart-http-proxy.md
+│   ├── 005-git-smart-http-proxy.md
+│   └── 006-ssh-transport.md
 ├── research/                           # Research notes
 │   ├── github-alternatives-pain-points.md
 │   ├── master-plan-alignment.md
@@ -65,7 +67,7 @@ docs/
 ### For Everyone
 
 **Current Priorities & Roadmap:**
-- [TODO.md](/TODO.md) - Current priorities and what's being worked on
+- [TODO.md](../TODO.md) - Current priorities and what's being worked on
 - [CURRENT_CAPABILITIES.md](CURRENT_CAPABILITIES.md) - What the platform can do today
 - [REMAINING_WORK.md](REMAINING_WORK.md) - Known remaining work
 
@@ -75,6 +77,7 @@ docs/
 1. [User Guide Overview](user-guide/README.md)
 2. [Getting Started](user-guide/getting-started.md)
 3. [Importing from GitHub](user-guide/importing.md)
+4. [CI Integration (Bring Your Own CI)](user-guide/ci-integration.md)
 
 **Help:**
 - [Troubleshooting](user-guide/troubleshooting.md)
@@ -114,13 +117,14 @@ docs/
 - [ADR 003: D1 for Import State](adr/003-d1-for-import-state.md)
 - [ADR 004: High-Frequency Agent Commits to a Shared Repo](adr/004-high-frequency-agent-commits.md)
 - [ADR 005: Native `git push` via a Smart-HTTP Proxy](adr/005-git-smart-http-proxy.md)
+- [ADR 006: SSH Transport for Git](adr/006-ssh-transport.md)
 
 **Historical Reference:**
 - [Archived Documents](archive/README.md) - Code reviews, audits, etc.
 
 ## Documentation Status
 
-"Last Updated" is the date of the last substantive commit touching the document (as of this table's refresh on 2026-08-18). "Outline" means the document exists but is a short stub that needs to be fleshed out.
+"Last Updated" is the date of the last substantive commit touching the document. The table was last refreshed in full on 2026-08-18; individual rows are updated as their documents change, so a row may be newer than that. "Outline" means the document exists but is a short stub that needs to be fleshed out.
 
 | Document | Status | Priority | Last Updated |
 |----------|--------|----------|--------------|
@@ -139,7 +143,7 @@ docs/
 | Developer - Queues | 🚧 Outline | Medium | 2026-06-16 |
 | Developer - Testing | 🚧 Outline | Medium | 2026-06-16 |
 | Developer - Deployment | ✅ Complete | Medium | 2026-08-07 |
-| ADRs (001-005) | ✅ Complete | Low | 2026-08-18 |
+| ADRs (001-006) | ✅ Complete | Low | 2026-08-25 |
 
 **Legend:** ✅ Complete | 🚧 Outline / In Progress | 📋 Planned
 
