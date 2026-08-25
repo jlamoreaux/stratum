@@ -2,6 +2,7 @@ import git from "isomorphic-git";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { snapshotRepo, walkRepoObjects } from "../src/backup/repo-snapshot";
 import {
+  MAX_TAGS,
   type NodeFS,
   cloneRepo,
   collectRepoTags,
@@ -418,7 +419,6 @@ describe("cloneRepo includeTags", () => {
     mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
       await buildRepo(dir, [{ "a.txt": "one" }], fs);
     });
-    const MAX_TAGS = 500; // matches the private constant in git-ops.ts
     const manyTags: Record<string, string> = {};
     for (let i = 0; i < MAX_TAGS + 37; i++) {
       manyTags[`t${String(i).padStart(5, "0")}`] = i.toString(16).padStart(40, "0");
@@ -566,7 +566,6 @@ describe("listRepoTags", () => {
     mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
       await buildRepo(dir, [{ "a.txt": "one" }], fs);
     });
-    const MAX_TAGS = 500; // matches the private constant in git-ops.ts
     const manyTags: Record<string, string> = {};
     for (let i = 0; i < MAX_TAGS + 10; i++) {
       manyTags[`t${String(i).padStart(5, "0")}`] = i.toString(16).padStart(40, "0");

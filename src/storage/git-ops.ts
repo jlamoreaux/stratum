@@ -469,8 +469,18 @@ export async function initAndPush(
  * would turn one clone into an unbounded number of requests. Truncation is
  * never silent: it is reported on the clone result (`tagsTruncated`,
  * `totalTagCount`) so `listRepoTags` and its callers can surface it (#241).
+ *
+ * Sized against the Workers subrequest budget, not picked round: one
+ * isomorphic-git fetch is TWO subrequests (a GET of
+ * `/info/refs?service=git-upload-pack`, then a POST to `/git-upload-pack`), so
+ * the loop below costs `2 * MAX_TAGS` on top of the clone's own pair and the
+ * `getRemoteInfo` handshake. At 500 that is ~1003 — on the nose of the
+ * ~1000-subrequest cap this codebase budgets against elsewhere (see the note in
+ * `src/storage/state.ts`), which would kill the request outright instead of
+ * degrading. 200 keeps the tag walk near 400 and leaves the rest of the request
+ * room to breathe; repos above it degrade visibly through `truncated`.
  */
-const MAX_TAGS = 500;
+export const MAX_TAGS = 200;
 
 /**
  * Clones the `main` branch of a repository into an in-memory filesystem.
