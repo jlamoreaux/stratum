@@ -13,11 +13,14 @@ Stratum can execute code in exactly three places, all driven by
 
 ### 1. The sandbox evaluator
 
-The `sandbox` evaluator (`src/evaluation/sandbox-evaluator.ts`) writes the
-added lines of the change's diff into a fresh Cloudflare Sandbox and runs a
-command there (default `npm test`, default timeout 60s, configurable via
-`command` and `timeoutMs`). Exit code 0 scores 1.0; otherwise the test
-output is parsed for `N passed / M failed` counts to derive a partial score.
+The `sandbox` evaluator (`src/evaluation/sandbox-evaluator.ts`) materializes
+the **full workspace tree at the evaluated commit** — the same tree the merge
+would land — into a fresh Cloudflare Sandbox and runs a command there (default
+`npm test`, default timeout 60s, configurable via `command` and `timeoutMs`).
+If the tree carries a `package.json` it installs first, using `npm ci` when a
+lockfile is present and `npm install` otherwise. Exit code 0 scores 1.0;
+otherwise the test output is parsed for `N passed / M failed` counts to derive
+a partial score.
 
 It **requires the optional `SANDBOX` binding**. If a policy names a `sandbox`
 evaluator and the binding is absent, the evaluator does not silently
@@ -25,8 +28,14 @@ disappear — it is replaced with an "unavailable" evaluator that returns
 score 0 / failed (see `buildEvaluators` in `src/services/change-flow.ts`).
 In other words, it **fails closed**.
 
-Note the sandbox sees only the diff's added lines reconstructed as files, not
-a full checkout — it is a smoke-check, not a full CI environment.
+The evaluator's `diff` argument is ignored on purpose: an earlier version
+reconstructed a pseudo-tree from the diff's `+` lines, which could not run a
+real suite — no base tree, no untouched sources, no `package.json` unless it
+happened to change. The tree is read from the repo instead.
+
+It is still not a general CI environment — one command, one timeout, no
+matrix, no artifacts, no caching between runs — but it does run against real
+sources rather than a reconstruction.
 
 ### 2. The `webhook` evaluator — your CI, called synchronously
 
@@ -159,14 +168,19 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const CHILD_ENV = { PATH: process.env.PATH, HOME: process.env.HOME };
 
 function evaluate(diff, budgetMs) {
-  // A throwaway worktree per request. `git checkout -f .` restores tracked
-  // paths but leaves whatever `git apply` created, so a shared checkout leaks
-  // untracked files from one evaluation into the next.
-  const dir = mkdtempSync(join(tmpdir(), "stratum-eval-"));
   const started = Date.now();
   const left = () => Math.max(1, budgetMs - (Date.now() - started));
+  // `dir` is created INSIDE the try. mkdtempSync throws on a full or
+  // read-only /tmp, and this runs inside a `req.on("end", ...)` handler, so a
+  // throw out here would be an uncaught exception that kills the process
+  // rather than a failed evaluation.
+  let dir = null;
   let result;
   try {
+    // A throwaway worktree per request. `git checkout -f .` restores tracked
+    // paths but leaves whatever `git apply` created, so a shared checkout
+    // leaks untracked files from one evaluation into the next.
+    dir = mkdtempSync(join(tmpdir(), "stratum-eval-"));
     execFileSync("git", ["-C", REPO_DIR, "worktree", "add", "--detach", dir, "HEAD"],
       { env: CHILD_ENV, timeout: left() });
     writeFileSync(join(dir, "change.diff"), diff);
@@ -186,6 +200,8 @@ function evaluate(diff, budgetMs) {
 }
 
 function cleanup(dir) {
+  // `dir` is null when mkdtempSync itself failed — nothing was created.
+  if (!dir) return;
   try {
     execFileSync("git", ["-C", REPO_DIR, "worktree", "remove", "--force", dir],
       { env: CHILD_ENV, timeout: CLEANUP_MS });
@@ -198,11 +214,27 @@ createServer((req, res) => {
   const started = Date.now();
   const chunks = [];
   let size = 0;
+
+  // An ABSOLUTE deadline, not an inactivity timeout. A sender that dribbles
+  // one byte every few seconds keeps the socket active indefinitely while
+  // holding a connection and the memory behind it; only a wall-clock timer
+  // bounds that. It is cleared on every terminal path so a finished request
+  // cannot be killed after the fact.
+  const deadline = setTimeout(() => {
+    if (!res.writableEnded) res.writeHead(408).end();
+    req.destroy();
+  }, DEADLINE_MS);
+  const done = () => clearTimeout(deadline);
+  req.on("aborted", done);
+  req.on("error", done);
+  res.on("close", done);
+
   req.on("data", (c) => {
     // Bound the body BEFORE the signature check: this endpoint is public, and
     // an unbounded `body += c` lets an unauthenticated sender exhaust memory.
     size += c.length;
     if (size > MAX_BODY_BYTES) {
+      done();
       res.writeHead(413).end();
       req.destroy();
       return;
@@ -210,6 +242,7 @@ createServer((req, res) => {
     chunks.push(c);
   });
   req.on("end", () => {
+    done();
     if (res.writableEnded) return;
     const body = Buffer.concat(chunks);
 
