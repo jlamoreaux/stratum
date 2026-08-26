@@ -225,6 +225,7 @@ export class GitHubProvider implements GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<RepoMetadata>> {
     try {
       const url = this.buildApiUrl(`/repos/${owner}/${repo}`);
@@ -233,6 +234,7 @@ export class GitHubProvider implements GitProviderClient {
       const response = await fetch(url, {
         method: "GET",
         headers: this.buildHeaders(auth),
+        ...(signal ? { signal } : {}),
       });
 
       if (!response.ok) {
@@ -301,8 +303,9 @@ export class GitHubProvider implements GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<string>> {
-    const metadataResult = await this.getRepoMetadata(owner, repo, auth, logger);
+    const metadataResult = await this.getRepoMetadata(owner, repo, auth, logger, signal);
 
     if (!metadataResult.success || !metadataResult.data) {
       return {

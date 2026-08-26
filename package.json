@@ -1,6 +1,10 @@
 {
   "name": "stratum",
   "version": "0.1.0",
+  "engines": {
+    "//": "node:sqlite is unflagged only from 22.13.0; tests/helpers/sqlite-d1.ts imports it.",
+    "node": ">=22.13.0"
+  },
   "private": true,
   "license": "MIT",
   "description": "A code collaboration platform for the AI engineering era, built on Cloudflare Workers.",
