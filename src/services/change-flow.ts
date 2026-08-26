@@ -223,6 +223,9 @@ type RecordedEvalRuns = Extract<
 export interface ChangeCreationActor {
   userId?: string;
   agentId?: string;
+  /** When the actor is an agent, its owning user. Recorded as the change's
+   * human author so the owner's approval cannot satisfy requiredApprovals. */
+  agentOwnerId?: string;
 }
 
 export interface ChangeCreationOutcome {
@@ -256,6 +259,9 @@ export async function createChangeWithEvaluation(
 ): Promise<Result<ChangeCreationOutcome, AppError>> {
   const { project, projectName, workspaceName, workspaceRemote, actor, waitUntil } = args;
   const { userId, agentId } = actor;
+  // The human author: the acting user, or (for agent-authored changes) the
+  // agent's owner. Excluded from the required-approval count at merge time.
+  const createdByUserId = userId ?? actor.agentOwnerId;
 
   const baseSha = await resolveProjectHead(env, project, logger);
 
@@ -288,6 +294,7 @@ export async function createChangeWithEvaluation(
     ...(baseSha !== null ? { baseSha } : {}),
     ...(agentModel !== undefined ? { agentModel } : {}),
     ...(agentPromptHash !== undefined ? { agentPromptHash } : {}),
+    ...(createdByUserId !== undefined ? { createdByUserId } : {}),
   });
   if (!changeResult.success) {
     logger.error("Failed to create change", changeResult.error);
