@@ -29,37 +29,46 @@ interface IssuesPageProps {
  * Previous/next links for a page bounded by a fixed limit. `hasNext` comes from
  * reading one row past the limit, so there is no total to show — the label
  * carries the 1-based page number rather than "of N".
+ *
+ * `order` is the chronological direction of the underlying query, and it decides
+ * which way the labels point. The issue list is newest-first (`desc`), so a
+ * higher page holds older rows; comments are oldest-first (`asc`), so a higher
+ * page holds *newer* rows. Labelling both the same way would send the reader the
+ * wrong direction on one of them.
  */
-const PageNav: FC<{ base: string; keep: string; page: number; hasNext: boolean }> = ({
-  base,
-  keep,
-  page,
-  hasNext,
-}) => {
+const PageNav: FC<{
+  base: string;
+  keep: string;
+  page: number;
+  hasNext: boolean;
+  order?: "asc" | "desc";
+}> = ({ base, keep, page, hasNext, order = "desc" }) => {
   if (page === 0 && !hasNext) return null;
   const href = (target: number) => {
     const params = [...(keep ? [keep] : []), ...(target > 0 ? [`page=${target}`] : [])].join("&");
     return params ? `${base}?${params}` : base;
   };
+  const prevLabel = order === "asc" ? "← Older" : "← Newer";
+  const nextLabel = order === "asc" ? "Newer →" : "Older →";
   return (
     <nav class="page-nav" aria-label="Pagination">
       {page > 0 ? (
         <a class="btn" href={href(page - 1)} rel="prev">
-          ← Newer
+          {prevLabel}
         </a>
       ) : (
         <span class="btn btn-disabled" aria-disabled="true">
-          ← Newer
+          {prevLabel}
         </span>
       )}
       <span class="issues-meta">Page {page + 1}</span>
       {hasNext ? (
         <a class="btn" href={href(page + 1)} rel="next">
-          Older →
+          {nextLabel}
         </a>
       ) : (
         <span class="btn btn-disabled" aria-disabled="true">
-          Older →
+          {nextLabel}
         </span>
       )}
     </nav>
@@ -295,6 +304,7 @@ export const IssueDetailPage: FC<IssueDetailPageProps> = ({
           keep=""
           page={commentPage}
           hasNext={commentsHasNext}
+          order="asc"
         />
         {user ? (
           <div class="card">

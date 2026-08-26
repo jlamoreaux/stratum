@@ -125,4 +125,25 @@ describe("IssueDetailPage comment pagination", () => {
     expect(html).not.toContain("1 comment<");
     expect(html).toContain("Comments");
   });
+
+  /**
+   * Comments are read oldest-first, so page 1 holds *newer* comments than page
+   * 0 — the opposite of the newest-first issue list. Sharing the list's labels
+   * pointed the reader backwards through the thread.
+   */
+  it("labels the next comment page as newer, not older", () => {
+    const html = renderDetail({ commentsHasNext: true, commentPage: 1 });
+    expect(html).toContain("Newer →");
+    expect(html).toContain("← Older");
+    expect(html).not.toContain("Older →");
+    expect(html).not.toContain("← Newer");
+  });
+
+  it("keeps the newest-first labelling on the issue list", () => {
+    const html = renderList({ hasNext: true, page: 1 });
+    expect(html).toContain("Older →");
+    expect(html).toContain("← Newer");
+    expect(html).not.toContain("Newer →");
+    expect(html).not.toContain("← Older");
+  });
 });
