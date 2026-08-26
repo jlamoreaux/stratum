@@ -39,7 +39,7 @@ import {
   updateProjectSyncError,
 } from "../storage/sync";
 import type { ArtifactsCreateResult, Env, ProjectEntry } from "../types";
-import { getArtifactsRepoName } from "../types";
+import { getArtifactsRepoName, projectDefaultBranch } from "../types";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
 import { canReadProject, filterReadableProjects, isDirectOwner } from "../utils/authz";
 import { createLogger } from "../utils/logger";
@@ -776,7 +776,12 @@ async function processImportJob(
     await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
-      { remote: updatedProject.remote, namespace, slug },
+      {
+        remote: updatedProject.remote,
+        namespace,
+        slug,
+        defaultBranch: projectDefaultBranch(updatedProject),
+      },
       logger,
     );
 
@@ -836,7 +841,12 @@ app.get("/:namespace/:slug/files", async (c) => {
 
   const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
   if (!readToken.success) return internalError(readToken.error.message);
-  const filesResult = await listFilesInRepo(project.remote, readToken.data, logger);
+  const filesResult = await listFilesInRepo(
+    project.remote,
+    readToken.data,
+    logger,
+    projectDefaultBranch(project),
+  );
   if (!filesResult.success) {
     logger.error("Failed to list files in repo", filesResult.error);
     return internalError(filesResult.error.message);
@@ -882,7 +892,13 @@ app.get("/:namespace/:slug/content", async (c) => {
 
   const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
   if (!readToken.success) return internalError(readToken.error.message);
-  const contentResult = await getFileContent(project.remote, readToken.data, filePath, logger);
+  const contentResult = await getFileContent(
+    project.remote,
+    readToken.data,
+    filePath,
+    logger,
+    projectDefaultBranch(project),
+  );
   if (!contentResult.success) {
     return internalError(contentResult.error.message);
   }
@@ -930,7 +946,13 @@ app.get("/:namespace/:slug/log", async (c) => {
   const depth = Number(c.req.query("depth") ?? 20);
   const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
   if (!readToken.success) return internalError(readToken.error.message);
-  const logResult = await getCommitLog(project.remote, readToken.data, logger, depth);
+  const logResult = await getCommitLog(
+    project.remote,
+    readToken.data,
+    logger,
+    depth,
+    projectDefaultBranch(project),
+  );
   if (!logResult.success) {
     logger.error("Failed to get commit log", logResult.error);
     return internalError(logResult.error.message);
@@ -1486,7 +1508,7 @@ app.post("/:namespace/:slug/sync", async (c) => {
 
   // Create a new import job for the sync
   const importId = generateProjectId();
-  const branch = project.sourceDefaultBranch || project.githubDefaultBranch || "main";
+  const branch = projectDefaultBranch(project);
   const createResult = await createImportJob(
     c.env.DB,
     {
@@ -1782,7 +1804,7 @@ export async function processSyncJob(
     await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
-      { remote: syncedRemote, namespace, slug },
+      { remote: syncedRemote, namespace, slug, defaultBranch: projectDefaultBranch(project) },
       logger,
     );
 

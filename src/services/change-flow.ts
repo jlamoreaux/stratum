@@ -23,7 +23,13 @@ import {
 } from "../storage/git-ops";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import { setWorkspace } from "../storage/state";
-import { type Change, type Env, type ProjectEntry, getArtifactsRepoName } from "../types";
+import {
+  type Change,
+  type Env,
+  type ProjectEntry,
+  getArtifactsRepoName,
+  projectDefaultBranch,
+} from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
@@ -51,7 +57,13 @@ export async function resolveProjectHead(
   }
   const readToken = await freshRepoToken(env.ARTIFACTS, project.remote, "read", logger);
   if (!readToken.success) return null;
-  const logResult = await getCommitLog(project.remote, readToken.data, logger, 1);
+  const logResult = await getCommitLog(
+    project.remote,
+    readToken.data,
+    logger,
+    1,
+    projectDefaultBranch(project),
+  );
   return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
 }
 
@@ -348,7 +360,8 @@ export async function createChangeWithEvaluation(
     );
   }
 
-  const policy = await loadPolicy(project.remote, projectReadToken.data, logger);
+  const branch = projectDefaultBranch(project);
+  const policy = await loadPolicy(project.remote, projectReadToken.data, logger, branch);
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -356,6 +369,7 @@ export async function createChangeWithEvaluation(
     workspaceRemote,
     workspaceReadToken.data,
     logger,
+    branch,
   );
   if (!diffResult.success) {
     logger.error("Failed to get diff between repos", diffResult.error);
