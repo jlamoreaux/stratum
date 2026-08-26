@@ -168,7 +168,11 @@ export const IssuesPage: FC<IssuesPageProps> = ({
         </form>
         {activeLabel && (
           <span class="issues-meta">
-            label: <strong>{activeLabel}</strong> <a href={tab()}>clear</a>
+            label: <strong>{activeLabel}</strong>{" "}
+            {/* labelKeep, not tab(): tab() carries `keep`, which includes the
+                active `label=`, so it would rebuild the very filter this link
+                clears. labelKeep is the same set minus the label. */}
+            <a href={labelKeep ? `${base}?${labelKeep}` : base}>clear</a>
           </span>
         )}
       </div>

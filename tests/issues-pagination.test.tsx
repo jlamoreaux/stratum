@@ -90,6 +90,30 @@ describe("IssuesPage pagination", () => {
   });
 });
 
+/**
+ * The clear link used `tab()`, which carries `keep` — and `keep` includes the
+ * active `label=`. So it rebuilt the very URL it was meant to clear, leaving
+ * the filter stuck with no way out of it from the list.
+ */
+describe("IssuesPage label filter clear link", () => {
+  /** The status tabs legitimately carry `label=`; only the clear link must not. */
+  const clearHref = (html: string) => html.match(/<a href="([^"]*)">clear<\/a>/)?.[1];
+
+  it("clears to the bare list when no other filter is active", () => {
+    expect(clearHref(renderList({ activeLabel: "bug" }))).toBe(BASE);
+  });
+
+  it("keeps the status tab and search text while dropping the label", () => {
+    const href = clearHref(renderList({ activeLabel: "bug", filter: "closed", query: "crash" }));
+    expect(href).toBe(`${BASE}?status=closed&amp;q=crash`);
+    expect(href).not.toContain("label=");
+  });
+
+  it("renders no clear link when no label filter is active", () => {
+    expect(clearHref(renderList())).toBeUndefined();
+  });
+});
+
 describe("IssueDetailPage comment pagination", () => {
   function renderDetail(overrides: Record<string, unknown> = {}) {
     return renderToString(
