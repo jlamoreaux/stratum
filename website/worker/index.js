@@ -42,9 +42,13 @@ const wantsMarkdown = (accept) =>
       .find((p) => p.startsWith("q="))
       ?.slice(2);
     if (q === undefined) return true;
-    const weight = Number.parseFloat(q);
-    // A malformed q is not a refusal, so only a parsed zero excludes.
-    return Number.isNaN(weight) ? true : weight > 0;
+    // Validate the whole token before converting. `Number.parseFloat` stops at
+    // the first non-numeric character, so it reads `q=0bogus` as 0 — refusing a
+    // malformed value that the policy below accepts, purely because the garbage
+    // happened to start with a digit. The pattern is RFC 9110's qvalue grammar.
+    if (!/^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.test(q)) return true;
+    // A malformed q is not a refusal, so only a well-formed zero excludes.
+    return Number(q) > 0;
   });
 
 export default {
