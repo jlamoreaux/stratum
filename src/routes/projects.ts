@@ -781,14 +781,15 @@ async function processImportJob(
       "Repository cloned, finalizing import",
     );
 
-    // Update project with actual repo info and mark import as complete
+    // Built here, persisted below. `importCompleted: true` must not reach KV
+    // until every way this run can still end in a non-terminal-success state
+    // has been ruled out, or a cancelled import leaves behind a project entry
+    // claiming it completed.
     const updatedProject: ProjectEntry = {
       ...project,
       remote: importResult.data.remote,
       importCompleted: true,
     };
-
-    await setProject(env.STATE, updatedProject, logger);
 
     // Final cancellation check before completing
     if (await checkCancelled()) return;
@@ -801,6 +802,8 @@ async function processImportJob(
     // cancel to land inside it. Writing "completed" without re-checking would
     // silently overwrite that cancellation.
     if (await checkCancelled()) return;
+
+    await setProject(env.STATE, updatedProject, logger);
 
     // Mark import as complete
     await updateImportStatus(

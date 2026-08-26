@@ -114,13 +114,21 @@ curl -X POST "$STRATUM_HOST/api/projects/@username/repo/sync/settings" \
 If a **queued** import fails, Stratum emails the user who started it, plus one
 operator copy. (A deployment with no import queue configured falls back to
 processing the import directly in the request, and that path sends no failure
-notification at all — it is a development fallback, not the normal path.) That copy goes to `ADMIN_EMAIL`, or — when `ADMIN_EMAIL` is unset — to
-`EMAIL_FROM_ADDRESS`. Leaving `ADMIN_EMAIL` unconfigured therefore does not
-switch the operator copy off; it redirects it to the sender address. Only when
-neither is set is the notification skipped entirely.
+notification at all — it is a development fallback, not the normal path.)
+
+Sending requires two things:
+
+- **An `EMAIL` binding on the Worker.** Without it no failure notification is
+  sent, whatever the addresses below are set to.
+- **At least one resolvable recipient.** The operator copy goes to
+  `ADMIN_EMAIL`, or — when `ADMIN_EMAIL` is unset — to `EMAIL_FROM_ADDRESS`.
+  Leaving `ADMIN_EMAIL` unconfigured therefore does not switch the operator copy
+  off; it redirects it to the sender address.
 
 When the initiator's address cannot be resolved, the operator copy is still
-sent, and identical addresses are de-duplicated so nobody is mailed twice.
+sent, and identical addresses are de-duplicated so nobody is mailed twice. A
+failure is reported only in the logs when the `EMAIL` binding is absent, or when
+neither an initiator address nor an operator address can be resolved.
 
 ## Current limitations
 

@@ -966,6 +966,13 @@ describe("import queue consumer", () => {
     const history = statusHistory.get("@usera:repo") ?? [];
     expect(history.at(-1)).toBe("cancelled");
     expect(history).not.toContain("completed");
+
+    // The stored entry has to agree with that status. Persisting
+    // `importCompleted: true` before the re-check would leave a project that
+    // reads as imported behind an import the user cancelled.
+    const stored = await env.STATE.get("project:@usera:repo");
+    expect(stored).not.toBeNull();
+    expect(JSON.parse(stored as string).importCompleted).not.toBe(true);
   });
 
   it("leaves progress at completion without counts when the snapshot walk fails", async () => {

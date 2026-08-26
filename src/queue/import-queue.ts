@@ -301,12 +301,39 @@ async function processImportJob(
       "Repository cloned, finalizing import",
     );
 
-    // Update project with actual repo info and mark import as complete
+    // Built here, persisted below. `importCompleted: true` must not reach KV
+    // until every way this run can still end in a non-terminal-success state
+    // has been ruled out, or a cancelled or failed import leaves behind a
+    // project entry claiming it completed.
     const updatedProject: ProjectEntry = {
       ...project,
       remote: importResult.data.remote,
       importCompleted: true,
     };
+
+    // Final cancellation check before completing
+    if (await checkAndHandleCancellation(env, namespace, slug)) {
+      await recordImportCancelled(env.DB, namespace, slug, logger);
+      msg.ack();
+      return;
+    }
+
+    // Measure the import proper — the clone — before the snapshot walk below,
+    // so the recorded duration keeps the meaning it had.
+    const duration = Date.now() - startedAt;
+
+    // Snapshot + file count, before the terminal status flip. See
+    // finalizeImportSnapshot for why the ordering matters.
+    await finalizeImportSnapshot(env, { remote: updatedProject.remote, namespace, slug }, logger);
+
+    // Re-check: the snapshot walk clones the repo, so it is long enough for a
+    // cancel to land inside it. Writing "completed" without re-checking would
+    // silently overwrite that cancellation.
+    if (await checkAndHandleCancellation(env, namespace, slug)) {
+      await recordImportCancelled(env.DB, namespace, slug, logger);
+      msg.ack();
+      return;
+    }
 
     const setResult = await setProject(env.STATE, updatedProject, logger);
     if (!setResult.success) {
@@ -330,30 +357,6 @@ async function processImportJob(
         logger,
         `Failed to update project: ${setResult.error.message}`,
       );
-      msg.ack();
-      return;
-    }
-
-    // Final cancellation check before completing
-    if (await checkAndHandleCancellation(env, namespace, slug)) {
-      await recordImportCancelled(env.DB, namespace, slug, logger);
-      msg.ack();
-      return;
-    }
-
-    // Measure the import proper — clone plus project write — before the
-    // snapshot walk below, so the recorded duration keeps the meaning it had.
-    const duration = Date.now() - startedAt;
-
-    // Snapshot + file count, before the terminal status flip. See
-    // finalizeImportSnapshot for why the ordering matters.
-    await finalizeImportSnapshot(env, { remote: updatedProject.remote, namespace, slug }, logger);
-
-    // Re-check: the snapshot walk clones the repo, so it is long enough for a
-    // cancel to land inside it. Writing "completed" without re-checking would
-    // silently overwrite that cancellation.
-    if (await checkAndHandleCancellation(env, namespace, slug)) {
-      await recordImportCancelled(env.DB, namespace, slug, logger);
       msg.ack();
       return;
     }
