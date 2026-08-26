@@ -31,6 +31,15 @@ export function formatTagDate(timestamp: number | undefined): string {
   return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
+/**
+ * Renders a project's git tags, annotated and lightweight alike.
+ *
+ * When `truncated` is set the page says so in place, showing how many of the
+ * remote's `totalTagCount` tags are actually listed. That notice is the whole
+ * point of the prop pair: the fetch caps tag count at `MAX_TAGS` to stay
+ * inside the Workers subrequest budget, and a capped listing that rendered
+ * like a complete one would quietly read as "this repo has 200 tags" (#241).
+ */
 export const TagsPage: FC<TagsProps> = ({ project, tags, truncated, totalTagCount, user }) => {
   return (
     <Layout title={`Tags — ${project.name}`} user={user}>
