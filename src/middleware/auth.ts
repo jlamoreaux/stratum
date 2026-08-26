@@ -25,6 +25,16 @@ function sanitizeToken(token: string): string {
   return `${token.slice(0, 4)}...${token.slice(-4)}`;
 }
 
+/**
+ * Resolve the caller's identity from an agent token, a user token, or a session
+ * cookie, and populate the auth context the routes read.
+ *
+ * Every account lookup here fails CLOSED (#236, mirroring #229 in git-http):
+ * the caller is authenticated only when the lookup succeeds AND returns a live
+ * account. A lookup that errors, rejects, or finds no row is a 401, never a
+ * pass — otherwise a transient D1 failure would authenticate an account the
+ * deletion cascade is erasing.
+ */
 export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   const requestId = crypto.randomUUID();
   const logger = createLogger({
