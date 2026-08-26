@@ -360,6 +360,11 @@ function buildUpdateChangeStatusStatement(
   return db.prepare(`UPDATE changes SET ${assignments.join(", ")} WHERE id = ?`).bind(...bindings);
 }
 
+/**
+ * Update a change's status (and any optional pinned fields) as a single,
+ * non-batched write. Callers that also need stale approvals dismissed in the
+ * same transaction should use dismissApprovalsAndUpdateStatus below instead.
+ */
 export async function updateChangeStatus(
   db: D1Database,
   logger: Logger,
@@ -444,10 +449,8 @@ export async function dismissApprovalsAndUpdateStatus(
     const dismissStmt = buildDismissApprovalsStatement(db, id);
     const updateStmt = buildUpdateChangeStatusStatement(db, id, status, opts);
 
-    const [dismissResult] = await db.batch([dismissStmt, updateStmt]);
-    const dismissedReviewerIds = (
-      (dismissResult?.results ?? []) as Array<{ reviewer_id: string }>
-    ).map((row) => row.reviewer_id);
+    const [dismissResult] = await db.batch<{ reviewer_id: string }>([dismissStmt, updateStmt]);
+    const dismissedReviewerIds = (dismissResult?.results ?? []).map((row) => row.reviewer_id);
 
     if (dismissedReviewerIds.length > 0) {
       logger.info("Stale approvals dismissed", {

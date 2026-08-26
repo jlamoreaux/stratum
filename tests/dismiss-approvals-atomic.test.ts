@@ -109,6 +109,7 @@ function makeAtomicD1(seed: { changes: FakeChangeRow[]; reviews: FakeReviewRow[]
   };
   let failAtBatchIndex: number | null = null;
 
+  /** Fake D1PreparedStatement whose run/first/batch-execution routes through applyStatement. */
   function makeStmt(sql: string, bindings: unknown[]) {
     return {
       bind: (...args: unknown[]) => makeStmt(sql, args),
@@ -162,6 +163,7 @@ function makeAtomicD1(seed: { changes: FakeChangeRow[]; reviews: FakeReviewRow[]
   };
 }
 
+/** One approved change ("chg_1", old_sha) with an 'approve' and a 'request_changes' review — the #238 scenario. */
 function seedRows(): { change: FakeChangeRow; reviews: FakeReviewRow[] } {
   return {
     change: { id: "chg_1", status: "approved", evaluated_sha: "old_sha" },
@@ -277,12 +279,14 @@ describe("updateChangeStatus — unaffected by the #238 batch change", () => {
   it("still performs a single, non-batched write for callers with no approvals in play", async () => {
     const { change } = seedRows();
     const { db, state } = makeAtomicD1({ changes: [change], reviews: [] });
+    const batchSpy = vi.spyOn(db, "batch");
 
     const result = await updateChangeStatus(db, mockLogger, "chg_1", "accepted", {
       evaluatedSha: "new_sha",
     });
 
     expect(result.success).toBe(true);
+    expect(batchSpy).not.toHaveBeenCalled();
     expect(state.changes.get("chg_1")).toMatchObject({
       status: "accepted",
       evaluated_sha: "new_sha",
