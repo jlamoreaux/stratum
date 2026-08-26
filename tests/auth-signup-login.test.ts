@@ -668,6 +668,46 @@ describe("Auth Signup/Login Integration Tests", () => {
         expect(res.headers.get("location")).toContain("error=rate_limited");
       });
 
+      /**
+       * The two reads are assigned in sequence, so a throw on the second one
+       * used to leave the first count standing. With the email bucket already
+       * exhausted that computed `blocked === true` — locking a user out of
+       * their own login on a transient KV blip, which is the exact failure the
+       * fail-open contract exists to prevent.
+       */
+      it("fails open when the per-IP read throws after the email bucket is full", async () => {
+        const email = "failopen@example.com";
+        const env = makeEnv();
+        const realGet = env.STATE.get.bind(env.STATE);
+        // Exhaust the per-email bucket through the real path first.
+        for (let i = 0; i < 5; i++) {
+          await app.fetch(
+            request("/auth/email/send-signup", {
+              method: "POST",
+              body: createFormData({ email, username: `failopen${i}` }),
+            }),
+            env,
+          );
+        }
+
+        // Now let the email read succeed and make only the per-IP read throw.
+        env.STATE.get = (async (key: string) => {
+          if (key.startsWith("magic_link_ip_rate:")) throw new Error("KV unavailable");
+          return realGet(key);
+        }) as typeof env.STATE.get;
+
+        const res = await app.fetch(
+          request("/auth/email/send-signup", {
+            method: "POST",
+            body: createFormData({ email, username: "failopen9" }),
+          }),
+          env,
+        );
+
+        expect(res.status).toBe(302);
+        expect(res.headers.get("location")).not.toContain("error=rate_limited");
+      });
+
       // The per-email bucket keys on a digest of the address. It has to be
       // collision-resistant, not merely opaque: the old 32-bit string hash let
       // an attacker construct a different address landing in a chosen victim's

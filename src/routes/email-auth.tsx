@@ -87,6 +87,13 @@ async function checkMagicLinkRateLimits(
     emailCount = Number.parseInt((await c.env.STATE.get(emailKey)) ?? "0");
     ipCount = Number.parseInt((await c.env.STATE.get(ipKey)) ?? "0");
   } catch (err) {
+    // Fail open means fail open for *both* caps. These are assigned in sequence,
+    // so a throw on the second read would otherwise leave a populated count from
+    // the first standing against a zero from the second — and an exhausted email
+    // bucket would block the request on a transient KV blip, which is precisely
+    // the lockout this contract exists to prevent. Reset both.
+    emailCount = 0;
+    ipCount = 0;
     logger.warn("Failed to read magic-link rate limits, allowing request", { error: err });
   }
   const blocked = emailCount >= MAGIC_LINK_RATE_LIMIT || ipCount >= MAGIC_LINK_IP_RATE_LIMIT;
