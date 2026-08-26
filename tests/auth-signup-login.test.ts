@@ -668,6 +668,43 @@ describe("Auth Signup/Login Integration Tests", () => {
         expect(res.headers.get("location")).toContain("error=rate_limited");
       });
 
+      // The per-email bucket keys on a digest of the address. It has to be
+      // collision-resistant, not merely opaque: the old 32-bit string hash let
+      // an attacker construct a different address landing in a chosen victim's
+      // bucket ("cg1@acme.com" for "ceo@acme.com", found in a few thousand
+      // tries) and spend the victim's five sends from a distinct source IP, so
+      // neither cap noticed. No mail is sent for the collider, which need not
+      // even be a real account.
+      it("does not let a colliding address consume another address's budget", async () => {
+        const victim = "ceo@acme.com";
+        const collider = "cg1@acme.com";
+
+        // Burn the collider's five sends, each from its own IP so the per-IP
+        // cap plays no part in the outcome.
+        for (let i = 0; i < 5; i++) {
+          const res = await app.fetch(
+            request("/auth/email/send-login", {
+              method: "POST",
+              headers: { "CF-Connecting-IP": `203.0.113.${20 + i}` },
+              body: createFormData({ email: collider }),
+            }),
+            env,
+          );
+          expect(res.headers.get("location")).not.toContain("error=rate_limited");
+        }
+
+        // The victim's own bucket must be untouched.
+        const res = await app.fetch(
+          request("/auth/email/send-login", {
+            method: "POST",
+            headers: { "CF-Connecting-IP": "203.0.113.30" },
+            body: createFormData({ email: victim }),
+          }),
+          env,
+        );
+        expect(res.headers.get("location")).not.toContain("error=rate_limited");
+      });
+
       it("rate limits per source IP across many different emails (anti mail-bomb)", async () => {
         const ip = "203.0.113.7";
         // 20 distinct emails from one IP each pass the per-email limit but exhaust

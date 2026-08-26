@@ -9,6 +9,7 @@ import { consumeMagicLink, createMagicLink } from "../storage/magic-links";
 import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername } from "../storage/users";
 import type { Env } from "../types";
+import { hashToken } from "../utils/crypto";
 import { escapeHtml } from "../utils/html";
 import { type Logger, createLogger } from "../utils/logger";
 import { validateUsername } from "../utils/username-validation";
@@ -30,10 +31,30 @@ function generateSecureToken(): string {
   return Array.from(array, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-// Get rate limit key for an email (uses hashed email for privacy)
-function getRateLimitKey(email: string): string {
+/**
+ * Rate-limit bucket key for an email address, in the current hour window.
+ *
+ * SHA-256 rather than hashEmail(): that helper is a 32-bit Java-style string
+ * hash, and collisions in it are constructible rather than merely possible —
+ * a collider for a chosen address turns up within a few thousand candidates
+ * ("cg1@acme.com" collides with "ceo@acme.com"). Sharing a bucket with an
+ * address the attacker picks is a targeted lockout: five POSTs to
+ * /auth/send-login naming the collider exhaust the victim's five sends for the
+ * hour. Those five requests cost nothing and send no mail, because the counter
+ * is committed even when no such user exists — deliberately, so the endpoint is
+ * not an account-enumeration oracle.
+ *
+ * The digest is unsalted, which makes it a collision-resistant bucket key and
+ * not a secret: anyone holding a candidate address can confirm whether it maps
+ * here. Salting would need a key that is always configured, and every secret on
+ * Env is optional today. hashEmail() stays for log lines, where a short opaque
+ * token is all that is wanted and a collision costs nothing.
+ *
+ * Changing the key shape resets in-flight hourly counters once, on deploy.
+ */
+async function getRateLimitKey(email: string): Promise<string> {
   const hour = Math.floor(Date.now() / 1000 / MAGIC_LINK_RATE_WINDOW);
-  const emailHash = hashEmail(email);
+  const emailHash = await hashToken(email);
   return `magic_link_rate:${emailHash}:${hour}`;
 }
 
@@ -57,7 +78,7 @@ async function checkMagicLinkRateLimits(
   email: string,
   logger: Logger,
 ): Promise<{ blocked: boolean; commit: () => Promise<void> }> {
-  const emailKey = getRateLimitKey(email);
+  const emailKey = await getRateLimitKey(email);
   const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
   const ipKey = getIpRateLimitKey(ip);
   let emailCount = 0;
