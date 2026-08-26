@@ -22,6 +22,17 @@ export interface DiffFile {
  * Tolerant of partial input: unrecognized lines render as context.
  * Old/new line numbers are computed from hunk headers as lines stream by, so
  * every content line can carry a stable anchor for line comments.
+ *
+ * `--- ` / `+++ ` are recognized as file headers only *outside* a hunk (or as
+ * an adjacent `--- `/`+++ ` pair, which starts a file section even when the
+ * preceding hunk was truncated). Inside a hunk every content line carries a
+ * `+`, `-`, ` ` or `\` marker, so `--- x` is a deleted line whose text starts
+ * with `-- ` (a SQL or Lua comment) and `+++ x` an added line starting with
+ * `++ `. Treating those as headers dropped the line from the render and
+ * desynchronized every following line number, which now anchors comments —
+ * hence the hunk-scoped check. The one case the pair rule still mistakes is a
+ * deletion of a `-- ` line immediately followed by an addition of a `++ ` one;
+ * no diff this app generates puts those two adjacent.
  */
 export function parseUnifiedDiff(diff: string): DiffFile[] {
   const files: DiffFile[] = [];
@@ -30,40 +41,69 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   let newLine = 0;
   // Lines before any @@ header (or in malformed input) get no numbers.
   let inHunk = false;
+  // Lines the current hunk still owes on each side, from its @@ counts. A hunk
+  // ends when both reach zero; that is what closes `inHunk` so the next `--- `
+  // is read as a header again.
+  let oldRemaining = 0;
+  let newRemaining = 0;
 
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("--- ")) {
+  const consume = (kind: "add" | "del" | "context") => {
+    if (kind !== "add") oldRemaining -= 1;
+    if (kind !== "del") newRemaining -= 1;
+    if (oldRemaining <= 0 && newRemaining <= 0) inHunk = false;
+  };
+
+  const rawLines = diff.split("\n");
+  for (const [index, line] of rawLines.entries()) {
+    // A `diff --git`/`Index:` preamble can only start a new file section, so it
+    // also closes a hunk left open by truncated input.
+    if (line.startsWith("Index:") || line.startsWith("diff ") || line.startsWith("index ")) {
+      inHunk = false;
       continue;
     }
-    if (line.startsWith("+++ ")) {
+    // A `--- ` line directly followed by a `+++ ` line is the header pair of a
+    // new file section, so it closes the previous hunk even when that hunk's
+    // @@ counts were wrong or its body was truncated.
+    if (line.startsWith("--- ") && rawLines[index + 1]?.startsWith("+++ ")) {
+      inHunk = false;
+      continue;
+    }
+    if (!inHunk && line.startsWith("--- ")) {
+      continue;
+    }
+    if (!inHunk && line.startsWith("+++ ")) {
       const rawPath = line.slice(4).trim();
       const path = rawPath.startsWith("b/") ? rawPath.slice(2) : rawPath;
       current = { path, additions: 0, deletions: 0, lines: [] };
       files.push(current);
-      inHunk = false;
       continue;
     }
-    if (line.startsWith("Index:") || line.startsWith("diff ") || line.startsWith("index ")) {
-      continue;
-    }
-    if (line.startsWith("===")) {
+    if (!inHunk && line.startsWith("===")) {
       continue;
     }
     if (!current) continue;
 
+    // Unconditional: inside a hunk every content line carries a marker, so a
+    // bare `@@` at column 0 is always a header — including one that starts the
+    // next hunk when a malformed count left this one open.
     if (line.startsWith("@@")) {
-      const header = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      const header = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
       if (header) {
         oldLine = Number(header[1]);
-        newLine = Number(header[2]);
-        inHunk = true;
+        newLine = Number(header[3]);
+        // An omitted count means 1 line, per the unified-diff format.
+        oldRemaining = header[2] === undefined ? 1 : Number(header[2]);
+        newRemaining = header[4] === undefined ? 1 : Number(header[4]);
+        inHunk = oldRemaining > 0 || newRemaining > 0;
       } else {
+        // Unparseable header: stop numbering rather than guess.
         inHunk = false;
       }
       current.lines.push({ kind: "hunk", text: line });
     } else if (line.startsWith("\\")) {
       // "\ No newline at end of file" — metadata about the adjacent line, not
-      // file content; kept distinct so the split view doesn't pair it.
+      // file content; kept distinct so the split view doesn't pair it. It is
+      // not counted by the hunk header, so it does not consume a line.
       current.lines.push({ kind: "meta", text: line });
     } else if (line.startsWith("+")) {
       current.additions += 1;
@@ -72,6 +112,7 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
         text: line,
         ...(inHunk ? { newLine: newLine++ } : {}),
       });
+      if (inHunk) consume("add");
     } else if (line.startsWith("-")) {
       current.deletions += 1;
       current.lines.push({
@@ -79,12 +120,14 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
         text: line,
         ...(inHunk ? { oldLine: oldLine++ } : {}),
       });
+      if (inHunk) consume("del");
     } else {
       current.lines.push({
         kind: "context",
         text: line,
         ...(inHunk ? { oldLine: oldLine++, newLine: newLine++ } : {}),
       });
+      if (inHunk) consume("context");
     }
   }
 
@@ -342,10 +385,19 @@ export const LineCommentThreads: FC<{
       {threads.map(({ root, replies }) => {
         const fileIndex = files.findIndex((file) => file.path === root.file);
         const side = root.side ?? "new";
-        const anchorHref =
+        // Link to the anchor the diff actually rendered rather than composing
+        // one from the thread's own side: a context line is anchored on its
+        // new-file number even when the comment names the old side, and a line
+        // outside every hunk has no anchor at all. Composing `L-i-old-n` for
+        // either case produced an href pointing at no element.
+        const anchored =
           fileIndex >= 0 && root.line !== undefined
-            ? `#L-${fileIndex}-${side}-${root.line}`
+            ? files[fileIndex]?.lines.find(
+                (line) => (side === "old" ? line.oldLine : line.newLine) === root.line,
+              )
             : undefined;
+        const anchorId = anchored !== undefined ? diffLineAnchor(fileIndex, anchored) : undefined;
+        const anchorHref = anchorId !== undefined ? `#${anchorId}` : undefined;
         const location = `${root.file}:${root.line}`;
         return (
           <div

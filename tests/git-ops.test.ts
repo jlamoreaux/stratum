@@ -251,6 +251,39 @@ describe("buildUnifiedDiff", () => {
     expect(diff).toContain("deleted file mode 100644");
     expect(diff).toContain("-export const old = true;");
   });
+
+  it("does not rewrite a deleted `-- ` comment line into a file header", () => {
+    // The header fix-up used to run over the whole patch body by prefix. A
+    // deleted "-- note" line reaches it as "--- note" and came back out as
+    // "--- a/<path>", so the reviewer saw the path where the SQL comment was.
+    const base = "CREATE TABLE t (id TEXT);\n-- legacy note\nSELECT 1;\n";
+    const changed = "CREATE TABLE t (id TEXT);\nSELECT 1;\n";
+
+    const diff = buildUnifiedDiff(
+      new Map([["migrations/001.sql", base]]),
+      new Map([["migrations/001.sql", changed]]),
+    );
+
+    expect(diff).toContain("--- legacy note");
+    // Exactly one header pair survives: the one the fix-up writes by position.
+    expect(diff.split("\n").filter((line) => line.startsWith("--- "))).toEqual([
+      "--- a/migrations/001.sql",
+      "--- legacy note",
+    ]);
+  });
+
+  it("does not rewrite an added `++ ` line into a file header", () => {
+    const diff = buildUnifiedDiff(
+      new Map([["notes.md", "intro\noutro\n"]]),
+      new Map([["notes.md", "intro\n++ bonus point\noutro\n"]]),
+    );
+
+    expect(diff).toContain("+++ bonus point");
+    expect(diff.split("\n").filter((line) => line.startsWith("+++ "))).toEqual([
+      "+++ b/notes.md",
+      "+++ bonus point",
+    ]);
+  });
 });
 
 describe("readTreeAtCommit", () => {

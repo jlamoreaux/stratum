@@ -70,6 +70,104 @@ describe("parseUnifiedDiff line numbers", () => {
     expect(file?.lines[0]).toEqual({ kind: "add", text: "+stray" });
   });
 
+  it("keeps a deleted line whose text starts with a `-- ` comment marker", () => {
+    // "-" + "-- legacy note" is "--- legacy note", which a prefix test reads as
+    // a file header: the line vanished and every later oldLine slipped by one.
+    const diff = [
+      "diff --git a/migrations/001.sql b/migrations/001.sql",
+      "--- a/migrations/001.sql",
+      "+++ b/migrations/001.sql",
+      "@@ -1,4 +1,3 @@",
+      " CREATE TABLE t (id TEXT);",
+      "--- legacy note",
+      " SELECT 1;",
+      " SELECT 2;",
+    ].join("\n");
+    const files = parseUnifiedDiff(diff);
+    expect(files).toHaveLength(1);
+    expect(files[0]?.deletions).toBe(1);
+    expect(files[0]?.lines).toEqual([
+      { kind: "hunk", text: "@@ -1,4 +1,3 @@" },
+      { kind: "context", text: " CREATE TABLE t (id TEXT);", oldLine: 1, newLine: 1 },
+      { kind: "del", text: "--- legacy note", oldLine: 2 },
+      { kind: "context", text: " SELECT 1;", oldLine: 3, newLine: 2 },
+      { kind: "context", text: " SELECT 2;", oldLine: 4, newLine: 3 },
+    ]);
+  });
+
+  it("keeps an added line whose text starts with `++ ` in the same file", () => {
+    // "+" + "++ bonus point" is "+++ bonus point", which a prefix test reads as
+    // a new file header: the diff split into a phantom file named after the
+    // line's own text and the rest of the real file lost its numbering.
+    const diff = [
+      "diff --git a/notes.md b/notes.md",
+      "--- a/notes.md",
+      "+++ b/notes.md",
+      "@@ -1,2 +1,3 @@",
+      " intro",
+      "+++ bonus point",
+      " outro",
+    ].join("\n");
+    const files = parseUnifiedDiff(diff);
+    expect(files.map((file) => file.path)).toEqual(["notes.md"]);
+    expect(files[0]?.additions).toBe(1);
+    expect(files[0]?.lines).toEqual([
+      { kind: "hunk", text: "@@ -1,2 +1,3 @@" },
+      { kind: "context", text: " intro", oldLine: 1, newLine: 1 },
+      { kind: "add", text: "+++ bonus point", newLine: 2 },
+      { kind: "context", text: " outro", oldLine: 2, newLine: 3 },
+    ]);
+  });
+
+  it("still starts a new file after a hunk that ends on such a line", () => {
+    // The hunk's own @@ counts say where it ends, so the following file's
+    // header is recognized even though the hunk's last line looked like one.
+    const diff = [
+      "diff --git a/a.sql b/a.sql",
+      "--- a/a.sql",
+      "+++ b/a.sql",
+      "@@ -1,1 +1,0 @@",
+      "--- trailing note",
+      "diff --git a/b.md b/b.md",
+      "--- a/b.md",
+      "+++ b/b.md",
+      "@@ -1,1 +1,1 @@",
+      "-x",
+      "+y",
+    ].join("\n");
+    const files = parseUnifiedDiff(diff);
+    expect(files.map((file) => file.path)).toEqual(["a.sql", "b.md"]);
+    expect(files[0]?.lines).toEqual([
+      { kind: "hunk", text: "@@ -1,1 +1,0 @@" },
+      { kind: "del", text: "--- trailing note", oldLine: 1 },
+    ]);
+    expect(files[1]?.lines).toEqual([
+      { kind: "hunk", text: "@@ -1,1 +1,1 @@" },
+      { kind: "del", text: "-x", oldLine: 1 },
+      { kind: "add", text: "+y", newLine: 1 },
+    ]);
+  });
+
+  it("does not let a `\\ No newline` marker consume a counted hunk line", () => {
+    const diff = [
+      "--- a/f",
+      "+++ b/f",
+      "@@ -1,2 +1,2 @@",
+      "-a",
+      "\\ No newline at end of file",
+      "+b",
+      " c",
+    ].join("\n");
+    const [file] = parseUnifiedDiff(diff);
+    expect(file?.lines).toEqual([
+      { kind: "hunk", text: "@@ -1,2 +1,2 @@" },
+      { kind: "del", text: "-a", oldLine: 1 },
+      { kind: "meta", text: "\\ No newline at end of file" },
+      { kind: "add", text: "+b", newLine: 1 },
+      { kind: "context", text: " c", oldLine: 2, newLine: 2 },
+    ]);
+  });
+
   it("stops numbering after a malformed hunk header", () => {
     const diff = ["--- a/f", "+++ b/f", "@@ broken @@", "+x"].join("\n");
     const [file] = parseUnifiedDiff(diff);
@@ -218,6 +316,47 @@ describe("LineCommentThreads rendering", () => {
     expect(html).toContain("not/in/diff.ts:2");
     expect(html).not.toContain('href="#L-');
     expect(html).toContain("(old)");
+  });
+
+  it("anchors an old-side thread to the row the diff actually rendered", () => {
+    // " context one" is old line 10 and new line 20; the unified view gives it
+    // one id, the new-side one. Composing "#L-0-old-10" from the thread's own
+    // side pointed at an element that does not exist.
+    const html = renderToString(
+      <LineCommentThreads
+        changeId="chg_1"
+        comments={[comment({ id: "c_root", file: "src/x.ts", line: 10, side: "old" })]}
+        files={files}
+        canComment={false}
+      />,
+    );
+    expect(html).toContain('href="#L-0-new-20"');
+    expect(html).not.toContain('href="#L-0-old-10"');
+  });
+
+  it("anchors a deleted line on its old-side id", () => {
+    const html = renderToString(
+      <LineCommentThreads
+        changeId="chg_1"
+        comments={[comment({ id: "c_root", file: "src/x.ts", line: 11, side: "old" })]}
+        files={files}
+        canComment={false}
+      />,
+    );
+    expect(html).toContain('href="#L-0-old-11"');
+  });
+
+  it("omits the link when the anchored line falls outside every hunk", () => {
+    const html = renderToString(
+      <LineCommentThreads
+        changeId="chg_1"
+        comments={[comment({ id: "c_root", file: "src/x.ts", line: 900 })]}
+        files={files}
+        canComment={false}
+      />,
+    );
+    expect(html).toContain("src/x.ts:900");
+    expect(html).not.toContain('href="#L-');
   });
 
   it("renders an empty state without any threads", () => {
