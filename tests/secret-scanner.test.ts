@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SecretScanEvaluator } from "../src/evaluation/secret-scanner";
+import { SecretScanEvaluator, scanContentForSecrets } from "../src/evaluation/secret-scanner";
 import type { EvalPolicy } from "../src/evaluation/types";
 import type { Logger } from "../src/utils/logger";
 
@@ -306,5 +306,58 @@ describe("SecretScanEvaluator — entropy detection", () => {
       expect(result.data.passed).toBe(false);
       expect(result.data.issues?.join("\n")).toContain("High-Entropy Credential");
     }
+  });
+});
+
+describe("added lines whose own text starts with ++", () => {
+  const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
+
+  it("scans an added line rendered as +++text (not a file header)", async () => {
+    // A source line of `++const k = "…"` appears in a unified diff as
+    // `+++const k = "…"`. Skipping every line starting with a bare `+++`
+    // treated that as the `+++ b/path` header and never scanned it.
+    const diff = makeDiff([`++const k = "${AWS_KEY}";`]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.join("\n")).toContain("AWS Access Key");
+    }
+  });
+
+  it("still skips the real +++ b/path file header", async () => {
+    // The header carries the path only; a path that happens to contain a
+    // secret-shaped substring must not be reported as content.
+    const result = await evaluator.evaluate(
+      `+++ b/${AWS_KEY}.ts\n+const ok = 1;`,
+      policy,
+      mockLogger,
+    );
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(true);
+  });
+});
+
+describe("scanContentForSecrets", () => {
+  const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
+
+  it("finds a secret regardless of what the line starts with", () => {
+    for (const prefix of ["", "+", "++", "+++", "+++ ", "---"]) {
+      expect(
+        scanContentForSecrets([{ file: "a.ts", content: `${prefix}const k = "${AWS_KEY}";` }]),
+      ).toEqual(["AWS Access Key: a.ts line 1"]);
+    }
+  });
+
+  it("reports the file and a content-relative line number", () => {
+    const issues = scanContentForSecrets([
+      { file: "clean.ts", content: "const a = 1;" },
+      { file: "dirty.ts", content: `line one\nline two\nconst k = "${AWS_KEY}";` },
+    ]);
+    expect(issues).toEqual(["AWS Access Key: dirty.ts line 3"]);
+  });
+
+  it("returns no issues for clean content", () => {
+    expect(scanContentForSecrets([{ file: "a.ts", content: "export const x = 1;\n" }])).toEqual([]);
   });
 });
