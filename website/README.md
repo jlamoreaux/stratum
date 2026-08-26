@@ -67,10 +67,12 @@ The docs are built to be readable by agents as well as people:
 
 `worker/index.js` adds the two things static assets cannot do alone: RFC 8288
 `Link` headers advertising those entry points, and Markdown content negotiation
-(`Accept: text/markdown` on any page returns its Markdown source). The Markdown
-twins are emitted into `dist/` by `scripts/emit-markdown.mjs` during the build;
-the landing page's twin is maintained by hand at `public/index.md` because its
-source is `.mdx`.
+(`Accept: text/markdown` returns a page's Markdown source). Negotiation applies
+only to pages that have a Markdown twin — the Worker looks for the matching
+`.md` asset and falls through to the normal response when there isn't one, so a
+route without a twin is unaffected. The twins are emitted into `dist/` by
+`scripts/emit-markdown.mjs` during the build; the landing page's is maintained
+by hand at `public/index.md` because its source is `.mdx`.
 
 ## Deployment
 

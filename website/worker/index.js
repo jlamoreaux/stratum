@@ -25,8 +25,27 @@ const CONTENT_TYPES = {
   "/.well-known/api-catalog": "application/linkset+json",
 };
 
+/**
+ * True when the client actually accepts Markdown.
+ *
+ * Parses each Accept entry rather than prefix-matching it: `startsWith` would
+ * also match an unrelated `text/markdownish`, and — more importantly — would
+ * treat `text/markdown;q=0` as acceptance when q=0 is how a client says it does
+ * NOT want that representation.
+ */
 const wantsMarkdown = (accept) =>
-  accept.split(",").some((part) => part.trim().toLowerCase().startsWith("text/markdown"));
+  accept.split(",").some((part) => {
+    const [mediaType, ...params] = part.split(";");
+    if (mediaType.trim().toLowerCase() !== "text/markdown") return false;
+    const q = params
+      .map((p) => p.trim().toLowerCase())
+      .find((p) => p.startsWith("q="))
+      ?.slice(2);
+    if (q === undefined) return true;
+    const weight = Number.parseFloat(q);
+    // A malformed q is not a refusal, so only a parsed zero excludes.
+    return Number.isNaN(weight) ? true : weight > 0;
+  });
 
 export default {
   async fetch(request, env) {

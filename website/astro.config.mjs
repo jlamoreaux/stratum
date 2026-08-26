@@ -1,5 +1,6 @@
 // @ts-check
 import { defineConfig } from "astro/config";
+import sitemap from "@astrojs/sitemap";
 import starlight from "@astrojs/starlight";
 import starlightLlmsTxt from "starlight-llms-txt";
 
@@ -10,6 +11,9 @@ const DESCRIPTION =
 export default defineConfig({
   site: SITE,
   integrations: [
+    // Emits sitemap-index.xml, which robots.txt and the Worker's RFC 8288 Link
+    // header both advertise. Without a producer those two point at a 404.
+    sitemap(),
     starlight({
       title: "Stratum",
       description: DESCRIPTION,
