@@ -52,6 +52,7 @@ vi.mock("../src/storage/deletion", () => ({
 
 vi.mock("../src/evaluation", () => ({
   loadPolicy: vi.fn(),
+  diffTouchesProtectedConfig: vi.fn(() => false),
   DiffEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
       success: true,
@@ -153,7 +154,12 @@ vi.mock("../src/storage/agents", () => ({
   getAgent: vi.fn(),
 }));
 
-import { CompositeEvaluator, SecretScanEvaluator, loadPolicy } from "../src/evaluation";
+import {
+  CompositeEvaluator,
+  SecretScanEvaluator,
+  diffTouchesProtectedConfig,
+  loadPolicy,
+} from "../src/evaluation";
 import { emitEvent } from "../src/queue/events";
 import { getAgent, getAgentByToken } from "../src/storage/agents";
 import { recordAudit } from "../src/storage/audit";
@@ -1217,6 +1223,23 @@ describe("POST /api/changes/:id/merge", () => {
     const body = (await res.json()) as { merged: boolean };
     expect(body.merged).toBe(true);
     expect(mergeWorkspaceIntoProject).toHaveBeenCalled();
+  });
+
+  it("refuses to force-merge a change that edits the protection config, even with allowForce (SA-3)", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, touchesProtectedConfig: true },
+    });
+    // Even where the policy permits force, a protection-config edit can't skip
+    // the approval gate.
+    vi.mocked(loadPolicy).mockResolvedValue({ ...mockPolicy, merge: { allowForce: true } });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/merge?force=true", undefined, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(mergeWorkspaceIntoProject).not.toHaveBeenCalled();
   });
 
   it("passes explicit squash strategy to merge implementation", async () => {
@@ -3164,6 +3187,63 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
     // The dismissal already happened; a failed audit write must not fail the request.
     expect(res.status).toBe(200);
     expect(updateChangeStatus).toHaveBeenCalled();
+  });
+
+  it("recomputes the protected-config flag from the re-evaluated diff", async () => {
+    // A change that was benign when opened can acquire a policy edit before
+    // re-evaluation. Re-evaluation re-pins evaluatedSha to the new tip, which is
+    // what the merge route's staleness check compares against — so if the flag
+    // kept its creation-time value, the relaxation would merge without the
+    // approval SA-3 requires.
+    const policyDiff =
+      "diff --git a/.stratum/policy.yaml b/.stratum/policy.yaml\n+requiredApprovals: 0";
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: {
+        diff: policyDiff,
+        workspaceOid: "new_sha",
+        workspaceTreeOid: "new_tree",
+        workspaceSha: "new_sha",
+      },
+    });
+    vi.mocked(diffTouchesProtectedConfig).mockReturnValue(true);
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // Detection must run against the diff this re-evaluation actually saw, not
+    // the one the change was opened with.
+    expect(diffTouchesProtectedConfig).toHaveBeenCalledWith(policyDiff);
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ touchesProtectedConfig: true }),
+    );
+  });
+
+  it("clears the protected-config flag when the re-evaluated diff no longer touches it", async () => {
+    // The recomputation must be symmetric: dropping the policy edit before
+    // re-evaluation must clear the flag, not leave the change permanently gated.
+    vi.mocked(diffTouchesProtectedConfig).mockReturnValue(false);
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ touchesProtectedConfig: false }),
+    );
   });
 
   it("keeps approvals when the re-evaluated sha is unchanged", async () => {

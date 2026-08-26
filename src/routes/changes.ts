@@ -1,5 +1,5 @@
 import { type Context, Hono } from "hono";
-import { loadPolicy } from "../evaluation";
+import { diffTouchesProtectedConfig, loadPolicy } from "../evaluation";
 import type { EvalPolicy } from "../evaluation/types";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { runPostMergeCheck } from "../merge/post-merge";
@@ -462,6 +462,14 @@ app.post("/changes/:id/merge", async (c) => {
   const forceAllowed = mergePolicy.merge?.allowForce === true;
   if (force && !forceAllowed) {
     return badRequest("Force merge is disabled by this project's policy");
+  }
+  // A change that edits the merge-protection config can never be force-merged,
+  // even where the policy allows force — force skips the approval gate that keeps
+  // a protection relaxation from landing with no human review (SA-3).
+  if (force && change.touchesProtectedConfig) {
+    return badRequest(
+      "This change modifies the merge-protection config and cannot be force-merged; it requires a human approval",
+    );
   }
 
   if (!MERGEABLE_STATUSES.includes(change.status) && !force) {
@@ -1414,6 +1422,13 @@ app.post("/changes/:id/evaluate", async (c) => {
       evaluatedTreeOid,
       // Re-pin to the commit this re-evaluation actually ran against (#115).
       ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
+      // Recompute the protected-config flag from the diff this run actually saw
+      // (SA-3). Re-evaluation re-pins evaluatedSha to the new tip, which is what
+      // the merge route's staleness check compares against — so leaving the flag
+      // at its creation-time value would let a change that was benign when opened
+      // acquire a policy edit, pass the staleness check, and merge without the
+      // approval the flag exists to force.
+      touchesProtectedConfig: diffTouchesProtectedConfig(diff),
     },
   );
   if (!updateResult.success) {
