@@ -109,7 +109,7 @@ function makeAtomicD1(seed: { changes: FakeChangeRow[]; reviews: FakeReviewRow[]
   };
   let failAtBatchIndex: number | null = null;
 
-  /** Fake D1PreparedStatement whose run/first/batch-execution routes through applyStatement. */
+  /** Keep all fake statement methods on one SQL simulation path so rollback tests exercise the same semantics. */
   function makeStmt(sql: string, bindings: unknown[]) {
     return {
       bind: (...args: unknown[]) => makeStmt(sql, args),
