@@ -44,6 +44,7 @@ interface IssueRow {
   updated_at: string;
 }
 
+/** Map a raw `issues` row to the camelCase `Issue` shape. */
 function rowToIssue(row: IssueRow): Issue {
   const issue: Issue = {
     id: row.id,
@@ -65,6 +66,11 @@ function rowToIssue(row: IssueRow): Issue {
   return issue;
 }
 
+/**
+ * Normalise a thrown value into an AppError, preserving one that is already an
+ * AppError and tagging anything else as DATABASE_ERROR with the operation and
+ * context attached for the log line.
+ */
 function toAppError(error: unknown, operation: string, context: Record<string, unknown>) {
   return error instanceof AppError
     ? error
@@ -76,6 +82,10 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
       );
 }
 
+/**
+ * Open a new issue, allocating its per-project `number`. `projectId` is the
+ * canonical scope; `project` is the free-form name kept for legacy rows.
+ */
 export async function createIssue(
   db: D1Database,
   logger: Logger,
@@ -135,6 +145,13 @@ export async function createIssue(
   }
 }
 
+/**
+ * Fetch one issue by its per-project number.
+ *
+ * Scopes by `project_id` when known and falls back to the free-form name only
+ * for legacy rows that were never backfilled — matching on the name alone would
+ * return a same-named project's issue from another namespace.
+ */
 export async function getIssueByNumber(
   db: D1Database,
   logger: Logger,
@@ -177,6 +194,15 @@ export function escapeLike(text: string): string {
   return text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
+/**
+ * List a project's issues, newest number first.
+ *
+ * Every query is project-scoped: the scope clause is always the first condition,
+ * so no filter combination can return another project's issues. `search` is a
+ * LIKE over title and body with the pattern metacharacters escaped, and `limit`
+ * / `offset` are bound rather than interpolated. Omitting `limit` returns every
+ * matching row, so callers rendering a page should pass one.
+ */
 export async function listIssues(
   db: D1Database,
   logger: Logger,
@@ -256,6 +282,11 @@ export async function listIssues(
   }
 }
 
+/**
+ * Apply a partial update to an issue and return the stored row. Only the fields
+ * present in `opts` are written; `linkedChangeId` and `assignee` take null to
+ * clear rather than omitting them, which leaves them untouched.
+ */
 export async function updateIssue(
   db: D1Database,
   logger: Logger,

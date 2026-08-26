@@ -50,6 +50,11 @@ interface RouteContext {
   req: { param(key: string): string };
 }
 
+/**
+ * Resolve the `:namespace/:slug` route params to a project, or the Response to
+ * return instead — 404 when it does not exist, 500 on a lookup failure. Callers
+ * branch on `"response" in result`.
+ */
 async function loadProject(
   c: RouteContext,
   logger: Logger,
@@ -68,6 +73,7 @@ async function loadProject(
   return { project: projectResult.data };
 }
 
+/** Parse a `:number` route param, returning null unless it is a positive integer. */
 function parseIssueNumber(raw: string): number | null {
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;

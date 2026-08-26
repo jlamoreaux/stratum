@@ -26,6 +26,7 @@ interface IssueCommentRow {
   created_at: string;
 }
 
+/** Map a raw `issue_comments` row to the camelCase `IssueComment` shape. */
 function rowToComment(row: IssueCommentRow): IssueComment {
   return {
     id: row.id,
@@ -37,6 +38,11 @@ function rowToComment(row: IssueCommentRow): IssueComment {
   };
 }
 
+/**
+ * Normalise a thrown value into an AppError, preserving one that is already
+ * an AppError and tagging anything else as DATABASE_ERROR with the operation
+ * and context attached for the log line.
+ */
 function toAppError(error: unknown, operation: string, context: Record<string, unknown>) {
   return error instanceof AppError
     ? error
@@ -48,6 +54,10 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
       );
 }
 
+/**
+ * Append a comment to an issue. Comments are append-only — there is no edit or
+ * delete path — so this only ever inserts, and returns the stored row.
+ */
 export async function addIssueComment(
   db: D1Database,
   logger: Logger,
@@ -80,6 +90,13 @@ export async function addIssueComment(
   }
 }
 
+/**
+ * Comments on an issue in chronological order, oldest first.
+ *
+ * Ordering breaks ties on rowid because `created_at` is millisecond-precision:
+ * two comments written in the same millisecond would otherwise paginate
+ * non-deterministically. Omitting `limit` returns every comment.
+ */
 export async function listIssueComments(
   db: D1Database,
   logger: Logger,
