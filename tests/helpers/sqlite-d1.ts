@@ -24,6 +24,11 @@ interface WrappedStmt {
   all<T>(): Promise<{ results: T[]; success: boolean; meta: Record<string, never> }>;
 }
 
+/**
+ * Creates an in-memory SQLite database with all production migrations applied.
+ *
+ * @returns The D1-compatible database wrapper and its underlying SQLite database
+ */
 export function makeSqliteD1(): { db: D1Database; raw: DatabaseSync } {
   const raw = new DatabaseSync(":memory:");
   const migrations = Object.entries(migrationModules)
@@ -67,7 +72,12 @@ export function makeSqliteD1(): { db: D1Database; raw: DatabaseSync } {
   return { db, raw };
 }
 
-/** A D1 stand-in whose every operation throws — for exercising error paths. */
+/**
+ * Creates a D1-compatible database whose operations throw an error.
+ *
+ * @param message - The error message to throw.
+ * @returns A D1-compatible database stub.
+ */
 export function makeThrowingD1(message = "boom"): D1Database {
   return {
     prepare: () => {

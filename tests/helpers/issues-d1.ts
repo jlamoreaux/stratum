@@ -41,6 +41,12 @@ export function makeIssuesD1(): {
   const matchScope = (r: IssueTableRow, projectId: unknown, project: unknown) =>
     r.project_id === projectId || (r.project_id === null && r.project === project);
 
+  /**
+   * Applies a supported issue update to the matching in-memory issue row.
+   *
+   * @param sql - The SQL update statement describing the assignments and issue scope
+   * @param bindings - Values bound to the statement
+   */
   function applyUpdate(sql: string, bindings: unknown[]) {
     // UPDATE issues SET <assignments> WHERE (project_id = ? OR (project_id IS NULL
     // AND project = ?)) AND number = ?  — or the legacy name-only WHERE.
@@ -90,6 +96,13 @@ export function makeIssuesD1(): {
     }
   }
 
+  /**
+   * Creates a mocked prepared statement for issue and event database operations.
+   *
+   * @param sql - The SQL statement represented by the mock
+   * @param bindings - Values bound to the statement's parameters
+   * @returns A statement supporting parameter binding and mocked execution methods
+   */
   function makeStmt(sql: string, bindings: unknown[]) {
     const upper = sql.trim().toUpperCase().replace(/\s+/g, " ");
     return {

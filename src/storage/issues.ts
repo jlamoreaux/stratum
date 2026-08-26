@@ -45,9 +45,12 @@ interface IssueRow {
 }
 
 /**
- * Build an `Issue` from a row, omitting optional keys whose column is NULL
- * rather than setting them to null — callers use `=== undefined` throughout,
- * and a present-but-null key would read as "set" to them.
+ * Converts a database row into an API issue.
+ *
+ * Optional properties with null database values are omitted from the result.
+ *
+ * @param row - The database row to convert
+ * @returns The corresponding API issue
  */
 function rowToIssue(row: IssueRow): Issue {
   const issue: Issue = {
@@ -71,9 +74,12 @@ function rowToIssue(row: IssueRow): Issue {
 }
 
 /**
- * Normalise a thrown value into an AppError, preserving one that is already an
- * AppError and tagging anything else as DATABASE_ERROR with the operation and
- * context attached for the log line.
+ * Converts a thrown value into an application error while preserving existing application errors.
+ *
+ * @param error - The thrown value to convert
+ * @param operation - The operation associated with the error
+ * @param context - Additional metadata to attach to converted errors
+ * @returns The original application error or a database error containing the operation and context
  */
 function toAppError(error: unknown, operation: string, context: Record<string, unknown>) {
   return error instanceof AppError
@@ -87,8 +93,10 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
 }
 
 /**
- * Open a new issue, allocating its per-project `number`. `projectId` is the
- * canonical scope; `project` is the free-form name kept for legacy rows.
+ * Creates an open issue and assigns the next number within its project.
+ *
+ * @param opts - Issue details, including the project scope and author information.
+ * @returns The created issue or an application error if creation fails.
  */
 export async function createIssue(
   db: D1Database,
@@ -199,13 +207,14 @@ export function escapeLike(text: string): string {
 }
 
 /**
- * List a project's issues, newest number first.
+ * Lists a project's issues in descending issue-number order.
  *
- * Every query is project-scoped: the scope clause is always the first condition,
- * so no filter combination can return another project's issues. `search` is a
- * LIKE over title and body with the pattern metacharacters escaped, and `limit`
- * / `offset` are bound rather than interpolated. Omitting `limit` returns every
- * matching row, so callers rendering a page should pass one.
+ * Supports filtering by status, label, assignee, title or body search, and
+ * pagination. When provided, `projectId` scopes canonical project records while
+ * retaining compatibility with legacy project-name records.
+ *
+ * @param project - The project name used for scoping and legacy records
+ * @returns The matching issues, or an application error if retrieval fails
  */
 export async function listIssues(
   db: D1Database,
@@ -287,9 +296,12 @@ export async function listIssues(
 }
 
 /**
- * Apply a partial update to an issue and return the stored row. Only the fields
- * present in `opts` are written; `linkedChangeId` and `assignee` take null to
- * clear rather than omitting them, which leaves them untouched.
+ * Applies the supplied changes to an issue.
+ *
+ * @param project - The project containing the issue
+ * @param number - The issue number within the project
+ * @param opts - Fields to update and the actor responsible for status changes; use `null` to clear the linked change or assignee
+ * @returns The updated issue or an error if the issue is not found or the update fails
  */
 export async function updateIssue(
   db: D1Database,
