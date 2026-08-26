@@ -3,6 +3,7 @@ import { type NodeFS, artifactsRepoNameFromRemote, pushMain, pushTags } from "..
 import { MemoryFS } from "../storage/memory-fs";
 import { placeLooseObject, unpackObjects } from "../storage/object-loader";
 import type { Env } from "../types";
+import { projectDefaultBranch } from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, fromPromise, ok } from "../utils/result";
@@ -20,8 +21,8 @@ const GITDIR = "/.git";
 /**
  * Reconstructs a repository in an in-memory Git store from a snapshot.
  *
- * Restores the main branch and any tagged references, and verifies that their
- * referenced objects are present in the snapshot.
+ * Restores the default branch and any tagged references, and verifies that
+ * their referenced objects are present in the snapshot.
  *
  * The verification matters because the backup captured the FULL reachable
  * object set: the reconstructed pack is closed under reachability, so the
@@ -32,33 +33,32 @@ const GITDIR = "/.git";
  * Operates on an in-memory store, so it is fully testable without Artifacts.
  *
  * @param pack - Serialized Git objects from the snapshot
- * @param manifest - Snapshot metadata containing the main branch tip and optional tags
+ * @param manifest - Snapshot metadata containing the tip and optional tags
+ * @param branch - The branch to point at the tip; defaults to `main`, but imported repos keep their source branch name (master/trunk/…), and restoring one under the wrong name would leave the repo with no branch at its own default
  * @returns The in-memory filesystem and repository directory, or a backup error
  */
 export async function reconstructRepo(
   pack: Uint8Array,
   manifest: RepoManifest,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   try {
-    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    await git.init({ fs: fs as any, dir: DIR, defaultBranch: "main" });
+    const fs = new MemoryFS().toNodeFS();
+    await git.init({ fs, dir: DIR, defaultBranch: branch });
 
     for (const obj of unpackObjects(pack)) {
       await placeLooseObject(fs, GITDIR, obj.oid, obj.bytes);
     }
     await git.writeRef({
-      // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-      fs: fs as any,
+      fs,
       dir: DIR,
-      ref: "refs/heads/main",
+      ref: `refs/heads/${branch}`,
       value: manifest.tipSha,
       force: true,
     });
 
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    const resolved = await git.resolveRef({ fs: fs as any, dir: DIR, ref: "main" });
+    const resolved = await git.resolveRef({ fs, dir: DIR, ref: branch });
     if (resolved !== manifest.tipSha) {
       return err(
         new AppError(
@@ -72,8 +72,7 @@ export async function reconstructRepo(
     // COMMIT OBJECT actually unpacked into the store. readCommit does — it throws
     // if the object (or any pack it needs) is missing, catching a corrupt pack
     // that reconstructs a dangling ref.
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    await git.readCommit({ fs: fs as any, dir: DIR, oid: manifest.tipSha });
+    await git.readCommit({ fs, dir: DIR, oid: manifest.tipSha });
 
     // Tag refs (#182). `tags` is OPTIONAL: manifests from backups taken before
     // tag support omit it, and such a restore must keep working unchanged.
@@ -86,8 +85,7 @@ export async function reconstructRepo(
         return err(new AppError(`Invalid tag name in manifest: ${tag.name}`, "BACKUP_ERROR", 500));
       }
       await git.writeRef({
-        // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-        fs: fs as any,
+        fs,
         dir: DIR,
         ref: `refs/tags/${tag.name}`,
         value: tag.oid,
@@ -95,8 +93,7 @@ export async function reconstructRepo(
       });
       // Same dangling-ref guard as the tip: prove the tag's object (annotated
       // tag object or lightweight target) actually unpacked.
-      // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-      await git.readObject({ fs: fs as any, dir: DIR, oid: tag.oid });
+      await git.readObject({ fs, dir: DIR, oid: tag.oid });
     }
 
     logger.debug("Reconstructed repo", {
@@ -225,7 +222,10 @@ export async function restoreProjectRepo(
     }
   };
 
-  const rebuilt = await reconstructRepo(snapshot.pack, snapshot.manifest, logger);
+  // Restore under the project's real default branch so an imported master/trunk
+  // repo comes back with the ref every other git op targets.
+  const branch = projectDefaultBranch(project);
+  const rebuilt = await reconstructRepo(snapshot.pack, snapshot.manifest, logger, branch);
   if (!rebuilt.success) {
     await rollbackIfCreated();
     return err(rebuilt.error);
@@ -233,6 +233,7 @@ export async function restoreProjectRepo(
 
   const pushed = await pushMain(remote, token, rebuilt.data.fs, rebuilt.data.dir, logger, {
     force: repoExists,
+    branch,
   });
   if (!pushed.success) {
     await rollbackIfCreated();

@@ -2,6 +2,7 @@ import git from "isomorphic-git";
 import { type NodeFS, cloneRepo, extractTreeObjects, freshRepoToken } from "../storage/git-ops";
 import { packObjects } from "../storage/object-loader";
 import type { Env, ProjectEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
@@ -379,6 +380,7 @@ export async function snapshotRepo(
   // Worker's memory budget so a normal repo never approaches it.
   const clone = await cloneRepo(project.remote, token.data, logger, {
     fullHistory: true,
+    ref: projectDefaultBranch(project),
     includeTags: true,
   });
   if (!clone.success) return err(clone.error);
