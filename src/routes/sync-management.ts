@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { scanContentForSecrets } from "../evaluation/secret-scanner";
 import { authMiddleware } from "../middleware/auth";
-import { freshRepoToken, resolveConflict } from "../storage/git-ops";
+import { MAX_FILE_BYTES, freshRepoToken, resolveConflict } from "../storage/git-ops";
 import { getProject, getProjectByPath, getWorkspace, setProject } from "../storage/state";
 import {
   checkForSyncUpdates,
@@ -535,6 +535,22 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   // accept-workspace reuse already-committed trees and need no re-scan.)
   if (strategy === "manual") {
     const resolutions = body.resolutions as Array<{ file: string; content: string }>;
+
+    // Size first, because the scan below is the expensive step: it splits every
+    // file and runs the full pattern set plus an entropy pass over each line.
+    // resolveConflict enforces the same cap, but only after the scan has already
+    // walked the content, so an oversized payload that is going to be rejected
+    // anyway would burn the request's CPU budget on its way to that rejection.
+    // Same limit and same 422 as the deeper check, so callers see no change.
+    for (const { file, content } of resolutions) {
+      if (new TextEncoder().encode(content).length > MAX_FILE_BYTES) {
+        return c.json(
+          { error: `File ${file} exceeds maximum size of 10 MB`, code: "INVALID_INPUT" },
+          422,
+        );
+      }
+    }
+
     // Scan the literal content, not a diff synthesised from it. Prefixing each
     // line with "+" is not reversible: a resolution line that already starts
     // with "++" would render as "+++…" and be skipped as a diff file header,

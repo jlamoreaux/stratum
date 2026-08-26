@@ -340,6 +340,43 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
     expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
   });
 
+  it("rejects an oversized resolution before the secret scan walks it", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+
+    // Over the 10 MB cap, and carrying a secret on its last line. The secret is
+    // what makes this discriminating: if the size check ran after the scan, the
+    // response would be SECRET_DETECTED rather than the size rejection, which is
+    // proof the expensive pass walked the whole payload first.
+    const oversized = `${"x".repeat(10 * 1024 * 1024 + 1)}\nconst k = "AKIAIOSFODNN7EXAMPLE";`;
+
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "src/big.ts", content: oversized }],
+        }),
+      }),
+      { STATE: kv, DB: makeDb() },
+    );
+
+    expect(res.status).toBe(422);
+    const body = await res.json<{ code: string; error: string }>();
+    expect(body.code).toBe("INVALID_INPUT");
+    expect(body.error).toContain("exceeds maximum size");
+    expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+  });
+
   it("blocks a secret on a line that itself starts with ++ (no prefix escape)", async () => {
     const kv = makeKv();
     vi.mocked(resolveConflict).mockClear();
