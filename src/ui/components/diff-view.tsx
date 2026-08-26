@@ -373,7 +373,6 @@ export const LineCommentThreads: FC<{
   comments: ChangeComment[];
   /** Rendered diff files, used to link threads to line anchors. */
   files?: DiffFile[];
-  /** Whether to render reply forms. */
   canComment?: boolean;
   /**
    * Whether the viewer may resolve *any* thread — i.e. is a project writer.
@@ -383,7 +382,6 @@ export const LineCommentThreads: FC<{
    * showed readers a button whose route answers 403.
    */
   canResolveAny?: boolean;
-  /** The signed-in viewer's user id, for the thread-author case above. */
   viewerId?: string;
 }> = ({ changeId, comments, files = [], canComment = false, canResolveAny = false, viewerId }) => {
   const threads = buildLineCommentThreads(comments);
