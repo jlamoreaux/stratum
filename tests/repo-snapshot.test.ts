@@ -100,14 +100,12 @@ describe("repo snapshot capture", () => {
   // interim "loud, explicit skip" — the drop must be logged, not silent.
   it("logs a loud warning naming the dropped tags for a tag-only repo (unborn HEAD)", async () => {
     const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }]);
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    const gfs = fs as any;
-    await git.tag({ fs: gfs, dir: DIR, ref: "v1", object: tipSha });
+    await git.tag({ fs, dir: DIR, ref: "v1", object: tipSha });
     // Remove the only branch ref directly (not via git.deleteBranch, which
     // detaches HEAD onto the sha instead of leaving it unborn) so HEAD stays
     // an unresolvable symref, mirroring a remote whose sole ref is a tag: the
     // tagged commit stays reachable only via refs/tags/v1.
-    await gfs.promises.unlink(`${DIR}/.git/refs/heads/main`);
+    await fs.promises.unlink(`${DIR}/.git/refs/heads/main`);
 
     const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
     expect(walk.success).toBe(true);
@@ -133,12 +131,10 @@ describe("repo snapshot capture", () => {
     // what this warning exists to prevent. The sample is bounded; the count
     // is not.
     const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }]);
-    // biome-ignore lint/suspicious/noExplicitAny: isomorphic-git fs shape
-    const gfs = fs as any;
     for (let i = 0; i < 60; i++) {
-      await git.tag({ fs: gfs, dir: DIR, ref: `v${String(i).padStart(3, "0")}`, object: tipSha });
+      await git.tag({ fs, dir: DIR, ref: `v${String(i).padStart(3, "0")}`, object: tipSha });
     }
-    await gfs.promises.unlink(`${DIR}/.git/refs/heads/main`);
+    await fs.promises.unlink(`${DIR}/.git/refs/heads/main`);
 
     const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
     expect(walk.success).toBe(true);
