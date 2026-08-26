@@ -28,13 +28,22 @@ interface IssuesPageProps {
 const statusBadge = (status: Issue["status"]) =>
   status === "open" ? "badge badge-open" : "badge badge-merged";
 
-const LabelChips: FC<{ labels: string[]; base: string }> = ({ labels, base }) => (
+/**
+ * `keep` carries the filters a label link must not discard — the status tab and
+ * the search text. The label itself is replaced, not accumulated, so the caller
+ * must leave the active `label=` out of `keep`.
+ */
+const LabelChips: FC<{ labels: string[]; base: string; keep?: string }> = ({
+  labels,
+  base,
+  keep,
+}) => (
   <>
     {labels.map((label) => (
       <a
         key={label}
         class="badge issue-label"
-        href={`${base}?label=${encodeURIComponent(label)}`}
+        href={`${base}?label=${encodeURIComponent(label)}${keep ? `&${keep}` : ""}`}
         title={`Filter by label "${label}"`}
       >
         {label}
@@ -58,6 +67,12 @@ export const IssuesPage: FC<IssuesPageProps> = ({
   // Preserve the label/search filters when switching status tabs.
   const keep = [
     ...(activeLabel ? [`label=${encodeURIComponent(activeLabel)}`] : []),
+    ...(query ? [`q=${encodeURIComponent(query)}`] : []),
+  ].join("&");
+  // A label link swaps the label filter, so it carries the status tab and the
+  // search text but deliberately not the current `label=`.
+  const labelKeep = [
+    ...(filter !== "open" ? [`status=${filter}`] : []),
     ...(query ? [`q=${encodeURIComponent(query)}`] : []),
   ].join("&");
   const tab = (status?: "closed" | "all") => {
@@ -120,7 +135,7 @@ export const IssuesPage: FC<IssuesPageProps> = ({
               <a href={`${base}/${issue.number}`} class="issues-title">
                 #{issue.number} {issue.title}
               </a>
-              <LabelChips labels={labels[issue.id] ?? []} base={base} />
+              <LabelChips labels={labels[issue.id] ?? []} base={base} keep={labelKeep} />
               {issue.linkedChangeId && (
                 <a href={`/changes/${issue.linkedChangeId}`} class="issues-linked-change">
                   {issue.linkedChangeId}

@@ -1119,6 +1119,38 @@ describe("issue comments + labels storage", () => {
     expect(empty.success && empty.data).toEqual({});
   });
 
+  it("getLabelsForIssues chunks its IN (...) list to respect D1's bind ceiling", async () => {
+    const { db } = makeSqliteD1();
+    // D1 caps bound parameters per query, so a page larger than that ceiling must
+    // be split. node:sqlite tolerates a far larger bind list than D1 does, so
+    // asserting only on the returned labels would pass against the unbatched
+    // version too — count the prepared statements instead.
+    const ids: string[] = [];
+    for (let i = 0; i < 250; i++) {
+      const issue = await seedRealIssue(db);
+      ids.push(issue.id);
+    }
+    await setIssueLabels(db, mockLogger, ids[0] as string, ["alpha"]);
+    await setIssueLabels(db, mockLogger, ids[249] as string, ["omega"]);
+
+    let labelQueries = 0;
+    const counting = {
+      ...db,
+      prepare: (sql: string) => {
+        if (sql.includes("FROM issue_labels WHERE issue_id IN")) labelQueries++;
+        return db.prepare(sql);
+      },
+    } as unknown as D1Database;
+
+    const batch = await getLabelsForIssues(counting, mockLogger, ids);
+    expect(batch.success).toBe(true);
+    // 250 ids at 100 binds per query.
+    expect(labelQueries).toBe(3);
+    // Labels from the first and last chunk both survive the merge.
+    expect(batch.success && batch.data[ids[0] as string]).toEqual(["alpha"]);
+    expect(batch.success && batch.data[ids[249] as string]).toEqual(["omega"]);
+  });
+
   it("listIssues supports offset without a limit and search over NULL bodies", async () => {
     const { db } = makeSqliteD1();
     await createIssue(db, mockLogger, {

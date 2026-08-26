@@ -74,7 +74,15 @@ export async function listIssueLabels(
 }
 
 /**
- * Labels for many issues in one query (issue list rendering / API listing).
+ * D1 caps how many parameters a single query may bind; `getLabelsForIssues`
+ * chunks its `IN (...)` list to stay under it. `src/storage/d1-backup.ts`
+ * carries the same value for its batched restore inserts.
+ */
+const MAX_D1_BINDS = 100;
+
+/**
+ * Labels for many issues, chunked to respect D1's bind ceiling (issue list
+ * rendering / API listing).
  * Returns a map of issue id → sorted labels; issues without labels are absent.
  */
 export async function getLabelsForIssues(
@@ -84,18 +92,25 @@ export async function getLabelsForIssues(
 ): Promise<Result<Record<string, string[]>, AppError>> {
   if (issueIds.length === 0) return ok({});
   try {
-    const placeholders = issueIds.map(() => "?").join(", ");
-    const result = await db
-      .prepare(
-        `SELECT issue_id, label FROM issue_labels WHERE issue_id IN (${placeholders}) ORDER BY label ASC`,
-      )
-      .bind(...issueIds)
-      .all<{ issue_id: string; label: string }>();
     const byIssue: Record<string, string[]> = {};
-    for (const row of result.results) {
-      const labels = byIssue[row.issue_id] ?? [];
-      labels.push(row.label);
-      byIssue[row.issue_id] = labels;
+    // One `?` is bound per issue id, and D1 caps bound parameters per query, so a
+    // single IN (...) over a whole page would fail outright once the page grows
+    // past that ceiling. Chunk the ids and merge. (`src/storage/d1-backup.ts`
+    // encodes the same platform limit for its batched inserts.)
+    for (let i = 0; i < issueIds.length; i += MAX_D1_BINDS) {
+      const chunk = issueIds.slice(i, i + MAX_D1_BINDS);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const result = await db
+        .prepare(
+          `SELECT issue_id, label FROM issue_labels WHERE issue_id IN (${placeholders}) ORDER BY label ASC`,
+        )
+        .bind(...chunk)
+        .all<{ issue_id: string; label: string }>();
+      for (const row of result.results) {
+        const labels = byIssue[row.issue_id] ?? [];
+        labels.push(row.label);
+        byIssue[row.issue_id] = labels;
+      }
     }
     return ok(byIssue);
   } catch (error) {

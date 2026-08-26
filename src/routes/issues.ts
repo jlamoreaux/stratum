@@ -37,11 +37,11 @@ const MAX_LABELS_PER_ISSUE = 20;
 const MAX_SEARCH_LENGTH = 200;
 
 /** Default + hard cap for the paginated issues listing (bounds the response). */
-const DEFAULT_ISSUES_PAGE = 100;
+export const DEFAULT_ISSUES_PAGE = 100;
 const MAX_ISSUES_PAGE = 500;
 
 /** Default + hard cap for the paginated comment listing. */
-const DEFAULT_COMMENTS_PAGE = 100;
+export const DEFAULT_COMMENTS_PAGE = 100;
 const MAX_COMMENTS_PAGE = 500;
 
 interface RouteContext {

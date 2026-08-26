@@ -49,6 +49,7 @@ import { WorkspacesPage } from "../ui/pages/workspaces";
 import { canReadProject, canWriteProject, filterMemberProjects } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import { isValidNamespace, isValidSlug } from "../utils/validation";
+import { DEFAULT_COMMENTS_PAGE, DEFAULT_ISSUES_PAGE } from "./issues";
 import { SUBSCRIBABLE_EVENTS } from "./webhooks";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -958,6 +959,9 @@ app.get("/:namespace/:slug/issues", async (c) => {
       projectId: project.id,
       ...(activeLabel !== undefined ? { label: activeLabel } : {}),
       ...(query !== undefined ? { search: query } : {}),
+      // Bound the page like the API route does. Unbounded, this renders every
+      // issue in the project and hands every id to getLabelsForIssues.
+      limit: DEFAULT_ISSUES_PAGE,
     },
   );
   if (!issuesResult.success) {
@@ -1043,7 +1047,7 @@ app.get("/:namespace/:slug/issues/:number", async (c) => {
 
   const [labelsResult, commentsResult] = await Promise.all([
     listIssueLabels(c.env.DB, logger, issue.id),
-    listIssueComments(c.env.DB, logger, issue.id),
+    listIssueComments(c.env.DB, logger, issue.id, { limit: DEFAULT_COMMENTS_PAGE }),
   ]);
   const comments = commentsResult.success ? commentsResult.data : [];
 
