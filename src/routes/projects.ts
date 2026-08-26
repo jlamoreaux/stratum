@@ -793,22 +793,15 @@ async function processImportJob(
     // Final cancellation check before completing
     if (await checkCancelled()) return;
 
-    // Mark import as complete
-    await updateImportStatus(
-      env.DB,
-      namespace,
-      slug,
-      "completed",
-      logger,
-      "Import completed successfully",
-    );
-
-    // Release the rate limit lock on completion
-    await releaseImportLock(env.STATE, namespace, slug, logger);
-
     // Write repo snapshot to KV so page loads skip git clones going forward.
     // The snapshot walk yields the real imported-file count — report it so the
     // progress bar shows actual numbers instead of a perpetual 0.
+    //
+    // This runs *before* the status flips to "completed": the progress stream
+    // below closes itself on a terminal status and the browser closes its
+    // EventSource with it, so a count written after the flip reaches nobody.
+    // writeSnapshotFromRepo swallows its own failures and returns null, so
+    // nothing added here can fail an import that already succeeded.
     const snapshot = await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
@@ -824,6 +817,19 @@ async function processImportJob(
         logger,
       );
     }
+
+    // Mark import as complete
+    await updateImportStatus(
+      env.DB,
+      namespace,
+      slug,
+      "completed",
+      logger,
+      "Import completed successfully",
+    );
+
+    // Release the rate limit lock on completion
+    await releaseImportLock(env.STATE, namespace, slug, logger);
 
     logger.info("Import completed", { namespace, slug, importId });
   } catch (error) {

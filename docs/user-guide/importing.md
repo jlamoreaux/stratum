@@ -52,6 +52,11 @@ This returns an `ImportProgress` object: a `status` (`queued`, `cloning`,
 `totalBytes`), and any `errors` and `logs`. Polling also recovers imports that
 have stalled for more than 5 minutes.
 
+`processedFiles` and `totalFiles` are not an incrementing counter: they are
+both written once, from the file walk that builds the repository snapshot, in
+the `processing` phase just before the status becomes `completed`. Expect them
+to stay at `0` for the whole clone and then jump to the final count.
+
 Or subscribe to Server-Sent Events instead of polling — the stream emits the
 same `ImportProgress` JSON as an SSE `data:` line every 2 seconds until the
 import completes, fails, or is cancelled:

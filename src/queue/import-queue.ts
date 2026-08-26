@@ -345,23 +345,20 @@ async function processImportJob(
       return;
     }
 
-    // Mark import as complete
-    await updateImportStatus(
-      env.DB,
-      namespace,
-      slug,
-      "completed",
-      logger,
-      "Import completed successfully",
-    );
-
-    // Record completion with duration
+    // Measure the import proper — clone plus project write — before the
+    // snapshot walk below, so the recorded duration keeps the meaning it had.
     const duration = Date.now() - startedAt;
-    await recordImportCompleted(env.DB, namespace, slug, duration, logger);
 
     // Write repo snapshot to KV so page loads skip git clones going forward.
     // The snapshot walk yields the real imported-file count — report it so the
     // progress bar shows actual numbers instead of the perpetual 0 it used to.
+    //
+    // This runs *before* the status flips to "completed": the progress stream
+    // (GET /projects/:ns/:slug/import/stream in src/routes/projects.ts) closes
+    // itself on a terminal status and the browser closes its EventSource with
+    // it, so a count written after the flip reaches nobody.
+    // writeSnapshotFromRepo swallows its own failures and returns null, so
+    // nothing added here can fail an import that already succeeded.
     const snapshot = await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
@@ -377,6 +374,18 @@ async function processImportJob(
         logger,
       );
     }
+
+    // Mark import as complete
+    await updateImportStatus(
+      env.DB,
+      namespace,
+      slug,
+      "completed",
+      logger,
+      "Import completed successfully",
+    );
+
+    await recordImportCompleted(env.DB, namespace, slug, duration, logger);
 
     await emitEvent(
       env.DB,

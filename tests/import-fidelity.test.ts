@@ -383,6 +383,31 @@ afterEach(() => {
 // validateCloneDepth
 // ----------------------------------------------------------------------------
 
+/**
+ * Assert the file-count progress write landed before the status flipped to
+ * "completed". Ordering is load-bearing, not cosmetic: the progress stream
+ * (GET /projects/:ns/:slug/import/stream) closes itself on a terminal status
+ * and the browser closes its EventSource with it, so counts written after the
+ * flip are never delivered to anyone watching the import.
+ */
+async function expectCountsBeforeCompletion(expectedFiles: number) {
+  const { updateImportProgress, updateImportStatus } = await import("../src/storage/imports");
+  const progressCalls = vi.mocked(updateImportProgress).mock;
+  const statusCalls = vi.mocked(updateImportStatus).mock;
+
+  const progressIndex = progressCalls.calls.findIndex(
+    (call) =>
+      (call[3] as { progress?: { processedFiles?: number } } | undefined)?.progress
+        ?.processedFiles === expectedFiles,
+  );
+  const completedIndex = statusCalls.calls.findIndex((call) => call[3] === "completed");
+  expect(progressIndex).toBeGreaterThanOrEqual(0);
+  expect(completedIndex).toBeGreaterThanOrEqual(0);
+  expect(progressCalls.invocationCallOrder[progressIndex]).toBeLessThan(
+    statusCalls.invocationCallOrder[completedIndex] as number,
+  );
+}
+
 describe("validateCloneDepth", () => {
   it("defaults to DEFAULT_CLONE_DEPTH when absent", async () => {
     const { DEFAULT_CLONE_DEPTH, validateCloneDepth } = await import("../src/utils/validation");
@@ -730,6 +755,8 @@ describe("import route edge paths", () => {
     expect(job?.progress.processedFiles).toBe(5);
     expect(job?.progress.totalFiles).toBe(5);
     expect(statusHistory.get("@usera:direct")).toContain("processing");
+
+    await expectCountsBeforeCompletion(5);
   });
 
   it("logs (and survives) an unexpected rejection from direct background processing", async () => {
@@ -864,6 +891,8 @@ describe("import queue consumer", () => {
     // Phases in order: queued -> cloning -> processing -> completed
     const history = statusHistory.get("@usera:repo") ?? [];
     expect(history).toEqual(["queued", "cloning", "processing", "completed"]);
+
+    await expectCountsBeforeCompletion(42);
   });
 
   it("leaves progress at completion without counts when the snapshot walk fails", async () => {
