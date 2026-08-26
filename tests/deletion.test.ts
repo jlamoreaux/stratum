@@ -52,6 +52,7 @@ function makeTarget(overrides: Partial<DeletionTarget> = {}): DeletionTarget {
     projectRepoName: "alice__api",
     changeIds: ["chg_1", "chg_2"],
     webhookIds: ["wh_1"],
+    issueIds: ["iss_1"],
     nameCollision: false,
     ...overrides,
   };
@@ -200,6 +201,28 @@ describe("deleteProjectCascade", () => {
       expect(child).toBeGreaterThanOrEqual(0);
       expect(child).toBeLessThan(changes);
       expect(child).toBeLessThan(webhooks);
+    }
+  });
+
+  // issue_comments and issue_labels key on issue_id alone, so a project-scoped
+  // DELETE cannot reach them, and migration 036 declares no foreign keys. Left
+  // out of the cascade they survive their project forever and ride along into
+  // every backup.
+  it("deletes issue child rows before the issues that own them", async () => {
+    const { db, executed } = makeRecordingD1();
+    const result = await deleteProjectCascade(
+      makeEnv({ db, kv: kvStub.kv }),
+      makeTarget({ issueIds: ["iss_1", "iss_2"] }),
+      mockLogger,
+    );
+
+    expect(result.success).toBe(true);
+    const issueComments = sqlIndex(executed, "DELETE FROM issue_comments");
+    const issueLabels = sqlIndex(executed, "DELETE FROM issue_labels");
+    const issues = sqlIndex(executed, "DELETE FROM issues");
+    for (const child of [issueComments, issueLabels]) {
+      expect(child).toBeGreaterThanOrEqual(0);
+      expect(child).toBeLessThan(issues);
     }
   });
 

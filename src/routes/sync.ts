@@ -3,7 +3,7 @@ import { syncOrImportProject } from "../services/project-sync";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
 import { listProjects, setProject } from "../storage/state";
 import { checkForSyncUpdates, getProjectSourceUrl, updateProjectAfterSync } from "../storage/sync";
-import { type Env, artifactsRepoName } from "../types";
+import { type Env, artifactsRepoName, projectDefaultBranch } from "../types";
 import { createLogger } from "../utils/logger";
 
 // The former unauthenticated `POST /projects/:name/sync` handler was removed: it
@@ -53,7 +53,7 @@ export async function syncAllProjects(
       }
 
       projectLogger.info("Syncing project", { commitsBehind: checkResult.data.commitsBehind });
-      const branch = project.sourceDefaultBranch || project.githubDefaultBranch || "main";
+      const branch = projectDefaultBranch(project);
 
       // #190: existing projects sync INCREMENTALLY into their Artifacts repo —
       // never delete-and-re-import, which destroyed Stratum-native commits and
@@ -84,6 +84,7 @@ export async function syncAllProjects(
             remote: syncedRemote,
             namespace: project.namespace,
             slug: project.slug,
+            defaultBranch: projectDefaultBranch(project),
           },
           projectLogger,
         );

@@ -45,6 +45,7 @@ import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
 import { getProjectSourceUrl } from "../storage/sync";
 import type { Change, Env, ProjectEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { newId } from "../utils/ids";
@@ -112,7 +113,12 @@ async function loadMergePolicyCached(
       }
       const tok = await freshRepoToken(env.ARTIFACTS, project.remote, "read", logger);
       if (!tok.success) throw new Error(tok.error.message);
-      const loaded = await loadPolicy(project.remote, tok.data, logger);
+      const loaded = await loadPolicy(
+        project.remote,
+        tok.data,
+        logger,
+        projectDefaultBranch(project),
+      );
       if (cacheable) {
         policyCache.set(project.id, { policy: loaded, expires: Date.now() + POLICY_CACHE_TTL_MS });
         await env.STATE.put(policyKvKey(project.id), JSON.stringify(loaded), {
@@ -198,10 +204,11 @@ async function resolveWorkspaceTip(
   env: Env,
   workspaceRemote: string,
   logger: Logger,
+  branch = "main",
 ): Promise<string | null> {
   const readToken = await freshRepoToken(env.ARTIFACTS, workspaceRemote, "read", logger);
   if (!readToken.success) return null;
-  const logResult = await getCommitLog(workspaceRemote, readToken.data, logger, 1);
+  const logResult = await getCommitLog(workspaceRemote, readToken.data, logger, 1, branch);
   return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
 }
 
@@ -269,6 +276,7 @@ app.post("/projects/:name/changes", async (c) => {
     actor: {
       ...(userId !== undefined ? { userId } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
+      ...(agentOwnerId !== undefined ? { agentOwnerId } : {}),
     },
     waitUntil: getWaitUntil(c),
   });
@@ -505,7 +513,12 @@ app.post("/changes/:id/merge", async (c) => {
     if (change.evaluatedSha !== undefined) {
       const workspaceResult = await getWorkspace(c.env.STATE, project.id, change.workspace, logger);
       const currentTip = workspaceResult.success
-        ? await resolveWorkspaceTip(c.env, workspaceResult.data.remote, logger)
+        ? await resolveWorkspaceTip(
+            c.env,
+            workspaceResult.data.remote,
+            logger,
+            projectDefaultBranch(project),
+          )
         : null;
       if (currentTip === null) {
         logger.warn("Could not verify workspace freshness for merge", {
@@ -672,6 +685,7 @@ app.post("/changes/:id/merge", async (c) => {
     logger,
     {
       strategy,
+      branch: projectDefaultBranch(project),
       // Merge the exact evaluated commit (#115) AND assert the tip hasn't moved
       // since evaluation (SEC-2, applies even under force). Both pin to the same
       // evaluated revision; legacy changes without these fields merge the live tip.
@@ -926,7 +940,12 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
       distinctWorkspaces.map(async (ws) => {
         const wsResult = await getWorkspace(c.env.STATE, project.id, ws, logger);
         const tip = wsResult.success
-          ? await resolveWorkspaceTip(c.env, wsResult.data.remote, logger)
+          ? await resolveWorkspaceTip(
+              c.env,
+              wsResult.data.remote,
+              logger,
+              projectDefaultBranch(project),
+            )
           : null;
         tipByWorkspace.set(ws, tip);
       }),
@@ -990,7 +1009,9 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
   const clonePromise = (async () => {
     const token = await freshRepoToken(c.env.ARTIFACTS, project.remote, "write", logger);
     if (!token.success) throw new Error(token.error.message);
-    const cloned = await cloneRepo(project.remote, token.data, logger);
+    const cloned = await cloneRepo(project.remote, token.data, logger, {
+      ref: projectDefaultBranch(project),
+    });
     if (!cloned.success) throw new Error(cloned.error.message);
     return { token: token.data, fs: cloned.data.fs, dir: cloned.data.dir };
   })();
@@ -1062,6 +1083,7 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
     cloneData.token,
     items,
     logger,
+    projectDefaultBranch(project),
   );
   if (!mergeResult.success) return internalError(mergeResult.error.message);
   const batchMs = Date.now() - tBatch;
@@ -1291,7 +1313,8 @@ app.post("/changes/:id/evaluate", async (c) => {
   if (!projectReadToken.success) return internalError(projectReadToken.error.message);
   if (!workspaceReadToken.success) return internalError(workspaceReadToken.error.message);
 
-  const policy = await loadPolicy(project.remote, projectReadToken.data, logger);
+  const branch = projectDefaultBranch(project);
+  const policy = await loadPolicy(project.remote, projectReadToken.data, logger, branch);
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -1299,6 +1322,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     workspace.remote,
     workspaceReadToken.data,
     logger,
+    branch,
   );
   if (!diffResult.success) {
     logger.error("Failed to get diff between repos", diffResult.error);
@@ -1632,7 +1656,12 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (body.base !== undefined && (typeof body.base !== "string" || !isValidBaseRef(body.base))) {
     return badRequest("Invalid base branch name");
   }
-  const base = body.base ?? project.sourceDefaultBranch ?? project.githubDefaultBranch ?? "main";
+  // projectDefaultBranch rather than the inline chain: it uses `||`, so an
+  // empty-string sourceDefaultBranch falls through instead of being sent to
+  // GitHub as a branch name. Resolved once: it is both the PR base fallback and
+  // the ref the workspace clone below must ask for.
+  const defaultBranch = projectDefaultBranch(project);
+  const base = body.base ?? defaultBranch;
 
   // GitHub PR creation needs a GitHub credential — the Artifacts repo token (now
   // never persisted) was never valid here. Use the app's configured GitHub token.
@@ -1658,7 +1687,11 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!repoTokenResult.success) return internalError(repoTokenResult.error.message);
   // GitHub shares no objects with the workspace repo, so a shallow clone's
   // history would be incomplete once pushed there — clone in full.
+  // `ref` is the project's default branch, NOT `base`: the workspace fork copies
+  // the parent's default branch under the same name, while `base` may be a
+  // caller-supplied GitHub branch that does not exist in the fork at all.
   const cloneResult = await cloneRepo(workspaceRemote, repoTokenResult.data, logger, {
+    ref: defaultBranch,
     fullHistory: true,
   });
   if (!cloneResult.success) return appError(cloneResult.error);
@@ -1670,6 +1703,10 @@ app.post("/changes/:id/github-pr", async (c) => {
       url: `https://github.com/${repo.owner}/${repo.repo}.git`,
       remoteRef: `refs/heads/${branch}`,
       token: githubToken,
+      // Must match the clone ref above: the clone is singleBranch, so on a
+      // non-main-default project it holds only `defaultBranch` and a push of
+      // `main` fails locally before the request is even made.
+      localRef: defaultBranch,
       // The Stratum-owned ref: re-promotion must move it to the current tip.
       force: true,
     },
