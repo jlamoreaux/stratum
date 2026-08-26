@@ -1648,20 +1648,31 @@ app.post("/changes/:id/github-pr", async (c) => {
   const repo = { owner: parsedRepo.info.owner, repo: parsedRepo.info.repo };
 
   const body = await c.req
-    .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
-    .catch(() => ({}) as { title?: string; body?: string; base?: string; draft?: boolean });
+    .json<{ title?: string; body?: string; draft?: boolean }>()
+    .catch(() => ({}) as { title?: string; body?: string; draft?: boolean });
 
-  // `base` comes straight from the request body — only a sane branch name may
-  // reach the GitHub API. Absent, fall back to the project's known default.
-  if (body.base !== undefined && (typeof body.base !== "string" || !isValidBaseRef(body.base))) {
-    return badRequest("Invalid base branch name");
-  }
-  // projectDefaultBranch rather than the inline chain: it uses `||`, so an
-  // empty-string sourceDefaultBranch falls through instead of being sent to
-  // GitHub as a branch name. Resolved once: it is both the PR base fallback and
-  // the ref the workspace clone below must ask for.
+  // The PR base is the project's own recorded default branch, never a
+  // caller-supplied value (SA-6). This endpoint acts with the instance-wide
+  // GitHub token, so honouring a body-supplied base would let any caller aim
+  // that shared credential at a branch of its choosing on the linked repo — and
+  // validating the string does not change that, because the problem is
+  // authorization, not syntax. `base` is therefore no longer read from the body
+  // at all; the request type above omits it.
+  //
+  // Through projectDefaultBranch rather than an inline `??` chain: the helper
+  // uses `||`, so an empty-string sourceDefaultBranch falls through to the next
+  // candidate instead of reaching GitHub as a branch name. Still validated after
+  // that, because the record can carry a branch name that arrived through import
+  // and was never checked by this app.
   const defaultBranch = projectDefaultBranch(project);
-  const base = body.base ?? defaultBranch;
+  if (!isValidBaseRef(defaultBranch)) {
+    logger.error("Project default branch is not a valid git ref", undefined, {
+      projectId: project.id,
+      base: defaultBranch,
+    });
+    return badRequest("Project default branch is not a valid branch name");
+  }
+  const base = defaultBranch;
 
   // GitHub PR creation needs a GitHub credential — the Artifacts repo token (now
   // never persisted) was never valid here. Use the app's configured GitHub token.
@@ -1687,9 +1698,10 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!repoTokenResult.success) return internalError(repoTokenResult.error.message);
   // GitHub shares no objects with the workspace repo, so a shallow clone's
   // history would be incomplete once pushed there — clone in full.
-  // `ref` is the project's default branch, NOT `base`: the workspace fork copies
-  // the parent's default branch under the same name, while `base` may be a
-  // caller-supplied GitHub branch that does not exist in the fork at all.
+  // `ref` is the project's default branch, which the workspace fork copies under
+  // the same name. Since SA-6 that is also exactly `base` — the caller can no
+  // longer supply one — but the two are kept distinct because they name
+  // different things: a ref in the fork versus a branch on GitHub.
   const cloneResult = await cloneRepo(workspaceRemote, repoTokenResult.data, logger, {
     ref: defaultBranch,
     fullHistory: true,

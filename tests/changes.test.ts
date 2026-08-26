@@ -2251,26 +2251,107 @@ describe("POST /api/changes/:id/github-pr", () => {
   // `base` is caller-supplied and may name a branch that exists on GitHub but
   // not in the workspace fork. It must never be used as the clone ref — only
   // the project's own default branch is guaranteed to exist there.
-  it("clones the project default branch even when the caller overrides base", async () => {
+  it("clones and pushes the project default branch, never a body-supplied base", async () => {
     const res = await promote({ base: "release/2026-08" });
     expect(res.status).toBe(200);
 
+    // Since SA-6 the base is the project's own default branch, so the body value
+    // reaches nothing. This case still earns its place alongside the SA-6 test
+    // below: it is the only one pinning the clone ref and push localRef, which
+    // must follow the fork's branch rather than the GitHub base.
     const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
-    expect(prPayload.base).toBe("release/2026-08");
+    expect(prPayload.base).toBe("develop");
     expect(cloneRepo).toHaveBeenCalledWith(
       mockWorkspace.remote,
       "artifacts-token",
       expect.anything(),
       { ref: "develop", fullHistory: true },
     );
-    // The push follows the clone, not `base`: `release/2026-08` is not in the
-    // fork, and neither is `main`.
+    // `release/2026-08` is not in the fork, and neither is `main`.
     expect(pushBranchToRemote).toHaveBeenCalledWith(
       {},
       "/",
       expect.objectContaining({ localRef: "develop" }),
       expect.anything(),
     );
+  });
+
+  // SA-6: this endpoint acts with the instance-wide GitHub token, so a
+  // caller-supplied base would aim that shared credential at a branch of the
+  // caller's choosing. `base` is not read from the body at all.
+  it("ignores a caller-supplied base and targets the project's own default branch", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        sourceUrl: "https://github.com/imported/repo.git",
+        sourceDefaultBranch: "trunk",
+      },
+    });
+
+    const res = await promote({ base: "attacker-controlled" });
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk");
+    expect(prPayload.base).not.toBe("attacker-controlled");
+  });
+
+  // Precedence, pinned because nothing else does: every other case sets at most
+  // one of the two recorded defaults, so none of them would notice the order
+  // being reversed.
+  it("prefers sourceDefaultBranch over githubDefaultBranch when both are recorded", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...githubProject,
+        sourceDefaultBranch: "trunk",
+        githubDefaultBranch: "develop",
+      },
+    } as Awaited<ReturnType<typeof getProject>>);
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk");
+    expect(prPayload.base).not.toBe("develop");
+  });
+
+  // The reason projectDefaultBranch uses `||` rather than `??`: an import can
+  // record an empty string, and `??` would forward that to GitHub as a branch
+  // name. It must fall through to the next candidate instead.
+  it("falls through an empty sourceDefaultBranch to githubDefaultBranch", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...githubProject,
+        sourceDefaultBranch: "",
+        githubDefaultBranch: "develop",
+      },
+    } as Awaited<ReturnType<typeof getProject>>);
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("develop");
+  });
+
+  it("rejects promotion when the project's own default branch is not a valid ref", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        sourceUrl: "https://github.com/imported/repo.git",
+        sourceDefaultBranch: "bad..branch",
+      },
+    });
+
+    const res = await promote();
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   // A shape-only URL check (github.com suffix + non-empty path) accepts real
@@ -2354,20 +2435,29 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(JSON.stringify(fetchMock.mock.calls)).not.toContain("stale/old-repo");
   });
 
-  it("passes a valid caller-supplied base through to GitHub", async () => {
-    const res = await promote({ base: "release/1.2" });
-    expect(res.status).toBe(200);
-    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
-    expect(prPayload.base).toBe("release/1.2");
-  });
+  // The base-validation matrix moved off the request body and onto the project's
+  // own recorded default branch. `base` is no longer accepted from callers at
+  // all (SA-6), but the project record can still carry a branch name that
+  // arrived through import and was never checked, so the same rules apply — the
+  // input is just a different one.
+  const withDefaultBranch = (sourceDefaultBranch: string) =>
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        sourceUrl: "https://github.com/imported/repo.git",
+        sourceDefaultBranch,
+      },
+    });
 
-  it.each(["feature/@/thing", "feature/@-fix", "v1.0.0", "a.b.c/d.e"])(
-    "accepts the legal base %j (@ inside a longer name is unambiguous)",
-    async (base) => {
-      const res = await promote({ base });
+  it.each(["release/1.2", "feature/@/thing", "feature/@-fix", "v1.0.0", "a.b.c/d.e"])(
+    "promotes against the legal project default branch %j (@ inside a longer name is unambiguous)",
+    async (branch) => {
+      withDefaultBranch(branch);
+      const res = await promote();
       expect(res.status).toBe(200);
       const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
-      expect(prPayload.base).toBe(base);
+      expect(prPayload.base).toBe(branch);
     },
   );
 
@@ -2387,7 +2477,6 @@ describe("POST /api/changes/:id/github-pr", () => {
     "quest?ion",
     "ctrl\u0007bell",
     "a".repeat(201),
-    "",
     // git applies its per-component rules to every slash-separated component,
     // not just the whole ref, so these are invalid despite the full string
     // neither starting with "." nor ending with "." / ".lock".
@@ -2399,18 +2488,20 @@ describe("POST /api/changes/:id/github-pr", () => {
     // git will create refs/heads/@, but "@" is git's shorthand for HEAD, so the
     // name is ambiguous everywhere it is used. Rejected deliberately.
     "@",
-  ])("rejects garbage base %j without touching GitHub", async (base) => {
-    const res = await promote({ base });
+  ])("refuses to promote against the garbage project default branch %j", async (branch) => {
+    withDefaultBranch(branch);
+    const res = await promote();
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("Invalid base branch name");
     expect(pushBranchToRemote).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a non-string base", async () => {
-    const res = await promote({ base: 42 });
-    expect(res.status).toBe(400);
-    expect(pushBranchToRemote).not.toHaveBeenCalled();
+  it("ignores a base in the request body even when it is a legal branch name", async () => {
+    withDefaultBranch("trunk");
+    const res = await promote({ base: "release/1.2" });
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk");
   });
 
   it("400s when the project has neither githubUrl nor sourceUrl", async () => {
