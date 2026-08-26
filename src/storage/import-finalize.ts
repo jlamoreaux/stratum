@@ -18,16 +18,25 @@ import { writeSnapshotFromRepo } from "./repo-snapshot";
  * `writeSnapshotFromRepo` handles its own failures and returns null, so nothing
  * here can fail an import that already succeeded — the cost of a failed snapshot
  * is a completed import whose file counts stay at 0.
+ *
+ * `defaultBranch` names the ref the snapshot clone should check out. Omitting it
+ * falls back to "main", which silently produces an empty snapshot for a repo
+ * imported from any other default branch, so both callers pass it.
  */
 export async function finalizeImportSnapshot(
   env: { STATE: KVNamespace; ARTIFACTS: ArtifactsNamespace; DB: D1Database },
-  project: { remote: string; namespace: string; slug: string },
+  project: { remote: string; namespace: string; slug: string; defaultBranch?: string },
   logger: Logger,
 ): Promise<void> {
   const snapshot = await writeSnapshotFromRepo(
     env.STATE,
     env.ARTIFACTS,
-    { remote: project.remote, namespace: project.namespace, slug: project.slug },
+    {
+      remote: project.remote,
+      namespace: project.namespace,
+      slug: project.slug,
+      ...(project.defaultBranch !== undefined ? { defaultBranch: project.defaultBranch } : {}),
+    },
     logger,
   );
   if (!snapshot) return;

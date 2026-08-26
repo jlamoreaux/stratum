@@ -27,7 +27,7 @@ import type {
   SyncJobMessage,
 } from "../types";
 import type { Message, MessageBatch } from "../types";
-import { getArtifactsRepoName } from "../types";
+import { getArtifactsRepoName, projectDefaultBranch } from "../types";
 import { escapeHtml } from "../utils/html";
 import { type Logger, createLogger } from "../utils/logger";
 import { DEFAULT_CLONE_DEPTH, MAX_CLONE_DEPTH } from "../utils/validation";
@@ -324,7 +324,16 @@ async function processImportJob(
 
     // Snapshot + file count, before the terminal status flip. See
     // finalizeImportSnapshot for why the ordering matters.
-    await finalizeImportSnapshot(env, { remote: updatedProject.remote, namespace, slug }, logger);
+    await finalizeImportSnapshot(
+      env,
+      {
+        remote: updatedProject.remote,
+        namespace,
+        slug,
+        defaultBranch: projectDefaultBranch(updatedProject),
+      },
+      logger,
+    );
 
     // Re-check: the snapshot walk clones the repo, so it is long enough for a
     // cancel to land inside it. Writing "completed" without re-checking would
@@ -622,7 +631,12 @@ async function processSyncJob(
     await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
-      { remote: updatedProject.remote, namespace, slug },
+      {
+        remote: updatedProject.remote,
+        namespace,
+        slug,
+        defaultBranch: projectDefaultBranch(updatedProject),
+      },
       logger,
     );
 

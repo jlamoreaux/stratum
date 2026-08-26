@@ -16,7 +16,12 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/** Outcome-oriented one-liner for an event, e.g. "Change chg_1 evaluated → 0.91 passed". */
+/**
+ * Outcome-oriented one-liner for an event, e.g. "Change chg_1 evaluated → 0.91
+ * passed" — the feed reads as a list of what happened, not of event types.
+ *
+ * @returns A description of the event and relevant payload details
+ */
 export function describeEvent(event: EventRecord): string {
   const { payload } = event;
   const changeId = asString(payload.changeId);
@@ -50,7 +55,12 @@ export function describeEvent(event: EventRecord): string {
     case "change.commented":
       return `Comment on change ${changeId ?? "?"}`;
     case "change.reviewed": {
-      const verdict = payload.verdict === "approve" ? "approved" : "changes requested";
+      const verdict =
+        payload.verdict === "approve"
+          ? "approved"
+          : payload.verdict === "comment"
+            ? "commented"
+            : "changes requested";
       return `Change ${changeId ?? "?"} reviewed → ${verdict}`;
     }
     case "sync.completed":
@@ -59,6 +69,10 @@ export function describeEvent(event: EventRecord): string {
       const number = typeof payload.issueNumber === "number" ? payload.issueNumber : "?";
       const title = asString(payload.title);
       return `Issue #${number} opened${title ? `: ${title}` : ""}`;
+    }
+    case "issue.commented": {
+      const number = typeof payload.issueNumber === "number" ? payload.issueNumber : "?";
+      return `Comment on issue #${number}`;
     }
     case "issue.closed": {
       const number = typeof payload.issueNumber === "number" ? payload.issueNumber : "?";

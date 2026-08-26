@@ -256,6 +256,26 @@ export function artifactsRepoName(project: ProjectEntry): string {
   return getArtifactsRepoName(project.namespace, project.slug);
 }
 
+/**
+ * The default branch of the project's Artifacts repo.
+ *
+ * `Artifacts.import` mirrors the SOURCE branch name into the target repo — it
+ * does not rename it to `main` (the push gate in routes/git-http.ts relies on
+ * this: a repo imported with a `master`/`trunk` default has no refs/heads/main).
+ * Workspace forks copy the parent's default branch under the same name, so this
+ * is also the branch every fork-based git op must target. Stratum-native repos
+ * (created via initAndPush) always have `main`, which the final fallback covers.
+ *
+ * Single source of truth for the `sourceDefaultBranch || githubDefaultBranch ||
+ * "main"` chain previously inlined at the push gate, sync, and PR paths.
+ */
+export function projectDefaultBranch(project: {
+  sourceDefaultBranch?: string;
+  githubDefaultBranch?: string;
+}): string {
+  return project.sourceDefaultBranch || project.githubDefaultBranch || "main";
+}
+
 export interface WorkspaceEntry {
   name: string;
   remote: string;
@@ -406,6 +426,11 @@ export interface Change {
   agentModel?: string;
   /** The authoring agent's prompt hash, snapshotted at change creation. */
   agentPromptHash?: string;
+  /** The human author of the change (the acting user, or an agent's owning
+   * user). Their own review does not count toward `merge.requiredApprovals`.
+   * NULL on legacy rows and on changes with no Stratum author (e.g. inbound
+   * GitHub PRs). */
+  createdByUserId?: string;
   /**
    * The workspace commit sha the evaluation ran against. The merge gate merges
    * *this* sha (not the workspace's live tip, #115), so a re-push between eval and

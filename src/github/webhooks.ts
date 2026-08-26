@@ -9,7 +9,7 @@ import { getProjectByGitHubRepo } from "../storage/github-bridge";
 import { createImportJob } from "../storage/imports";
 import { getWorkspace } from "../storage/state";
 import { getSyncStatus, setSyncInProgress } from "../storage/sync";
-import type { Env } from "../types";
+import { type Env, projectDefaultBranch } from "../types";
 import { type Logger, createLogger } from "../utils/logger";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -88,10 +88,18 @@ async function handlePush(
 
   const project = projectResult.data;
 
-  if (branch !== project.sourceDefaultBranch) {
+  // Resolve once, up front: the guard and the queued job must agree on which
+  // branch is "default". Comparing against the raw sourceDefaultBranch while
+  // queueing projectDefaultBranch(project) meant a project whose branch comes
+  // from githubDefaultBranch — an import that never set sourceDefaultBranch —
+  // had every push to its real default rejected here, so webhook-triggered
+  // sync never ran for it.
+  const sourceBranch = projectDefaultBranch(project);
+
+  if (branch !== sourceBranch) {
     logger.debug("Push to non-default branch, skipping sync", {
       branch,
-      defaultBranch: project.sourceDefaultBranch,
+      defaultBranch: sourceBranch,
     });
     return;
   }
@@ -115,7 +123,6 @@ async function handlePush(
   }
 
   const importId = crypto.randomUUID();
-  const sourceBranch = project.sourceDefaultBranch ?? "main";
   const sourceUrl = project.sourceUrl ?? project.remote;
 
   // Enqueue FIRST — only write state flags after a successful send().
@@ -218,10 +225,20 @@ export async function handlePullRequest(
         return;
       }
 
+      // Record the change author so the merge gate can exclude their own
+      // approval (SA-2). The acting identity is not in the webhook payload —
+      // GitHub names the PR author, who need not be a Stratum user — but the
+      // workspace this PR tracks was created in Stratum by someone, and
+      // WorkspaceEntry.createdByUserId is the same "user, or an agent's owner"
+      // principal the API path records. Without it these changes carry a NULL
+      // author, no approval is excluded, and the self-approval bypass this
+      // guard exists to close stays open on every webhook-created change.
+      const workspaceAuthor = workspaceResult.data.createdByUserId;
       const createResult = await createChange(env.DB, logger, {
         project: project.id,
         projectId: project.id,
         workspace: pr.head.ref,
+        ...(workspaceAuthor !== undefined ? { createdByUserId: workspaceAuthor } : {}),
       });
       if (!createResult.success) {
         logger.error("Failed to create Change from PR webhook", createResult.error, { prNumber });
