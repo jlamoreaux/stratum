@@ -46,6 +46,7 @@ function makeTarget(overrides: Partial<DeletionTarget> = {}): DeletionTarget {
     forkRepoNames: [],
     projectRepoName: "alice__api",
     changeIds: ["chg_1"],
+    issueIds: [],
     webhookIds: [],
     nameCollision: false,
     ...overrides,

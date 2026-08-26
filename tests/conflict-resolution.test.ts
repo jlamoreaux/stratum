@@ -309,6 +309,148 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
     expect(vi.mocked(kv.delete)).toHaveBeenCalledWith("conflict:conflict-abc");
   });
 
+  it("blocks a manual resolution that contains a secret (422, never pushes)", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "src/foo.ts", content: 'const k = "AKIAIOSFODNN7EXAMPLE";' }],
+        }),
+      }),
+      { STATE: kv, DB: makeDb() },
+    );
+
+    expect(res.status).toBe(422);
+    const body = await res.json<{ code: string }>();
+    expect(body.code).toBe("SECRET_DETECTED");
+    // The always-on secret scan must block before any push happens.
+    expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized resolution before the secret scan walks it", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+
+    // Over the 10 MB cap, and carrying a secret on its last line. The secret is
+    // what makes this discriminating: if the size check ran after the scan, the
+    // response would be SECRET_DETECTED rather than the size rejection, which is
+    // proof the expensive pass walked the whole payload first.
+    const oversized = `${"x".repeat(10 * 1024 * 1024 + 1)}\nconst k = "AKIAIOSFODNN7EXAMPLE";`;
+
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "src/big.ts", content: oversized }],
+        }),
+      }),
+      { STATE: kv, DB: makeDb() },
+    );
+
+    expect(res.status).toBe(422);
+    const body = await res.json<{ code: string; error: string }>();
+    expect(body.code).toBe("INVALID_INPUT");
+    expect(body.error).toContain("exceeds maximum size");
+    expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+  });
+
+  it("blocks a secret on a line that itself starts with ++ (no prefix escape)", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+
+    // The scan used to run over a diff synthesised by prefixing every content
+    // line with "+". That encoding is not reversible: this line would become
+    // "+++const k = ..." and be skipped as a unified-diff file header, so the
+    // key landed on the default branch unscanned. Both "++" and "++ " forms are
+    // covered because only the latter also looks like a header after prefixing.
+    for (const content of [
+      '++const k = "AKIAIOSFODNN7EXAMPLE";',
+      '++ const k = "AKIAIOSFODNN7EXAMPLE";',
+    ]) {
+      const res = await app.fetch(
+        new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+          method: "POST",
+          headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            strategy: "manual",
+            resolutions: [{ file: "src/foo.ts", content }],
+          }),
+        }),
+        { STATE: kv, DB: makeDb() },
+      );
+
+      expect(res.status).toBe(422);
+      const body = await res.json<{ code: string; issues: string[] }>();
+      expect(body.code).toBe("SECRET_DETECTED");
+      // Issues are reported per file with a content-relative line number.
+      expect(body.issues[0]).toBe("AWS Access Key: src/foo.ts line 1");
+      expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("allows a manual resolution with clean content (scan passes → pushes)", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+    vi.mocked(resolveConflict).mockResolvedValue({
+      success: true,
+      data: { commitSha: "resolved-sha" },
+    });
+
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "src/foo.ts", content: "export const x = 1;" }],
+        }),
+      }),
+      { STATE: kv, DB: makeDb() },
+    );
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(resolveConflict)).toHaveBeenCalledOnce();
+  });
+
   it("404s a caller without project write access (never mints a token or pushes)", async () => {
     const kv = makeKv();
     vi.mocked(resolveConflict).mockClear();

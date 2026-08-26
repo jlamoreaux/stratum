@@ -14,6 +14,7 @@ import {
   submoduleUnsupportedError,
 } from "../storage/git-ops";
 import { getProviderFromUrl } from "../storage/git-providers";
+import { finalizeImportSnapshot } from "../storage/import-finalize";
 import { deleteImportJob, isImportCancelled, updateImportStatus } from "../storage/imports";
 import {
   recordImportCancelled,
@@ -33,15 +34,13 @@ import type {
   SyncJobMessage,
 } from "../types";
 import type { Message, MessageBatch } from "../types";
-import { getArtifactsRepoName } from "../types";
+import { getArtifactsRepoName, projectDefaultBranch } from "../types";
 import { escapeHtml } from "../utils/html";
 import { type Logger, createLogger } from "../utils/logger";
+import { DEFAULT_CLONE_DEPTH, MAX_CLONE_DEPTH } from "../utils/validation";
 import { emitEvent } from "./events";
 
 const logger = createLogger({ component: "ImportQueue" });
-
-// Default clone depth for imports
-const DEFAULT_CLONE_DEPTH = 10;
 
 /**
  * Validates an import job message
@@ -78,6 +77,16 @@ function validateImportMessage(body: unknown): ImportJobMessage | null {
     return null;
   }
 
+  // Sanitize depth: only integers in [0, MAX_CLONE_DEPTH] are honored
+  // (0 = full history); anything else falls back to the default.
+  const depth =
+    typeof msg.depth === "number" &&
+    Number.isInteger(msg.depth) &&
+    msg.depth >= 0 &&
+    msg.depth <= MAX_CLONE_DEPTH
+      ? msg.depth
+      : DEFAULT_CLONE_DEPTH;
+
   return {
     type: "github.import",
     importId: msg.importId,
@@ -86,8 +95,9 @@ function validateImportMessage(body: unknown): ImportJobMessage | null {
     slug: msg.slug,
     githubUrl: msg.githubUrl,
     branch: msg.branch,
-    depth: typeof msg.depth === "number" ? msg.depth : DEFAULT_CLONE_DEPTH,
+    depth,
     timestamp: msg.timestamp,
+    ...(typeof msg.initiatedBy === "string" ? { initiatedBy: msg.initiatedBy } : {}),
   };
 }
 
@@ -188,12 +198,26 @@ async function readSubmoduleReport(
   remote: string,
   logger: Logger,
 ): Promise<SubmoduleContentReport | null> {
-  const tokenResult = await freshRepoToken(env.ARTIFACTS, remote, "read", logger);
-  if (!tokenResult.success) return null;
-  const cloneResult = await cloneRepo(remote, tokenResult.data, logger);
-  if (!cloneResult.success) return null;
-  const scanResult = await scanForSubmoduleContent(cloneResult.data.fs, "main", logger);
-  return scanResult.success ? scanResult.data : null;
+  // Every failure mode collapses to null, including a thrown one. The caller
+  // treats null as "not scanned" and lets the import through with a warning, so
+  // a rejected promise here has to reach that path too — without the catch it
+  // would escape to the job's outer handler and fail an import for an infra
+  // hiccup, which is the opposite of the best-effort contract documented at the
+  // call site.
+  try {
+    const tokenResult = await freshRepoToken(env.ARTIFACTS, remote, "read", logger);
+    if (!tokenResult.success) return null;
+    const cloneResult = await cloneRepo(remote, tokenResult.data, logger);
+    if (!cloneResult.success) return null;
+    const scanResult = await scanForSubmoduleContent(cloneResult.data.fs, "main", logger);
+    return scanResult.success ? scanResult.data : null;
+  } catch (error) {
+    logger.warn("Submodule scan threw while reading the imported tree", {
+      remote,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /**
@@ -205,7 +229,7 @@ async function processImportJob(
   message: ImportJobMessage,
   msg: Message<ImportJobMessage>,
 ): Promise<void> {
-  const { importId, projectId, namespace, slug, githubUrl, branch, depth } = message;
+  const { importId, projectId, namespace, slug, githubUrl, branch, depth, initiatedBy } = message;
   const artifactsRepoName = getArtifactsRepoName(namespace, slug);
 
   // Use message timestamp for duration calculation (works across Worker isolates)
@@ -287,6 +311,7 @@ async function processImportJob(
         branch,
         error: importResult.error,
         startedAt,
+        ...(initiatedBy !== undefined ? { initiatedBy } : {}),
       });
 
       await updateImportStatus(
@@ -307,6 +332,17 @@ async function processImportJob(
       msg.ack();
       return;
     }
+
+    // Clone finished — surface the phase transition so the progress UI moves
+    // off "cloning" while the project entry and snapshot are written.
+    await updateImportStatus(
+      env.DB,
+      namespace,
+      slug,
+      "processing",
+      logger,
+      "Repository cloned, finalizing import",
+    );
 
     // Fail closed on git submodules (#258). The raw import above (Artifacts
     // cloning the source directly) preserves a gitlink entry byte-for-byte, but
@@ -348,13 +384,48 @@ async function processImportJob(
       msg.ack();
       return;
     }
-
-    // Update project with actual repo info and mark import as complete
+    // Built here, persisted below. `importCompleted: true` must not reach KV
+    // until every way this run can still end in a non-terminal-success state
+    // has been ruled out, or a cancelled or failed import leaves behind a
+    // project entry claiming it completed.
     const updatedProject: ProjectEntry = {
       ...project,
       remote: importResult.data.remote,
       importCompleted: true,
     };
+
+    // Final cancellation check before completing
+    if (await checkAndHandleCancellation(env, namespace, slug)) {
+      await recordImportCancelled(env.DB, namespace, slug, logger);
+      msg.ack();
+      return;
+    }
+
+    // Measure the import proper — the clone — before the snapshot walk below,
+    // so the recorded duration keeps the meaning it had.
+    const duration = Date.now() - startedAt;
+
+    // Snapshot + file count, before the terminal status flip. See
+    // finalizeImportSnapshot for why the ordering matters.
+    await finalizeImportSnapshot(
+      env,
+      {
+        remote: updatedProject.remote,
+        namespace,
+        slug,
+        defaultBranch: projectDefaultBranch(updatedProject),
+      },
+      logger,
+    );
+
+    // Re-check: the snapshot walk clones the repo, so it is long enough for a
+    // cancel to land inside it. Writing "completed" without re-checking would
+    // silently overwrite that cancellation.
+    if (await checkAndHandleCancellation(env, namespace, slug)) {
+      await recordImportCancelled(env.DB, namespace, slug, logger);
+      msg.ack();
+      return;
+    }
 
     const setResult = await setProject(env.STATE, updatedProject, logger);
     if (!setResult.success) {
@@ -367,6 +438,7 @@ async function processImportJob(
         branch,
         error,
         startedAt,
+        ...(initiatedBy !== undefined ? { initiatedBy } : {}),
       });
 
       await updateImportStatus(
@@ -381,13 +453,6 @@ async function processImportJob(
       return;
     }
 
-    // Final cancellation check before completing
-    if (await checkAndHandleCancellation(env, namespace, slug)) {
-      await recordImportCancelled(env.DB, namespace, slug, logger);
-      msg.ack();
-      return;
-    }
-
     // Mark import as complete
     await updateImportStatus(
       env.DB,
@@ -398,17 +463,7 @@ async function processImportJob(
       "Import completed successfully",
     );
 
-    // Record completion with duration
-    const duration = Date.now() - startedAt;
     await recordImportCompleted(env.DB, namespace, slug, duration, logger);
-
-    // Write repo snapshot to KV so page loads skip git clones going forward
-    await writeSnapshotFromRepo(
-      env.STATE,
-      env.ARTIFACTS,
-      { remote: updatedProject.remote, namespace, slug },
-      logger,
-    );
 
     await emitEvent(
       env.DB,
@@ -444,6 +499,7 @@ async function processImportJob(
         branch,
         error: err,
         startedAt,
+        ...(initiatedBy !== undefined ? { initiatedBy } : {}),
       });
 
       await updateImportStatus(
@@ -658,7 +714,12 @@ async function processSyncJob(
     await writeSnapshotFromRepo(
       env.STATE,
       env.ARTIFACTS,
-      { remote: updatedProject.remote, namespace, slug },
+      {
+        remote: updatedProject.remote,
+        namespace,
+        slug,
+        defaultBranch: projectDefaultBranch(updatedProject),
+      },
       logger,
     );
 
@@ -776,7 +837,7 @@ export async function handleImportQueue(
  */
 export async function queueImportJob(
   queue: Queue<ImportJobMessage> | undefined,
-  params: Omit<ImportJobMessage, "type" | "timestamp"> & { depth?: number },
+  params: Omit<ImportJobMessage, "type" | "timestamp" | "depth"> & { depth?: number },
 ): Promise<void> {
   if (!queue) {
     throw new Error("IMPORT_QUEUE not configured");
@@ -792,6 +853,7 @@ export async function queueImportJob(
     branch: params.branch,
     depth: params.depth ?? DEFAULT_CLONE_DEPTH,
     timestamp: new Date().toISOString(),
+    ...(params.initiatedBy !== undefined ? { initiatedBy: params.initiatedBy } : {}),
   };
 
   await queue.send(message);
@@ -894,7 +956,11 @@ async function storeFailedImport(
 }
 
 /**
- * Send failure notification email
+ * Send failure notification email.
+ *
+ * Recipients: the user who triggered the import (when known), plus an admin
+ * copy (ADMIN_EMAIL, falling back to EMAIL_FROM_ADDRESS) — kept deliberately so
+ * operators still see import failures across all users.
  */
 async function sendFailureNotification(
   env: Env,
@@ -903,6 +969,8 @@ async function sendFailureNotification(
     slug: string;
     errorType: string;
     errorMessage: string;
+    /** Email address of the user who triggered the import, when known. */
+    initiatorEmail?: string;
   },
   logger: Logger,
 ): Promise<void> {
@@ -911,9 +979,17 @@ async function sendFailureNotification(
     return;
   }
 
-  const toAddress = env.ADMIN_EMAIL ?? env.EMAIL_FROM_ADDRESS;
-  if (!toAddress) {
-    logger.debug("No admin email configured, skipping notification");
+  const recipients = new Set<string>();
+  if (params.initiatorEmail) {
+    recipients.add(params.initiatorEmail);
+  }
+  const adminAddress = env.ADMIN_EMAIL ?? env.EMAIL_FROM_ADDRESS;
+  if (adminAddress) {
+    recipients.add(adminAddress);
+  }
+
+  if (recipients.size === 0) {
+    logger.debug("No notification recipients configured, skipping notification");
     return;
   }
 
@@ -925,8 +1001,7 @@ async function sendFailureNotification(
   const safeErrorType = escapeHtml(params.errorType);
   const safeErrorMessage = escapeHtml(params.errorMessage);
 
-  const message: EmailMessage = {
-    to: toAddress,
+  const message: Omit<EmailMessage, "to"> = {
     from: { email: fromAddress, name: "Stratum Alerts" },
     subject: `[Stratum] Import Failed: ${projectPath}`,
     text: `Import failed for ${projectPath}\n\nError Type: ${params.errorType}\nError: ${params.errorMessage}\n\nTime: ${new Date().toISOString()}`,
@@ -941,15 +1016,25 @@ async function sendFailureNotification(
     `,
   };
 
-  try {
-    await env.EMAIL.send(message);
-    logger.info("Failure notification sent", {
-      to: toAddress,
-      namespace: params.namespace,
-      slug: params.slug,
-    });
-  } catch (error) {
-    logger.error("Failed to send failure notification", error instanceof Error ? error : undefined);
+  for (const toAddress of recipients) {
+    // The admin address is operator configuration, but the initiator's is a
+    // user's own email — logging it copies PII into log storage. The type is
+    // all the log needs to tell the two deliveries apart.
+    const recipientType = toAddress === adminAddress ? "admin" : "initiator";
+    try {
+      await env.EMAIL.send({ ...message, to: toAddress });
+      logger.info("Failure notification sent", {
+        recipientType,
+        namespace: params.namespace,
+        slug: params.slug,
+      });
+    } catch (error) {
+      logger.error(
+        "Failed to send failure notification",
+        error instanceof Error ? error : undefined,
+        { recipientType, namespace: params.namespace, slug: params.slug },
+      );
+    }
   }
 }
 /**
@@ -1007,9 +1092,21 @@ async function handleImportFailure(
     error: Error;
     startedAt: number;
     isSync?: boolean;
+    /** User id of the account that triggered the import, for notification routing. */
+    initiatedBy?: string;
   },
 ): Promise<void> {
-  const { importId, namespace, slug, githubUrl, branch, error, startedAt, isSync = false } = params;
+  const {
+    importId,
+    namespace,
+    slug,
+    githubUrl,
+    branch,
+    error,
+    startedAt,
+    isSync = false,
+    initiatedBy,
+  } = params;
 
   const errorType = classifyError(error);
   const duration = Date.now() - startedAt;
@@ -1049,6 +1146,30 @@ async function handleImportFailure(
 
   // Send notification (if not a cancellation)
   if (errorType !== "CANCELLED") {
+    // Resolve the triggering user's email so the notification reaches the
+    // person who started the import — not only the instance admin.
+    let initiatorEmail: string | undefined;
+    if (initiatedBy) {
+      try {
+        const { getUser } = await import("../storage/users");
+        const userResult = await getUser(env.DB, initiatedBy, logger);
+        if (userResult.success) {
+          initiatorEmail = userResult.data.email;
+        } else {
+          logger.warn("Could not resolve import initiator for failure notification", {
+            initiatedBy,
+            namespace,
+            slug,
+          });
+        }
+      } catch (lookupError) {
+        logger.warn("Initiator lookup failed for failure notification", {
+          initiatedBy,
+          error: lookupError instanceof Error ? lookupError.message : String(lookupError),
+        });
+      }
+    }
+
     await sendFailureNotification(
       env,
       {
@@ -1056,6 +1177,7 @@ async function handleImportFailure(
         slug,
         errorMessage: error.message,
         errorType,
+        ...(initiatorEmail !== undefined ? { initiatorEmail } : {}),
       },
       logger,
     );

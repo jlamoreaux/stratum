@@ -10,6 +10,7 @@ import {
 import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
 import { getUser, getUserByToken } from "../storage/users";
 import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
 import { getWaitUntil } from "../utils/execution-ctx";
 import {
@@ -338,7 +339,7 @@ async function authorizeWorkspace(
   c: { req: { header(name: string): string | undefined; param(name: string): string }; env: Env },
   scope: "read" | "write",
   logger: ReturnType<typeof createLogger>,
-): Promise<{ remote: string; workspace: WorkspaceEntry } | Response> {
+): Promise<{ remote: string; workspace: WorkspaceEntry; project: ProjectEntry } | Response> {
   const namespace = c.req.param("namespace");
   const slug = normalizeSlug(c.req.param("slug"));
   const workspaceName = normalizeSlug(c.req.param("workspace"));
@@ -400,7 +401,7 @@ async function authorizeWorkspace(
     return gitUnavailable("workspace");
   }
 
-  return { remote: workspace.remote, workspace };
+  return { remote: workspace.remote, workspace, project };
 }
 
 /**
@@ -762,7 +763,7 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   // Same default-branch resolution the merge/sync paths use — a repo imported
   // with a `master` or `trunk` default must gate pushes to THAT ref, not to a
   // literal refs/heads/main it doesn't have.
-  const defaultBranch = project.sourceDefaultBranch || project.githubDefaultBranch || "main";
+  const defaultBranch = projectDefaultBranch(project);
   const defaultRef = `refs/heads/${defaultBranch}`;
   const command = commands[0];
   const isGateablePush =
@@ -955,7 +956,13 @@ gitHttpRouter.post("/:namespace/:slug/workspaces/:workspace/git-receive-pack", a
     }
 
     const branch = result.workspace.branchName || result.workspace.name;
-    const verdict = checkWorkspacePushPolicy(parsed.data.commands, branch);
+    // The fork's working branch is the PROJECT's default, not necessarily
+    // `main` — an imported project keeps its source default (master/trunk/...).
+    const verdict = checkWorkspacePushPolicy(
+      parsed.data.commands,
+      branch,
+      projectDefaultBranch(result.project),
+    );
     if (!verdict.allowed) {
       logger.warn("Workspace push refused by ref policy", {
         ref: verdict.ref,

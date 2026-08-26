@@ -203,3 +203,97 @@ describe("Webhook push handler", () => {
     expect(queueSyncJob).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The guard above the enqueue and the branch the job carries must agree on
+ * what "default" means. The guard used to compare the pushed branch against
+ * the raw `sourceDefaultBranch` while the job was queued with
+ * `projectDefaultBranch(project)`, so a project whose default comes from
+ * `githubDefaultBranch` — an import that never set `sourceDefaultBranch` —
+ * had every push to its real default rejected, and webhook sync never ran.
+ *
+ * Unlike the cases above, this drives the real router with a signed payload,
+ * so it exercises handlePush rather than asserting the mocks exist.
+ */
+describe("Webhook push handler: default branch resolution", () => {
+  const SECRET = "test-webhook-secret";
+
+  async function sign(payload: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(SECRET),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+    const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return `sha256=${hex}`;
+  }
+
+  async function pushTo(branch: string, project: Record<string, unknown>) {
+    // mockReset, not mockResolvedValueOnce: the suites above queue `Once`
+    // values they never consume (they assert on mocks rather than driving the
+    // handler), so a queued value here would sit behind their leftovers.
+    vi.mocked(getProjectByGitHubRepo).mockReset();
+    vi.mocked(getProjectByGitHubRepo).mockResolvedValue({
+      success: true,
+      data: project,
+    } as unknown as Awaited<ReturnType<typeof getProjectByGitHubRepo>>);
+    vi.mocked(queueSyncJob).mockClear();
+
+    const { DB, STATE, IMPORT_QUEUE } = makeEnv();
+    const { githubWebhookRouter } = await import("../src/github/webhooks");
+    const body = JSON.stringify({
+      repository: { owner: { login: "owner" }, name: "repo" },
+      ref: `refs/heads/${branch}`,
+      after: "abc1234",
+      pusher: { email: "user@example.com" },
+    });
+
+    const res = await githubWebhookRouter.request(
+      "/",
+      {
+        method: "POST",
+        headers: {
+          "x-hub-signature-256": await sign(body),
+          "x-github-event": "push",
+          "x-github-delivery": `delivery-${branch}-${Math.random()}`,
+          "content-type": "application/json",
+        },
+        body,
+      },
+      { DB, STATE, IMPORT_QUEUE, GITHUB_WEBHOOK_SECRET: SECRET },
+    );
+    expect(res.status).toBe(200);
+  }
+
+  it("syncs a push to a default branch that only githubDefaultBranch knows about", async () => {
+    await pushTo("master", {
+      ...PROJECT,
+      sourceDefaultBranch: undefined,
+      githubDefaultBranch: "master",
+    });
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ branch: "master" }),
+    );
+  });
+
+  it("treats an empty sourceDefaultBranch as unset rather than as a branch name", async () => {
+    await pushTo("master", { ...PROJECT, sourceDefaultBranch: "", githubDefaultBranch: "master" });
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ branch: "master" }),
+    );
+  });
+
+  it("still skips a push to a genuinely non-default branch", async () => {
+    await pushTo("feature/x", {
+      ...PROJECT,
+      sourceDefaultBranch: undefined,
+      githubDefaultBranch: "master",
+    });
+    expect(queueSyncJob).not.toHaveBeenCalled();
+  });
+});
