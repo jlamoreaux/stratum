@@ -561,6 +561,14 @@ a:hover { text-decoration: underline; }
   font-size: 0.8rem; line-height: 1.5; background: #0d0d0d;
 }
 .diff-line { display: block; padding: 0 0.75rem; white-space: pre; }
+.diff-lineno {
+  display: inline-block; width: 3em; text-align: right; padding-right: 0.75em;
+  /* Line numbers are content, not decoration — readers use them to find the
+     line a comment anchors to — so they need the 4.5:1 body-text ratio.
+     #8a8f98 on the #0d0d0d diff body is ~5.6:1; the old #4b5563 was ~2.6:1. */
+  color: #8a8f98; user-select: none;
+}
+.diff-line:target { background: rgba(124, 183, 255, 0.18); outline: 1px solid #7cb7ff; }
 .diff-add { background: rgba(74, 222, 128, 0.12); color: #b9f0cd; }
 .diff-del { background: rgba(248, 113, 113, 0.12); color: #f5c2c2; }
 .diff-hunk { color: #7cb7ff; background: #14181f; }
@@ -675,6 +683,22 @@ a:hover { text-decoration: underline; }
   padding: 0.5rem; border-radius: 4px; font-family: inherit;
 }
 .comment-form button { align-self: flex-start; }
+
+/* Line comment threads (beneath the diff) */
+.line-threads { display: flex; flex-direction: column; gap: 1rem; }
+.line-thread { border: 1px solid #222; border-radius: 6px; padding: 0.6rem 0.75rem; }
+.line-thread-resolved { opacity: 0.7; border-color: #1c2e1c; }
+.line-thread-header {
+  display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap;
+  font-size: 0.85rem; padding-bottom: 0.25rem; border-bottom: 1px solid #1c1c1c;
+}
+.line-thread-anchor { color: #7cb7ff; text-decoration: none; }
+.line-thread-anchor:hover { text-decoration: underline; }
+.line-thread-side { color: #888; font-size: 0.75rem; }
+.line-thread-replies {
+  list-style: none; margin: 0; padding-left: 1.5rem; border-left: 2px solid #222;
+}
+.line-thread-actions { display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap; }
 
 /* File Viewer */
 .file-viewer-breadcrumb {

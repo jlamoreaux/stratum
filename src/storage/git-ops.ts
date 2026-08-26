@@ -2728,12 +2728,16 @@ function fileUnifiedDiff(path: string, oldContent: string, newContent: string): 
   // We strip the Index/=== preamble and replace the --- / +++ markers with git-style ones.
   const patch = createPatch(path, oldContent, newContent, "", "");
   const lines = patch.split("\n");
-  // Drop the first two lines ("Index: …" and "===…") then fix up --- / +++ paths.
+  // Drop the first two lines ("Index: …" and "===…"). The next two are the
+  // --- / +++ header pair; rewrite those *by position*, never by prefix. A
+  // deleted line whose text starts with "-- " (a SQL or Lua comment) arrives as
+  // "--- …" and an added line starting with "++ " as "+++ …", so a prefix test
+  // rewrites file content into a bogus header.
   const body = lines
     .slice(2)
-    .map((line) => {
-      if (line.startsWith("--- ")) return `--- a/${path}`;
-      if (line.startsWith("+++ ")) return `+++ b/${path}`;
+    .map((line, index) => {
+      if (index === 0 && line.startsWith("--- ")) return `--- a/${path}`;
+      if (index === 1 && line.startsWith("+++ ")) return `+++ b/${path}`;
       return line;
     })
     .join("\n");
