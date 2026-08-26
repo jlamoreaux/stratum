@@ -1,7 +1,17 @@
 import { Hono } from "hono";
+import { loadPolicy } from "../evaluation/policy-loader";
 import { scanContentForSecrets } from "../evaluation/secret-scanner";
+import { checkResolutionMergeProtection } from "../merge/protection";
 import { authMiddleware } from "../middleware/auth";
-import { MAX_FILE_BYTES, freshRepoToken, resolveConflict } from "../storage/git-ops";
+import { buildEvaluators, runEvaluation } from "../services/change-flow";
+import { recordAudit } from "../storage/audit";
+import { getChange } from "../storage/changes";
+import {
+  MAX_FILE_BYTES,
+  buildManualResolutionDiff,
+  freshRepoToken,
+  resolveConflict,
+} from "../storage/git-ops";
 import { getProject, getProjectByPath, getWorkspace, setProject } from "../storage/state";
 import {
   checkForSyncUpdates,
@@ -451,6 +461,10 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     workspaceName: string;
     conflictingFiles: string[];
     detectedAt: string;
+    // The Change whose merge attempt produced this conflict. Absent on entries
+    // written before this field existed (KV entries expire after 7 days, so
+    // this is a short-lived compatibility window, not a permanent case).
+    changeId?: string;
   };
   try {
     conflictCtx = JSON.parse(conflictRaw);
@@ -529,10 +543,14 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   const workspace = workspaceResult.data;
 
   // The `manual` strategy commits caller-supplied file contents straight to the
-  // project's default branch, which otherwise bypasses the always-on secret
-  // scan that every change is subject to. Run that mandatory, blocking scan here
-  // so a resolution cannot smuggle a credential onto main. (accept-project /
-  // accept-workspace reuse already-committed trees and need no re-scan.)
+  // project's default branch, which otherwise bypasses everything a normal
+  // Change goes through. Run the mandatory, blocking secret scan first — it's
+  // cheap relative to a full evaluator pass and the size guard ahead of it is
+  // cheaper still — then (below, once tokens are minted) the project's full
+  // evaluator suite and merge protection, so a resolution can't land content
+  // no evaluator saw and no approver reviewed (#260, SA-5 follow-up).
+  // accept-project / accept-workspace reuse already-committed, already-evaluated
+  // trees (see the full-gate block below for why) and need none of this.
   if (strategy === "manual") {
     const resolutions = body.resolutions as Array<{ file: string; content: string }>;
 
@@ -587,6 +605,124 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   if (!projectToken.success) return c.json({ error: projectToken.error.message }, 502);
   if (!workspaceToken.success) return c.json({ error: workspaceToken.error.message }, 502);
 
+  // Route a manual resolution through the same merge gate a normal Change goes
+  // through: the project's configured evaluator suite, then merge protection
+  // (required evaluators + required approvals), both run against the exact
+  // content about to be committed — BEFORE resolveConflict pushes it.
+  //
+  // accept-project / accept-workspace are exempt: they re-stage content that
+  // already exists, committed, on one side of the conflict (the project's own
+  // HEAD, or the workspace fork) — content a Change already evaluated (or that
+  // is already live on the default branch) on its way into this merge. `manual`
+  // is the one strategy that introduces content no evaluator or approver has
+  // ever seen, which is exactly what this gate exists to close.
+  let manualResolutionAudit:
+    | { conflictId: string; resolvedByUserId: string; evaluatedBaseSha: string; evalScore: number }
+    | undefined;
+  if (strategy === "manual") {
+    const resolutions = body.resolutions as Array<{ file: string; content: string }>;
+    const branch = projectDefaultBranch(project);
+
+    const diffResult = await buildManualResolutionDiff(
+      project.remote,
+      projectToken.data,
+      resolutions,
+      branch,
+      logger,
+    );
+    if (!diffResult.success) {
+      logger.error("Failed to prepare manual resolution for evaluation", diffResult.error, {
+        conflictId,
+      });
+      return c.json(
+        { error: "Failed to prepare resolution for evaluation", code: "EVAL_PREP_FAILED" },
+        502,
+      );
+    }
+    const { diff, baseSha } = diffResult.data;
+
+    const policy = await loadPolicy(project.remote, projectToken.data, logger, branch);
+    const projectName = `${conflictCtx.namespace}/${conflictCtx.slug}`;
+    // No workspace repo access is passed for the sandbox evaluator: the content
+    // being judged here has no commit of its own yet — that's the point, it must
+    // pass BEFORE resolveConflict creates one — so there is no ref a sandbox
+    // could check out. A policy naming `sandbox` fails closed via
+    // UnavailableEvaluator, same as any other missing prerequisite.
+    const evaluators = buildEvaluators(c.env, policy, projectName, logger);
+    const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
+
+    if (!evalResult.passed) {
+      logger.warn("Manual conflict resolution blocked by evaluator suite", {
+        conflictId,
+        evalScore: evalResult.score,
+        evalReason: evalResult.reason,
+      });
+      return c.json(
+        {
+          error: `Resolution rejected: ${evalResult.reason}`,
+          code: "EVALUATION_FAILED",
+          issues: evalResult.issues ?? [],
+        },
+        422,
+      );
+    }
+
+    // Approvals are checked against the Change whose merge attempt produced
+    // this conflict, not a fresh review round on the resolution itself — see
+    // checkResolutionMergeProtection's doc comment for why.
+    let originatingChange: { id: string; createdByUserId?: string } | undefined;
+    if (conflictCtx.changeId) {
+      const changeResult = await getChange(c.env.DB, logger, conflictCtx.changeId);
+      if (changeResult.success) {
+        originatingChange = {
+          id: changeResult.data.id,
+          ...(changeResult.data.createdByUserId !== undefined
+            ? { createdByUserId: changeResult.data.createdByUserId }
+            : {}),
+        };
+      } else {
+        // Best effort: a missing originating change (e.g. deleted) must not
+        // crash the resolution — it falls through to checkResolutionMergeProtection
+        // failing closed on any required approval, same as no changeId at all.
+        logger.warn("Could not load originating change for resolution approvals", {
+          conflictId,
+          changeId: conflictCtx.changeId,
+          error: changeResult.error.message,
+        });
+      }
+    }
+
+    const protectionResult = await checkResolutionMergeProtection(
+      c.env.DB,
+      logger,
+      { diff, evalRuns, originatingChange },
+      policy,
+    );
+    if (!protectionResult.success) {
+      logger.error("Failed to evaluate merge protection for resolution", protectionResult.error, {
+        conflictId,
+      });
+      return c.json({ error: protectionResult.error.message }, 500);
+    }
+    if (!protectionResult.data.allowed) {
+      return c.json(
+        {
+          error: "Resolution blocked by branch protection",
+          code: "PROTECTION_BLOCKED",
+          reasons: protectionResult.data.reasons,
+        },
+        403,
+      );
+    }
+
+    manualResolutionAudit = {
+      conflictId,
+      resolvedByUserId: userId,
+      evaluatedBaseSha: baseSha,
+      evalScore: evalResult.score,
+    };
+  }
+
   const startedAt = Date.now();
   const resolveResult = await resolveConflict(
     {
@@ -629,6 +765,27 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   );
 
   await c.env.STATE.delete(`conflict:${conflictId}`);
+
+  // Provenance for a manual resolution commit: who resolved it, from which
+  // conflict, and against which sha the evaluator suite ran (#260). Best-effort
+  // by contract, same as recordSyncHistory above — an audit-log failure must
+  // not undo an already-pushed, already-gated resolution.
+  if (manualResolutionAudit) {
+    await recordAudit(c.env.DB, logger, {
+      action: "conflict.resolved_manually",
+      actorType: "user",
+      actorId: manualResolutionAudit.resolvedByUserId,
+      subject: commitSha,
+      detail: {
+        conflictId: manualResolutionAudit.conflictId,
+        project: `${conflictCtx.namespace}/${conflictCtx.slug}`,
+        workspace: conflictCtx.workspaceName,
+        evaluatedBaseSha: manualResolutionAudit.evaluatedBaseSha,
+        evalScore: manualResolutionAudit.evalScore,
+        commitSha,
+      },
+    });
+  }
 
   logger.info("Conflict resolved", { conflictId, commitSha });
   return c.json({ status: "resolved", commitSha });
