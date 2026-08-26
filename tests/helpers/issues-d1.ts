@@ -8,6 +8,7 @@ export interface IssueTableRow {
   status: string;
   author_type: string;
   author_id: string;
+  assignee: string | null;
   linked_change_id: string | null;
   closed_at: string | null;
   closed_by: string | null;
@@ -40,6 +41,12 @@ export function makeIssuesD1(): {
   const matchScope = (r: IssueTableRow, projectId: unknown, project: unknown) =>
     r.project_id === projectId || (r.project_id === null && r.project === project);
 
+  /**
+   * Applies a supported issue update to the matching in-memory issue row.
+   *
+   * @param sql - The SQL update statement describing the assignments and issue scope
+   * @param bindings - Values bound to the statement
+   */
   function applyUpdate(sql: string, bindings: unknown[]) {
     // UPDATE issues SET <assignments> WHERE (project_id = ? OR (project_id IS NULL
     // AND project = ?)) AND number = ?  — or the legacy name-only WHERE.
@@ -76,6 +83,9 @@ export function makeIssuesD1(): {
         case "linked_change_id":
           row.linked_change_id = value;
           break;
+        case "assignee":
+          row.assignee = value;
+          break;
         case "closed_at":
           row.closed_at = value;
           break;
@@ -86,6 +96,13 @@ export function makeIssuesD1(): {
     }
   }
 
+  /**
+   * Creates a mocked prepared statement for issue and event database operations.
+   *
+   * @param sql - The SQL statement represented by the mock
+   * @param bindings - Values bound to the statement's parameters
+   * @returns A statement supporting parameter binding and mocked execution methods
+   */
   function makeStmt(sql: string, bindings: unknown[]) {
     const upper = sql.trim().toUpperCase().replace(/\s+/g, " ");
     return {
@@ -133,6 +150,7 @@ export function makeIssuesD1(): {
             status: "open",
             author_type: bindings[4] as string,
             author_id: bindings[5] as string,
+            assignee: null,
             linked_change_id: bindings[6] as string | null,
             closed_at: null,
             closed_by: null,

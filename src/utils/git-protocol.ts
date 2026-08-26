@@ -119,10 +119,16 @@ export type PushPolicyVerdict = { allowed: true } | { allowed: false; ref: strin
  * Ref/force-push policy for a push proxied to a workspace fork (S3, #130).
  *
  * A workspace fork carries exactly one line of work, so the only refs a push
- * may touch are the fork's working branch — `main` (what a fresh fork's clone
- * checks out, and what every server-side flow reads/writes) and the recorded
- * workspace branch name (`WorkspaceEntry.branchName`, falling back to the
- * workspace name). Everything else is refused:
+ * may touch are the fork's working branch — the PROJECT'S DEFAULT BRANCH (what
+ * a fresh fork's clone checks out, and what every server-side flow
+ * reads/writes) and the recorded workspace branch name
+ * (`WorkspaceEntry.branchName`, falling back to the workspace name).
+ * Everything else is refused:
+ *
+ * The default branch is passed in rather than assumed to be `main`: an
+ * imported project keeps its source default (`master`, `trunk`, …), and a fork
+ * of one carries that branch, not `main`. Hardcoding `main` here refused the
+ * fork's own working branch on every such project.
  *
  *  - ref DELETION (all-zero new-oid) — even of the working branch or a tag —
  *    because merge/eval/staging flows assume the branch exists, and dropping a
@@ -143,8 +149,9 @@ export type PushPolicyVerdict = { allowed: true } | { allowed: false; ref: strin
 export function checkWorkspacePushPolicy(
   commands: readonly ReceivePackCommand[],
   workspaceBranch: string,
+  defaultBranch: string,
 ): PushPolicyVerdict {
-  const allowedRefs = new Set(["refs/heads/main", `refs/heads/${workspaceBranch}`]);
+  const allowedRefs = new Set([`refs/heads/${defaultBranch}`, `refs/heads/${workspaceBranch}`]);
   for (const command of commands) {
     if (command.newOid === ZERO_OID) {
       return {

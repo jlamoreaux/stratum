@@ -251,6 +251,7 @@ export class GitLabProvider implements GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<RepoMetadata>> {
     try {
       const projectPath = this.encodePath(`${owner}/${repo}`);
@@ -260,6 +261,7 @@ export class GitLabProvider implements GitProviderClient {
       const response = await fetch(url, {
         method: "GET",
         headers: this.buildHeaders(auth),
+        ...(signal ? { signal } : {}),
       });
 
       if (!response.ok) {
@@ -331,8 +333,9 @@ export class GitLabProvider implements GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<string>> {
-    const metadataResult = await this.getRepoMetadata(owner, repo, auth, logger);
+    const metadataResult = await this.getRepoMetadata(owner, repo, auth, logger, signal);
 
     if (!metadataResult.success || !metadataResult.data) {
       return {
