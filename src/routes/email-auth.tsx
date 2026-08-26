@@ -58,7 +58,6 @@ async function getRateLimitKey(email: string): Promise<string> {
   return `magic_link_rate:${emailHash}:${hour}`;
 }
 
-// Per-IP rate limit key for the current hour window.
 function getIpRateLimitKey(ip: string): string {
   const hour = Math.floor(Date.now() / 1000 / MAGIC_LINK_RATE_WINDOW);
   return `magic_link_ip_rate:${ip}:${hour}`;
@@ -415,7 +414,6 @@ app.post("/send-signup", async (c) => {
     return emailAuthRedirect(c, "error", "username_taken", "/auth/signup");
   }
 
-  // Enforce per-email and per-IP magic-link caps.
   const rateLimit = await checkMagicLinkRateLimits(c, email, logger);
   if (rateLimit.blocked) {
     logger.warn("Magic link rate limit exceeded", { emailHash });
@@ -423,7 +421,6 @@ app.post("/send-signup", async (c) => {
   }
 
   try {
-    // Bump both rate-limit counters (per-email + per-IP) now that we are sending.
     await rateLimit.commit();
 
     // Generate secure magic link token
@@ -508,7 +505,6 @@ app.post("/send-login", async (c) => {
   // send-only-for-real-accounts branch isn't a cheap oracle.
   const existingUser = await getUserByEmail(c.env.DB, email, logger);
 
-  // Enforce per-email and per-IP magic-link caps.
   const rateLimit = await checkMagicLinkRateLimits(c, email, logger);
   if (rateLimit.blocked) {
     logger.warn("Magic link rate limit exceeded", { emailHash });
@@ -516,7 +512,6 @@ app.post("/send-login", async (c) => {
   }
 
   try {
-    // Bump both rate-limit counters (per-email + per-IP) now that we are sending.
     await rateLimit.commit();
 
     if (existingUser.success) {
@@ -599,7 +594,6 @@ app.post("/send", async (c) => {
     return emailAuthRedirect(c, "error", "auth_config_incomplete");
   }
 
-  // Enforce per-email and per-IP magic-link caps.
   const rateLimit = await checkMagicLinkRateLimits(c, email, logger);
   if (rateLimit.blocked) {
     logger.warn("Magic link rate limit exceeded", { emailHash });
@@ -607,7 +601,6 @@ app.post("/send", async (c) => {
   }
 
   try {
-    // Bump both rate-limit counters (per-email + per-IP) now that we are sending.
     await rateLimit.commit();
 
     // Check if user exists to determine intent
