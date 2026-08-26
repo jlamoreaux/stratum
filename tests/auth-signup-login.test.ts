@@ -668,6 +668,122 @@ describe("Auth Signup/Login Integration Tests", () => {
         expect(res.headers.get("location")).toContain("error=rate_limited");
       });
 
+      /**
+       * The two reads are assigned in sequence, so a throw on the second one
+       * used to leave the first count standing. With the email bucket already
+       * exhausted that computed `blocked === true` — locking a user out of
+       * their own login on a transient KV blip, which is the exact failure the
+       * fail-open contract exists to prevent.
+       */
+      it("fails open when the per-IP read throws after the email bucket is full", async () => {
+        const email = "failopen@example.com";
+        const env = makeEnv();
+        const realGet = env.STATE.get.bind(env.STATE);
+        // Exhaust the per-email bucket through the real path first.
+        for (let i = 0; i < 5; i++) {
+          await app.fetch(
+            request("/auth/email/send-signup", {
+              method: "POST",
+              body: createFormData({ email, username: `failopen${i}` }),
+            }),
+            env,
+          );
+        }
+
+        // Now let the email read succeed and make only the per-IP read throw.
+        env.STATE.get = (async (key: string) => {
+          if (key.startsWith("magic_link_ip_rate:")) throw new Error("KV unavailable");
+          return realGet(key);
+        }) as typeof env.STATE.get;
+
+        const res = await app.fetch(
+          request("/auth/email/send-signup", {
+            method: "POST",
+            body: createFormData({ email, username: "failopen9" }),
+          }),
+          env,
+        );
+
+        expect(res.status).toBe(302);
+        expect(res.headers.get("location")).not.toContain("error=rate_limited");
+      });
+
+      // The per-email bucket keys on a digest of the address. It has to be
+      // collision-resistant, not merely opaque: the old 32-bit string hash let
+      // an attacker construct a different address landing in a chosen victim's
+      // bucket ("cg1@acme.com" for "ceo@acme.com", found in a few thousand
+      // tries) and spend the victim's five sends from a distinct source IP, so
+      // neither cap noticed. No mail is sent for the collider, which need not
+      // even be a real account.
+      it("does not let a colliding address consume another address's budget", async () => {
+        const victim = "ceo@acme.com";
+        const collider = "cg1@acme.com";
+
+        // Burn the collider's five sends, each from its own IP so the per-IP
+        // cap plays no part in the outcome.
+        for (let i = 0; i < 5; i++) {
+          const res = await app.fetch(
+            request("/auth/email/send-login", {
+              method: "POST",
+              headers: { "CF-Connecting-IP": `203.0.113.${20 + i}` },
+              body: createFormData({ email: collider }),
+            }),
+            env,
+          );
+          expect(res.headers.get("location")).not.toContain("error=rate_limited");
+        }
+
+        // The victim's own bucket must be untouched.
+        const res = await app.fetch(
+          request("/auth/email/send-login", {
+            method: "POST",
+            headers: { "CF-Connecting-IP": "203.0.113.30" },
+            body: createFormData({ email: victim }),
+          }),
+          env,
+        );
+        expect(res.headers.get("location")).not.toContain("error=rate_limited");
+      });
+
+      it("rate limits per source IP across many different emails (anti mail-bomb)", async () => {
+        const ip = "203.0.113.7";
+        // 20 distinct emails from one IP each pass the per-email limit but exhaust
+        // the per-IP budget (MAGIC_LINK_IP_RATE_LIMIT = 20).
+        for (let i = 0; i < 20; i++) {
+          const res = await app.fetch(
+            request("/auth/email/send-signup", {
+              method: "POST",
+              headers: { "CF-Connecting-IP": ip },
+              body: createFormData({ email: `victim${i}@example.com`, username: `victim${i}` }),
+            }),
+            env,
+          );
+          expect(res.headers.get("location")).toContain("success=email_sent");
+        }
+
+        // The 21st send from the same IP — a brand-new email — is blocked.
+        const blocked = await app.fetch(
+          request("/auth/email/send-signup", {
+            method: "POST",
+            headers: { "CF-Connecting-IP": ip },
+            body: createFormData({ email: "victim20@example.com", username: "victim20" }),
+          }),
+          env,
+        );
+        expect(blocked.headers.get("location")).toContain("error=rate_limited");
+
+        // A different IP is unaffected.
+        const otherIp = await app.fetch(
+          request("/auth/email/send-signup", {
+            method: "POST",
+            headers: { "CF-Connecting-IP": "198.51.100.9" },
+            body: createFormData({ email: "victim21@example.com", username: "victim21" }),
+          }),
+          env,
+        );
+        expect(otherIp.headers.get("location")).toContain("success=email_sent");
+      });
+
       it("fails when email service not configured", async () => {
         const envWithoutEmail = makeEnv({ EMAIL: undefined });
 

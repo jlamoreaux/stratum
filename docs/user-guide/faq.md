@@ -32,6 +32,20 @@ invariants GitHub doesn't have:
 - A malformed `.stratum/policy.yaml` **fails closed** (blocks merges) instead of
   silently falling back to defaults.
 
+## Does Stratum replace GitHub Actions?
+
+No. Stratum has no native CI runner — no workflows, hosted runners, matrix
+builds, artifacts, caching, scheduled jobs, CI secrets store, deployment
+environments, or status-check aggregation (it does not collect external CI
+check results the way a GitHub PR's checks tab does). Its code execution is
+limited to the evaluation pipeline: the
+sandbox evaluator (needs the optional `SANDBOX` binding; fails closed without
+it), the `webhook` evaluator (a synchronous call-out to CI *you* host, which
+must answer within the request timeout — default 10s), and the post-merge
+smoke command run in a sandbox. Bring your own CI and wire it in via the
+webhook evaluator, or use layer mode and keep running GitHub Actions on the
+promoted PRs. See [CI Integration](ci-integration.md).
+
 ## Do I have to leave GitHub to use it?
 
 No. Stratum supports two modes with the same codebase. In **layer mode**,
@@ -110,8 +124,22 @@ Honestly, several:
   access.
 - **Evaluation runs synchronously** at change creation — there's no async
   evaluation queue yet, so very slow evaluators stretch the request.
+- **No Git LFS**: see
+  [Does Stratum support Git LFS?](#does-stratum-support-git-lfs) below.
 
 See `docs/CURRENT_CAPABILITIES.md` for the authoritative, current state.
+
+## Does Stratum support Git LFS?
+
+No. There is no LFS server: the git smart-HTTP router exposes only
+`info/refs`, `git-upload-pack`, and `git-receive-pack` — there is no
+`/info/lfs` route and no `objects/batch` endpoint, so `git lfs` clients get a
+`404 Not found` when they call the batch API and an LFS-enabled clone fails
+at that point. Combined with the 50 MB cap on git push request bodies,
+large-binary workflows are effectively blocked. Keep binaries out of
+Stratum-hosted repos, or keep LFS-dependent repos on GitHub and use layer
+mode. See `docs/CURRENT_CAPABILITIES.md` and the implementation sketch in
+`docs/REMAINING_WORK.md`.
 
 ## Can I use plain `git` with Stratum?
 
