@@ -2879,6 +2879,55 @@ export function buildUnifiedDiff(
   return diffParts.join("\n");
 }
 
+/**
+ * Build a unified diff of what a manual conflict resolution would change
+ * relative to the project's current default-branch tip, without pushing
+ * anything. This lets the resolution's content be run through the same
+ * evaluator pipeline a normal Change goes through (buildEvaluators +
+ * runEvaluation in ../services/change-flow) BEFORE resolveConflict commits it.
+ *
+ * Only reads the resolution's own file paths from project HEAD, not the whole
+ * tree — every other path is untouched by a manual resolution and would
+ * appear nowhere in the diff, so there is nothing worth spending a full-repo
+ * read on. A resolution path absent from HEAD reads as a new-file addition.
+ *
+ * Returns the resolved base commit sha alongside the diff so callers can
+ * record what revision the evaluation ran against (provenance) — the same
+ * role `evaluatedSha` plays for a Change.
+ */
+export async function buildManualResolutionDiff(
+  projectRemote: string,
+  projectToken: string,
+  resolutions: Array<{ file: string; content: string }>,
+  branch: string,
+  logger: Logger,
+): Promise<Result<{ diff: string; baseSha: string }, AppError>> {
+  const cloneResult = await cloneRepo(projectRemote, projectToken, logger, { ref: branch });
+  if (!cloneResult.success) return err(cloneResult.error);
+  const { fs, dir } = cloneResult.data;
+
+  const baseOidResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
+  if (!baseOidResult.success) {
+    return err(
+      new AppError("Failed to resolve project HEAD for resolution diff", "GIT_ERROR", 500),
+    );
+  }
+  const baseOid = baseOidResult.data;
+
+  const baseContent = new Map<string, string>();
+  const resolvedContent = new Map<string, string>();
+  for (const { file, content } of resolutions) {
+    const readResult = await readFileAtCommit(fs, baseOid, file, logger);
+    // A read failure (most commonly: the file doesn't exist on HEAD yet) is
+    // treated as "no base content" so buildUnifiedDiff renders it as an
+    // addition, matching getDiffBetweenRepos' handling of the same case.
+    if (readResult.success) baseContent.set(file, readResult.data);
+    resolvedContent.set(file, content);
+  }
+
+  return ok({ diff: buildUnifiedDiff(baseContent, resolvedContent), baseSha: baseOid });
+}
+
 /** A tag as listed from a cloned repo (see `collectRepoTags`). */
 export interface RepoTagEntry {
   /** Tag name without the refs/tags/ prefix. */

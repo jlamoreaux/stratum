@@ -713,6 +713,12 @@ app.post("/changes/:id/merge", async (c) => {
           workspaceName: change.workspace,
           conflictingFiles: mergeResult.error.conflictingFiles,
           detectedAt: new Date().toISOString(),
+          // The Change whose merge attempt hit this conflict. A manual resolution
+          // is part of landing THIS change, not a change of its own — the
+          // resolve route uses it to check the review trail this change already
+          // has (SA-5 follow-up, #260) rather than demanding fresh approvals
+          // with no UI to grant them against resolved bytes.
+          changeId: id,
         }),
         { expirationTtl: 7 * 24 * 60 * 60 },
       );
