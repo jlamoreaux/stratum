@@ -2297,6 +2297,47 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(prPayload.base).not.toBe("attacker-controlled");
   });
 
+  // Precedence, pinned because nothing else does: every other case sets at most
+  // one of the two recorded defaults, so none of them would notice the order
+  // being reversed.
+  it("prefers sourceDefaultBranch over githubDefaultBranch when both are recorded", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...githubProject,
+        sourceDefaultBranch: "trunk",
+        githubDefaultBranch: "develop",
+      },
+    } as Awaited<ReturnType<typeof getProject>>);
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk");
+    expect(prPayload.base).not.toBe("develop");
+  });
+
+  // The reason projectDefaultBranch uses `||` rather than `??`: an import can
+  // record an empty string, and `??` would forward that to GitHub as a branch
+  // name. It must fall through to the next candidate instead.
+  it("falls through an empty sourceDefaultBranch to githubDefaultBranch", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...githubProject,
+        sourceDefaultBranch: "",
+        githubDefaultBranch: "develop",
+      },
+    } as Awaited<ReturnType<typeof getProject>>);
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("develop");
+  });
+
   it("rejects promotion when the project's own default branch is not a valid ref", async () => {
     vi.mocked(getProject).mockResolvedValue({
       success: true,
