@@ -147,7 +147,19 @@ vi.mock("../src/queue/events", () => ({
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
-  getUser: vi.fn(async () => ({ success: false, error: new Error("nf") })),
+  // Agent auth resolves the agent's owner via getUser (fail-closed on the
+  // owner lookup); default to a live owner so agent-token tests authenticate
+  // as before unless a test overrides this to exercise the deleting/failed path.
+  getUser: vi.fn(async () => ({
+    success: true,
+    data: {
+      id: "usr_owner",
+      email: "owner@example.com",
+      username: "owner",
+      tokenHash: "hash",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  })),
 }));
 
 // Need to setup mocks in beforeEach instead
