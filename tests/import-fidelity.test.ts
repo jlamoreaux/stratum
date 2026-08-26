@@ -931,6 +931,43 @@ describe("import queue consumer", () => {
     await expectCountsBeforeCompletion(42);
   });
 
+  /**
+   * The snapshot walk clones the repository, so it is long enough for a user to
+   * hit cancel inside it. Moving the walk ahead of the terminal status (so the
+   * file count reaches the progress stream before it closes) put that slow step
+   * between the cancellation check and the "completed" write — so a cancel
+   * landing during finalization was silently overwritten.
+   */
+  it("honours a cancel that lands during snapshot finalization", async () => {
+    const { handleImportQueue } = await import("../src/queue/import-queue");
+    const { importFromGitHub } = await import("../src/storage/git-ops");
+    const { writeSnapshotFromRepo } = await import("../src/storage/repo-snapshot");
+    vi.mocked(importFromGitHub).mockResolvedValue({
+      success: true,
+      data: { name: "r", remote: "https://artifacts.example.com/repos/r", token: "t" },
+    });
+
+    const env = makeEnv();
+    await seedProject(env, { namespace: "@usera", slug: "repo", projectId: "proj_1" });
+    await seedImportJob({ namespace: "@usera", slug: "repo", projectId: "proj_1" });
+
+    // Cancel *while* the walk is running, which is the window under test.
+    vi.mocked(writeSnapshotFromRepo).mockImplementationOnce(async () => {
+      const key = "@usera:repo";
+      const job = mockImportJobs.get(key);
+      if (job) mockImportJobs.set(key, { ...job, status: "cancelling" });
+      return { fileCount: 7 };
+    });
+
+    const message = createMockMessage(importMessage());
+    await handleImportQueue(createMockBatch([message]), env);
+
+    // The cancel path removes the job row, so the status history is the record.
+    const history = statusHistory.get("@usera:repo") ?? [];
+    expect(history.at(-1)).toBe("cancelled");
+    expect(history).not.toContain("completed");
+  });
+
   it("leaves progress at completion without counts when the snapshot walk fails", async () => {
     const { handleImportQueue } = await import("../src/queue/import-queue");
     const { importFromGitHub } = await import("../src/storage/git-ops");

@@ -111,8 +111,10 @@ curl -X POST "$STRATUM_HOST/api/projects/@username/repo/sync/settings" \
 
 ## Failure notifications
 
-If an import fails, Stratum emails the user who started it, plus one operator
-copy. That copy goes to `ADMIN_EMAIL`, or — when `ADMIN_EMAIL` is unset — to
+If a **queued** import fails, Stratum emails the user who started it, plus one
+operator copy. (A deployment with no import queue configured falls back to
+processing the import directly in the request, and that path sends no failure
+notification at all — it is a development fallback, not the normal path.) That copy goes to `ADMIN_EMAIL`, or — when `ADMIN_EMAIL` is unset — to
 `EMAIL_FROM_ADDRESS`. Leaving `ADMIN_EMAIL` unconfigured therefore does not
 switch the operator copy off; it redirects it to the sender address. Only when
 neither is set is the notification skipped entirely.
@@ -130,8 +132,10 @@ What import does **not** do yet:
   work.
 - **Git data only.** Issues, pull requests, releases, and tags are not
   imported — only the selected branch's commit history and files.
-- **Single branch.** Only one branch is imported per project; the clone is a
-  `singleBranch` clone bounded by `depth`.
+- **Single branch.** Only one branch is imported per project. The clone is a
+  `singleBranch` clone; it is bounded by `depth` only for shallow imports —
+  `depth: 0` (or `"full"`) omits the cutoff and fetches the whole history of
+  that one branch.
 - **No self-hosted instances.** Only `github.com`, `gitlab.com`, and
   `bitbucket.org` URLs are recognized; GitHub Enterprise Server and self-hosted
   GitLab are not supported.

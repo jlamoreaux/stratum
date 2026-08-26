@@ -349,6 +349,15 @@ async function processImportJob(
     // finalizeImportSnapshot for why the ordering matters.
     await finalizeImportSnapshot(env, { remote: updatedProject.remote, namespace, slug }, logger);
 
+    // Re-check: the snapshot walk clones the repo, so it is long enough for a
+    // cancel to land inside it. Writing "completed" without re-checking would
+    // silently overwrite that cancellation.
+    if (await checkAndHandleCancellation(env, namespace, slug)) {
+      await recordImportCancelled(env.DB, namespace, slug, logger);
+      msg.ack();
+      return;
+    }
+
     // Mark import as complete
     await updateImportStatus(
       env.DB,
