@@ -176,6 +176,29 @@ export function isValidGitHubUrl(value: unknown): value is string {
   return typeof value === "string" && GITHUB_URL_RE.test(value);
 }
 
+// Project ids are crypto.randomUUID() values; anything else in a projectId
+// field is at best a typo and at worst a KV key-injection probe (the id is
+// interpolated into `workspace:<projectId>:<name>` keys).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Whether a repo-relative path would escape its root once joined onto a
+ * directory.
+ *
+ * Segment-based on purpose. A substring test like `path.includes("../")`
+ * matches only a `..` followed by a separator, so it lets through every
+ * traversal whose `..` lands last — a bare `..`, `./..`, or `dir/..` — each of
+ * which still resolves above the clone directory.
+ */
+export function isTraversalPath(value: string): boolean {
+  return value.startsWith("/") || value.split("/").includes("..");
+}
+
+/** Whether a value is a canonical UUID string (the shape of project ids). */
+export function isValidUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+
 /** @deprecated Use validateStringRecord instead. */
 export function isStringRecord(value: unknown): value is Record<string, string> {
   return (
@@ -309,4 +332,61 @@ export function slugify(str: string): string {
     .replace(/[\s]+/g, "-") // Replace spaces with hyphens
     .replace(/-+/g, "-") // Collapse multiple hyphens
     .slice(0, MAX_SLUG_LENGTH); // Limit to MAX_SLUG_LENGTH characters
+}
+
+// ---------------------------------------------------------------------------
+// Clone depth (GitHub/GitLab/Bitbucket import)
+// ---------------------------------------------------------------------------
+
+/** Default shallow clone depth used when an import does not specify one. */
+export const DEFAULT_CLONE_DEPTH = 10;
+
+/** Upper bound for a caller-specified shallow clone depth. */
+export const MAX_CLONE_DEPTH = 1000;
+
+/**
+ * Sentinel meaning "full history": the depth field is omitted from the
+ * underlying Artifacts import call (its `depth` parameter is optional).
+ */
+export const FULL_HISTORY_DEPTH = 0;
+
+const CLONE_DEPTH_ERROR = `depth must be an integer between 1 and ${MAX_CLONE_DEPTH}, or 0 / "full" for full history`;
+
+/**
+ * Validate a caller-supplied clone depth (JSON number, form string, or absent).
+ *
+ * Accepted values:
+ * - undefined / null / "" -> DEFAULT_CLONE_DEPTH
+ * - 0, "0", or "full" (case-insensitive) -> FULL_HISTORY_DEPTH (full history)
+ * - integer 1..MAX_CLONE_DEPTH (number or numeric string) -> that depth
+ * Everything else is rejected.
+ */
+export function validateCloneDepth(
+  value: unknown,
+): { valid: true; depth: number } | { valid: false; error: string } {
+  if (value === undefined || value === null || value === "") {
+    return { valid: true, depth: DEFAULT_CLONE_DEPTH };
+  }
+
+  let num: number;
+  if (typeof value === "number") {
+    num = value;
+  } else if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.toLowerCase() === "full") {
+      return { valid: true, depth: FULL_HISTORY_DEPTH };
+    }
+    if (!/^\d+$/.test(trimmed)) {
+      return { valid: false, error: CLONE_DEPTH_ERROR };
+    }
+    num = Number(trimmed);
+  } else {
+    return { valid: false, error: CLONE_DEPTH_ERROR };
+  }
+
+  if (!Number.isInteger(num) || num < 0 || num > MAX_CLONE_DEPTH) {
+    return { valid: false, error: CLONE_DEPTH_ERROR };
+  }
+
+  return { valid: true, depth: num };
 }

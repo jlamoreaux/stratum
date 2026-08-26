@@ -152,6 +152,8 @@ export interface GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    /** Bounds the underlying request; callers on a user-facing path must pass one. */
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<RepoMetadata>>;
 
   /**
@@ -185,6 +187,8 @@ export interface GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    /** Forwarded to `getRepoMetadata`. */
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<string>>;
 }
 

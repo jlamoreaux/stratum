@@ -30,6 +30,13 @@ export interface DeletionTarget {
   changeIds: string[];
   webhookIds: string[];
   /**
+   * Issue ids, captured so `issue_comments` and `issue_labels` can be deleted
+   * by id-set. Those tables key on `issue_id` alone, so they are unreachable
+   * from a project-scoped DELETE, and migration 036 declares no foreign keys —
+   * nothing removes them when their issue goes.
+   */
+  issueIds: string[];
+  /**
    * True when any OTHER project shares this project's name or slug. Historical
    * D1 rows may carry a NULL project_id and only a bare `project` name — under
    * a collision, deleting those by name would destroy another tenant's rows,
@@ -113,9 +120,21 @@ async function listKeysPaginated(kv: KVNamespace, prefix: string): Promise<strin
   return names;
 }
 
+/**
+ * Captures identifiers for records associated with a project.
+ *
+ * When the project name collides with another project, only records linked by
+ * `project_id` are included; otherwise, legacy records with a matching project
+ * name are included as well.
+ *
+ * @param table - The dependent table from which to capture identifiers
+ * @param name - The project name used to match legacy records
+ * @param nameCollision - Whether another project shares the project name or slug
+ * @returns The captured record identifiers
+ */
 async function selectIds(
   db: D1Database,
-  table: "changes" | "webhooks",
+  table: "changes" | "webhooks" | "issues",
   projectId: string,
   name: string,
   nameCollision: boolean,
@@ -216,6 +235,7 @@ export async function captureDeletionTarget(
 
     const changeIds = await selectIds(env.DB, "changes", project.id, project.name, nameCollision);
     const webhookIds = await selectIds(env.DB, "webhooks", project.id, project.name, nameCollision);
+    const issueIds = await selectIds(env.DB, "issues", project.id, project.name, nameCollision);
 
     return ok({
       projectId: project.id,
@@ -227,6 +247,7 @@ export async function captureDeletionTarget(
       projectRepoName,
       changeIds,
       webhookIds,
+      issueIds,
       nameCollision,
     });
   } catch (error) {
@@ -394,6 +415,9 @@ async function deleteKvKey(
  * exists a re-drive can always re-resolve the target). Every step is
  * idempotent; the function reports failures as residuals or a Result error and
  * never throws.
+ *
+ * @param target - Captured identifiers and names for the project and its related resources
+ * @returns The residual cleanup identifiers, or an application error if the cascade cannot complete
  */
 export async function deleteProjectCascade(
   env: Env,
@@ -408,6 +432,8 @@ export async function deleteProjectCascade(
     await deleteByIdChunks(env.DB, "change_comments", "change_id", target.changeIds);
     await deleteByIdChunks(env.DB, "change_reviews", "change_id", target.changeIds);
     await deleteByIdChunks(env.DB, "webhook_deliveries", "webhook_id", target.webhookIds);
+    await deleteByIdChunks(env.DB, "issue_comments", "issue_id", target.issueIds);
+    await deleteByIdChunks(env.DB, "issue_labels", "issue_id", target.issueIds);
     for (const table of PROJECT_SCOPED_TABLES) {
       await deleteProjectScopedTable(env.DB, table, target, residuals);
     }
@@ -522,6 +548,8 @@ async function countByIdChunks(
  * existence check (get() mints repo handles, list() is unbounded), so we trust
  * the cascade's step-3 residuals, which already report every repo that failed
  * to delete.
+ *
+ * @returns The remaining residual identifiers, or an error if verification fails
  */
 export async function verifyProjectDeleted(
   env: Env,
@@ -535,6 +563,8 @@ export async function verifyProjectDeleted(
       ["change_comments", "change_id", target.changeIds],
       ["change_reviews", "change_id", target.changeIds],
       ["webhook_deliveries", "webhook_id", target.webhookIds],
+      ["issue_comments", "issue_id", target.issueIds],
+      ["issue_labels", "issue_id", target.issueIds],
     ];
     for (const [table, column, ids] of childCounts) {
       const n = await countByIdChunks(env.DB, table, column, ids);

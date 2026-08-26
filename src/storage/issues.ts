@@ -16,6 +16,8 @@ export interface Issue {
   status: IssueStatus;
   authorType: "user" | "agent";
   authorId: string;
+  /** Single assignee (a user id) — one assignee per issue by design (#198). */
+  assignee?: string;
   linkedChangeId?: string;
   closedAt?: string;
   closedBy?: string;
@@ -33,6 +35,8 @@ interface IssueRow {
   status: string;
   author_type: string;
   author_id: string;
+  /** Absent (undefined) when a pre-036 stub row omits the column. */
+  assignee?: string | null;
   linked_change_id: string | null;
   closed_at: string | null;
   closed_by: string | null;
@@ -40,6 +44,14 @@ interface IssueRow {
   updated_at: string;
 }
 
+/**
+ * Build an `Issue` from a row, omitting optional keys whose column is NULL
+ * rather than setting them to null — callers use `=== undefined` throughout,
+ * and a present-but-null key would read as "set" to them.
+ *
+ * @param row - The database row to convert
+ * @returns The corresponding API issue
+ */
 function rowToIssue(row: IssueRow): Issue {
   const issue: Issue = {
     id: row.id,
@@ -54,12 +66,20 @@ function rowToIssue(row: IssueRow): Issue {
   };
   if (row.project_id !== null) issue.projectId = row.project_id;
   if (row.body !== null) issue.body = row.body;
+  if (row.assignee != null) issue.assignee = row.assignee;
   if (row.linked_change_id !== null) issue.linkedChangeId = row.linked_change_id;
   if (row.closed_at !== null) issue.closedAt = row.closed_at;
   if (row.closed_by !== null) issue.closedBy = row.closed_by;
   return issue;
 }
 
+/**
+ * Normalise a thrown value into an AppError, preserving one that is already an
+ * AppError and tagging anything else as DATABASE_ERROR with the operation and
+ * context attached for the log line.
+ *
+ * @returns The original AppError, or a database error carrying the operation and context
+ */
 function toAppError(error: unknown, operation: string, context: Record<string, unknown>) {
   return error instanceof AppError
     ? error
@@ -71,6 +91,13 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
       );
 }
 
+/**
+ * Open a new issue, allocating its per-project `number`. `projectId` is the
+ * canonical scope; `project` is the free-form name kept for legacy rows.
+ *
+ * @param opts - Issue details, including the project scope and author information
+ * @returns The created issue, or an application error if creation fails
+ */
 export async function createIssue(
   db: D1Database,
   logger: Logger,
@@ -130,6 +157,13 @@ export async function createIssue(
   }
 }
 
+/**
+ * Fetch one issue by its per-project number.
+ *
+ * Scopes by `project_id` when known and falls back to the free-form name only
+ * for legacy rows that were never backfilled — matching on the name alone would
+ * return a same-named project's issue from another namespace.
+ */
 export async function getIssueByNumber(
   db: D1Database,
   logger: Logger,
@@ -164,12 +198,43 @@ export async function getIssueByNumber(
   }
 }
 
+/**
+ * Escape `%`, `_`, and `\` in user text so it matches literally inside a
+ * `LIKE ? ESCAPE '\'` pattern.
+ */
+export function escapeLike(text: string): string {
+  return text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * List a project's issues, newest number first.
+ *
+ * Every query is project-scoped: the scope clause is always the first condition,
+ * so no filter combination can return another project's issues. `search` is a
+ * LIKE over title and body with the pattern metacharacters escaped, and `limit`
+ * / `offset` are bound rather than interpolated. Omitting `limit` returns every
+ * matching row, so callers rendering a page should pass one.
+ *
+ * @param project - The project name used for scoping and legacy records
+ * @returns The matching issues, or an application error if retrieval fails
+ */
 export async function listIssues(
   db: D1Database,
   logger: Logger,
   project: string,
   status?: IssueStatus,
-  opts?: { projectId?: string; limit?: number },
+  opts?: {
+    projectId?: string;
+    limit?: number;
+    /** Rows to skip (LIMIT/OFFSET pagination); only meaningful with results ordered by number DESC. */
+    offset?: number;
+    /** Only issues carrying this exact label. */
+    label?: string;
+    /** Only issues assigned to this user id. */
+    assignee?: string;
+    /** Case-insensitive substring match over title + body (SQL LIKE; % and _ are escaped). */
+    search?: string;
+  },
 ): Promise<Result<Issue[], AppError>> {
   try {
     // project_id-first with a legacy name fallback (see getIssueByNumber).
@@ -179,21 +244,51 @@ export async function listIssues(
           binds: [opts.projectId, project],
         }
       : { clause: "project = ?", binds: [project] };
+
+    const conditions = [scope.clause];
+    const binds: unknown[] = [...scope.binds];
+    if (status) {
+      conditions.push("status = ?");
+      binds.push(status);
+    }
+    if (opts?.label !== undefined) {
+      conditions.push("id IN (SELECT issue_id FROM issue_labels WHERE label = ?)");
+      binds.push(opts.label);
+    }
+    if (opts?.assignee !== undefined) {
+      conditions.push("assignee = ?");
+      binds.push(opts.assignee);
+    }
+    if (opts?.search !== undefined) {
+      // LIKE over title+body is fine at D1 scale; escape the pattern metachars
+      // so user text always matches literally. body is nullable — COALESCE keeps
+      // the OR two-valued instead of NULL when only the title matches.
+      conditions.push("(title LIKE ? ESCAPE '\\' OR COALESCE(body, '') LIKE ? ESCAPE '\\')");
+      const pattern = `%${escapeLike(opts.search)}%`;
+      binds.push(pattern, pattern);
+    }
+
     // Bound the response when asked (the API route does); internal callers that
-    // omit `limit` still get every row.
-    const limitClause = opts?.limit !== undefined ? " LIMIT ?" : "";
-    const limitBind = opts?.limit !== undefined ? [opts.limit] : [];
-    const result = status
-      ? await db
-          .prepare(
-            `SELECT * FROM issues WHERE ${scope.clause} AND status = ? ORDER BY number DESC${limitClause}`,
-          )
-          .bind(...scope.binds, status, ...limitBind)
-          .all<IssueRow>()
-      : await db
-          .prepare(`SELECT * FROM issues WHERE ${scope.clause} ORDER BY number DESC${limitClause}`)
-          .bind(...scope.binds, ...limitBind)
-          .all<IssueRow>();
+    // omit `limit` still get every row. OFFSET needs a LIMIT clause in SQLite,
+    // so an offset without a limit rides on LIMIT -1 (unlimited).
+    let pageClause = "";
+    if (opts?.limit !== undefined) {
+      pageClause = " LIMIT ?";
+      binds.push(opts.limit);
+    } else if (opts?.offset !== undefined) {
+      pageClause = " LIMIT -1";
+    }
+    if (opts?.offset !== undefined) {
+      pageClause += " OFFSET ?";
+      binds.push(opts.offset);
+    }
+
+    const result = await db
+      .prepare(
+        `SELECT * FROM issues WHERE ${conditions.join(" AND ")} ORDER BY number DESC${pageClause}`,
+      )
+      .bind(...binds)
+      .all<IssueRow>();
     return ok(result.results.map(rowToIssue));
   } catch (error) {
     const appError = toAppError(error, "listIssues", { project });
@@ -202,6 +297,14 @@ export async function listIssues(
   }
 }
 
+/**
+ * Apply a partial update to an issue and return the stored row. Only the fields
+ * present in `opts` are written; `linkedChangeId` and `assignee` take null to
+ * clear rather than omitting them, which leaves them untouched.
+ *
+ * @param number - The issue number within the project
+ * @returns The updated issue, or an error if the issue is not found or the update fails
+ */
 export async function updateIssue(
   db: D1Database,
   logger: Logger,
@@ -212,6 +315,8 @@ export async function updateIssue(
     body?: string;
     status?: IssueStatus;
     linkedChangeId?: string | null;
+    /** Set (string) or clear (null) the single assignee. */
+    assignee?: string | null;
     actorId: string;
     projectId?: string;
   },
@@ -236,6 +341,10 @@ export async function updateIssue(
     if (opts.linkedChangeId !== undefined) {
       assignments.push("linked_change_id = ?");
       bindings.push(opts.linkedChangeId);
+    }
+    if (opts.assignee !== undefined) {
+      assignments.push("assignee = ?");
+      bindings.push(opts.assignee);
     }
     if (opts.status !== undefined && opts.status !== existing.data.status) {
       assignments.push("status = ?");

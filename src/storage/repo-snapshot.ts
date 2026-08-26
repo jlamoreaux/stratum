@@ -139,9 +139,9 @@ async function walkDir(fs: MinimalFS, base: string, prefix: string): Promise<str
 export async function writeSnapshotFromRepo(
   kv: KVNamespace,
   artifacts: ArtifactsNamespace,
-  project: { remote: string; namespace: string; slug: string },
+  project: { remote: string; namespace: string; slug: string; defaultBranch?: string },
   logger: Logger,
-): Promise<void> {
+): Promise<{ fileCount: number } | null> {
   try {
     const tokenResult = await freshRepoToken(artifacts, project.remote, "read", logger);
     if (!tokenResult.success) {
@@ -150,9 +150,12 @@ export async function writeSnapshotFromRepo(
         slug: project.slug,
         error: tokenResult.error.message,
       });
-      return;
+      return null;
     }
-    const cloneResult = await cloneRepo(project.remote, tokenResult.data, logger);
+    const cloneResult = await cloneRepo(project.remote, tokenResult.data, logger, {
+      // Imported repos keep the source's default branch name; "main" otherwise.
+      ref: project.defaultBranch ?? "main",
+    });
 
     if (!cloneResult.success) {
       logger.warn("writeSnapshotFromRepo: clone failed, skipping snapshot", {
@@ -160,7 +163,7 @@ export async function writeSnapshotFromRepo(
         slug: project.slug,
         error: cloneResult.error.message,
       });
-      return;
+      return null;
     }
 
     const { fs, dir } = cloneResult.data;
@@ -242,11 +245,15 @@ export async function writeSnapshotFromRepo(
         hasReadme: readme !== null,
       });
     }
+    // The walk succeeded even if the KV write did not — the count is still a
+    // real signal callers can surface as import progress.
+    return { fileCount: files.length };
   } catch (error) {
     logger.warn("writeSnapshotFromRepo: unexpected error, skipping snapshot", {
       namespace: project.namespace,
       slug: project.slug,
       error: error instanceof Error ? error.message : String(error),
     });
+    return null;
   }
 }
