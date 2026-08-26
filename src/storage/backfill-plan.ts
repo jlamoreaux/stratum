@@ -126,6 +126,13 @@ export async function backfillWebhookProjectIds(
   env: Pick<Env, "DB" | "STATE">,
   logger: Logger,
 ): Promise<Result<WebhookBackfillReport, AppError>> {
+  // Declared outside the try so a throw partway through the loop below can
+  // still report how far the run got: D1 auto-commits each UPDATE
+  // independently, so a failure on row N leaves rows 1..N-1 already committed
+  // with no way to unwind them. The caller needs those counts to audit what
+  // actually landed, not just that something failed.
+  const skipped: WebhookBackfillSkip[] = [];
+  let updated = 0;
   try {
     const projectsResult = await listProjects(env.STATE, logger);
     if (!projectsResult.success) return err(projectsResult.error);
@@ -149,8 +156,6 @@ export async function backfillWebhookProjectIds(
       "SELECT id, project FROM webhooks WHERE project_id IS NULL",
     ).all<{ id: string; project: string }>();
 
-    const skipped: WebhookBackfillSkip[] = [];
-    let updated = 0;
     for (const row of rows.results) {
       const projectId = nameToId.get(row.project);
       if (projectId === undefined) {
@@ -184,16 +189,31 @@ export async function backfillWebhookProjectIds(
 
     return ok({ updated, skipped, remainingNullRows: remaining?.n ?? 0 });
   } catch (error) {
+    // D1 auto-commits each UPDATE independently, so a throw here can land
+    // after some rows were already stamped. Carry that partial progress out
+    // on the error's context rather than discarding it -- the route needs it
+    // to audit what actually happened, not just that the run failed. Message,
+    // code, and statusCode are preserved as-is so existing callers are
+    // unaffected; only `context` gains the partial counts.
+    const context = {
+      ...(error instanceof AppError ? error.context : undefined),
+      operation: "backfillWebhookProjectIds",
+      updated,
+      skipped: skipped.length,
+    };
     const appError =
       error instanceof AppError
-        ? error
+        ? new AppError(error.message, error.code, error.statusCode, context)
         : new AppError(
             error instanceof Error ? error.message : "Failed to backfill webhook project_id",
             "DATABASE_ERROR",
             500,
-            { operation: "backfillWebhookProjectIds" },
+            context,
           );
-    logger.error("Failed to backfill webhook project_id", appError);
+    logger.error("Failed to backfill webhook project_id", appError, {
+      updated,
+      skipped: skipped.length,
+    });
     return err(appError);
   }
 }

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { recordAudit } from "../storage/audit";
 import { backfillWebhookProjectIds, computeBackfillPlan } from "../storage/backfill-plan";
 import type { Env } from "../types";
-import { isAdminRequest } from "../utils/admin";
+import { resolveAdminAuth } from "../utils/admin";
 import { createLogger } from "../utils/logger";
 import { forbidden, internalError, ok } from "../utils/response";
 
@@ -12,19 +12,26 @@ const app = new Hono<{ Bindings: Env }>();
  * Accepts either the X-Admin-API-Key header or an authenticated admin user,
  * deliberately matching /plan's contract: an operator running the dry-run and
  * the apply back-to-back should not need two different credentials.
+ *
+ * Carries `via` out alongside `ok` so callers that write an audit entry can
+ * attribute the action to whichever credential actually authorized it,
+ * rather than to a `userId` that merely happened to be attached to the
+ * request (see resolveAdminAuth).
  */
 async function requireAdmin(c: {
   env: Env;
   req: { header: (n: string) => string | undefined; path: string; method: string };
   get: (k: "userId") => string | undefined;
-}): Promise<{ ok: true; logger: ReturnType<typeof createLogger> } | { ok: false }> {
+}): Promise<
+  { ok: true; logger: ReturnType<typeof createLogger>; via: "api-key" | "user" } | { ok: false }
+> {
   const logger = createLogger({
     requestId: crypto.randomUUID(),
     userId: c.get("userId"),
     path: c.req.path,
     method: c.req.method,
   });
-  const isAdmin = await isAdminRequest(
+  const auth = await resolveAdminAuth(
     c.env,
     {
       ...(c.req.header("X-Admin-API-Key") !== undefined
@@ -34,7 +41,7 @@ async function requireAdmin(c: {
     },
     logger,
   );
-  return isAdmin ? { ok: true, logger } : { ok: false };
+  return auth.authorized && auth.via ? { ok: true, logger, via: auth.via } : { ok: false };
 }
 
 // GET /api/admin/backfill-project-id/plan — DRY-RUN: how much legacy (NULL
@@ -65,13 +72,54 @@ app.post("/webhooks/apply", async (c) => {
   if (!auth.ok) return forbidden("Administrator access required");
   const { logger } = auth;
 
+  // Attribute the audit entry to whichever credential actually authorized
+  // this run, not to whatever `userId` happens to be attached to the
+  // request. `requireAdmin` checks the API-key branch first, so a run
+  // authorized purely by X-Admin-API-Key must record as "system" even when a
+  // non-admin user session also rode along on the same request — crediting
+  // that user would be misattribution in an audit trail, which is worse than
+  // an absent actorId.
+  const actor: { actorType: "user" | "system"; actorId?: string } =
+    auth.via === "user"
+      ? {
+          actorType: "user",
+          ...(c.get("userId") !== undefined ? { actorId: c.get("userId") } : {}),
+        }
+      : { actorType: "system" };
+
   const report = await backfillWebhookProjectIds(c.env, logger);
-  if (!report.success) return internalError(report.error.message);
+  if (!report.success) {
+    // D1 auto-commits each row's UPDATE independently, so a throw partway
+    // through the backfill can leave earlier rows already stamped even
+    // though this call reports failure. backfillWebhookProjectIds carries
+    // that partial progress out on the error's context; record it here,
+    // before returning the error, so a partially-applied privileged mutation
+    // never lands with zero provenance. This audit write is best-effort like
+    // the success-path one below -- if it also fails, log it and still
+    // return the original error untouched.
+    const failureAudit = await recordAudit(c.env.DB, logger, {
+      action: "webhook.project_id_backfilled",
+      ...actor,
+      detail: {
+        failed: true,
+        updated: report.error.context?.updated ?? 0,
+        skipped: report.error.context?.skipped ?? 0,
+        error: report.error.message,
+      },
+    });
+    if (!failureAudit.success) {
+      logger.error(
+        "Backfill failed and its failure-path audit entry also failed to persist",
+        failureAudit.error,
+        { updated: report.error.context?.updated ?? 0 },
+      );
+    }
+    return internalError(report.error.message);
+  }
 
   const auditResult = await recordAudit(c.env.DB, logger, {
     action: "webhook.project_id_backfilled",
-    actorType: c.get("userId") ? "user" : "system",
-    ...(c.get("userId") !== undefined ? { actorId: c.get("userId") } : {}),
+    ...actor,
     detail: {
       updated: report.data.updated,
       skipped: report.data.skipped.length,
