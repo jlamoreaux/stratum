@@ -100,8 +100,32 @@ vi.mock("../src/storage/git-ops", async (importActual) => {
     ...actual,
     resolveConflict: vi.fn(),
     freshRepoToken: vi.fn(async () => ({ success: true, data: "test-token" })),
+    // The merge-gate diff builder clones the project repo for real; stub it so
+    // manual-resolution route tests don't need network access. Individual tests
+    // override this to feed a specific diff into the evaluator suite.
+    buildManualResolutionDiff: vi.fn(async () => ({
+      success: true,
+      data: { diff: "", baseSha: "base-sha-default" },
+    })),
   };
 });
+
+vi.mock("../src/evaluation/policy-loader", async (importActual) => {
+  const actual = await importActual<typeof import("../src/evaluation/policy-loader")>();
+  return {
+    ...actual,
+    // Real loadPolicy clones the repo to read .stratum/policy.yaml; stub it so
+    // tests control the policy directly instead of needing network access.
+    // Defaults to the same permissive shape loadPolicy returns when no policy
+    // file is present, so strategies/tests that don't care about policy content
+    // behave the way they did before this gate existed.
+    loadPolicy: vi.fn(async () => ({ evaluators: [], requireAll: true, minScore: 0.7 })),
+  };
+});
+
+vi.mock("../src/storage/changes", () => ({
+  getChange: vi.fn(),
+}));
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(async (_: unknown, token: string) => {
@@ -152,8 +176,10 @@ vi.mock("../src/storage/sync", () => ({
   updateProjectAfterSync: vi.fn(),
 }));
 
+import { loadPolicy } from "../src/evaluation/policy-loader";
 import app from "../src/index";
-import { resolveConflict } from "../src/storage/git-ops";
+import { getChange } from "../src/storage/changes";
+import { buildManualResolutionDiff, resolveConflict } from "../src/storage/git-ops";
 import { getProjectByPath, getWorkspace } from "../src/storage/state";
 
 const PROJECT = {
@@ -435,6 +461,116 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
       data: { commitSha: "resolved-sha" },
     });
 
+    const db = makeDb();
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "src/foo.ts", content: "export const x = 1;" }],
+        }),
+      }),
+      { STATE: kv, DB: db },
+    );
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(resolveConflict)).toHaveBeenCalledOnce();
+
+    // Provenance: who resolved, from which conflict, against which evaluated
+    // sha (#260) is recorded to the audit log once the push succeeds.
+    const prepareMock = vi.mocked(db.prepare).mock;
+    const auditCallIndex = prepareMock.calls.findIndex(([sql]) =>
+      sql.includes("INSERT INTO audit_log"),
+    );
+    expect(auditCallIndex).toBeGreaterThanOrEqual(0);
+    const stmt = prepareMock.results[auditCallIndex]?.value as {
+      bind: (...args: unknown[]) => unknown;
+    };
+    const boundArgs = vi.mocked(stmt.bind).mock.calls[0];
+    expect(boundArgs?.[1]).toBe("conflict.resolved_manually");
+    expect(boundArgs?.[3]).toBe("user_test"); // actorId
+    // Detail JSON (6th bound param) carries conflictId + evaluatedBaseSha.
+    const detail = JSON.parse(boundArgs?.[5] as string) as Record<string, unknown>;
+    expect(detail.conflictId).toBe("conflict-abc");
+    expect(detail.evaluatedBaseSha).toBe("base-sha-default");
+    expect(detail.commitSha).toBe("resolved-sha");
+  });
+
+  it("blocks a manual resolution when the configured evaluator suite fails (never pushes)", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+    vi.mocked(buildManualResolutionDiff).mockResolvedValueOnce({
+      success: true,
+      data: {
+        diff: "diff --git a/config/prod.yaml b/config/prod.yaml\n--- /dev/null\n+++ b/config/prod.yaml\n+not-a-secret-but-forbidden\n",
+        baseSha: "base-sha-1",
+      },
+    });
+    vi.mocked(loadPolicy).mockResolvedValueOnce({
+      evaluators: [{ type: "diff", forbiddenPatterns: ["config/prod"] }],
+      requireAll: true,
+      minScore: 0.9,
+    });
+
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "config/prod.yaml", content: "not-a-secret-but-forbidden" }],
+        }),
+      }),
+      { STATE: kv, DB: makeDb() },
+    );
+
+    expect(res.status).toBe(422);
+    const body = await res.json<{ code: string }>();
+    expect(body.code).toBe("EVALUATION_FAILED");
+    expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+  });
+
+  it("blocks a manual resolution when merge protection requires more approvals than recorded (never pushes)", async () => {
+    const kv = makeKv();
+    // Overwrite with a conflict context carrying the originating changeId, so
+    // the protection check has a change to look up approvals against.
+    await kv.put("conflict:conflict-abc", JSON.stringify({ ...CONFLICT_CTX, changeId: "chg_1" }));
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+    vi.mocked(loadPolicy).mockResolvedValueOnce({
+      evaluators: [],
+      requireAll: true,
+      minScore: 0.7,
+      merge: { requiredApprovals: 1 },
+    });
+    vi.mocked(getChange).mockResolvedValueOnce({
+      success: true,
+      data: {
+        id: "chg_1",
+        project: "@owner/my-repo",
+        workspace: "ws-1234",
+        status: "accepted",
+        createdAt: new Date().toISOString(),
+        createdByUserId: "user_test",
+      },
+    } as Awaited<ReturnType<typeof getChange>>);
+
     const res = await app.fetch(
       new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
         method: "POST",
@@ -447,8 +583,11 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
       { STATE: kv, DB: makeDb() },
     );
 
-    expect(res.status).toBe(200);
-    expect(vi.mocked(resolveConflict)).toHaveBeenCalledOnce();
+    expect(res.status).toBe(403);
+    const body = await res.json<{ code: string; reasons: string[] }>();
+    expect(body.code).toBe("PROTECTION_BLOCKED");
+    expect(body.reasons[0]).toContain("Requires 1 approval");
+    expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
   });
 
   it("404s a caller without project write access (never mints a token or pushes)", async () => {
