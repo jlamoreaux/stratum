@@ -16,7 +16,12 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/** Outcome-oriented one-liner for an event, e.g. "Change chg_1 evaluated → 0.91 passed". */
+/**
+ * Creates a human-readable summary of an activity event.
+ *
+ * @param event - The event to summarize
+ * @returns A description of the event and relevant payload details
+ */
 export function describeEvent(event: EventRecord): string {
   const { payload } = event;
   const changeId = asString(payload.changeId);

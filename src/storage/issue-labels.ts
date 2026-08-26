@@ -3,10 +3,12 @@ import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
 
 /**
- * Free-form label strings per issue (migration 036). Deliberately a flat
- * (issue_id, label) table instead of a label catalog + join: at this scale the
- * only operations are set/remove/list/filter, and a catalog (colors,
- * descriptions) can layer on later without rewriting these rows.
+ * Converts an unknown database failure into an `AppError`.
+ *
+ * @param error - The original error value
+ * @param operation - The database operation that failed
+ * @param context - Additional metadata associated with the failure
+ * @returns The existing `AppError`, or a new database error containing the operation and context
  */
 
 function toAppError(error: unknown, operation: string, context: Record<string, unknown>) {
@@ -21,9 +23,9 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
 }
 
 /**
- * Replace an issue's label set. The full set is written each time (a delete +
- * inserts in one atomic batch), which keeps "add" and "remove" a single
- * operation and makes the endpoint idempotent.
+ * Replaces all labels assigned to an issue.
+ *
+ * @returns The deduplicated labels stored for the issue, or an application error if the operation fails.
  */
 export async function setIssueLabels(
   db: D1Database,
@@ -81,9 +83,10 @@ export async function listIssueLabels(
 export const MAX_D1_BINDS = 100;
 
 /**
- * Labels for many issues, chunked to respect D1's bind ceiling (issue list
- * rendering / API listing).
- * Returns a map of issue id → sorted labels; issues without labels are absent.
+ * Retrieves labels for multiple issues.
+ *
+ * @param issueIds - The issue identifiers whose labels should be retrieved
+ * @returns A map from issue identifiers to alphabetically sorted labels; issues without labels are omitted
  */
 export async function getLabelsForIssues(
   db: D1Database,

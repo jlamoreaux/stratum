@@ -120,6 +120,18 @@ async function listKeysPaginated(kv: KVNamespace, prefix: string): Promise<strin
   return names;
 }
 
+/**
+ * Captures identifiers for records associated with a project.
+ *
+ * When the project name collides with another project, only records linked by
+ * `project_id` are included; otherwise, legacy records with a matching project
+ * name are included as well.
+ *
+ * @param table - The dependent table from which to capture identifiers
+ * @param name - The project name used to match legacy records
+ * @param nameCollision - Whether another project shares the project name or slug
+ * @returns The captured record identifiers
+ */
 async function selectIds(
   db: D1Database,
   table: "changes" | "webhooks" | "issues",
@@ -398,11 +410,10 @@ async function deleteKvKey(
 }
 
 /**
- * Destroy every byte tied to a captured deletion target, children before
- * parents and KV last (the project entry is the tombstone-of-record: while it
- * exists a re-drive can always re-resolve the target). Every step is
- * idempotent; the function reports failures as residuals or a Result error and
- * never throws.
+ * Removes data associated with a captured project deletion target.
+ *
+ * @param target - Captured identifiers and names for the project and its related resources
+ * @returns The residual cleanup identifiers, or an application error if the cascade cannot complete
  */
 export async function deleteProjectCascade(
   env: Env,
@@ -525,14 +536,15 @@ async function countByIdChunks(
 }
 
 /**
- * Reconciliation pass: re-query every store for anything the cascade should
- * have removed. "No orphans" is a checked invariant, not an assertion — only
- * an empty residual set lets a job finish `completed`.
+ * Verifies that project deletion left no residual database rows or KV entries.
  *
- * Artifacts is intentionally NOT verified here: the binding offers no cheap
- * existence check (get() mints repo handles, list() is unbounded), so we trust
- * the cascade's step-3 residuals, which already report every repo that failed
- * to delete.
+ * Artifacts repositories are not independently verified; repository deletion failures
+ * are reported by the cascade.
+ *
+ * @param env - The environment containing project storage bindings
+ * @param target - The captured identifiers and metadata for the deleted project
+ * @param logger - The logger used to record verification failures
+ * @returns The remaining residual identifiers, or an error if verification fails
  */
 export async function verifyProjectDeleted(
   env: Env,
