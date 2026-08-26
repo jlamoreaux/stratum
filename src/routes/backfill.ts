@@ -8,6 +8,11 @@ import { forbidden, internalError, ok } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
 
+/**
+ * Gate an admin-only backfill route, returning a request-scoped logger on
+ * success. Accepts either the X-Admin-API-Key header or an authenticated
+ * admin user, matching the existing /plan endpoint's contract.
+ */
 async function requireAdmin(c: {
   env: Env;
   req: { header: (n: string) => string | undefined; path: string; method: string };
@@ -64,7 +69,7 @@ app.post("/webhooks/apply", async (c) => {
   const report = await backfillWebhookProjectIds(c.env, logger);
   if (!report.success) return internalError(report.error.message);
 
-  await recordAudit(c.env.DB, logger, {
+  const auditResult = await recordAudit(c.env.DB, logger, {
     action: "webhook.project_id_backfilled",
     actorType: c.get("userId") ? "user" : "system",
     ...(c.get("userId") !== undefined ? { actorId: c.get("userId") } : {}),
@@ -74,8 +79,25 @@ app.post("/webhooks/apply", async (c) => {
       remainingNullRows: report.data.remainingNullRows,
     },
   });
+  if (!auditResult.success) {
+    // The rows are already stamped by this point and nothing here can unwind
+    // them, so a failed audit write is a partial success, not a failure: the
+    // mutation landed, its provenance record did not. Deliberately NOT a 500
+    // — that would tell an operator the backfill did not happen when it did,
+    // and would throw away the `remainingNullRows` count this endpoint exists
+    // to report (the step-2 verification for #235), pushing them toward a
+    // re-run to recover numbers they already earned. Instead the gap is made
+    // explicit in the log and in `audited` below, so it can neither be missed
+    // nor mistaken for a clean run. (Auditing before the mutation, the
+    // deletion-runner's fail-hard order, isn't available here: the entry's
+    // detail is the run's own counts.)
+    logger.error("Backfill applied but its audit entry failed to persist", auditResult.error, {
+      updated: report.data.updated,
+      remainingNullRows: report.data.remainingNullRows,
+    });
+  }
 
-  return ok({ report: report.data });
+  return ok({ report: report.data, audited: auditResult.success });
 });
 
 export { app as backfillRouter };
