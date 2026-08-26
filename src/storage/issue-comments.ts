@@ -39,12 +39,11 @@ function rowToComment(row: IssueCommentRow): IssueComment {
 }
 
 /**
- * Normalizes an unknown failure into an `AppError`.
+ * Normalise a thrown value into an AppError, preserving one that is already
+ * an AppError and tagging anything else as DATABASE_ERROR with the operation
+ * and context attached for the log line.
  *
- * @param error - The failure to normalize
- * @param operation - The operation associated with the failure
- * @param context - Additional context to attach to converted errors
- * @returns The original `AppError`, or a `DATABASE_ERROR` with operation context
+ * @returns The original `AppError`, or a `DATABASE_ERROR` carrying the operation context
  */
 function toAppError(error: unknown, operation: string, context: Record<string, unknown>) {
   return error instanceof AppError
@@ -58,10 +57,11 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
 }
 
 /**
- * Appends a comment to an issue and returns the stored comment.
+ * Append a comment to an issue. Comments are append-only — there is no edit or
+ * delete path — so this only ever inserts, and returns the stored row.
  *
  * @param opts - The issue, author, and body of the comment
- * @returns The stored comment on success or an application error on failure
+ * @returns The stored comment, or an application error on failure
  */
 export async function addIssueComment(
   db: D1Database,
@@ -96,12 +96,13 @@ export async function addIssueComment(
 }
 
 /**
- * Lists an issue's comments in chronological order.
+ * Comments on an issue in chronological order, oldest first.
  *
- * Comments with identical timestamps are ordered by insertion order. Supports
- * optional limit and offset pagination.
+ * Ordering breaks ties on rowid because `created_at` is millisecond-precision:
+ * two comments written in the same millisecond would otherwise paginate
+ * non-deterministically. Omitting `limit` returns every comment.
  *
- * @param opts - Pagination options
+ * @param opts - LIMIT/OFFSET pagination in created-ascending order
  * @returns The issue comments, or an application error if retrieval fails
  */
 export async function listIssueComments(

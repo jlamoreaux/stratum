@@ -80,11 +80,14 @@ function parseIssueNumber(raw: string): number | null {
 }
 
 /**
- * Determines whether a change belongs to a project.
+ * Whether a change belongs to this project. The changes table's `project`
+ * column is historically mixed: it holds the project NAME on rows created via
+ * the name-keyed API paths and the project ID on rows created by the GitHub
+ * webhook path — and post-025 rows also carry the canonical `projectId`.
+ * Compare against all three (same as the merge-batch guard in changes.ts) so an
+ * id-keyed change is not mis-rejected.
  *
- * @param change - The change to check
- * @param project - The project to compare against
- * @returns `true` if the change references the project's canonical ID, name, or ID, `false` otherwise.
+ * @returns `true` when the change matches on any of the three, `false` otherwise
  */
 function changeBelongsToProject(change: Change, project: ProjectEntry): boolean {
   return (
@@ -95,10 +98,11 @@ function changeBelongsToProject(change: Change, project: ProjectEntry): boolean 
 }
 
 /**
- * Parses and normalizes issue labels.
+ * Validate a `labels` payload: an array of at most MAX_LABELS_PER_ISSUE
+ * non-empty strings (trimmed, capped at MAX_LABEL_LENGTH, deduped).
  *
  * @param raw - The value supplied as the labels payload
- * @returns An object containing unique trimmed labels, or an error message when the payload is invalid
+ * @returns The unique trimmed labels, or an error string for the 400 response
  */
 function parseLabels(raw: unknown): { labels: string[] } | { error: string } {
   if (!Array.isArray(raw)) return { error: "labels must be an array of strings" };

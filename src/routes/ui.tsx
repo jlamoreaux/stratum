@@ -939,10 +939,12 @@ const issuePageError = (status: 400 | 404 | 500) => (
 );
 
 /**
- * Parses a page query parameter into a zero-based page index.
+ * `?page=` as a zero-based page index. Anything not a non-negative integer —
+ * absent, "-1", "abc", "1e3" — is page 0 rather than an error: a bad page in a
+ * hand-edited URL should show the first page, not a 400.
  *
- * @param raw - The raw page query parameter.
- * @returns The parsed non-negative safe integer, or `0` for invalid, missing, or unsafe values.
+ * @param raw - The raw page query parameter
+ * @returns The parsed non-negative safe integer, or `0` for invalid or missing values
  */
 function parsePageParam(raw: string | undefined): number {
   if (raw === undefined) return 0;

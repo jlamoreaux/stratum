@@ -73,10 +73,11 @@ export function makeSqliteD1(): { db: D1Database; raw: DatabaseSync } {
 }
 
 /**
- * Creates a D1-compatible database whose operations throw an error.
+ * A D1 stand-in whose every operation throws — for exercising error paths that
+ * a working database cannot reach.
  *
- * @param message - The error message to throw.
- * @returns A D1-compatible database stub.
+ * @param message - The error message to throw
+ * @returns A D1-compatible database stub
  */
 export function makeThrowingD1(message = "boom"): D1Database {
   return {

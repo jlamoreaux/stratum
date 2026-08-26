@@ -17,9 +17,9 @@ function asString(value: unknown): string | undefined {
 }
 
 /**
- * Creates a human-readable summary of an activity event.
+ * Outcome-oriented one-liner for an event, e.g. "Change chg_1 evaluated → 0.91
+ * passed" — the feed reads as a list of what happened, not of event types.
  *
- * @param event - The event to summarize
  * @returns A description of the event and relevant payload details
  */
 export function describeEvent(event: EventRecord): string {

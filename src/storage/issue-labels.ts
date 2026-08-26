@@ -3,14 +3,19 @@ import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
 
 /**
- * Converts an unknown database failure into an `AppError`.
- *
- * @param error - The original error value
- * @param operation - The database operation that failed
- * @param context - Additional metadata associated with the failure
- * @returns The existing `AppError`, or a new database error containing the operation and context
+ * Free-form label strings per issue (migration 036). Deliberately a flat
+ * (issue_id, label) table instead of a label catalog + join: at this scale the
+ * only operations are set/remove/list/filter, and a catalog (colors,
+ * descriptions) can layer on later without rewriting these rows.
  */
 
+/**
+ * Normalise a thrown value into an `AppError`, preserving one that is already
+ * an AppError and tagging anything else as DATABASE_ERROR with the operation
+ * and context attached for the log line.
+ *
+ * @returns The existing `AppError`, or a new database error carrying the operation and context
+ */
 function toAppError(error: unknown, operation: string, context: Record<string, unknown>) {
   return error instanceof AppError
     ? error
@@ -23,9 +28,11 @@ function toAppError(error: unknown, operation: string, context: Record<string, u
 }
 
 /**
- * Replaces all labels assigned to an issue.
+ * Replace an issue's label set. The full set is written each time (a delete +
+ * inserts in one atomic batch), which keeps "add" and "remove" a single
+ * operation and makes the endpoint idempotent.
  *
- * @returns The deduplicated labels stored for the issue, or an application error if the operation fails.
+ * @returns The deduplicated labels stored for the issue, or an application error on failure
  */
 export async function setIssueLabels(
   db: D1Database,
@@ -83,10 +90,14 @@ export async function listIssueLabels(
 export const MAX_D1_BINDS = 100;
 
 /**
- * Retrieves labels for multiple issues.
+ * Labels for many issues, chunked to respect D1's bind ceiling — D1 allows at
+ * most MAX_D1_BINDS bound parameters per statement, and both the API (up to 500
+ * ids) and the issues page can exceed that in one call. Exceeding it raises
+ * `SQLITE_ERROR: too many SQL variables`, which surfaced as a 500 from the API
+ * and as silently label-less issues in the UI.
  *
  * @param issueIds - The issue identifiers whose labels should be retrieved
- * @returns A map from issue identifiers to alphabetically sorted labels; issues without labels are omitted
+ * @returns A map of issue id to sorted labels; issues without labels are absent, not empty arrays
  */
 export async function getLabelsForIssues(
   db: D1Database,
