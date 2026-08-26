@@ -5,6 +5,7 @@ import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { PhaseTimer } from "../utils/phase-timer";
 import { type Result, err, fromPromise, ok } from "../utils/result";
+import { isTraversalPath } from "../utils/validation";
 import { commitObject } from "./git-objects";
 import { MODE_SYMLINK, MemoryFS } from "./memory-fs";
 import { packObjects, placeLooseObject, unpackObjects } from "./object-loader";
@@ -130,6 +131,13 @@ export interface MergeWorkspaceOptions {
    * workspace history, else the merge fails closed.
    */
   workspaceSha?: string;
+  /**
+   * Default branch of the project repo AND its workspace fork (Artifacts forks
+   * copy the parent's default branch under the same name). Defaults to "main";
+   * pass projectDefaultBranch(project) for imported repos whose default is
+   * master/trunk/….
+   */
+  branch?: string;
 }
 
 /**
@@ -246,15 +254,15 @@ export async function freshRepoToken(
 }
 
 /**
- * Publishes the local `main` branch to a remote repository.
+ * Publishes the local default branch to a remote repository.
  *
- * `force` is opt-in because it overwrites the remote's `main` outright — the
- * project's canonical branch — so defaulting it on would discard any commits
- * pushed by someone else since this clone was taken. Backup restore is the
- * caller that does pass it, to publish a reconstructed repo over an existing
- * one; `pushTags` mirrors the same opt-in for the same reason.
+ * `force` is opt-in because it overwrites the remote's default branch outright
+ * — the project's canonical branch — so defaulting it on would discard any
+ * commits pushed by someone else since this clone was taken. Backup restore is
+ * the caller that does pass it, to publish a reconstructed repo over an
+ * existing one; `pushTags` mirrors the same opt-in for the same reason.
  *
- * @param opts - Controls whether an existing remote `main` branch may be overwritten.
+ * @param opts - Controls whether the existing remote branch may be overwritten, and which branch to push (default `main`, since imported repos keep their source branch name).
  * @returns No value on success, or an application error if the push fails.
  */
 export async function pushMain(
@@ -263,16 +271,17 @@ export async function pushMain(
   fs: NodeFS,
   dir: string,
   logger: Logger,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; branch?: string },
 ): Promise<Result<void, AppError>> {
+  const branch = opts?.branch ?? "main";
   const res = await fromPromise(
     git.push({
       fs,
       dir,
       http,
       url: remote,
-      ref: "main",
-      remoteRef: "main",
+      ref: branch,
+      remoteRef: branch,
       onAuth: makeAuth(token),
       force: opts?.force ?? false,
     }),
@@ -345,8 +354,13 @@ export async function pushTags(
 }
 
 /**
- * Pushes the local `main` branch to a branch on an external remote — e.g.
- * GitHub's `stratum/<changeId>` ref before a PR is opened (#189).
+ * Pushes a local branch to a branch on an external remote — e.g. GitHub's
+ * `stratum/<changeId>` ref before a PR is opened (#189).
+ *
+ * `localRef` is the branch inside `dir` to push and defaults to `main`. It must
+ * match the ref the caller cloned: a `singleBranch` clone of a `develop`- or
+ * `master`-default repo contains only that branch, and asking git.push for a
+ * `main` that is not there fails locally, before any network call.
  *
  * Auth is HTTP basic with the token as the password; GitHub accepts any
  * username alongside a token. `force` defaults to false because `remoteRef` is
@@ -354,13 +368,13 @@ export async function pushTags(
  * force-push there would destroy someone else's work. Pass `force: true`
  * explicitly, and only when overwriting a ref Stratum owns (re-promotion).
  *
- * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
+ * @param opts - Remote URL, target branch, authentication token, the local branch to push, and optional force-push setting.
  * @returns A successful result when the push completes, or an application error when it fails.
  */
 export async function pushBranchToRemote(
   fs: NodeFS,
   dir: string,
-  opts: { url: string; remoteRef: string; token: string; force?: boolean },
+  opts: { url: string; remoteRef: string; token: string; force?: boolean; localRef?: string },
   logger: Logger,
 ): Promise<Result<void, AppError>> {
   const res = await fromPromise(
@@ -369,7 +383,7 @@ export async function pushBranchToRemote(
       dir,
       http,
       url: opts.url,
-      ref: "main",
+      ref: opts.localRef ?? "main",
       remoteRef: opts.remoteRef,
       onAuth: () => ({ username: "x-access-token", password: opts.token }),
       force: opts.force ?? false,
@@ -380,6 +394,7 @@ export async function pushBranchToRemote(
     logger.error("Failed to push branch to remote", res.error, {
       url: opts.url,
       remoteRef: opts.remoteRef,
+      localRef: opts.localRef ?? "main",
     });
     return err(new ExternalServiceError("Git", `Failed to push branch: ${cause}`, res.error));
   }
@@ -473,6 +488,7 @@ export async function initAndPush(
  * @param token - The authentication token for the repository
  * @param opts - Clone options
  * @param opts.fullHistory - Whether to clone the complete reachable history; otherwise, clone the most recent 50 commits
+ * @param opts.ref - The branch to clone; defaults to `main`, but imported repos keep their source branch name (master/trunk/…)
  * @param opts.includeTags - Whether to follow the clone with a fetch of `refs/tags/*`; a `singleBranch` clone never brings tags
  * @returns The cloned filesystem and its working directory, or an application error
  */
@@ -480,7 +496,7 @@ export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  opts: { fullHistory?: boolean; includeTags?: boolean } = {},
+  opts: { fullHistory?: boolean; ref?: string; includeTags?: boolean } = {},
   httpClient: HttpClient = http,
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
@@ -492,7 +508,10 @@ export async function cloneRepo(
       http: httpClient,
       dir: DIR,
       url: remote,
-      ref: "main",
+      // The repo's default branch: "main" for Stratum-native repos, but imported
+      // repos keep their source branch name (master/trunk/…) — see
+      // projectDefaultBranch in ../types.
+      ref: opts.ref ?? "main",
       singleBranch: true,
       // Merges only need recent history (fast shallow clone). Backup needs the FULL
       // reachable history so the resulting pack is reachability-closed and restores
@@ -545,11 +564,32 @@ export async function commitAndPush(
   message: string,
   logger: Logger,
   author: Author = SYSTEM_AUTHOR,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.debug("Committing and pushing changes", {
     remote,
     changeCount: Object.keys(changes).length,
   });
+
+  // S7 (#130): the change map can come straight from a request body, and each
+  // key is joined onto the clone dir below. Mirror resolveConflict's guards at
+  // this choke point so EVERY caller gets them: no `../`/absolute traversal
+  // out of the repo tree, and a per-file size cap (the MemoryFS lives in a
+  // ~128MB isolate).
+  for (const [path, content] of Object.entries(changes)) {
+    if (isTraversalPath(path)) {
+      return err(
+        new AppError(
+          `Invalid file path: ${path} — path traversal is not allowed`,
+          "INVALID_INPUT",
+          422,
+        ),
+      );
+    }
+    if (new TextEncoder().encode(content).length > MAX_FILE_BYTES) {
+      return err(new AppError(`File ${path} exceeds maximum size of 10 MB`, "INVALID_INPUT", 422));
+    }
+  }
 
   const base = dir.endsWith("/") ? dir : `${dir}/`;
   for (const [path, content] of Object.entries(changes)) {
@@ -575,7 +615,7 @@ export async function commitAndPush(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
   );
   if (!pushResult.success) {
     logger.error("Failed to push to remote", pushResult.error, { remote });
@@ -633,12 +673,13 @@ export async function mergeWorkspaceIntoProject(
   });
 
   const author = options.author ?? SYSTEM_AUTHOR;
+  const branch = options.branch ?? "main";
   const timer = options.timer;
   const measure = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     timer ? timer.measure(name, fn) : fn();
 
   const cloneResult = await measure("projectCloneMs", () =>
-    cloneRepo(projectRemote, projectToken, logger),
+    cloneRepo(projectRemote, projectToken, logger, { ref: branch }),
   );
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
@@ -663,7 +704,7 @@ export async function mergeWorkspaceIntoProject(
         http,
         dir,
         remote: "workspace",
-        ref: "main",
+        ref: branch,
         singleBranch: true,
         onAuth: makeAuth(workspaceToken),
       }),
@@ -698,7 +739,7 @@ export async function mergeWorkspaceIntoProject(
     const tipResult = await resolveFetchedTip(
       fs,
       dir,
-      "refs/remotes/workspace/main",
+      `refs/remotes/workspace/${branch}`,
       logger,
       "Failed to resolve workspace ref",
       { workspaceRemote },
@@ -727,7 +768,7 @@ export async function mergeWorkspaceIntoProject(
   }
 
   if (options.strategy === "squash") {
-    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author, logger);
+    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author, logger, branch);
   }
 
   const mergeResult = await measure("mergeMs", () =>
@@ -735,7 +776,7 @@ export async function mergeWorkspaceIntoProject(
       git.merge({
         fs,
         dir,
-        ours: "main",
+        ours: branch,
         theirs: workspaceSha,
         author,
         message: "Merge workspace into project",
@@ -790,7 +831,7 @@ export async function mergeWorkspaceIntoProject(
         dir,
         http,
         url: projectRemote,
-        ref: "main",
+        ref: branch,
         onAuth: makeAuth(projectToken),
       }),
     ),
@@ -851,17 +892,19 @@ export async function fastForwardMerge(
    * `PINNED_SHA_UNREACHABLE`. Omit for legacy live-tip behavior (changes that
    * predate migration 024). */
   pinnedWorkspaceSha?: string,
+  /** Default branch shared by the project repo and its workspace fork. */
+  branch = "main",
 ): Promise<Result<FastForwardResult, AppError>> {
   const measure = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     timer ? timer.measure(name, fn) : fn();
 
   const cloneResult = await measure("workspaceFetchMs", () =>
-    cloneRepo(workspaceRemote, workspaceToken, logger),
+    cloneRepo(workspaceRemote, workspaceToken, logger, { ref: branch }),
   );
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
-  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
   if (!tipResult.success) {
     return err(new ExternalServiceError("Git", "Failed to resolve workspace tip", tipResult.error));
   }
@@ -920,7 +963,7 @@ export async function fastForwardMerge(
   // Push the target. The common case (target === tip) pushes the clone's `main`
   // exactly as before; a pinned non-tip target is pushed via a local ref written
   // at the pinned commit — O(1) extra work, no additional network round trips.
-  let pushRef = "main";
+  let pushRef = branch;
   if (target !== workspaceTip) {
     const writeRefResult = await fromPromise(
       git.writeRef({ fs, dir, ref: PINNED_MERGE_REF, value: target, force: true }),
@@ -941,7 +984,7 @@ export async function fastForwardMerge(
         http,
         url: projectRemote,
         ref: pushRef,
-        remoteRef: "main",
+        remoteRef: branch,
         onAuth: makeAuth(projectToken),
       }),
     ),
@@ -1334,6 +1377,7 @@ export async function batchMergeStagedTrees(
   projectToken: string,
   items: StagedTreeItem[],
   _logger: Logger,
+  branch = "main",
 ): Promise<Result<StagedItemResult[], AppError>> {
   const gitdir = `${dir === "/" ? "" : dir}/.git`;
 
@@ -1383,7 +1427,7 @@ export async function batchMergeStagedTrees(
     }
     const synthOid = synths[i]?.oid;
     if (!synthOid) continue;
-    const checkpoint = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+    const checkpoint = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
     if (!checkpoint.success) {
       results.push({ changeId: item.changeId, merged: false });
       continue;
@@ -1393,16 +1437,16 @@ export async function batchMergeStagedTrees(
         const merged = await git.merge({
           fs,
           dir,
-          ours: "main",
+          ours: branch,
           theirs: synthOid,
           author: SYSTEM_AUTHOR,
           message: `Merge change ${item.changeId}`,
         });
-        await git.checkout({ fs, dir, ref: "main" });
+        await git.checkout({ fs, dir, ref: branch });
         // git.merge omits `oid` when already up to date (the change's tree is already
-        // in main) — that's a successful no-op merge, not a conflict. Fall back to the
-        // current head so it's reported merged.
-        return merged.oid ?? (await git.resolveRef({ fs, dir, ref: "main" }));
+        // in the default branch) — that's a successful no-op merge, not a conflict.
+        // Fall back to the current head so it's reported merged.
+        return merged.oid ?? (await git.resolveRef({ fs, dir, ref: branch }));
       })(),
     );
     if (attempt.success && attempt.data) {
@@ -1412,14 +1456,14 @@ export async function batchMergeStagedTrees(
       // If restoration itself fails the FS is corrupt — abort the whole batch
       // rather than merge subsequent items against a dirty state.
       const restoreRef = await fromPromise(
-        git.writeRef({ fs, dir, ref: "main", value: checkpoint.data, force: true }),
+        git.writeRef({ fs, dir, ref: branch, value: checkpoint.data, force: true }),
       );
       if (!restoreRef.success) {
         return err(
           new ExternalServiceError("Git", "Failed to restore ref after conflict", restoreRef.error),
         );
       }
-      const restoreCheckout = await fromPromise(git.checkout({ fs, dir, ref: "main" }));
+      const restoreCheckout = await fromPromise(git.checkout({ fs, dir, ref: branch }));
       if (!restoreCheckout.success) {
         return err(
           new ExternalServiceError(
@@ -1435,7 +1479,7 @@ export async function batchMergeStagedTrees(
 
   if (results.some((r) => r.merged)) {
     const pushResult = await fromPromise(
-      git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+      git.push({ fs, dir, http, url: projectRemote, ref: branch, onAuth: makeAuth(projectToken) }),
     );
     if (!pushResult.success) {
       return err(new ExternalServiceError("Git", "Batch push failed", pushResult.error));
@@ -1531,13 +1575,14 @@ export async function squashMerge(
   projectToken: string,
   author: Author,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.debug("Performing squash merge", { projectRemote, workspaceSha });
 
   const workspaceFilesResult = await listFilesAtCommit(projectFs, workspaceSha, logger);
   if (!workspaceFilesResult.success) return err(workspaceFilesResult.error);
 
-  const projectFilesResult = await listFilesAtCommit(projectFs, "main", logger);
+  const projectFilesResult = await listFilesAtCommit(projectFs, branch, logger);
   if (!projectFilesResult.success) return err(projectFilesResult.error);
 
   const workspaceFiles = workspaceFilesResult.data;
@@ -1668,12 +1713,16 @@ export async function squashMerge(
   const changeCount = changed.length + deleted.length;
   if (changeCount === 0) {
     const resolveResult = await fromPromise(
-      git.resolveRef({ fs: projectFs, dir: projectDir, ref: "main" }),
+      git.resolveRef({ fs: projectFs, dir: projectDir, ref: branch }),
     );
     if (!resolveResult.success) {
-      logger.error("Failed to resolve main ref", resolveResult.error, { projectRemote });
+      logger.error("Failed to resolve default-branch ref", resolveResult.error, { projectRemote });
       return err(
-        new ExternalServiceError("Git", "Failed to resolve main ref", resolveResult.error),
+        new ExternalServiceError(
+          "Git",
+          "Failed to resolve default-branch ref",
+          resolveResult.error,
+        ),
       );
     }
     return ok(resolveResult.data);
@@ -1700,7 +1749,7 @@ export async function squashMerge(
       dir: projectDir,
       http,
       url: projectRemote,
-      ref: "main",
+      ref: branch,
       onAuth: makeAuth(projectToken),
     }),
   );
@@ -1714,7 +1763,9 @@ export async function squashMerge(
 }
 
 const MAX_REPO_FILES = 500;
-const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+/** Per-file ceiling for a commit. Exported so the workspace route enforces the
+ * SAME number this choke point does, instead of a copy that can drift. */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 export interface ResolveConflictOpts {
   projectRemote: string;
@@ -1724,6 +1775,8 @@ export interface ResolveConflictOpts {
   strategy: "accept-project" | "accept-workspace" | "manual";
   manualResolutions?: { file: string; content: string }[];
   conflictingFiles?: string[];
+  /** Default branch shared by the project repo and its workspace fork ("main" if omitted). */
+  branch?: string;
 }
 
 /**
@@ -1735,6 +1788,7 @@ export async function resolveConflict(
   logger: Logger,
 ): Promise<Result<{ commitSha: string }, AppError>> {
   const { projectRemote, projectToken, workspaceRemote, workspaceToken, strategy } = opts;
+  const branch = opts.branch ?? "main";
 
   logger.info("Resolving conflict", { strategy, projectRemote });
 
@@ -1768,12 +1822,14 @@ export async function resolveConflict(
       }
     }
 
-    const cloneResult = await cloneRepo(projectRemote, projectToken, logger);
+    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, {
+      ref: branch,
+    });
     if (!cloneResult.success) return err(cloneResult.error);
     const { fs, dir } = cloneResult.data;
 
     // Guard: total file count
-    const filesResult = await listFilesAtCommit(fs, "main", logger);
+    const filesResult = await listFilesAtCommit(fs, branch, logger);
     if (!filesResult.success) return err(filesResult.error);
     if (filesResult.data.length > MAX_REPO_FILES) {
       return err(
@@ -1798,18 +1854,22 @@ export async function resolveConflict(
       fileMap,
       "Resolved merge conflict manually",
       logger,
+      SYSTEM_AUTHOR,
+      branch,
     );
     if (!commitResult.success) return mapPushError(commitResult.error);
     return ok({ commitSha: commitResult.data });
   }
 
   if (strategy === "accept-project") {
-    const cloneResult = await cloneRepo(projectRemote, projectToken, logger);
+    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, {
+      ref: branch,
+    });
     if (!cloneResult.success) return err(cloneResult.error);
     const { fs, dir } = cloneResult.data;
 
     // Guard: total file count
-    const filesResult = await listFilesAtCommit(fs, "main", logger);
+    const filesResult = await listFilesAtCommit(fs, branch, logger);
     if (!filesResult.success) return err(filesResult.error);
     if (filesResult.data.length > MAX_REPO_FILES) {
       return err(
@@ -1839,7 +1899,7 @@ export async function resolveConflict(
 
     if (Object.keys(fileMap).length === 0) {
       // No conflicting files to re-stage — resolve HEAD as the "commit"
-      const refResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+      const refResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
       if (!refResult.success) return err(new AppError("Failed to resolve HEAD", "GIT_ERROR", 500));
       return ok({ commitSha: refResult.data });
     }
@@ -1852,18 +1912,22 @@ export async function resolveConflict(
       fileMap,
       "Resolved merge conflict: accepted project changes",
       logger,
+      SYSTEM_AUTHOR,
+      branch,
     );
     if (!commitResult.success) return mapPushError(commitResult.error);
     return ok({ commitSha: commitResult.data });
   }
 
   if (strategy === "accept-workspace") {
-    const projectClone = await cloneRepo(projectRemote, projectToken, logger);
+    const projectClone = await cloneRepo(projectRemote, projectToken, logger, {
+      ref: branch,
+    });
     if (!projectClone.success) return err(projectClone.error);
     const { fs: projectFs, dir: projectDir } = projectClone.data;
 
     // Guard: total file count in project
-    const filesResult = await listFilesAtCommit(projectFs, "main", logger);
+    const filesResult = await listFilesAtCommit(projectFs, branch, logger);
     if (!filesResult.success) return err(filesResult.error);
     if (filesResult.data.length > MAX_REPO_FILES) {
       return err(
@@ -1875,7 +1939,9 @@ export async function resolveConflict(
       );
     }
 
-    const workspaceClone = await cloneRepo(workspaceRemote, workspaceToken, logger);
+    const workspaceClone = await cloneRepo(workspaceRemote, workspaceToken, logger, {
+      ref: branch,
+    });
     if (!workspaceClone.success) return err(workspaceClone.error);
     const { fs: wsFs, dir: wsDir } = workspaceClone.data;
 
@@ -1898,7 +1964,7 @@ export async function resolveConflict(
 
     if (Object.keys(fileMap).length === 0) {
       const refResult = await fromPromise(
-        git.resolveRef({ fs: projectFs, dir: projectDir, ref: "main" }),
+        git.resolveRef({ fs: projectFs, dir: projectDir, ref: branch }),
       );
       if (!refResult.success) return err(new AppError("Failed to resolve HEAD", "GIT_ERROR", 500));
       return ok({ commitSha: refResult.data });
@@ -1912,6 +1978,8 @@ export async function resolveConflict(
       fileMap,
       "Resolved merge conflict: accepted workspace changes",
       logger,
+      SYSTEM_AUTHOR,
+      branch,
     );
     if (!commitResult.success) return mapPushError(commitResult.error);
     return ok({ commitSha: commitResult.data });
@@ -1998,10 +2066,11 @@ export async function readFileFromRepo(
   token: string,
   path: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.debug("Reading file from repo", { remote, path });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs } = cloneResult.data;
@@ -2023,10 +2092,11 @@ export async function listFilesInRepo(
   remote: string,
   token: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string[], AppError>> {
   logger.debug("Listing files in repo", { remote });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs, dir } = cloneResult.data;
@@ -2047,10 +2117,14 @@ export async function readRepoFiles(
   token: string,
   logger: Logger,
   ref?: string,
+  branch = "main",
 ): Promise<Result<Map<string, string>, AppError>> {
   logger.debug("Reading repo files", { remote, ref });
 
-  const cloneResult = await cloneRepo(remote, token, logger, { fullHistory: ref !== undefined });
+  const cloneResult = await cloneRepo(remote, token, logger, {
+    ref: branch,
+    ...(ref !== undefined ? { fullHistory: true } : {}),
+  });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -2122,8 +2196,9 @@ export async function getCommitParent(
   token: string,
   commitSha: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -2150,10 +2225,11 @@ export async function revertToCommit(
   targetSha: string,
   message: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.info("Reverting repo to commit tree", { remote, targetSha });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -2195,14 +2271,14 @@ export async function revertToCommit(
   const revertSha = writeResult.data;
 
   const refResult = await fromPromise(
-    git.writeRef({ fs, dir, ref: "refs/heads/main", value: revertSha, force: true }),
+    git.writeRef({ fs, dir, ref: `refs/heads/${branch}`, value: revertSha, force: true }),
   );
   if (!refResult.success) {
     return err(new ExternalServiceError("Git", "Failed to update ref", refResult.error));
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
   );
   if (!pushResult.success) {
     logger.error("Failed to push revert commit", pushResult.error, { remote });
@@ -2263,10 +2339,11 @@ export async function getCommitLog(
   token: string,
   logger: Logger,
   depth = 20,
+  branch = "main",
 ): Promise<Result<CommitLogEntry[], AppError>> {
   logger.debug("Getting commit log", { remote, depth });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs, dir } = cloneResult.data;
@@ -2309,9 +2386,11 @@ export async function importFromGitHub(
       }, timeoutMs);
     });
 
+    // depth <= 0 means "full history": omit depth from the import request so the
+    // Artifacts backend clones without a shallow cutoff.
     const doImport = () =>
       artifacts.import({
-        source: { url: githubUrl, branch, depth },
+        source: { url: githubUrl, branch, ...(depth > 0 ? { depth } : {}) },
         target: { name },
       });
 
@@ -2473,15 +2552,16 @@ export async function applySourceUpdate(
   sourceTip: string,
   logger: Logger,
   author: Author = SYSTEM_AUTHOR,
+  branch = "main",
 ): Promise<Result<SourceSyncResult, AppError>> {
   const mergeResult = await fromPromise(
     git.merge({
       fs,
       dir,
-      ours: "main",
+      ours: branch,
       theirs: sourceTip,
       author,
-      message: `Sync source commit ${sourceTip.slice(0, 7)} into main`,
+      message: `Sync source commit ${sourceTip.slice(0, 7)} into ${branch}`,
     }),
   );
   if (!mergeResult.success) {
@@ -2532,10 +2612,10 @@ export async function applySourceUpdate(
   // git.merge omits `oid` in some no-op cases; fall back to the current head.
   let commit = mergeResult.data.oid;
   if (!commit) {
-    const headResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+    const headResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
     if (!headResult.success) {
       return err(
-        new ExternalServiceError("Git", "Failed to resolve main after sync", headResult.error),
+        new ExternalServiceError("Git", `Failed to resolve ${branch} after sync`, headResult.error),
       );
     }
     commit = headResult.data;
@@ -2579,8 +2659,9 @@ export async function applySourceUpdateWithDeepening(
   maxDepth: number,
   deepen: { project: DeepenFetch; source: DeepenFetch },
   logger: Logger,
+  branch = "main",
 ): Promise<Result<SourceSyncResult, AppError>> {
-  let applyResult = await applySourceUpdate(fs, dir, sourceTip, logger);
+  let applyResult = await applySourceUpdate(fs, dir, sourceTip, logger, SYSTEM_AUTHOR, branch);
   let window = startDepth;
 
   while (
@@ -2593,7 +2674,7 @@ export async function applySourceUpdateWithDeepening(
     const increment = nextWindow - window;
 
     const [projectShallow, sourceShallow] = await Promise.all([
-      isRefShallow(fs, dir, "main"),
+      isRefShallow(fs, dir, branch),
       isRefShallow(fs, dir, sourceRef),
     ]);
     if (!projectShallow && !sourceShallow) {
@@ -2620,7 +2701,7 @@ export async function applySourceUpdateWithDeepening(
     }
 
     window = nextWindow;
-    applyResult = await applySourceUpdate(fs, dir, sourceTip, logger);
+    applyResult = await applySourceUpdate(fs, dir, sourceTip, logger, SYSTEM_AUTHOR, branch);
   }
 
   return applyResult;
@@ -2667,7 +2748,7 @@ export async function syncFromGitHub(
   if (!tokenResult.success) return err(tokenResult.error);
   const token = tokenResult.data;
 
-  const cloneResult = await cloneRepo(remote, token, logger, { fullHistory: false });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch, fullHistory: false });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -2718,7 +2799,11 @@ export async function syncFromGitHub(
         http,
         dir,
         remote: "origin",
-        ref: "main",
+        // Follows the project's real default branch, not a hardcoded "main":
+        // the clone and push around it already do, and asking origin to deepen
+        // a ref the repo does not have would fail on any imported project whose
+        // default is master/trunk.
+        ref: branch,
         singleBranch: true,
         depth: increment,
         relative: true,
@@ -2772,6 +2857,7 @@ export async function syncFromGitHub(
     maxDepth,
     { project: deepenProject, source: deepenSource },
     logger,
+    branch,
   );
 
   if (!applyResult.success) {
@@ -2803,8 +2889,8 @@ export async function syncFromGitHub(
       dir,
       http,
       url: remote,
-      ref: "main",
-      remoteRef: "main",
+      ref: branch,
+      remoteRef: branch,
       onAuth: makeAuth(token),
     }),
   );
@@ -2831,12 +2917,16 @@ function fileUnifiedDiff(path: string, oldContent: string, newContent: string): 
   // We strip the Index/=== preamble and replace the --- / +++ markers with git-style ones.
   const patch = createPatch(path, oldContent, newContent, "", "");
   const lines = patch.split("\n");
-  // Drop the first two lines ("Index: …" and "===…") then fix up --- / +++ paths.
+  // Drop the first two lines ("Index: …" and "===…"). The next two are the
+  // --- / +++ header pair; rewrite those *by position*, never by prefix. A
+  // deleted line whose text starts with "-- " (a SQL or Lua comment) arrives as
+  // "--- …" and an added line starting with "++ " as "+++ …", so a prefix test
+  // rewrites file content into a bogus header.
   const body = lines
     .slice(2)
-    .map((line) => {
-      if (line.startsWith("--- ")) return `--- a/${path}`;
-      if (line.startsWith("+++ ")) return `+++ b/${path}`;
+    .map((line, index) => {
+      if (index === 0 && line.startsWith("--- ")) return `--- a/${path}`;
+      if (index === 1 && line.startsWith("+++ ")) return `+++ b/${path}`;
       return line;
     })
     .join("\n");
@@ -2863,6 +2953,8 @@ export async function getDiffBetweenRepos(
   workspaceRemote: string,
   workspaceToken: string,
   logger: Logger,
+  /** Default branch shared by the base repo and its workspace fork ("main" if omitted). */
+  branch = "main",
 ): Promise<
   Result<
     { diff: string; workspaceOid: string; workspaceTreeOid: string; workspaceSha: string },
@@ -2872,8 +2964,8 @@ export async function getDiffBetweenRepos(
   logger.debug("Getting diff between repos", { baseRemote, workspaceRemote });
 
   const [workspaceCloneResult, baseCloneResult] = await Promise.all([
-    cloneRepo(workspaceRemote, workspaceToken, logger),
-    cloneRepo(baseRemote, baseToken, logger),
+    cloneRepo(workspaceRemote, workspaceToken, logger, { ref: branch }),
+    cloneRepo(baseRemote, baseToken, logger, { ref: branch }),
   ]);
 
   if (!workspaceCloneResult.success) return err(workspaceCloneResult.error);
@@ -2890,7 +2982,7 @@ export async function getDiffBetweenRepos(
   // against what was evaluated, closing the residual race between the pre-merge
   // tip check and the staged-tree read.
   const workspaceOidResult = await fromPromise(
-    git.resolveRef({ fs: workspaceFs, dir: workspaceDir, ref: "main" }),
+    git.resolveRef({ fs: workspaceFs, dir: workspaceDir, ref: branch }),
   );
   if (!workspaceOidResult.success) {
     return err(new AppError("Failed to resolve workspace tip for diff", "GIT_ERROR", 500));
@@ -2906,9 +2998,19 @@ export async function getDiffBetweenRepos(
   }
   const workspaceTreeOid = workspaceCommitResult.data.commit.tree;
 
+  // Resolve the base tip too: readFileAtCommit feeds git.readBlob, whose `oid`
+  // parameter does NOT resolve ref names (a ref string fails with NotFoundError,
+  // silently dropping the file from the diff) — so both sides read at their
+  // resolved tip commit, pinned to the same clone the file listing came from.
+  const baseOidResult = await fromPromise(git.resolveRef({ fs: baseFs, dir: DIR, ref: branch }));
+  if (!baseOidResult.success) {
+    return err(new AppError("Failed to resolve base tip for diff", "GIT_ERROR", 500));
+  }
+  const baseOid = baseOidResult.data;
+
   const [workspaceFilesResult, baseFilesResult] = await Promise.all([
-    listFilesAtCommit(workspaceFs, "main", logger),
-    listFilesAtCommit(baseFs, "main", logger),
+    listFilesAtCommit(workspaceFs, branch, logger),
+    listFilesAtCommit(baseFs, branch, logger),
   ]);
 
   if (!workspaceFilesResult.success) return err(workspaceFilesResult.error);
@@ -2922,13 +3024,13 @@ export async function getDiffBetweenRepos(
 
   await Promise.all([
     ...baseFiles.map(async ([path]) => {
-      const contentResult = await readFileAtCommit(baseFs, "main", path, logger);
+      const contentResult = await readFileAtCommit(baseFs, baseOid, path, logger);
       if (contentResult.success) {
         baseContent.set(path, contentResult.data);
       }
     }),
     ...workspaceFiles.map(async ([path]) => {
-      const contentResult = await readFileAtCommit(workspaceFs, "main", path, logger);
+      const contentResult = await readFileAtCommit(workspaceFs, workspaceOid, path, logger);
       if (contentResult.success) {
         workspaceContent.set(path, contentResult.data);
       }

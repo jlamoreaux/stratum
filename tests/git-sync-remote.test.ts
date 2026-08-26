@@ -121,6 +121,60 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     expect(importFn).not.toHaveBeenCalled();
   });
 
+  // #181: an imported repo keeps its SOURCE default branch name. Every leg of
+  // the sync — clone, merge base, head fallback, and push — has to follow it,
+  // or the sync fails at the clone (the remote has no `main`) or, worse,
+  // advances a branch nobody reads.
+  it("threads a non-main default branch through clone, merge, resolve, and push", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    vi.mocked(git.resolveRef)
+      .mockReset()
+      .mockImplementation(async ({ ref }) => {
+        if (ref === "FETCH_HEAD") return "srctip";
+        if (ref === "master") return "headsha";
+        throw new Error(`unexpected ref ${ref}`);
+      });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "master");
+
+    expect(result.success).toBe(true);
+    expect(git.clone).toHaveBeenCalledWith(expect.objectContaining({ url: REMOTE, ref: "master" }));
+    expect(git.fetch).toHaveBeenCalledWith(
+      expect.objectContaining({ remote: "source", ref: "master" }),
+    );
+    expect(git.merge).toHaveBeenCalledWith(expect.objectContaining({ ours: "master" }));
+    expect(git.push).toHaveBeenCalledWith(
+      expect.objectContaining({ url: REMOTE, ref: "master", remoteRef: "master" }),
+    );
+    // Never the hardcoded main, on any leg.
+    for (const call of vi.mocked(git.clone).mock.calls) {
+      expect(call[0]).not.toHaveProperty("ref", "main");
+    }
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  // The head fallback runs only when git.merge returns no oid; on a non-main
+  // repo it must resolve that repo's branch, not `main`.
+  it("resolves the non-main head when git.merge reports no oid", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.merge).mockResolvedValue({} as never);
+    vi.mocked(git.resolveRef)
+      .mockReset()
+      .mockImplementation(async ({ ref }) => {
+        if (ref === "FETCH_HEAD") return "srctip";
+        if (ref === "trunk") return "trunkhead";
+        throw new Error(`unexpected ref ${ref}`);
+      });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "trunk");
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.commit).toBe("trunkhead");
+    expect(git.resolveRef).toHaveBeenCalledWith(expect.objectContaining({ ref: "trunk" }));
+  });
+
   it("is a no-op (no push) when already up to date", async () => {
     const { artifacts, del } = makeArtifacts();
     vi.mocked(git.merge).mockResolvedValue({ oid: "headsha", alreadyMerged: true } as never);

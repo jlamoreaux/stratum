@@ -14,7 +14,7 @@ export type StratumEvent =
       type: "change.reviewed";
       project: string;
       changeId: string;
-      verdict: "approve" | "request_changes";
+      verdict: "approve" | "request_changes" | "comment";
     }
   | { type: "project.created"; project: string }
   | { type: "project.imported"; project: string; sourceUrl: string }
@@ -24,6 +24,7 @@ export type StratumEvent =
   | { type: "workspace.created"; project: string; workspace: string }
   | { type: "sync.completed"; project: string; commit?: string }
   | { type: "issue.opened"; project: string; issueNumber: number; title: string }
+  | { type: "issue.commented"; project: string; issueNumber: number }
   | {
       type: "issue.closed";
       project: string;
