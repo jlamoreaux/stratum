@@ -511,6 +511,36 @@ export const MAX_TAGS = 200;
  * @param opts.includeTags - Whether to follow the clone with a per-tag fetch of `refs/tags/*`; a `singleBranch` clone never brings tags. Capped at {@link MAX_TAGS}; see the result's `tagsTruncated`/`totalTagCount`.
  * @returns The cloned filesystem and its working directory (plus tag-fetch truncation info when `includeTags` was set), or an application error
  */
+
+/** The shape `getRemoteInfo` nests advertised refs into: each `/`-separated
+ * path segment of the ref becomes a nested key, with the oid (or symref
+ * target) only at the leaf. See {@link flattenRefTree}. */
+type RemoteRefTree = { [segment: string]: string | RemoteRefTree };
+
+/**
+ * `getRemoteInfo` builds an object TREE out of the flat ref list it gets from
+ * the remote, splitting every ref on "/" and nesting a level per segment (see
+ * isomorphic-git's `getRemoteInfo`) — so `refs/tags/release/1.0` lands at
+ * `refs.tags.release["1.0"]`, not `refs.tags["release/1.0"]`. A plain
+ * `Object.keys(refs.tags)` therefore only recovers the first path segment of
+ * any hierarchical tag name (yielding a nested object where an oid was
+ * expected). This walks the tree back down, rejoining segments with "/", to
+ * recover the true `name -> oid` pairs regardless of nesting depth.
+ */
+function flattenRefTree(node: RemoteRefTree | undefined, prefix = ""): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!node) return out;
+  for (const [segment, value] of Object.entries(node)) {
+    const name = prefix ? `${prefix}/${segment}` : segment;
+    if (typeof value === "string") {
+      out[name] = value;
+    } else {
+      Object.assign(out, flattenRefTree(value, name));
+    }
+  }
+  return out;
+}
+
 export async function cloneRepo(
   remote: string,
   token: string,
@@ -576,19 +606,28 @@ export async function cloneRepo(
     }
 
     // getRemoteInfo nests advertised refs into an object tree keyed by path
-    // segment (`refs.tags.<name>`); it also advertises each annotated tag's
-    // peeled commit under a `<name>^{}` key alongside the tag object itself —
-    // that suffix marks a peeled target, not a real tag name, so it's filtered
-    // out (we peel annotated tags ourselves in `collectRepoTags`).
-    const remoteTags = (remoteInfoResult.data.refs as { tags?: Record<string, string> } | undefined)
+    // segment (`refs.tags.<name>`, or several levels deep for a hierarchical
+    // tag name like `release/1.0` — see `flattenRefTree`); it also advertises
+    // each annotated tag's peeled commit under a `<name>^{}` key alongside the
+    // tag object itself — that suffix marks a peeled target, not a real tag
+    // name, so it's filtered out (we peel annotated tags ourselves in
+    // `collectRepoTags`).
+    const remoteTagsTree = (remoteInfoResult.data.refs as { tags?: RemoteRefTree } | undefined)
       ?.tags;
-    const tagNames = Object.keys(remoteTags ?? {})
-      .filter((name) => !name.endsWith("^{}"))
-      .sort();
+    const tagNames = Object.keys(flattenRefTree(remoteTagsTree)).filter(
+      (name) => !name.endsWith("^{}"),
+    );
 
     totalTagCount = tagNames.length;
     tagsTruncated = totalTagCount > MAX_TAGS;
-    const tagNamesToFetch = tagsTruncated ? tagNames.slice(0, MAX_TAGS) : tagNames;
+    // Sort ascending for stable, readable fetch order; when truncating, keep
+    // the highest-sorting names (tail of the ascending sort) rather than the
+    // lowest, since a release listing wants v9.x over v1.x when only one can
+    // fit. This is lexicographic, not chronological, ordering — "v10" sorts
+    // below "v9" — so it's a best-effort signal from names alone, not a
+    // guarantee of "newest".
+    const sortedTagNames = tagNames.sort();
+    const tagNamesToFetch = tagsTruncated ? sortedTagNames.slice(-MAX_TAGS) : sortedTagNames;
     if (tagsTruncated) {
       logger.warn("Remote tag count exceeds MAX_TAGS; truncating tags fetch", {
         remote,

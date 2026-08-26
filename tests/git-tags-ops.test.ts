@@ -45,10 +45,24 @@ vi.mock("isomorphic-git", async (importActual) => {
   };
 });
 
-/** Shape a `getRemoteInfo` mock resolution for a set of tag names, matching
- * the real nested `{ refs: { tags: { <name>: oid } } }` shape (see git-ops.ts). */
+/** Shape a `getRemoteInfo` mock resolution for a set of tag names, mirroring
+ * the real nesting getRemoteInfo builds: each ref is split on "/" and nested
+ * a level per segment, so a hierarchical tag name (e.g. "release/1.0") lands
+ * at `refs.tags.release["1.0"]`, not `refs.tags["release/1.0"]` — a flat mock
+ * shape would hide exactly the bug this nesting causes (see git-ops.ts). */
 function remoteInfoWithTags(tags: Record<string, string>) {
-  return { capabilities: [], refs: { tags } };
+  const tree: Record<string, unknown> = {};
+  for (const [name, oid] of Object.entries(tags)) {
+    const parts = name.split("/");
+    const last = parts.pop() as string;
+    let node = tree;
+    for (const part of parts) {
+      node[part] = node[part] ?? {};
+      node = node[part] as Record<string, unknown>;
+    }
+    node[last] = oid;
+  }
+  return { capabilities: [], refs: { tags: tree } };
 }
 
 /**
@@ -372,6 +386,32 @@ describe("cloneRepo includeTags", () => {
     );
   });
 
+  it("fetches a hierarchical tag name, which getRemoteInfo nests several levels deep", async () => {
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      await buildRepo(dir, [{ "a.txt": "one" }], fs);
+    });
+    // "release/1.0" advertises as refs/tags/release/1.0, which getRemoteInfo
+    // nests as refs.tags.release["1.0"] — a plain Object.keys(refs.tags)
+    // would yield "release" (a nested object, not an oid) instead of the
+    // real tag name.
+    mockGetRemoteInfo.mockResolvedValue(
+      remoteInfoWithTags({ "release/1.0": "a".repeat(40), "v1/rc1": "b".repeat(40) }),
+    );
+    mockFetch.mockResolvedValue({});
+
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
+      includeTags: true,
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.totalTagCount).toBe(2);
+
+    const remoteRefs = mockFetch.mock.calls
+      .map((c) => (c[0] as Record<string, unknown>).remoteRef)
+      .sort();
+    expect(remoteRefs).toEqual(["refs/tags/release/1.0", "refs/tags/v1/rc1"]);
+  });
+
   it("does not enumerate or fetch tags unless asked", async () => {
     mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
       await buildRepo(dir, [{ "a.txt": "one" }], fs);
@@ -436,6 +476,38 @@ describe("cloneRepo includeTags", () => {
     // Only the cap's worth of tags were actually fetched — not silently more
     // or fewer.
     expect(mockFetch).toHaveBeenCalledTimes(MAX_TAGS);
+  });
+
+  it("keeps the highest-sorting tags, not the lowest, when truncating", async () => {
+    mockClone.mockImplementation(async ({ fs, dir }: { fs: NodeFS; dir: string }) => {
+      await buildRepo(dir, [{ "a.txt": "one" }], fs);
+    });
+    // v0..v(MAX_TAGS+9): a plain lexicographic sort keeps the "v0*" tags and
+    // drops "v1*" — the opposite of what a release listing wants.
+    const manyTags: Record<string, string> = {};
+    const total = MAX_TAGS + 10;
+    for (let i = 0; i < total; i++) {
+      manyTags[`v${String(i).padStart(5, "0")}`] = i.toString(16).padStart(40, "0");
+    }
+    mockGetRemoteInfo.mockResolvedValue(remoteInfoWithTags(manyTags));
+    mockFetch.mockResolvedValue({});
+
+    const result = await cloneRepo("https://r.example/repo.git", "tok", logger, {
+      includeTags: true,
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.tagsTruncated).toBe(true);
+
+    const fetchedNames = mockFetch.mock.calls
+      .map((c) => (c[0] as Record<string, unknown>).remoteRef as string)
+      .map((ref) => ref.replace("refs/tags/", ""))
+      .sort();
+    const expectedKept = Object.keys(manyTags).sort().slice(-MAX_TAGS);
+    expect(fetchedNames).toEqual(expectedKept);
+    // The lowest-sorting names were the ones dropped.
+    expect(fetchedNames).not.toContain("v00000");
+    expect(fetchedNames).toContain(`v${String(total - 1).padStart(5, "0")}`);
   });
 
   it("does not materialize a large branch's objects that no tag references", async () => {
