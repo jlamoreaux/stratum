@@ -1,6 +1,8 @@
+import git from "isomorphic-git";
 import { describe, expect, it, vi } from "vitest";
 import {
   BINARY_DECODE_COMMAND,
+  type RepoFilesReader,
   SandboxEvaluator,
   type SandboxRepoAccess,
   encodeForSandboxWrite,
@@ -8,6 +10,8 @@ import {
 } from "../src/evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../src/evaluation/types";
 import { buildEvaluators } from "../src/services/change-flow";
+import { type NodeFS, readTreeAtCommit } from "../src/storage/git-ops";
+import { MemoryFS } from "../src/storage/memory-fs";
 import type { Env, SandboxBinding, SandboxInstance } from "../src/types";
 import { AppError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
@@ -219,15 +223,75 @@ describe("SandboxEvaluator — workspace tree materialization", () => {
     expect(runCalls.map((c) => c.command)).toEqual([BINARY_DECODE_COMMAND]);
   });
 
-  it("passes ref: undefined through when no commit is pinned", async () => {
-    const { binding } = makeMockSandbox({ exitCode: 0 });
-    const readFiles = makeReadFiles();
+  it("requires `ref` at the type level — a SandboxRepoAccess cannot be built unpinned (#252)", () => {
+    // This is a compile-time guarantee, not a runtime assertion: `ref` on
+    // SandboxRepoAccess is a required `string`, so the object literal below
+    // is a type error and the whole file fails `tsc` if it ever stops being
+    // one. That makes the fail-closed pinned-commit read structural rather
+    // than resting on every construction site remembering to pass a ref.
+    // @ts-expect-error — ref is required; omitting it must not compile.
     const unpinned: SandboxRepoAccess = { remote: repo.remote, token: repo.token };
-    const evaluator = new SandboxEvaluator(binding, unpinned, readFiles);
+    expect(unpinned.remote).toBe(repo.remote);
+  });
 
-    await evaluator.evaluate("", makePolicy(), mockLogger);
+  it("an unreadable blob under the pinned ref produces an error verdict, never a pass (#252)", async () => {
+    // Wires the evaluator to the REAL readTreeAtCommit — the fail-closed path
+    // `SandboxRepoAccess.ref` being required now guarantees is the only one
+    // reachable — against a tree with one dangling blob oid. The regression
+    // this guards: a partial tree must never be handed to the sandbox as if
+    // it were complete, because that could let a broken/incomplete checkout
+    // score a false pass in a merge gate.
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const dir = "/";
+    await git.init({ fs, dir, defaultBranch: "main" });
+    const goodBlob = await git.writeBlob({
+      fs,
+      dir,
+      blob: new TextEncoder().encode("still readable"),
+    });
+    const treeOid = await git.writeTree({
+      fs,
+      dir,
+      tree: [
+        { mode: "100644", path: "good.txt", oid: goodBlob, type: "blob" },
+        // A dangling oid: listed in the tree but the object does not exist —
+        // simulates the unreadable-blob case the fail-closed path must catch.
+        {
+          mode: "100644",
+          path: "missing.txt",
+          oid: "0123456789abcdef0123456789abcdef01234567",
+          type: "blob",
+        },
+      ],
+    });
+    const author = { name: "Test", email: "test@example.com", timestamp: 0, timezoneOffset: 0 };
+    const commitSha = await git.writeCommit({
+      fs,
+      dir,
+      commit: { tree: treeOid, parent: [], author, committer: author, message: "broken tree" },
+    });
 
-    expect(readFiles).toHaveBeenCalledWith(repo.remote, repo.token, mockLogger, undefined);
+    const pinnedRepo: SandboxRepoAccess = {
+      remote: repo.remote,
+      token: repo.token,
+      ref: commitSha,
+    };
+    // Bypasses the network clone: reads straight from the local repo built
+    // above at the pinned commit, exactly as `readRepoFiles` would once
+    // cloned. Exercises the real fail-closed logic, not a mock of it.
+    const pinnedReader: RepoFilesReader = (_remote, _token, logger, ref) =>
+      readTreeAtCommit(fs, dir, ref, logger);
+    const { binding } = makeMockSandbox({ exitCode: 0 });
+    const evaluator = new SandboxEvaluator(binding, pinnedRepo, pinnedReader);
+
+    const result = await evaluator.evaluate("ignored diff", makePolicy(), mockLogger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain("Could not read workspace tree");
+    expect(result.error.message).toContain("missing.txt");
+    // No verdict was fabricated from the partial tree: no sandbox ever ran.
+    expect(binding.create).not.toHaveBeenCalled();
   });
 
   it("fails (err) with a clear reason when the tree cannot be read, without creating a sandbox", async () => {

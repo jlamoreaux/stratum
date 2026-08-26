@@ -426,6 +426,10 @@ export interface Change {
   agentModel?: string;
   /** The authoring agent's prompt hash, snapshotted at change creation. */
   agentPromptHash?: string;
+  /** True when the change's diff modifies a merge-protection config file
+   * (.stratum/policy.yaml / stratum.config.json). Such a change requires a human
+   * approval and cannot be force-merged, so protection can't be silently relaxed. */
+  touchesProtectedConfig?: boolean;
   /** The human author of the change (the acting user, or an agent's owning
    * user). Their own review does not count toward `merge.requiredApprovals`.
    * NULL on legacy rows and on changes with no Stratum author (e.g. inbound

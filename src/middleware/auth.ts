@@ -25,6 +25,16 @@ function sanitizeToken(token: string): string {
   return `${token.slice(0, 4)}...${token.slice(-4)}`;
 }
 
+/**
+ * Resolve the caller's identity from an agent token, a user token, or a session
+ * cookie, and populate the auth context the routes read.
+ *
+ * Every account lookup here fails CLOSED (#236, mirroring #229 in git-http):
+ * the caller is authenticated only when the lookup succeeds AND returns a live
+ * account. A lookup that errors, rejects, or finds no row is a 401, never a
+ * pass — otherwise a transient D1 failure would authenticate an account the
+ * deletion cascade is erasing.
+ */
 export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   const requestId = crypto.randomUUID();
   const logger = createLogger({
@@ -95,9 +105,21 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       }
       // An agent inherits its owner's access, so a deleting owner's agent must
       // stop working too — otherwise it's an authenticated write channel that
-      // re-creates rows the account cascade is erasing.
-      const ownerResult = await getUser(c.env.DB, agentResult.data.ownerId, logger);
-      if (ownerResult.success && ownerResult.data.deletingAt) {
+      // re-creates rows the account cascade is erasing. Fail CLOSED on the
+      // owner lookup: an unresolved lookup or a deleting owner rejects the
+      // agent token. getUser can reject on a D1 error, so catch it rather
+      // than letting it propagate past this middleware.
+      let ownerResult: Awaited<ReturnType<typeof getUser>>;
+      try {
+        ownerResult = await getUser(c.env.DB, agentResult.data.ownerId, logger);
+      } catch (error) {
+        logger.warn("Agent owner lookup threw during auth; failing closed", {
+          ownerId: agentResult.data.ownerId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return c.json({ error: "Invalid token" }, 401);
+      }
+      if (!ownerResult.success || ownerResult.data.deletingAt) {
         logger.warn("Auth failed - agent owner is deleting", { path: c.req.path });
         return c.json({ error: "Invalid token" }, 401);
       }
@@ -131,28 +153,33 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
         // Fetch the user row FIRST so a soft-`deleting` account is rejected
         // before any auth context is set (the deleting_at flag rides on the
         // same row, so this is not an extra round-trip beyond the username
-        // lookup this path already did).
-        const userResult = await getUser(c.env.DB, sessionResult.data.userId, logger);
-        if (userResult.success && userResult.data.deletingAt) {
-          logger.warn("Auth rejected - session user is deleting", { userId });
+        // lookup this path already did). Fail CLOSED: an unresolved lookup
+        // (missing row, or getUser rejecting on a D1 error) must not end up
+        // authenticated any more than a deleting account should.
+        let userResult: Awaited<ReturnType<typeof getUser>>;
+        try {
+          userResult = await getUser(c.env.DB, sessionResult.data.userId, logger);
+        } catch (error) {
+          logger.warn("Session user lookup threw during auth; failing closed", {
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return c.json({ error: "Unauthorized" }, 401);
+        }
+        if (!userResult.success || userResult.data.deletingAt) {
+          logger.warn("Auth rejected - session user missing or deleting", { userId });
           return c.json({ error: "Unauthorized" }, 401);
         }
 
         c.set("userId", sessionResult.data.userId);
         c.set("authVia", "session");
 
-        if (userResult.success) {
-          // Generate username from email if missing (backward compatibility)
-          const username =
-            userResult.data.username ||
-            (userResult.data.email.split("@")[0] ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
-          c.set("username", username);
-          logger.debug("Auth success - session", { userId: sessionResult.data.userId, username });
-        } else {
-          logger.debug("Auth success - session (username not found)", {
-            userId: sessionResult.data.userId,
-          });
-        }
+        // Generate username from email if missing (backward compatibility)
+        const username =
+          userResult.data.username ||
+          (userResult.data.email.split("@")[0] ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        c.set("username", username);
+        logger.debug("Auth success - session", { userId: sessionResult.data.userId, username });
       }
     } else {
       logger.debug("Session not found", { sessionId: sanitizeToken(sessionId) });

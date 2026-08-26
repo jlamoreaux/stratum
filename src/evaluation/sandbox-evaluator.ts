@@ -22,8 +22,16 @@ export interface SandboxRepoAccess {
   remote: string;
   /** A read-scoped token for that remote. */
   token: string;
-  /** The evaluated commit sha (pinned as evaluated_sha). HEAD when absent. */
-  ref?: string;
+  /**
+   * The evaluated commit sha (pinned as evaluated_sha). Required — not
+   * optional — so a `SandboxRepoAccess` can only be constructed with a commit
+   * pinned. `readRepoFiles` takes an unpinned, best-effort branch when `ref`
+   * is omitted (see its doc comment); that branch must never be reachable
+   * from the sandbox evaluator, which runs a merge gate and cannot let a
+   * silently partial tree produce a passing verdict. Requiring `ref` here
+   * makes that structural rather than a call-site convention.
+   */
+  ref: string;
 }
 
 /** Reads a repo tree into path → raw bytes; injectable for tests. */
@@ -31,7 +39,7 @@ export type RepoFilesReader = (
   remote: string,
   token: string,
   logger: Logger,
-  ref?: string,
+  ref: string,
 ) => Promise<Result<Map<string, Uint8Array>, AppError>>;
 
 /**

@@ -335,11 +335,33 @@ export async function listReviews(
 }
 
 /**
+ * Build (without running) the statement that deletes every 'approve' verdict
+ * on a change. Shared by `dismissApprovals` and the atomic
+ * `dismissApprovalsAndUpdateStatus` batch in storage/changes.ts (#238) so both
+ * paths delete with the exact same SQL.
+ */
+export function buildDismissApprovalsStatement(
+  db: D1Database,
+  changeId: string,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      "DELETE FROM change_reviews WHERE change_id = ? AND verdict = 'approve' RETURNING reviewer_id",
+    )
+    .bind(changeId);
+}
+
+/**
  * Dismiss every 'approve' verdict on a change because its evaluated revision
  * changed (#193) — those approvals were given for different code and must not
  * count toward requiredApprovals. 'request_changes' verdicts are kept, matching
  * GitHub's dismiss-stale-approvals-on-push semantics. Returns the reviewer IDs
  * whose approvals were dismissed, so callers can record who was dismissed.
+ *
+ * This runs the DELETE on its own, with no accompanying write — for the
+ * re-evaluate route, which must also re-pin evaluatedSha/status atomically
+ * with this dismissal, use `dismissApprovalsAndUpdateStatus` in
+ * storage/changes.ts instead (#238).
  */
 export async function dismissApprovals(
   db: D1Database,
@@ -347,12 +369,9 @@ export async function dismissApprovals(
   changeId: string,
 ): Promise<Result<string[], AppError>> {
   try {
-    const result = await db
-      .prepare(
-        "DELETE FROM change_reviews WHERE change_id = ? AND verdict = 'approve' RETURNING reviewer_id",
-      )
-      .bind(changeId)
-      .all<{ reviewer_id: string }>();
+    const result = await buildDismissApprovalsStatement(db, changeId).all<{
+      reviewer_id: string;
+    }>();
     const dismissedReviewerIds = result.results.map((row) => row.reviewer_id);
     if (dismissedReviewerIds.length > 0) {
       logger.info("Stale approvals dismissed", {
