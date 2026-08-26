@@ -1,6 +1,7 @@
 import { Hono } from "hono";
+import { scanContentForSecrets } from "../evaluation/secret-scanner";
 import { authMiddleware } from "../middleware/auth";
-import { freshRepoToken, resolveConflict } from "../storage/git-ops";
+import { MAX_FILE_BYTES, freshRepoToken, resolveConflict } from "../storage/git-ops";
 import { getProject, getProjectByPath, getWorkspace, setProject } from "../storage/state";
 import {
   checkForSyncUpdates,
@@ -11,6 +12,7 @@ import {
   updateProjectAfterSync,
 } from "../storage/sync";
 import type { Env } from "../types";
+import { projectDefaultBranch } from "../types";
 import { canWriteProject } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import { readJsonWithLimit } from "../utils/request-body";
@@ -19,7 +21,12 @@ import { notFound, ok } from "../utils/response";
 const app = new Hono<{ Bindings: Env }>();
 
 const MAX_SYNC_SETTINGS_BODY_BYTES = 1024 * 1024;
-const MAX_CONFLICT_RESOLVE_BODY_BYTES = 1024 * 1024;
+// Above the route's own per-file MAX_FILE_BYTES (10 MB), deliberately: a manual
+// resolution may legitimately carry several files that large, and the generic
+// 1 MiB default would reject them with an opaque 413 before the per-file check
+// could answer 422 naming the offending file. Mirrors the workspace-commit
+// route, whose ceiling likewise sits above the limit it actually enforces.
+const MAX_CONFLICT_RESOLVE_BODY_BYTES = 32 * 1024 * 1024;
 
 // Apply auth middleware
 app.use("*", authMiddleware);
@@ -535,6 +542,50 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   }
   const workspace = workspaceResult.data;
 
+  // The `manual` strategy commits caller-supplied file contents straight to the
+  // project's default branch, which otherwise bypasses the always-on secret
+  // scan that every change is subject to. Run that mandatory, blocking scan here
+  // so a resolution cannot smuggle a credential onto main. (accept-project /
+  // accept-workspace reuse already-committed trees and need no re-scan.)
+  if (strategy === "manual") {
+    const resolutions = body.resolutions as Array<{ file: string; content: string }>;
+
+    // Size first, because the scan below is the expensive step: it splits every
+    // file and runs the full pattern set plus an entropy pass over each line.
+    // resolveConflict enforces the same cap, but only after the scan has already
+    // walked the content, so an oversized payload that is going to be rejected
+    // anyway would burn the request's CPU budget on its way to that rejection.
+    // Same limit and same 422 as the deeper check, so callers see no change.
+    for (const { file, content } of resolutions) {
+      if (new TextEncoder().encode(content).length > MAX_FILE_BYTES) {
+        return c.json(
+          { error: `File ${file} exceeds maximum size of 10 MB`, code: "INVALID_INPUT" },
+          422,
+        );
+      }
+    }
+
+    // Scan the literal content, not a diff synthesised from it. Prefixing each
+    // line with "+" is not reversible: a resolution line that already starts
+    // with "++" would render as "+++…" and be skipped as a diff file header,
+    // so a credential placed on such a line would reach main unscanned.
+    const issues = scanContentForSecrets(resolutions);
+    if (issues.length > 0) {
+      logger.warn("Conflict resolution blocked by secret scan", {
+        conflictId,
+        issueCount: issues.length,
+      });
+      return c.json(
+        {
+          error: `Resolution rejected: ${issues[0]?.split(":")[0] ?? "secret detected"}`,
+          code: "SECRET_DETECTED",
+          issues,
+        },
+        422,
+      );
+    }
+  }
+
   logger.info("Resolving conflict", {
     conflictId,
     strategy,
@@ -558,6 +609,7 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
       workspaceRemote: workspace.remote,
       workspaceToken: workspaceToken.data,
       strategy,
+      branch: projectDefaultBranch(project),
       conflictingFiles: conflictCtx.conflictingFiles,
       manualResolutions:
         strategy === "manual"

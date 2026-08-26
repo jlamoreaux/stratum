@@ -133,23 +133,28 @@ describe("checkWorkspacePushPolicy (S3)", () => {
   const del = (ref: string) => ({ oldOid: OID_A, newOid: ZERO_OID, ref });
 
   it("allows an update to refs/heads/main", () => {
-    expect(checkWorkspacePushPolicy([update("refs/heads/main")], "myws").allowed).toBe(true);
+    expect(checkWorkspacePushPolicy([update("refs/heads/main")], "myws", "main").allowed).toBe(
+      true,
+    );
   });
 
   it("allows an update to the workspace branch", () => {
-    expect(checkWorkspacePushPolicy([update("refs/heads/myws")], "myws").allowed).toBe(true);
+    expect(checkWorkspacePushPolicy([update("refs/heads/myws")], "myws", "main").allowed).toBe(
+      true,
+    );
   });
 
   it("allows a multi-command push entirely on allowed refs", () => {
     const verdict = checkWorkspacePushPolicy(
       [update("refs/heads/main"), update("refs/heads/myws")],
       "myws",
+      "main",
     );
     expect(verdict.allowed).toBe(true);
   });
 
   it("refuses a ref delete, even of an allowed ref, naming the ref", () => {
-    const verdict = checkWorkspacePushPolicy([del("refs/heads/main")], "myws");
+    const verdict = checkWorkspacePushPolicy([del("refs/heads/main")], "myws", "main");
     expect(verdict.allowed).toBe(false);
     if (!verdict.allowed) {
       expect(verdict.ref).toBe("refs/heads/main");
@@ -159,7 +164,7 @@ describe("checkWorkspacePushPolicy (S3)", () => {
 
   it("refuses off-branch heads and arbitrary refs", () => {
     for (const ref of ["refs/heads/other", "refs/evil/x", "HEAD"]) {
-      const verdict = checkWorkspacePushPolicy([update(ref)], "myws");
+      const verdict = checkWorkspacePushPolicy([update(ref)], "myws", "main");
       expect(verdict.allowed).toBe(false);
       if (!verdict.allowed) expect(verdict.ref).toBe(ref);
     }
@@ -172,12 +177,12 @@ describe("checkWorkspacePushPolicy (S3)", () => {
   // marker just as surely as deleting a branch breaks the merge flows.
   it("allows tag creates and updates", () => {
     for (const ref of ["refs/tags/v1", "refs/tags/v1.0.0", "refs/tags/release/2026-08"]) {
-      expect(checkWorkspacePushPolicy([update(ref)], "myws").allowed).toBe(true);
+      expect(checkWorkspacePushPolicy([update(ref)], "myws", "main").allowed).toBe(true);
     }
   });
 
   it("still refuses a tag DELETION", () => {
-    const verdict = checkWorkspacePushPolicy([del("refs/tags/v1.0.0")], "myws");
+    const verdict = checkWorkspacePushPolicy([del("refs/tags/v1.0.0")], "myws", "main");
     expect(verdict.allowed).toBe(false);
     if (!verdict.allowed) {
       expect(verdict.ref).toBe("refs/tags/v1.0.0");
@@ -189,6 +194,7 @@ describe("checkWorkspacePushPolicy (S3)", () => {
     const verdict = checkWorkspacePushPolicy(
       [update("refs/tags/v1.0.0"), update("refs/heads/other")],
       "myws",
+      "main",
     );
     expect(verdict.allowed).toBe(false);
     if (!verdict.allowed) expect(verdict.ref).toBe("refs/heads/other");
@@ -198,17 +204,47 @@ describe("checkWorkspacePushPolicy (S3)", () => {
     const verdict = checkWorkspacePushPolicy(
       [update("refs/heads/main"), del("refs/heads/myws")],
       "myws",
+      "main",
     );
     expect(verdict.allowed).toBe(false);
   });
 
   it("a branch name of 'main' collapses the allowed set without error", () => {
-    expect(checkWorkspacePushPolicy([update("refs/heads/main")], "main").allowed).toBe(true);
-    expect(checkWorkspacePushPolicy([update("refs/heads/x")], "main").allowed).toBe(false);
+    expect(checkWorkspacePushPolicy([update("refs/heads/main")], "main", "main").allowed).toBe(
+      true,
+    );
+    expect(checkWorkspacePushPolicy([update("refs/heads/x")], "main", "main").allowed).toBe(false);
+  });
+
+  // The default branch is a PARAMETER, not the literal "main": an imported
+  // project keeps its source default and a fork of one carries that branch.
+  // Hardcoding "main" here refused the fork's own working branch on every
+  // master/trunk-default project.
+  it("allows the project default branch when it is not 'main'", () => {
+    for (const def of ["master", "trunk", "develop"]) {
+      expect(checkWorkspacePushPolicy([update(`refs/heads/${def}`)], "myws", def).allowed).toBe(
+        true,
+      );
+    }
+  });
+
+  it("refuses refs/heads/main when the project default is master", () => {
+    const verdict = checkWorkspacePushPolicy([update("refs/heads/main")], "myws", "master");
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) {
+      expect(verdict.ref).toBe("refs/heads/main");
+      expect(verdict.reason).toContain("refs/heads/master");
+    }
+  });
+
+  it("still allows the workspace branch on a non-main-default project", () => {
+    expect(checkWorkspacePushPolicy([update("refs/heads/myws")], "myws", "master").allowed).toBe(
+      true,
+    );
   });
 
   it("an empty command list is trivially allowed (nothing to police)", () => {
-    expect(checkWorkspacePushPolicy([], "myws").allowed).toBe(true);
+    expect(checkWorkspacePushPolicy([], "myws", "main").allowed).toBe(true);
   });
 });
 

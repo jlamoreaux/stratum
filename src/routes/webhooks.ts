@@ -38,6 +38,7 @@ const SUBSCRIBABLE_EVENTS = [
   "workspace.created",
   "sync.completed",
   "issue.opened",
+  "issue.commented",
   "issue.closed",
 ];
 
