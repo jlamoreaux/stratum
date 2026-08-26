@@ -676,6 +676,65 @@ src/
 
 ## Scaling Considerations
 
+### Scale limits today
+
+Ordinary server-side git work runs `isomorphic-git` in-memory inside the Worker
+isolate, and those operations clone the repo per request (`cloneRepo` in
+`src/storage/git-ops.ts`, `depth: 50` unless full history is requested). The
+warm `RepoDO` object-plane path is the exception: it builds objects directly
+(`treeObject`/`commitObject`/`blobObject`) and writes them to R2 with
+`putObject` (`src/queue/repo-do.ts`), so it does not clone at all — it keeps
+`cloneRepo` only for the cold fallback when its warm state is empty. The limits
+below describe the cloning paths.
+
+**Clone-per-request paths** (each call to these functions performs its own
+clone, all in `src/storage/git-ops.ts` unless noted):
+
+- Reading a single file: `readFileFromRepo`
+- Listing files: `listFilesInRepo` (page loads can be served from the KV
+  repo snapshot instead — `src/storage/repo-snapshot.ts` — so browse does
+  not always pay this)
+- Commit log: `getCommitLog`
+- Diff: `getDiffBetweenRepos` — **two concurrent clones** (workspace + base)
+- Conflict resolution: `resolveConflict` — up to two clones depending on
+  strategy
+- REST commit: `POST /api/workspaces/:name/commit` clones, then
+  `commitAndPush` (`src/routes/workspaces.ts`)
+- Merge: `mergeWorkspaceIntoProject` clones the project and fetches the
+  workspace inside the serialized merge window (unless the warm
+  `RepoDO`/group-commit fast path is enabled — `REPO_DO_ENABLED`, staging)
+
+**Hard limits currently enforced in code:**
+
+| Limit | Value | Where |
+| --- | --- | --- |
+| git push request body | 50 MB (`MAX_GIT_BODY_BYTES = 50 * 1024 * 1024`) | `src/routes/git-http.ts` |
+| git push command section | 1 MiB (`MAX_COMMAND_SECTION_BYTES`) — the inflated pkt-line command list a push is inspected through, bounded so a compressed body cannot expand without limit | `src/routes/git-http.ts` |
+| REST commit payload | 25 MB aggregate (`MAX_COMMIT_BYTES`), 2000 files (`MAX_COMMIT_FILES`), 10 MB per file (`MAX_FILE_BYTES`) | `src/routes/workspaces.ts` |
+| Conflict resolution repo size | 500 files (`MAX_REPO_FILES`), 10 MB per file (`MAX_FILE_BYTES`) | `src/storage/git-ops.ts` |
+| Worker isolate memory | ~128 MB (Cloudflare Workers platform limit) — the budget belongs to the **whole isolate**, not to one request. Concurrent requests share it, and each contributes every clone it opens (diff holds two at once), the fetch buffers those clones fill, and its fully-buffered request body. Peak usage is the sum across all of them | platform |
+
+`MAX_FILE_BYTES` is one constant, exported from `git-ops.ts` and enforced at
+both the REST commit route and the `commitAndPush` choke point, so the two
+cannot drift apart.
+
+Push bodies must be fully buffered because Workers cannot half-duplex stream
+outbound `fetch` bodies (see the notes in `src/routes/git-http.ts` and
+`src/storage/git-ops.ts`), which compounds memory pressure on large pushes.
+
+Consequences: very large repositories hit the isolate budget, and per-repo
+merge throughput is capped by seconds of clone/push work inside the
+serialized merge window (ADR 004 estimates ~1–2 merges/sec on the cold
+path). The benchmark harness is `scripts/bench-commit-throughput.ts`;
+measured numbers are tracked in
+[`docs/research/option-b-warm-repo-do-spike.md`](../research/option-b-warm-repo-do-spike.md).
+
+**Roadmap:** move git operations off the Worker to Cloudflare Containers or
+a backend service, and add a repo-object plane so browse/diff read objects
+directly instead of full-cloning (the KV repo snapshot and the R2
+staged-tree/group-commit path — ADR 004 — are the first steps in that
+direction).
+
 ### D1
 - Read replicas for query-heavy workloads
 - Connection pooling via Prisma or similar

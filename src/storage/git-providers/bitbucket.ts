@@ -245,6 +245,7 @@ export class BitbucketProvider implements GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<RepoMetadata>> {
     try {
       const url = this.buildApiUrl(`/repositories/${owner}/${repo}`);
@@ -253,6 +254,7 @@ export class BitbucketProvider implements GitProviderClient {
       const response = await fetch(url, {
         method: "GET",
         headers: this.buildHeaders(auth),
+        ...(signal ? { signal } : {}),
       });
 
       if (!response.ok) {
@@ -331,8 +333,9 @@ export class BitbucketProvider implements GitProviderClient {
     repo: string,
     auth: ProviderAuthConfig | undefined,
     logger: Logger,
+    signal?: AbortSignal,
   ): Promise<ProviderApiResponse<string>> {
-    const metadataResult = await this.getRepoMetadata(owner, repo, auth, logger);
+    const metadataResult = await this.getRepoMetadata(owner, repo, auth, logger, signal);
 
     if (!metadataResult.success || !metadataResult.data) {
       return {

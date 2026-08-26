@@ -24,7 +24,13 @@ import {
 } from "../storage/git-ops";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import { setWorkspace } from "../storage/state";
-import { type Change, type Env, type ProjectEntry, getArtifactsRepoName } from "../types";
+import {
+  type Change,
+  type Env,
+  type ProjectEntry,
+  getArtifactsRepoName,
+  projectDefaultBranch,
+} from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
@@ -52,7 +58,13 @@ export async function resolveProjectHead(
   }
   const readToken = await freshRepoToken(env.ARTIFACTS, project.remote, "read", logger);
   if (!readToken.success) return null;
-  const logResult = await getCommitLog(project.remote, readToken.data, logger, 1);
+  const logResult = await getCommitLog(
+    project.remote,
+    readToken.data,
+    logger,
+    1,
+    projectDefaultBranch(project),
+  );
   return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
 }
 
@@ -224,6 +236,9 @@ type RecordedEvalRuns = Extract<
 export interface ChangeCreationActor {
   userId?: string;
   agentId?: string;
+  /** When the actor is an agent, its owning user. Recorded as the change's
+   * human author so the owner's approval cannot satisfy requiredApprovals. */
+  agentOwnerId?: string;
 }
 
 export interface ChangeCreationOutcome {
@@ -257,6 +272,9 @@ export async function createChangeWithEvaluation(
 ): Promise<Result<ChangeCreationOutcome, AppError>> {
   const { project, projectName, workspaceName, workspaceRemote, actor, waitUntil } = args;
   const { userId, agentId } = actor;
+  // The human author: the acting user, or (for agent-authored changes) the
+  // agent's owner. Excluded from the required-approval count at merge time.
+  const createdByUserId = userId ?? actor.agentOwnerId;
 
   const baseSha = await resolveProjectHead(env, project, logger);
 
@@ -289,6 +307,7 @@ export async function createChangeWithEvaluation(
     ...(baseSha !== null ? { baseSha } : {}),
     ...(agentModel !== undefined ? { agentModel } : {}),
     ...(agentPromptHash !== undefined ? { agentPromptHash } : {}),
+    ...(createdByUserId !== undefined ? { createdByUserId } : {}),
   });
   if (!changeResult.success) {
     logger.error("Failed to create change", changeResult.error);
@@ -342,7 +361,8 @@ export async function createChangeWithEvaluation(
     );
   }
 
-  const policy = await loadPolicy(project.remote, projectReadToken.data, logger);
+  const branch = projectDefaultBranch(project);
+  const policy = await loadPolicy(project.remote, projectReadToken.data, logger, branch);
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -350,6 +370,7 @@ export async function createChangeWithEvaluation(
     workspaceRemote,
     workspaceReadToken.data,
     logger,
+    branch,
   );
   if (!diffResult.success) {
     logger.error("Failed to get diff between repos", diffResult.error);

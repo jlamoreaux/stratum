@@ -20,7 +20,7 @@ import {
   setWorkspace,
 } from "../storage/state";
 import type { Env } from "../types";
-import { getArtifactsRepoName } from "../types";
+import { getArtifactsRepoName, projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import {
@@ -308,7 +308,12 @@ app.post("/:name/commit", async (c) => {
   }
   const workspaceToken = tokenResult.data;
 
-  const cloneResult = await cloneRepo(workspace.remote, workspaceToken, logger);
+  // A workspace fork copies the project's default branch under the same name, so
+  // commits must target that ref ("main" for native repos, master/trunk/… for imports).
+  const workspaceBranch = projectDefaultBranch(project);
+  const cloneResult = await cloneRepo(workspace.remote, workspaceToken, logger, {
+    ref: workspaceBranch,
+  });
   if (!cloneResult.success) {
     logger.error("Failed to clone repo", cloneResult.error);
     return badRequest(cloneResult.error.message);
@@ -323,6 +328,8 @@ app.post("/:name/commit", async (c) => {
     body.files,
     body.message,
     logger,
+    undefined,
+    workspaceBranch,
   );
   if (!commitResult.success) {
     logger.error("Failed to commit and push", commitResult.error);

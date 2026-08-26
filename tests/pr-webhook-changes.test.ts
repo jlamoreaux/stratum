@@ -212,6 +212,41 @@ describe("handlePullRequest", () => {
     expect(updateChangeStatus).toHaveBeenCalled();
   });
 
+  // SA-2: the merge gate excludes the change author's own approval, which only
+  // works if an author was recorded. The webhook payload names the GitHub PR
+  // author, who need not be a Stratum user — but the workspace the PR tracks
+  // was created in Stratum, and its owner is the same "user, or an agent's
+  // owner" principal the API path records. Without this, every webhook-created
+  // change carries a NULL author and its creator can self-approve it.
+  it("opened records the workspace owner as the change author", async () => {
+    vi.mocked(getChangeByGitHubBranch).mockResolvedValue(null);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: {
+        name: "ws-1234",
+        branchName: "ws-1234",
+        remote: "r",
+        parent: "proj-1",
+        createdAt: new Date().toISOString(),
+        createdByUserId: "user_author",
+      },
+    });
+    vi.mocked(createChange).mockResolvedValue({
+      success: true,
+      data: CHANGE,
+    } as Awaited<ReturnType<typeof createChange>>);
+
+    const env = makeEnv();
+    await handlePullRequest(env, makePRPayload("opened", "ws-1234"), logger);
+
+    expect(createChange).toHaveBeenCalledWith(env.DB, logger, {
+      project: PROJECT.id,
+      projectId: PROJECT.id,
+      workspace: "ws-1234",
+      createdByUserId: "user_author",
+    });
+  });
+
   it("opened with NO matching workspace skips silently (no phantom records)", async () => {
     vi.mocked(getChangeByGitHubBranch).mockResolvedValue(null);
     vi.mocked(getWorkspace).mockResolvedValue({
