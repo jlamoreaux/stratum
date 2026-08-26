@@ -57,6 +57,12 @@ both written once, from the file walk that builds the repository snapshot, in
 the `processing` phase just before the status becomes `completed`. Expect them
 to stay at `0` for the whole clone and then jump to the final count.
 
+One exception: the snapshot write handles its own failures and returns no
+count, and the import is still marked `completed` in that case. So a completed
+import whose `processedFiles` and `totalFiles` are both `0` means the snapshot
+could not be built — not that the repository was empty. The repository itself
+imported fine; only the file listing is missing.
+
 Or subscribe to Server-Sent Events instead of polling — the stream emits the
 same `ImportProgress` JSON as an SSE `data:` line every 2 seconds until the
 import completes, fails, or is cancelled:

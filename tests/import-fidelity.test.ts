@@ -672,6 +672,42 @@ describe("import route edge paths", () => {
     );
   });
 
+  /**
+   * The dedicated retry endpoint is a separate path from the re-trigger above,
+   * and it was the one case that still hardcoded depth 10 and sent no
+   * initiatedBy — so a user who retried a failed import got no failure email,
+   * which is exactly the gap this PR set out to close.
+   */
+  it("carries the initiator and the default depth through the retry endpoint", async () => {
+    stubFetch(async () => githubRepoMetadata("main"));
+    const { default: app } = await import("../src/index");
+    const env = makeEnv();
+
+    await seedProject(env, { namespace: "@usera", slug: "retryep", projectId: "proj_re" });
+    await seedImportJob({ namespace: "@usera", slug: "retryep", projectId: "proj_re" });
+    const { updateImportStatus } = await import("../src/storage/imports");
+    const { createLogger } = await import("../src/utils/logger");
+    await updateImportStatus(
+      {} as D1Database,
+      "@usera",
+      "retryep",
+      "failed",
+      createLogger({ component: "Test" }),
+    );
+
+    const { DEFAULT_CLONE_DEPTH } = await import("../src/utils/validation");
+    const res = await app.fetch(
+      request("POST", "/api/projects/@usera/retryep/import/retry", {}, USER_A_HEADERS),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    const send = vi.mocked(env.IMPORT_QUEUE?.send as unknown as ReturnType<typeof vi.fn>);
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ depth: DEFAULT_CLONE_DEPTH, initiatedBy: "user_A" }),
+    );
+  });
+
   it("re-triggers via direct processing when no queue is configured", async () => {
     stubFetch(async () => githubRepoMetadata("main"));
     const { default: app } = await import("../src/index");

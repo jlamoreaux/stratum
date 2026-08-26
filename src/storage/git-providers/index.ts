@@ -135,6 +135,14 @@ export const FALLBACK_DEFAULT_BRANCH = "main";
  * @param logger - Logger instance
  * @returns The provider's default branch, or "main" when it cannot be resolved
  */
+/**
+ * How long a provider metadata lookup may take before we give up and use the
+ * fallback. This runs inline on the import request, so an unresponsive provider
+ * API would otherwise hold the request open indefinitely; the timeout lands in
+ * the same catch as any other lookup failure and yields "main".
+ */
+const PROVIDER_METADATA_TIMEOUT_MS = 5_000;
+
 export async function resolveDefaultBranch(
   url: string,
   env: {
@@ -158,7 +166,13 @@ export async function resolveDefaultBranch(
   const auth = buildAuthConfig(parsed.provider, env);
 
   try {
-    const result = await client.getDefaultBranch(parsed.info.owner, parsed.info.repo, auth, logger);
+    const result = await client.getDefaultBranch(
+      parsed.info.owner,
+      parsed.info.repo,
+      auth,
+      logger,
+      AbortSignal.timeout(PROVIDER_METADATA_TIMEOUT_MS),
+    );
     if (result.success && result.data) {
       logger.debug("Resolved default branch from provider", {
         url,

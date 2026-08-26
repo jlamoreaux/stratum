@@ -16,6 +16,7 @@ import {
   listRepoTags,
 } from "../storage/git-ops";
 import { buildAuthConfig, resolveDefaultBranch } from "../storage/git-providers";
+import { finalizeImportSnapshot } from "../storage/import-finalize";
 import {
   cancelImportJob,
   createImportJob,
@@ -23,7 +24,6 @@ import {
   getImportProgress,
   isImportCancelled,
   recoverStalledImport,
-  updateImportProgress,
   updateImportStatus,
 } from "../storage/imports";
 import { getOrgAccessLevel, getOrgBySlug } from "../storage/orgs";
@@ -793,30 +793,9 @@ async function processImportJob(
     // Final cancellation check before completing
     if (await checkCancelled()) return;
 
-    // Write repo snapshot to KV so page loads skip git clones going forward.
-    // The snapshot walk yields the real imported-file count — report it so the
-    // progress bar shows actual numbers instead of a perpetual 0.
-    //
-    // This runs *before* the status flips to "completed": the progress stream
-    // below closes itself on a terminal status and the browser closes its
-    // EventSource with it, so a count written after the flip reaches nobody.
-    // writeSnapshotFromRepo swallows its own failures and returns null, so
-    // nothing added here can fail an import that already succeeded.
-    const snapshot = await writeSnapshotFromRepo(
-      env.STATE,
-      env.ARTIFACTS,
-      { remote: updatedProject.remote, namespace, slug },
-      logger,
-    );
-    if (snapshot) {
-      await updateImportProgress(
-        env.DB,
-        namespace,
-        slug,
-        { progress: { processedFiles: snapshot.fileCount, totalFiles: snapshot.fileCount } },
-        logger,
-      );
-    }
+    // Snapshot + file count, before the terminal status flip. See
+    // finalizeImportSnapshot for why the ordering matters.
+    await finalizeImportSnapshot(env, { remote: updatedProject.remote, namespace, slug }, logger);
 
     // Mark import as complete
     await updateImportStatus(
@@ -1393,7 +1372,10 @@ app.post(
           slug,
           githubUrl,
           branch,
-          depth: 10,
+          depth: DEFAULT_CLONE_DEPTH,
+          // Without this the retry path is the one case that never emails the
+          // person waiting on the import — which is the gap this PR closes.
+          initiatedBy: userId,
         });
       } catch (queueError) {
         logger.error(
@@ -1418,15 +1400,21 @@ app.post(
         slug,
       });
       c.executionCtx.waitUntil(
-        processImportJob(c.env, projectResult.data, importId, githubUrl, branch, logger).catch(
-          (error) => {
-            logger.error(
-              "Unhandled error in background import retry",
-              error instanceof Error ? error : undefined,
-              { namespace, slug },
-            );
-          },
-        ),
+        processImportJob(
+          c.env,
+          projectResult.data,
+          importId,
+          githubUrl,
+          branch,
+          logger,
+          DEFAULT_CLONE_DEPTH,
+        ).catch((error) => {
+          logger.error(
+            "Unhandled error in background import retry",
+            error instanceof Error ? error : undefined,
+            { namespace, slug },
+          );
+        }),
       );
     }
 

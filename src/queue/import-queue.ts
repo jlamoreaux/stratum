@@ -7,12 +7,8 @@ import { syncOrImportProject } from "../services/project-sync";
 import { isTargetDeleting } from "../storage/deletion";
 import { importFromGitHub } from "../storage/git-ops";
 import { getProviderFromUrl } from "../storage/git-providers";
-import {
-  deleteImportJob,
-  isImportCancelled,
-  updateImportProgress,
-  updateImportStatus,
-} from "../storage/imports";
+import { finalizeImportSnapshot } from "../storage/import-finalize";
+import { deleteImportJob, isImportCancelled, updateImportStatus } from "../storage/imports";
 import {
   recordImportCancelled,
   recordImportCompleted,
@@ -349,31 +345,9 @@ async function processImportJob(
     // snapshot walk below, so the recorded duration keeps the meaning it had.
     const duration = Date.now() - startedAt;
 
-    // Write repo snapshot to KV so page loads skip git clones going forward.
-    // The snapshot walk yields the real imported-file count — report it so the
-    // progress bar shows actual numbers instead of the perpetual 0 it used to.
-    //
-    // This runs *before* the status flips to "completed": the progress stream
-    // (GET /projects/:ns/:slug/import/stream in src/routes/projects.ts) closes
-    // itself on a terminal status and the browser closes its EventSource with
-    // it, so a count written after the flip reaches nobody.
-    // writeSnapshotFromRepo swallows its own failures and returns null, so
-    // nothing added here can fail an import that already succeeded.
-    const snapshot = await writeSnapshotFromRepo(
-      env.STATE,
-      env.ARTIFACTS,
-      { remote: updatedProject.remote, namespace, slug },
-      logger,
-    );
-    if (snapshot) {
-      await updateImportProgress(
-        env.DB,
-        namespace,
-        slug,
-        { progress: { processedFiles: snapshot.fileCount, totalFiles: snapshot.fileCount } },
-        logger,
-      );
-    }
+    // Snapshot + file count, before the terminal status flip. See
+    // finalizeImportSnapshot for why the ordering matters.
+    await finalizeImportSnapshot(env, { remote: updatedProject.remote, namespace, slug }, logger);
 
     // Mark import as complete
     await updateImportStatus(
@@ -934,10 +908,14 @@ async function sendFailureNotification(
   };
 
   for (const toAddress of recipients) {
+    // The admin address is operator configuration, but the initiator's is a
+    // user's own email — logging it copies PII into log storage. The type is
+    // all the log needs to tell the two deliveries apart.
+    const recipientType = toAddress === adminAddress ? "admin" : "initiator";
     try {
       await env.EMAIL.send({ ...message, to: toAddress });
       logger.info("Failure notification sent", {
-        to: toAddress,
+        recipientType,
         namespace: params.namespace,
         slug: params.slug,
       });
@@ -945,7 +923,7 @@ async function sendFailureNotification(
       logger.error(
         "Failed to send failure notification",
         error instanceof Error ? error : undefined,
-        { to: toAddress },
+        { recipientType, namespace: params.namespace, slug: params.slug },
       );
     }
   }
