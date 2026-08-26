@@ -41,7 +41,53 @@ interface ErrorInfo {
   };
 }
 
-function classifyError(errorMessage: string): ErrorInfo {
+/**
+ * Markers that identify a genuine Git LFS failure. Each one names the git-lfs
+ * tool itself, and that is the whole rule: a marker must come from git-lfs's
+ * own output, never from a URL.
+ *
+ * Anything path-shaped is unusable here, however LFS-specific it looks. A
+ * repository URL can contain any path, so `/info/lfs` matches
+ * `github.com/info/lfs` and `objects/batch` matches `github.com/objects/batch`
+ * — ordinary repositories whose 404 would then be reported as "this repository
+ * uses Git LFS", losing the "View Repository" action. Both markers were also
+ * redundant: git-lfs prefixes its own diagnostics, so every real message that
+ * mentions those paths already matches one of the three below.
+ *
+ * Word boundaries do not help either — /\bgit-lfs\b/ matches
+ * `git-lfs-tools`, because a boundary exists between "s" and "-".
+ *
+ * This branch runs BEFORE not-found (see classifyError), which is what makes
+ * breadth here expensive: every false positive is a missing repository being
+ * told it uses LFS.
+ */
+const LFS_MARKERS = [
+  "git-lfs:", // git-lfs CLI error prefix
+  "git-lfs filter-process", // smudge/clean filter failure
+  "git lfs ", // spaced prose form; a URL cannot contain a raw space
+];
+
+/**
+ * git-lfs does not always name itself. A batch-API failure is reported as
+ * `batch response: <error>` next to the endpoint it called, and that message
+ * matches none of {@link LFS_MARKERS} — it is still git-lfs's own output,
+ * which is the rule above, so the rule covered this case and the marker list
+ * did not.
+ *
+ * Neither half is usable alone: "batch response" is ordinary English, and the
+ * endpoint is path-shaped, so on its own it would match a repository at
+ * `github.com/info/lfs/objects/batch`. Required TOGETHER they are
+ * unambiguous — a repository URL does not also carry git-lfs's response
+ * prefix — so this is an ALL-of match, unlike the ANY-of list above.
+ */
+const LFS_BATCH_RESPONSE_MARKERS = ["batch response", "/info/lfs/objects/batch"];
+
+/**
+ * Map a raw import failure message to user-facing guidance. Exported for tests:
+ * the ORDER of these branches is load-bearing, and order is exactly what a
+ * rendering test cannot see.
+ */
+export function classifyError(errorMessage: string): ErrorInfo {
   const msg = errorMessage.toLowerCase();
 
   // Authentication errors
@@ -85,6 +131,34 @@ function classifyError(errorMessage: string): ErrorInfo {
         "Verify your internet connection",
         "The repository host might be experiencing issues - try again in a few minutes",
         "If using a corporate network, check if GitHub access is blocked by a firewall",
+      ],
+    };
+  }
+
+  // Git LFS — deliberately BEFORE the not-found branch. Stratum exposes no
+  // `/objects/lfs` or `objects/batch` route, so an LFS client's batch request
+  // falls through to the app's 404 handler and arrives here as a message
+  // containing both "not found" and "404". Classified below, the one failure
+  // this guidance exists to explain would instead tell the user to check the
+  // repository URL for typos.
+  //
+  // Match explicit LFS markers only. A bare "lfs" substring also appears in
+  // ordinary repository names and URLs (`github.com/acme/lfs-tools`), and
+  // because this branch sits ahead of not-found, a plain 404 for any such
+  // repository would be answered with "this repository uses Git LFS".
+  if (
+    LFS_MARKERS.some((marker) => msg.includes(marker)) ||
+    LFS_BATCH_RESPONSE_MARKERS.every((marker) => msg.includes(marker))
+  ) {
+    return {
+      type: "GIT_ERROR",
+      title: "Git LFS Not Supported",
+      description:
+        "This repository uses Git LFS, which Stratum does not support. There is no LFS batch endpoint, so the LFS client's request fails.",
+      tips: [
+        "The rest of the repository still imports — LFS-tracked files arrive as pointer files, not their contents",
+        "Keep large binaries out of Stratum-hosted repositories, or keep an LFS-dependent repository on GitHub in layer mode",
+        "See the Git LFS section of the capabilities guide for the full limitation and workarounds",
       ],
     };
   }
@@ -138,7 +212,6 @@ function classifyError(errorMessage: string): ErrorInfo {
         "Ensure the repository is a valid Git repository",
         "Very large repositories may timeout - try importing with a shallow clone (depth: 1)",
         "Check if the repository has submodules that might be causing issues",
-        "Some repositories require specific Git LFS setup",
       ],
     };
   }

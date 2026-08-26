@@ -133,6 +133,42 @@ function highEntropyCandidate(line: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Name the first secret pattern a single line of text matches, or undefined.
+ *
+ * Takes the line already stripped of any diff marker, so the same rules apply
+ * to diff-derived and raw content.
+ */
+function matchSecret(line: string): string | undefined {
+  for (const { name, pattern } of SECRET_PATTERNS) {
+    if (pattern.test(line)) return name;
+  }
+  return highEntropyCandidate(line) ? "High-Entropy Credential" : undefined;
+}
+
+/**
+ * Scan raw file content — not a diff — for secrets.
+ *
+ * Callers that hold the literal bytes about to be committed must use this
+ * rather than synthesising a diff to feed `SecretScanEvaluator.evaluate`.
+ * Prefixing content lines with "+" is not a lossless encoding: a content line
+ * that itself starts with "++" becomes "+++…", which the diff reader skips as
+ * a file header, and the secret on it is never scanned. Scanning the content
+ * directly removes that escape entirely.
+ *
+ * @returns One issue string per finding, empty when the content is clean.
+ */
+export function scanContentForSecrets(files: Array<{ file: string; content: string }>): string[] {
+  const issues: string[] = [];
+  for (const { file, content } of files) {
+    content.split("\n").forEach((line, idx) => {
+      const name = matchSecret(line);
+      if (name) issues.push(`${name}: ${file} line ${idx + 1}`);
+    });
+  }
+  return issues;
+}
+
 export class SecretScanEvaluator implements Evaluator {
   async evaluate(
     diff: string,
@@ -143,16 +179,15 @@ export class SecretScanEvaluator implements Evaluator {
 
     const lines = diff.split("\n");
     lines.forEach((line, idx) => {
-      if (!line.startsWith("+") || line.startsWith("+++")) return;
+      // Only the unified-diff file header is skipped, and that header always
+      // has a space after the marker ("+++ b/path"). Testing for a bare "+++"
+      // also swallowed a genuine added line whose own text starts with "++",
+      // letting a secret on such a line through unscanned.
+      if (!line.startsWith("+") || line.startsWith("+++ ")) return;
       const lineNumber = idx + 1;
-      for (const { name, pattern } of SECRET_PATTERNS) {
-        if (pattern.test(line)) {
-          issues.push(`${name}: line ${lineNumber}`);
-          return;
-        }
-      }
-      if (highEntropyCandidate(line)) {
-        issues.push(`High-Entropy Credential: line ${lineNumber}`);
+      const name = matchSecret(line);
+      if (name) {
+        issues.push(`${name}: line ${lineNumber}`);
       }
     });
 
