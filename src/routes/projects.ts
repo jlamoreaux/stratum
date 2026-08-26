@@ -803,7 +803,22 @@ async function processImportJob(
     // silently overwrite that cancellation.
     if (await checkCancelled()) return;
 
-    await setProject(env.STATE, updatedProject, logger);
+    const setResult = await setProject(env.STATE, updatedProject, logger);
+    if (!setResult.success) {
+      // The entry write is the last thing standing between here and
+      // "completed", so a discarded failure would report an import that
+      // succeeded against a project KV still says was never imported.
+      await updateImportStatus(
+        env.DB,
+        namespace,
+        slug,
+        "failed",
+        logger,
+        `Failed to update project: ${setResult.error.message}`,
+      );
+      await releaseImportLock(env.STATE, namespace, slug, logger);
+      return;
+    }
 
     // Mark import as complete
     await updateImportStatus(

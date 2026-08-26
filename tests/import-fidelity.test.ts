@@ -795,6 +795,56 @@ describe("import route edge paths", () => {
     await expectCountsBeforeCompletion(5);
   });
 
+  it("does not report completion when the project write fails in direct processing", async () => {
+    stubFetch(async () => githubRepoMetadata("main"));
+    const { default: app } = await import("../src/index");
+    const { importFromGitHub } = await import("../src/storage/git-ops");
+    const { writeSnapshotFromRepo } = await import("../src/storage/repo-snapshot");
+    vi.mocked(importFromGitHub).mockResolvedValue({
+      success: true,
+      data: { name: "r", remote: "https://artifacts.example.com/repos/r", token: "t" },
+    });
+    vi.mocked(writeSnapshotFromRepo).mockResolvedValue({ fileCount: 5 });
+
+    const env = makeEnv({ IMPORT_QUEUE: undefined });
+
+    // Fail only the completion write. The route creates the project first with
+    // `importCompleted: false`, so keying on the serialized `true` singles out
+    // the one write under test and leaves creation intact.
+    const originalPut = env.STATE.put.bind(env.STATE) as (k: string, v: string) => Promise<void>;
+    (env.STATE as unknown as { put: (k: string, v: string) => Promise<void> }).put = async (
+      key,
+      value,
+    ) => {
+      if (typeof value === "string" && value.includes('"importCompleted":true')) {
+        throw new Error("kv down");
+      }
+      return originalPut(key, value);
+    };
+
+    const background: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => background.push(p),
+      passThroughOnException: () => undefined,
+    } as unknown as ExecutionContext;
+
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/projects/@usera/direct-setfail/import",
+        { url: "https://github.com/test/repo", branch: "main" },
+        USER_A_HEADERS,
+      ),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(201);
+    await Promise.all(background);
+
+    expect(mockImportJobs.get("@usera:direct-setfail")?.status).toBe("failed");
+    expect(statusHistory.get("@usera:direct-setfail")).not.toContain("completed");
+  });
+
   it("logs (and survives) an unexpected rejection from direct background processing", async () => {
     stubFetch(async () => githubRepoMetadata("main"));
     const { default: app } = await import("../src/index");
