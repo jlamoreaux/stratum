@@ -90,14 +90,140 @@ CAS; throughput should jump on the concurrent-N runs.
 - Containerized native-git backend for gc/repack/large packs.
 - Changing the fork-per-workspace model; this runs alongside it.
 
-## Results (fill in as we go)
+## Results
 
-| Metric (single repo)        | Before (Phase 0) | After (Phase 2) | Target |
-|-----------------------------|------------------|-----------------|--------|
-| Commits/sec (N=25)          | TBD              | TBD             | ~20+   |
-| p50 end-to-end latency      | TBD              | TBD             | —      |
-| p95 end-to-end latency      | TBD              | TBD             | —      |
-| Clone phase share of total  | TBD              | ~0 (removed)    | —      |
+**Status: pending staging benchmark.** The harness
+(`scripts/bench-commit-throughput.ts`) is implemented, but the runs against a
+real staging deployment (real Artifacts, real D1) have not been recorded here
+yet, so every "pending" cell below awaits that run. This table must not be
+filled from local-dev numbers — `wrangler dev` latencies are not
+representative of Artifacts round-trips.
+
+Everything in this section — the table below, the per-phase breakdown, and the
+`REPO_DO_ENABLED` before/after — describes the **ordinary full-merge
+benchmark**, the harness's default mode. The two flag-selected modes take
+different code paths and are reported separately (see "Other harness modes"):
+they return before the ordinary flow runs, so neither produces the
+`commits.phases` payload this section relies on.
+
+| Metric (single repo)        | Before (Phase 0)             | After (Phase 1–2)            | Target |
+|-----------------------------|------------------------------|------------------------------|--------|
+| Commits/sec (N=25)          | pending staging benchmark    | pending staging benchmark    | ~20+   |
+| p50 end-to-end latency      | pending staging benchmark    | pending staging benchmark    | —      |
+| p95 end-to-end latency      | pending staging benchmark    | pending staging benchmark    | —      |
+| Clone phase share of total  | pending staging benchmark    | pending staging benchmark    | —      |
+
+Removing the per-request clone is **Phase 1**'s deliverable — the warm
+`RepoDO` cache, whose stated outcome is that "the clone phase drops out of the
+Phase 0 breakdown" — not Phase 2's, which adds fast-forward CAS on top. The
+expected warm figure is therefore ~0 once Phase 1 lands. That is a prediction,
+not a result: the benchmark still has to show that the warmup batch primes the
+DO and that no re-clone happens inside the measured interval. A cold start
+clones once regardless, so if the warm and cold shares turn out to differ,
+report them separately rather than collapsing them into one number.
+
+### How to produce the numbers
+
+The harness fires N concurrent commit → merge cycles at one project repo and
+reports commits/sec plus a per-phase breakdown. `--conflict` selects ONE mode
+per invocation (`none` or `same`), so covering both means running the harness
+twice and recording the two results separately. Run it
+against **staging** (it refuses known production hosts unless
+`--i-understand-this-writes-real-commits` is passed, because every merge
+pushes a real commit):
+
+```bash
+# Export the credentials first, and keep the quotes. An unquoted <...> is a
+# shell redirection, not a placeholder: pasting these as one backslash-
+# continued VAR=value block is a syntax error, not a silent no-op.
+export STRATUM_URL="https://staging-host.example"
+export STRATUM_SESSION="<stratum_session cookie value>"  # or: export STRATUM_TOKEN="<bearer token>"
+
+npx tsx scripts/bench-commit-throughput.ts --n=1,5,25,100 --conflict=none --repeat=3
+npx tsx scripts/bench-commit-throughput.ts --n=1,5,25,100 --conflict=same --repeat=3
+```
+
+Credentials differ by what you are running:
+
+| Run | Needs | How it is sent |
+|-----|-------|----------------|
+| Ordinary benchmark | `STRATUM_SESSION` **or** `STRATUM_TOKEN` | session cookie / bearer token |
+| `--r2-bench` | `STRATUM_ADMIN_KEY` | `X-Admin-API-Key`, compared against the server's `ADMIN_API_KEY` |
+| `GET /api/admin/metrics` | admin rights | the same `X-Admin-API-Key`, **or** a signed-in user whose email equals the server's `ADMIN_EMAIL` |
+
+`--r2-bench` fails fast without `STRATUM_ADMIN_KEY`, and the metrics read
+returns 401 for a non-admin session — so a run can produce throughput numbers
+and still have no per-phase breakdown to go with them.
+
+Flags (defaults in parentheses): `--url` (or `STRATUM_URL`,
+`http://localhost:8787`), `--n` — comma-separated concurrency levels
+(`1,5,25,100`; `1,5,25,50,64` in batch mode, whose server cap is 80),
+`--conflict` `none|same` (`none`), `--repeat` (1), `--warmup` (1),
+`--project` name prefix (`bench-throughput`; each run creates a disposable
+uniquely-suffixed project), `--bytes` commit payload size (256),
+`--duration` ms for the R2 probe (3000), `--r2-bench` — drive the Phase 2
+R2 object-plane + group-commit endpoint (authenticates with an admin key)
+instead of full merges, `--batch` — drive the server-side batch-merge
+endpoint.
+
+Output is a plain-text table:
+`N | mode | landed | failed | wall(ms) | commits/sec | p50/p95/p99(ms)` —
+per-op latency percentiles are reported only at N ≤ 5 (at N ≥ 25 the single
+DO serializes advances, so latency is queue wait, not work). The server-side
+per-phase breakdown is read separately from `GET /api/admin/metrics` (commits
+block), which reports all eight spans of `CommitPhaseSpans` — token mint,
+project clone, workspace fetch, merge, push, ref advance, D1 update, and
+provenance. Reading only the clone/merge/push subset hides where the rest of
+the wall-clock went; workspace fetch and D1 update in particular are the two
+that move once the repo is warm.
+
+Two caveats on those numbers. `getCommitMetrics` takes no project or run filter
+— it averages the most recent rows of `commit_metrics` (default 5000, ordered by
+`recorded_at`) across **every** project on the instance — so the phase breakdown
+is only attributable to this run on a staging instance that is otherwise idle.
+On a busy one, either quiesce it first or treat the breakdown as indicative
+rather than measured. And note the timing caveat the harness prints: Workers
+freeze the clock between I/O, so CPU spans are lower bounds.
+
+Run each mode twice: once "before" and once "after", per the harness header
+comment. `REPO_DO_ENABLED` is a **server-side** Worker var set per environment
+in `wrangler.toml` — not one of the client `STRATUM_*` variables above — so the
+two runs need two staging configurations (or two deployments), with the flag
+`"false"` for "before" and `"true"` for "after". Record the effective
+`REPO_DO_ENABLED` value next to each result: without it the two columns cannot
+be told apart after the fact.
+
+### Other harness modes
+
+Both flags short-circuit the run before the ordinary commit → merge flow, so
+their numbers are not comparable to the table above and must be recorded on
+their own:
+
+| Mode | Drives | Results read from | Credential |
+|------|--------|-------------------|------------|
+| `--r2-bench` | `POST /api/admin/metrics/bench` per object | `GET /api/admin/metrics/bench-stats?repo=…` (the bench DO's counters) | `STRATUM_ADMIN_KEY` only — it returns before the session check, so `STRATUM_SESSION`/`STRATUM_TOKEN` are not consulted |
+| `--batch` | `POST /api/projects/{name}/changes/merge-batch` | the harness's own table | session or token, like the ordinary mode |
+
+Neither mode reads `GET /api/admin/metrics`, so neither yields the eight-span
+`commits.phases` breakdown. Reporting an `--r2-bench` or `--batch` figure in
+the Results table above would compare different work through different
+endpoints.
+
+### Acceptance thresholds
+
+- ADR 004's target is **~20+ commits/sec** sustained into a single repo
+  (versus its estimated **~1–2 merges/sec** cap on the current serialized
+  path).
+- Issue #124 records the thresholds used for the R2/group-commit fast path:
+  the group-commit benchmark **must stay ≥ 22.6 c/s**, with **431 c/s** as
+  the then-current group-commit figure. The 22.6 floor is also enforced in
+  the repo — `TARGET_CPS` in `tests/group-commit.test.ts` (added by #109) —
+  but that test measures a **local model** of the ref plane (a
+  `GroupCommitCoordinator` over a 50 ms simulated `durableWrite`), not a
+  deployment, so it bounds the batching design, not Stratum's real
+  throughput. The 431 c/s figure appears only in the issue text. Treat the
+  staging run — not either citation — as the source of truth when filling
+  the table.
 
 ## References
 

@@ -45,6 +45,27 @@ async function rewindMain(gfs: GitFS, sha: string) {
 }
 
 describe("applySourceUpdate (real git, in-memory)", () => {
+  // #181: an imported repo's branch may be master/trunk. Driven with REAL
+  // isomorphic-git, so a wrong `ours` fails to resolve rather than silently
+  // merging the wrong side.
+  it("merges onto a non-main branch when one is given", async () => {
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const gfs = fs as GitFS;
+    await git.init({ fs: gfs, dir: DIR, defaultBranch: "master" });
+    const base = await commitFiles(gfs, { "file.txt": "base\n" }, "base");
+    const sourceTip = await commitFiles(gfs, { "file.txt": "v2\n" }, "source c2");
+    await git.writeRef({ fs: gfs, dir: DIR, ref: "refs/heads/master", value: base, force: true });
+    await git.checkout({ fs: gfs, dir: DIR, ref: "master", force: true });
+
+    const result = await applySourceUpdate(fs, DIR, sourceTip, logger, undefined, "master");
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.status).toBe("fast-forwarded");
+    expect(result.data.commit).toBe(sourceTip);
+    expect(await git.resolveRef({ fs: gfs, dir: DIR, ref: "master" })).toBe(sourceTip);
+  });
+
   it("fast-forwards main to the source tip when the source is strictly ahead", async () => {
     const { fs, gfs } = await initRepo();
     const base = await commitFiles(gfs, { "file.txt": "base\n" }, "base");

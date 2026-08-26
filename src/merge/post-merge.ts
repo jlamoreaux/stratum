@@ -11,6 +11,7 @@ import { updateChangeStatus } from "../storage/changes";
 import { recordCosts } from "../storage/costs";
 import { freshRepoToken, getCommitParent, readRepoFiles, revertToCommit } from "../storage/git-ops";
 import type { Env, ProjectEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import type { Logger } from "../utils/logger";
 
 const DEFAULT_POST_MERGE_TIMEOUT_MS = 60_000;
@@ -55,10 +56,19 @@ export async function runPostMergeCheck(
     return { status: "skipped", reason: `Could not mint repo token: ${tokenResult.error.message}` };
   }
   const projectToken = tokenResult.data;
+  const branch = projectDefaultBranch(project);
 
   let failureReason: string;
   try {
-    const filesResult = await readRepoFiles(project.remote, projectToken, logger);
+    // `ref` is undefined here on purpose: the smoke check reads the tree the
+    // merge just produced, i.e. the branch tip, not a pinned commit.
+    const filesResult = await readRepoFiles(
+      project.remote,
+      projectToken,
+      logger,
+      undefined,
+      branch,
+    );
     if (!filesResult.success) {
       return {
         status: "skipped",
@@ -131,6 +141,7 @@ export async function runPostMergeCheck(
     projectToken,
     opts.mergeCommit,
     logger,
+    branch,
   );
   if (!parentResult.success) {
     return {
@@ -145,6 +156,7 @@ export async function runPostMergeCheck(
     parentResult.data,
     `Revert merge ${opts.mergeCommit.slice(0, 7)}: post-merge check failed`,
     logger,
+    branch,
   );
   if (!revertResult.success) {
     return {
