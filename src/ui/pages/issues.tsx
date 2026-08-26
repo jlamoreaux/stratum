@@ -12,18 +12,59 @@ interface ProjectRef {
 interface IssuesPageProps {
   project: ProjectRef;
   issues: Issue[];
-  /** Labels keyed by issue id (issues without labels may be absent). */
+  /** Absent for an issue with no labels, rather than an empty array. */
   labels: Record<string, string[]>;
-  /** Author display names keyed by author id. */
   authors: Record<string, string>;
   filter: "open" | "closed" | "all";
-  /** Active ?label= filter, if any. */
   activeLabel?: string;
-  /** Active ?q= search text, if any. */
   query?: string;
+  /** Zero-based page index; `hasNext` comes from reading one row past the page. */
+  page: number;
+  hasNext: boolean;
   canWrite: boolean;
   user?: { id: string; email: string; username: string } | null;
 }
+
+/**
+ * Previous/next links for a page bounded by a fixed limit. `hasNext` comes from
+ * reading one row past the limit, so there is no total to show — the label
+ * carries the 1-based page number rather than "of N".
+ */
+const PageNav: FC<{ base: string; keep: string; page: number; hasNext: boolean }> = ({
+  base,
+  keep,
+  page,
+  hasNext,
+}) => {
+  if (page === 0 && !hasNext) return null;
+  const href = (target: number) => {
+    const params = [...(keep ? [keep] : []), ...(target > 0 ? [`page=${target}`] : [])].join("&");
+    return params ? `${base}?${params}` : base;
+  };
+  return (
+    <nav class="page-nav" aria-label="Pagination">
+      {page > 0 ? (
+        <a class="btn" href={href(page - 1)} rel="prev">
+          ← Newer
+        </a>
+      ) : (
+        <span class="btn btn-disabled" aria-disabled="true">
+          ← Newer
+        </span>
+      )}
+      <span class="issues-meta">Page {page + 1}</span>
+      {hasNext ? (
+        <a class="btn" href={href(page + 1)} rel="next">
+          Older →
+        </a>
+      ) : (
+        <span class="btn btn-disabled" aria-disabled="true">
+          Older →
+        </span>
+      )}
+    </nav>
+  );
+};
 
 const statusBadge = (status: Issue["status"]) =>
   status === "open" ? "badge badge-open" : "badge badge-merged";
@@ -60,6 +101,8 @@ export const IssuesPage: FC<IssuesPageProps> = ({
   filter,
   activeLabel,
   query,
+  page,
+  hasNext,
   canWrite,
   user,
 }) => {
@@ -75,6 +118,10 @@ export const IssuesPage: FC<IssuesPageProps> = ({
     ...(filter !== "open" ? [`status=${filter}`] : []),
     ...(query ? [`q=${encodeURIComponent(query)}`] : []),
   ].join("&");
+  // Everything the pager must carry across pages: status tab, label, search.
+  const pageKeep = [...(filter !== "open" ? [`status=${filter}`] : []), ...(keep ? [keep] : [])]
+    .filter(Boolean)
+    .join("&");
   const tab = (status?: "closed" | "all") => {
     const params = [...(status ? [`status=${status}`] : []), ...(keep ? [keep] : [])].join("&");
     return params ? `${base}?${params}` : base;
@@ -152,6 +199,8 @@ export const IssuesPage: FC<IssuesPageProps> = ({
           ))}
         </ul>
       )}
+
+      <PageNav base={base} keep={pageKeep} page={page} hasNext={hasNext} />
     </Layout>
   );
 };
@@ -161,6 +210,9 @@ interface IssueDetailPageProps {
   issue: Issue;
   labels: string[];
   comments: IssueComment[];
+  /** Zero-based comment page; `commentsHasNext` reads one row past the page. */
+  commentPage: number;
+  commentsHasNext: boolean;
   /** Author display names keyed by author id (issue + comment authors + assignee). */
   authors: Record<string, string>;
   canWrite: boolean;
@@ -172,6 +224,8 @@ export const IssueDetailPage: FC<IssueDetailPageProps> = ({
   issue,
   labels,
   comments,
+  commentPage,
+  commentsHasNext,
   authors,
   canWrite,
   user,
@@ -223,7 +277,7 @@ export const IssueDetailPage: FC<IssueDetailPageProps> = ({
 
       <div class="issue-comments">
         <h2>
-          {comments.length === 0
+          {comments.length === 0 || commentPage > 0 || commentsHasNext
             ? "Comments"
             : `${comments.length} comment${comments.length === 1 ? "" : "s"}`}
         </h2>
@@ -236,6 +290,12 @@ export const IssueDetailPage: FC<IssueDetailPageProps> = ({
             <pre class="issue-body-text">{comment.body}</pre>
           </div>
         ))}
+        <PageNav
+          base={`${base}/${issue.number}`}
+          keep=""
+          page={commentPage}
+          hasNext={commentsHasNext}
+        />
         {user ? (
           <div class="card">
             <form method="post" action={`${apiBase}/${issue.number}/comments`} class="issue-form">

@@ -418,19 +418,11 @@ app.patch("/:namespace/:slug/issues/:number", async (c) => {
   }
   const issue = updateResult.data;
 
-  // Labels are a full-set replace keyed by the issue's globally-unique id, so
-  // setting/removing is one idempotent write. Omitting `labels` leaves them as-is.
-  let finalLabels: string[];
-  if (labels !== undefined) {
-    const setResult = await setIssueLabels(c.env.DB, logger, issue.id, labels);
-    if (!setResult.success) return internalError(setResult.error.message);
-    finalLabels = [...setResult.data].sort();
-  } else {
-    const labelsResult = await listIssueLabels(c.env.DB, logger, issue.id);
-    if (!labelsResult.success) return internalError(labelsResult.error.message);
-    finalLabels = labelsResult.data;
-  }
-
+  // Emitted directly after the transition that `updateIssue` already made
+  // durable, and BEFORE the label work below. The payload does not depend on
+  // labels, and the guard reads `before.data.status`: if a label failure
+  // returned 500 first, a retry would see the issue already closed, take this
+  // branch as false, and drop the event for good.
   if (updates.status === "closed" && before.data.status === "open") {
     await emitEvent(
       c.env.DB,
@@ -445,6 +437,19 @@ app.patch("/:namespace/:slug/issues/:number", async (c) => {
       logger,
       project.id,
     );
+  }
+
+  // Labels are a full-set replace keyed by the issue's globally-unique id, so
+  // setting/removing is one idempotent write. Omitting `labels` leaves them as-is.
+  let finalLabels: string[];
+  if (labels !== undefined) {
+    const setResult = await setIssueLabels(c.env.DB, logger, issue.id, labels);
+    if (!setResult.success) return internalError(setResult.error.message);
+    finalLabels = [...setResult.data].sort();
+  } else {
+    const labelsResult = await listIssueLabels(c.env.DB, logger, issue.id);
+    if (!labelsResult.success) return internalError(labelsResult.error.message);
+    finalLabels = labelsResult.data;
   }
 
   return ok({ issue: { ...issue, labels: finalLabels } });

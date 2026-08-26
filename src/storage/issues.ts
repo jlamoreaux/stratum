@@ -44,7 +44,11 @@ interface IssueRow {
   updated_at: string;
 }
 
-/** Map a raw `issues` row to the camelCase `Issue` shape. */
+/**
+ * Build an `Issue` from a row, omitting optional keys whose column is NULL
+ * rather than setting them to null — callers use `=== undefined` throughout,
+ * and a present-but-null key would read as "set" to them.
+ */
 function rowToIssue(row: IssueRow): Issue {
   const issue: Issue = {
     id: row.id,

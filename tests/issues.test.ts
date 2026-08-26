@@ -5,7 +5,12 @@ import { autoCloseLinkedIssues } from "../src/queue/issue-autoclose";
 import { issuesRouter } from "../src/routes/issues";
 import type { EventRecord } from "../src/storage/events";
 import { addIssueComment, listIssueComments } from "../src/storage/issue-comments";
-import { getLabelsForIssues, listIssueLabels, setIssueLabels } from "../src/storage/issue-labels";
+import {
+  MAX_D1_BINDS,
+  getLabelsForIssues,
+  listIssueLabels,
+  setIssueLabels,
+} from "../src/storage/issue-labels";
 import {
   closeIssue,
   createIssue,
@@ -856,6 +861,42 @@ describe("issue routes: auth, form posts, and error paths", () => {
     ).toBe(400);
   });
 
+  // updateIssue makes the close durable before the label work runs. The emit
+  // guard reads the PRE-update status, so if a label failure returned 500 first
+  // and the emit sat after it, a retry would see the issue already closed, skip
+  // the branch, and lose the event permanently. Ordering is the whole fix, and
+  // the end state is identical either way — hence a failure-injection test.
+  it("emits issue.closed even when the label write afterwards fails", async () => {
+    const { json, openIssue, env, raw } = await makeIssuesApp();
+    await openIssue("Bug");
+
+    const realDb = env.DB;
+    env.DB = {
+      ...realDb,
+      prepare: (sql: string) => {
+        if (sql.includes("issue_labels")) throw new Error("label store unavailable");
+        return realDb.prepare(sql);
+      },
+      batch: realDb.batch?.bind(realDb),
+    } as unknown as D1Database;
+
+    const res = await json("PATCH", `${API}/1`, { status: "closed" }, OWNER_AUTH);
+    env.DB = realDb;
+    expect(res.status).toBe(500);
+
+    // The transition is durable...
+    const row = raw.prepare("SELECT status FROM issues WHERE number = 1").get() as {
+      status: string;
+    };
+    expect(row.status).toBe("closed");
+
+    // ...and so is its event.
+    const events = raw
+      .prepare("SELECT type FROM events WHERE type = 'issue.closed'")
+      .all() as Array<{ type: string }>;
+    expect(events).toHaveLength(1);
+  });
+
   it("closing via PATCH emits and detail 400s on a bad number", async () => {
     const { json, openIssue } = await makeIssuesApp();
     await openIssue("Bug");
@@ -1144,8 +1185,10 @@ describe("issue comments + labels storage", () => {
 
     const batch = await getLabelsForIssues(counting, mockLogger, ids);
     expect(batch.success).toBe(true);
-    // 250 ids at 100 binds per query.
-    expect(labelQueries).toBe(3);
+    // One query per MAX_D1_BINDS-sized chunk, derived so that raising the bind
+    // ceiling changes the expectation instead of failing this test opaquely.
+    expect(labelQueries).toBe(Math.ceil(ids.length / MAX_D1_BINDS));
+    expect(labelQueries).toBeGreaterThan(1);
     // Labels from the first and last chunk both survive the merge.
     expect(batch.success && batch.data[ids[0] as string]).toEqual(["alpha"]);
     expect(batch.success && batch.data[ids[249] as string]).toEqual(["omega"]);

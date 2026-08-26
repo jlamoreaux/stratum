@@ -78,7 +78,7 @@ export async function listIssueLabels(
  * chunks its `IN (...)` list to stay under it. `src/storage/d1-backup.ts`
  * carries the same value for its batched restore inserts.
  */
-const MAX_D1_BINDS = 100;
+export const MAX_D1_BINDS = 100;
 
 /**
  * Labels for many issues, chunked to respect D1's bind ceiling (issue list

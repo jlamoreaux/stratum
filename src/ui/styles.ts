@@ -494,6 +494,11 @@ a:hover { text-decoration: underline; }
 
 /* Issues */
 .page-header-actions { display: flex; gap: 0.5rem; }
+.page-nav {
+  display: flex; gap: 0.75rem; align-items: center; justify-content: center;
+  margin-top: 1rem;
+}
+.btn-disabled { opacity: 0.4; cursor: default; }
 .issues-filter { display: flex; gap: 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
 .issues-filter a { color: #777; text-decoration: none; }
 .issues-filter a:hover { color: #ccc; }
