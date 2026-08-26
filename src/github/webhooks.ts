@@ -88,10 +88,18 @@ async function handlePush(
 
   const project = projectResult.data;
 
-  if (branch !== project.sourceDefaultBranch) {
+  // Resolve once, up front: the guard and the queued job must agree on which
+  // branch is "default". Comparing against the raw sourceDefaultBranch while
+  // queueing projectDefaultBranch(project) meant a project whose branch comes
+  // from githubDefaultBranch — an import that never set sourceDefaultBranch —
+  // had every push to its real default rejected here, so webhook-triggered
+  // sync never ran for it.
+  const sourceBranch = projectDefaultBranch(project);
+
+  if (branch !== sourceBranch) {
     logger.debug("Push to non-default branch, skipping sync", {
       branch,
-      defaultBranch: project.sourceDefaultBranch,
+      defaultBranch: sourceBranch,
     });
     return;
   }
@@ -115,7 +123,6 @@ async function handlePush(
   }
 
   const importId = crypto.randomUUID();
-  const sourceBranch = projectDefaultBranch(project);
   const sourceUrl = project.sourceUrl ?? project.remote;
 
   // Enqueue FIRST — only write state flags after a successful send().

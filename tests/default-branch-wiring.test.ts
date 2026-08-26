@@ -67,8 +67,9 @@ import { MemoryFS } from "../src/storage/memory-fs";
 import { packObjects } from "../src/storage/object-loader";
 import { writeSnapshotFromRepo } from "../src/storage/repo-snapshot";
 import { getProject, getWorkspace } from "../src/storage/state";
-import type { Env, ProjectEntry } from "../src/types";
+import type { ArtifactsNamespace, Change, Env, ProjectEntry, WorkspaceEntry } from "../src/types";
 import { getFileContent } from "../src/ui/file-content";
+import { AppError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
 
 const logger: Logger = {
@@ -94,8 +95,7 @@ const trunkProject = {
 
 const errResult = {
   success: false as const,
-  // biome-ignore lint/suspicious/noExplicitAny: minimal AppError stub
-  error: { message: "nope", code: "GIT_ERROR", statusCode: 500 } as any,
+  error: new AppError("nope", "GIT_ERROR", 500),
 };
 
 beforeEach(() => {
@@ -146,10 +146,10 @@ describe("post-merge check passes the project's default branch", () => {
 describe("KV repo snapshot passes the default branch to the clone", () => {
   it("clones the given defaultBranch", async () => {
     vi.mocked(cloneRepo).mockResolvedValue(errResult);
-    // biome-ignore lint/suspicious/noExplicitAny: minimal KV stub
-    const kv = {} as any;
-    // biome-ignore lint/suspicious/noExplicitAny: minimal Artifacts stub
-    const artifacts = {} as any;
+    // writeSnapshotFromRepo reaches neither binding on this path: freshRepoToken
+    // and cloneRepo are both mocked, and cloneRepo fails first.
+    const kv = {} as unknown as KVNamespace;
+    const artifacts = {} as unknown as ArtifactsNamespace;
     await writeSnapshotFromRepo(
       kv,
       artifacts,
@@ -164,10 +164,8 @@ describe("KV repo snapshot passes the default branch to the clone", () => {
   it("defaults to main when no defaultBranch is given (regression)", async () => {
     vi.mocked(cloneRepo).mockResolvedValue(errResult);
     await writeSnapshotFromRepo(
-      // biome-ignore lint/suspicious/noExplicitAny: minimal KV stub
-      {} as any,
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Artifacts stub
-      {} as any,
+      {} as unknown as KVNamespace,
+      {} as unknown as ArtifactsNamespace,
       { remote: trunkProject.remote, namespace: "@acme", slug: "web" },
       logger,
     );
@@ -269,19 +267,20 @@ describe("MergeQueue passes the project's default branch to the merge", () => {
   it("sets options.branch from projectDefaultBranch(project)", async () => {
     vi.mocked(getChange).mockResolvedValue({
       success: true,
-      data: { id: "chg_1", project: "acme/web", workspace: "ws_1", status: "approved" },
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Change stub
-    } as any);
-    vi.mocked(getProject).mockResolvedValue({
-      success: true,
-      data: trunkProject,
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Project stub
-    } as any);
+      data: {
+        id: "chg_1",
+        project: "acme/web",
+        workspace: "ws_1",
+        status: "approved",
+      } as unknown as Change,
+    });
+    vi.mocked(getProject).mockResolvedValue({ success: true, data: trunkProject });
     vi.mocked(getWorkspace).mockResolvedValue({
       success: true,
-      data: { remote: "https://acct.artifacts.cloudflare.net/git/ns/ws1.git" },
-      // biome-ignore lint/suspicious/noExplicitAny: minimal Workspace stub
-    } as any);
+      data: {
+        remote: "https://acct.artifacts.cloudflare.net/git/ns/ws1.git",
+      } as unknown as WorkspaceEntry,
+    });
 
     const env = { DB: {}, STATE: {}, ARTIFACTS: {} } as unknown as Env;
     const ctx = {} as unknown as DurableObjectState;
