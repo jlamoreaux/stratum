@@ -9,9 +9,9 @@ import { forbidden, internalError, ok } from "../utils/response";
 const app = new Hono<{ Bindings: Env }>();
 
 /**
- * Gate an admin-only backfill route, returning a request-scoped logger on
- * success. Accepts either the X-Admin-API-Key header or an authenticated
- * admin user, matching the existing /plan endpoint's contract.
+ * Accepts either the X-Admin-API-Key header or an authenticated admin user,
+ * deliberately matching /plan's contract: an operator running the dry-run and
+ * the apply back-to-back should not need two different credentials.
  */
 async function requireAdmin(c: {
   env: Env;
@@ -49,13 +49,12 @@ app.get("/plan", async (c) => {
   return ok({ plan: plan.data });
 });
 
-// POST /api/admin/backfill-project-id/webhooks/apply — APPLY: stamp
-// project_id on every legacy (NULL project_id) `webhooks` row whose `project`
-// name resolves to exactly one project across all namespaces. Ambiguous
-// (name shared by >1 project) and unresolved (no matching project) rows are
-// left NULL and reported — never guessed, since a bare name can collide
-// across tenants. Response reports rows updated, rows left NULL with why, and
-// the remaining NULL count (the step-2 verification for issue #235).
+// Only a name resolving to exactly one project across all namespaces is
+// stamped. Ambiguous and unresolved rows are left NULL and reported rather
+// than guessed: a bare project name can collide across tenants, so a guess
+// here would hand a legacy webhook (and its deliveries) to the wrong tenant.
+// `remainingNullRows` is reported because it is the step-2 verification for
+// issue #235 — it should read 0 after a clean run.
 //
 // This is step 1-2 of a 3-step coordinated fix (issue #235); the name-based
 // fallback in webhookBelongsToProject/listWebhooks intentionally stays in
