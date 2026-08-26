@@ -15,6 +15,8 @@ import {
   readFileFromRepo,
 } from "../storage/git-ops";
 import { getImportProgress } from "../storage/imports";
+import { listIssueComments } from "../storage/issue-comments";
+import { getLabelsForIssues, listIssueLabels } from "../storage/issue-labels";
 import { getIssueByNumber, listIssues } from "../storage/issues";
 import { getProvenance } from "../storage/provenance";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
@@ -48,6 +50,7 @@ import { WorkspacesPage } from "../ui/pages/workspaces";
 import { canReadProject, canWriteProject, filterMemberProjects } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import { isValidNamespace, isValidSlug } from "../utils/validation";
+import { DEFAULT_COMMENTS_PAGE, DEFAULT_ISSUES_PAGE } from "./issues";
 import { SUBSCRIBABLE_EVENTS } from "./webhooks";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -944,6 +947,22 @@ const issuePageError = (status: 400 | 404 | 500) => (
   </div>
 );
 
+/**
+ * `?page=` as a zero-based page index. Anything not a non-negative integer —
+ * absent, "-1", "abc", "1e3" — is page 0 rather than an error: a bad page in a
+ * hand-edited URL should show the first page, not a 400.
+ *
+ * @param raw - The raw page query parameter
+ * @returns The parsed non-negative safe integer, or `0` for invalid or missing values
+ */
+function parsePageParam(raw: string | undefined): number {
+  if (raw === undefined) return 0;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return 0;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) ? n : 0;
+}
+
 // GET /:namespace/:slug/issues — Issues list
 app.get("/:namespace/:slug/issues", async (c) => {
   const ctx = await loadIssuePageContext(c);
@@ -953,30 +972,62 @@ app.get("/:namespace/:slug/issues", async (c) => {
   const statusParam = c.req.query("status");
   const filter: "open" | "closed" | "all" =
     statusParam === "closed" ? "closed" : statusParam === "all" ? "all" : "open";
+  const activeLabel = c.req.query("label")?.trim() || undefined;
+  const query = c.req.query("q")?.trim() || undefined;
+  const page = parsePageParam(c.req.query("page"));
 
   const issuesResult = await listIssues(
     c.env.DB,
     logger,
     project.name,
     filter === "all" ? undefined : filter,
-    { projectId: project.id },
+    {
+      projectId: project.id,
+      ...(activeLabel !== undefined ? { label: activeLabel } : {}),
+      ...(query !== undefined ? { search: query } : {}),
+      // Bound the page like the API route does. Unbounded, this renders every
+      // issue in the project and hands every id to getLabelsForIssues. One row
+      // beyond the page tells us whether a next page exists without a COUNT.
+      limit: DEFAULT_ISSUES_PAGE + 1,
+      offset: page * DEFAULT_ISSUES_PAGE,
+    },
   );
   if (!issuesResult.success) {
     logger.error("Failed to list issues", issuesResult.error);
     return c.html(issuePageError(500), 500);
   }
+  const hasNext = issuesResult.data.length > DEFAULT_ISSUES_PAGE;
+  const issues = issuesResult.data.slice(0, DEFAULT_ISSUES_PAGE);
 
+  const labelsResult = await getLabelsForIssues(
+    c.env.DB,
+    logger,
+    issues.map((issue) => issue.id),
+  );
+
+  // The assignee is a user id like the author ids — resolve display names for both.
+  const authorRefs = [
+    ...issues,
+    ...issues
+      .filter((issue) => issue.assignee !== undefined)
+      .map((issue) => ({ authorType: "user" as const, authorId: issue.assignee as string })),
+  ];
   const [authors, canWrite] = await Promise.all([
-    resolveIssueAuthors(c.env.DB, issuesResult.data, logger),
+    resolveIssueAuthors(c.env.DB, authorRefs, logger),
     canWriteProject(c.env.DB, project, userId),
   ]);
 
   return c.html(
     <IssuesPage
       project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
-      issues={issuesResult.data}
+      issues={issues}
+      labels={labelsResult.success ? labelsResult.data : {}}
       authors={authors}
       filter={filter}
+      activeLabel={activeLabel}
+      query={query}
+      page={page}
+      hasNext={hasNext}
       canWrite={canWrite}
       user={user}
     />,
@@ -1023,16 +1074,43 @@ app.get("/:namespace/:slug/issues/:number", async (c) => {
       404,
     );
   }
+  const issue = issueResult.data;
 
+  const commentPage = parsePageParam(c.req.query("page"));
+  const [labelsResult, commentsResult] = await Promise.all([
+    listIssueLabels(c.env.DB, logger, issue.id),
+    // One past the page, as above, so "is there more" needs no second query.
+    listIssueComments(c.env.DB, logger, issue.id, {
+      limit: DEFAULT_COMMENTS_PAGE + 1,
+      offset: commentPage * DEFAULT_COMMENTS_PAGE,
+    }),
+  ]);
+  const commentsPageData = commentsResult.success ? commentsResult.data : [];
+  const commentsHasNext = commentsPageData.length > DEFAULT_COMMENTS_PAGE;
+  const comments = commentsPageData.slice(0, DEFAULT_COMMENTS_PAGE);
+
+  // Resolve display names for the issue author, every comment author, and the
+  // assignee (a user id) in one pass.
+  const authorRefs = [
+    issue,
+    ...comments,
+    ...(issue.assignee !== undefined
+      ? [{ authorType: "user" as const, authorId: issue.assignee }]
+      : []),
+  ];
   const [authors, canWrite] = await Promise.all([
-    resolveIssueAuthors(c.env.DB, [issueResult.data], logger),
+    resolveIssueAuthors(c.env.DB, authorRefs, logger),
     canWriteProject(c.env.DB, project, userId),
   ]);
 
   return c.html(
     <IssueDetailPage
       project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
-      issue={issueResult.data}
+      issue={issue}
+      labels={labelsResult.success ? labelsResult.data : []}
+      comments={comments}
+      commentPage={commentPage}
+      commentsHasNext={commentsHasNext}
       authors={authors}
       canWrite={canWrite}
       user={user}

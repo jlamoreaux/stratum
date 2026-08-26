@@ -494,6 +494,11 @@ a:hover { text-decoration: underline; }
 
 /* Issues */
 .page-header-actions { display: flex; gap: 0.5rem; }
+.page-nav {
+  display: flex; gap: 0.75rem; align-items: center; justify-content: center;
+  margin-top: 1rem;
+}
+.btn-disabled { opacity: 0.4; cursor: default; }
 .issues-filter { display: flex; gap: 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
 .issues-filter a { color: #777; text-decoration: none; }
 .issues-filter a:hover { color: #ccc; }
@@ -521,6 +526,16 @@ a:hover { text-decoration: underline; }
   background: #111; border: 1px solid #333; color: #eee;
   padding: 0.5rem; border-radius: 4px; font-family: inherit;
 }
+.issue-label { background: #2a2a1a; color: #e0d080; text-decoration: none; text-transform: none; }
+.issue-label:hover { color: #f0e4a0; }
+.issues-search { display: inline-flex; margin-left: auto; }
+.issues-search input {
+  background: #111; border: 1px solid #333; color: #eee;
+  padding: 0.25rem 0.5rem; border-radius: 4px; font-family: inherit; font-size: 0.85rem;
+}
+.issue-comments { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; }
+.issue-comments h2 { font-size: 1rem; margin: 0; }
+.issue-comment .issues-meta { margin-bottom: 0.5rem; }
 
 /* Syntax highlighting (server-side lexer) */
 .tok-comment { color: #6a737d; font-style: italic; }
