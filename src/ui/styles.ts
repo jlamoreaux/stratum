@@ -548,7 +548,10 @@ a:hover { text-decoration: underline; }
 .diff-line { display: block; padding: 0 0.75rem; white-space: pre; }
 .diff-lineno {
   display: inline-block; width: 3em; text-align: right; padding-right: 0.75em;
-  color: #4b5563; user-select: none;
+  /* Line numbers are content, not decoration — readers use them to find the
+     line a comment anchors to — so they need the 4.5:1 body-text ratio.
+     #8a8f98 on the #0d0d0d diff body is ~5.6:1; the old #4b5563 was ~2.6:1. */
+  color: #8a8f98; user-select: none;
 }
 .diff-line:target { background: rgba(124, 183, 255, 0.18); outline: 1px solid #7cb7ff; }
 .diff-add { background: rgba(74, 222, 128, 0.12); color: #b9f0cd; }

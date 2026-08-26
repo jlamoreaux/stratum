@@ -398,6 +398,17 @@ app.post("/changes/:id/reviews", async (c) => {
     if (!commentResult.success) {
       return internalError(commentResult.error.message);
     }
+    // The row is an ordinary discussion comment, so it has to announce itself
+    // the same way POST /changes/:id/comments does — activity feeds and webhook
+    // subscribers key on change.commented and would otherwise never see it.
+    await emitEvent(
+      c.env.DB,
+      c.env.EVENTS_QUEUE,
+      { type: "change.commented", project: change.project, changeId: change.id },
+      { type: "user", id: userId },
+      logger,
+      change.projectId ?? project.id,
+    );
   }
 
   const reviewResult = await submitReview(c.env.DB, logger, {

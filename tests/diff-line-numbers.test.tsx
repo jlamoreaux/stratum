@@ -268,6 +268,7 @@ describe("LineCommentThreads rendering", () => {
         comments={threadComments}
         files={files}
         canComment={true}
+        canResolveAny={true}
       />,
     );
     expect(html).toContain("src/x.ts:21");
@@ -289,6 +290,7 @@ describe("LineCommentThreads rendering", () => {
         comments={[comment({ id: "c_root", file: "src/x.ts", line: 21, resolved: true })]}
         files={files}
         canComment={true}
+        canResolveAny={true}
       />,
     );
     expect(html).toContain("line-thread-resolved");
@@ -364,5 +366,71 @@ describe("LineCommentThreads rendering", () => {
       <LineCommentThreads changeId="chg_1" comments={[comment({ id: "c_plain" })]} />,
     );
     expect(html).toContain("No line comments yet.");
+  });
+
+  /**
+   * Reply and resolve are different permissions on the server: the resolve
+   * route admits a project writer or the thread root's own author, while
+   * replying only needs read access. Gating both on `canComment` showed a
+   * signed-in reader a Resolve button whose route answers 403.
+   */
+  describe("resolve authorization", () => {
+    const root = comment({ id: "c_root", file: "src/x.ts", line: 20, authorId: "user_author" });
+
+    it("hides Resolve from a signed-in reader who did not write the thread", () => {
+      const html = renderToString(
+        <LineCommentThreads
+          changeId="chg_1"
+          comments={[root]}
+          files={files}
+          canComment={true}
+          canResolveAny={false}
+          viewerId="user_other"
+        />,
+      );
+      expect(html).toContain("Reply");
+      expect(html).not.toContain("Resolve");
+    });
+
+    it("shows Resolve to the thread author even without write access", () => {
+      const html = renderToString(
+        <LineCommentThreads
+          changeId="chg_1"
+          comments={[root]}
+          files={files}
+          canComment={true}
+          canResolveAny={false}
+          viewerId="user_author"
+        />,
+      );
+      expect(html).toContain("Resolve");
+    });
+
+    it("shows Resolve to a project writer who did not write the thread", () => {
+      const html = renderToString(
+        <LineCommentThreads
+          changeId="chg_1"
+          comments={[root]}
+          files={files}
+          canComment={true}
+          canResolveAny={true}
+          viewerId="user_other"
+        />,
+      );
+      expect(html).toContain("Resolve");
+    });
+
+    it("names the reply box for screen readers", () => {
+      const html = renderToString(
+        <LineCommentThreads
+          changeId="chg_1"
+          comments={[root]}
+          files={files}
+          canComment={true}
+          viewerId="user_other"
+        />,
+      );
+      expect(html).toContain('aria-label="Reply to comment on src/x.ts:20"');
+    });
   });
 });

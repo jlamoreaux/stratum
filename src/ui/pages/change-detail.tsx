@@ -295,6 +295,8 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({
             comments={lineComments}
             files={diff ?? []}
             canComment={!!user}
+            canResolveAny={canReview}
+            {...(user ? { viewerId: user.id } : {})}
           />
         </div>
       )}
@@ -352,7 +354,13 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({
               class="comment-form review-comment-form"
             >
               <input type="hidden" name="verdict" value="comment" />
-              <textarea name="comment" rows={2} placeholder="Comment without a verdict…" required />
+              <textarea
+                name="comment"
+                rows={2}
+                placeholder="Comment without a verdict…"
+                aria-label="Review comment without a verdict"
+                required
+              />
               <button type="submit" class="btn">
                 Comment
               </button>

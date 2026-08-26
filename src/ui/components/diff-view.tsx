@@ -373,9 +373,19 @@ export const LineCommentThreads: FC<{
   comments: ChangeComment[];
   /** Rendered diff files, used to link threads to line anchors. */
   files?: DiffFile[];
-  /** Whether to render reply and resolve/unresolve forms. */
+  /** Whether to render reply forms. */
   canComment?: boolean;
-}> = ({ changeId, comments, files = [], canComment = false }) => {
+  /**
+   * Whether the viewer may resolve *any* thread — i.e. is a project writer.
+   * The resolve route also admits a thread's own author, so a reader who wrote
+   * the root still gets the control; `viewerId` is what identifies them.
+   * Reply and resolve are separate permissions: gating both on `canComment`
+   * showed readers a button whose route answers 403.
+   */
+  canResolveAny?: boolean;
+  /** The signed-in viewer's user id, for the thread-author case above. */
+  viewerId?: string;
+}> = ({ changeId, comments, files = [], canComment = false, canResolveAny = false, viewerId }) => {
   const threads = buildLineCommentThreads(comments);
   if (threads.length === 0) {
     return <p class="review-empty">No line comments yet.</p>;
@@ -399,6 +409,11 @@ export const LineCommentThreads: FC<{
         const anchorId = anchored !== undefined ? diffLineAnchor(fileIndex, anchored) : undefined;
         const anchorHref = anchorId !== undefined ? `#${anchorId}` : undefined;
         const location = `${root.file}:${root.line}`;
+        // Mirrors handleResolveToggle: a project writer, or the thread root's
+        // own author.
+        const canResolveThread =
+          canResolveAny ||
+          (root.authorType === "user" && viewerId !== undefined && root.authorId === viewerId);
         return (
           <div
             class={root.resolved ? "line-thread line-thread-resolved" : "line-thread"}
@@ -429,27 +444,37 @@ export const LineCommentThreads: FC<{
                 ))}
               </ul>
             )}
-            {canComment && (
+            {(canComment || canResolveThread) && (
               <div class="line-thread-actions">
-                <form
-                  method="post"
-                  action={`/api/changes/${changeId}/comments`}
-                  class="comment-form"
-                >
-                  <input type="hidden" name="parentCommentId" value={root.id} />
-                  <textarea name="body" rows={2} placeholder="Reply…" required />
-                  <button type="submit" class="btn">
-                    Reply
-                  </button>
-                </form>
-                <form
-                  method="post"
-                  action={`/api/changes/${changeId}/comments/${root.id}/${root.resolved ? "unresolve" : "resolve"}`}
-                >
-                  <button type="submit" class="btn">
-                    {root.resolved ? "Unresolve" : "Resolve"}
-                  </button>
-                </form>
+                {canComment && (
+                  <form
+                    method="post"
+                    action={`/api/changes/${changeId}/comments`}
+                    class="comment-form"
+                  >
+                    <input type="hidden" name="parentCommentId" value={root.id} />
+                    <textarea
+                      name="body"
+                      rows={2}
+                      placeholder="Reply…"
+                      aria-label={`Reply to comment on ${location}`}
+                      required
+                    />
+                    <button type="submit" class="btn">
+                      Reply
+                    </button>
+                  </form>
+                )}
+                {canResolveThread && (
+                  <form
+                    method="post"
+                    action={`/api/changes/${changeId}/comments/${root.id}/${root.resolved ? "unresolve" : "resolve"}`}
+                  >
+                    <button type="submit" class="btn">
+                      {root.resolved ? "Unresolve" : "Resolve"}
+                    </button>
+                  </form>
+                )}
               </div>
             )}
           </div>

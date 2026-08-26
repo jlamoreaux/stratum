@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { EvalPolicy } from "../src/evaluation/types";
 import { checkMergeProtection } from "../src/merge/protection";
 import {
   addComment,
@@ -427,8 +428,7 @@ describe("comment-only review verdict", () => {
 
     const blocked = await checkMergeProtection(db, mockLogger, change, {
       merge: { requiredApprovals: 1 },
-      // biome-ignore lint/suspicious/noExplicitAny: minimal policy under test
-    } as any);
+    } as unknown as EvalPolicy);
     expect(blocked.success).toBe(true);
     if (!blocked.success) return;
     // A comment-only review is NOT an approval: the merge stays blocked on
@@ -443,8 +443,7 @@ describe("comment-only review verdict", () => {
     });
     const allowed = await checkMergeProtection(db, mockLogger, change, {
       merge: { requiredApprovals: 1 },
-      // biome-ignore lint/suspicious/noExplicitAny: minimal policy under test
-    } as any);
+    } as unknown as EvalPolicy);
     expect(allowed.success).toBe(true);
     if (!allowed.success) return;
     // The other reviewer's standing 'comment' verdict does not block.

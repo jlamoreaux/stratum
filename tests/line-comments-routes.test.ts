@@ -21,6 +21,7 @@ vi.mock("../src/utils/authz", () => ({
 }));
 vi.mock("../src/queue/events", () => ({ emitEvent: vi.fn() }));
 
+import { emitEvent } from "../src/queue/events";
 import { reviewsRouter } from "../src/routes/reviews";
 import {
   type ChangeComment,
@@ -34,7 +35,7 @@ import {
 import { getChange, updateChangeStatus } from "../src/storage/changes";
 import { isTargetDeleting } from "../src/storage/deletion";
 import { getProject } from "../src/storage/state";
-import type { Env } from "../src/types";
+import type { Change, Env, ProjectEntry } from "../src/types";
 import { canReadProject, canWriteProject } from "../src/utils/authz";
 import { AppError } from "../src/utils/errors";
 
@@ -88,10 +89,11 @@ function comment(overrides: Partial<ChangeComment> = {}): ChangeComment {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // biome-ignore lint/suspicious/noExplicitAny: minimal change shape under test
-  vi.mocked(getChange).mockResolvedValue({ success: true, data: change as any });
-  // biome-ignore lint/suspicious/noExplicitAny: minimal project shape under test
-  vi.mocked(getProject).mockResolvedValue({ success: true, data: { id: "pid_1" } as any });
+  vi.mocked(getChange).mockResolvedValue({ success: true, data: change as unknown as Change });
+  vi.mocked(getProject).mockResolvedValue({
+    success: true,
+    data: { id: "pid_1" } as unknown as ProjectEntry,
+  });
   vi.mocked(canReadProject).mockResolvedValue(true);
   vi.mocked(canWriteProject).mockResolvedValue(true);
   vi.mocked(isTargetDeleting).mockResolvedValue(false);
@@ -123,8 +125,8 @@ beforeEach(() => {
     },
   }));
   vi.mocked(setCommentResolved).mockResolvedValue({ success: true, data: undefined });
-  // biome-ignore lint/suspicious/noExplicitAny: minimal change shape under test
-  vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: change as any });
+  // updateChangeStatus resolves Result<void, ...>, so the payload is undefined.
+  vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
 });
 
 describe("POST /api/changes/:id/comments (anchors)", () => {
@@ -419,6 +421,38 @@ describe("POST /api/changes/:id/reviews (comment verdict)", () => {
       reviewerId: "user_1",
       verdict: "comment",
     });
+  });
+
+  /**
+   * The body is written through addComment, exactly like POST
+   * /changes/:id/comments — so it has to announce itself the same way or
+   * activity feeds and change.commented webhook subscribers never see the row.
+   */
+  it("emits change.commented for the comment body", async () => {
+    await jsonPost("/api/changes/chg_1/reviews", {
+      verdict: "comment",
+      comment: "just passing through",
+    });
+    expect(vi.mocked(emitEvent)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ type: "change.commented", changeId: "chg_1" }),
+      expect.objectContaining({ type: "user", id: "user_1" }),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("does not emit change.commented when a verdict carries no comment", async () => {
+    await jsonPost("/api/changes/chg_1/reviews", { verdict: "approve" });
+    expect(vi.mocked(emitEvent)).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ type: "change.commented" }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("still moves the state machine for approve", async () => {
