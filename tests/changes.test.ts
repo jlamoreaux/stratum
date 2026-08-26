@@ -2156,7 +2156,10 @@ describe("POST /api/changes/:id/github-pr", () => {
       // so a `develop`-default project has no `main` for the clone to find.
       { ref: "develop", fullHistory: true },
     );
-    // …and its tip is pushed to the Stratum-owned head ref on GitHub.
+    // …and its tip is pushed to the Stratum-owned head ref on GitHub. The
+    // pushed LOCAL ref has to be the same branch the clone above asked for:
+    // that clone is singleBranch, so a `develop`-default project's clone holds
+    // no `main`, and pushing one fails locally before any request is made.
     expect(pushBranchToRemote).toHaveBeenCalledWith(
       {},
       "/",
@@ -2164,6 +2167,7 @@ describe("POST /api/changes/:id/github-pr", () => {
         url: "https://github.com/acme/widgets.git",
         remoteRef: "refs/heads/stratum/chg_abc123",
         token: "ghp_secret_token",
+        localRef: "develop",
         force: true,
       },
       expect.anything(),
@@ -2223,7 +2227,10 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(pushBranchToRemote).toHaveBeenCalledWith(
       {},
       "/",
-      expect.objectContaining({ url: "https://github.com/imported/repo.git" }),
+      expect.objectContaining({
+        url: "https://github.com/imported/repo.git",
+        localRef: "trunk",
+      }),
       expect.anything(),
     );
     expect(fetchMock).toHaveBeenCalledWith(
@@ -2255,6 +2262,14 @@ describe("POST /api/changes/:id/github-pr", () => {
       "artifacts-token",
       expect.anything(),
       { ref: "develop", fullHistory: true },
+    );
+    // The push follows the clone, not `base`: `release/2026-08` is not in the
+    // fork, and neither is `main`.
+    expect(pushBranchToRemote).toHaveBeenCalledWith(
+      {},
+      "/",
+      expect.objectContaining({ localRef: "develop" }),
+      expect.anything(),
     );
   });
 

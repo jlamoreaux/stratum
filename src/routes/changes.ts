@@ -1702,6 +1702,10 @@ app.post("/changes/:id/github-pr", async (c) => {
       url: `https://github.com/${repo.owner}/${repo.repo}.git`,
       remoteRef: `refs/heads/${branch}`,
       token: githubToken,
+      // Must match the clone ref above: the clone is singleBranch, so on a
+      // non-main-default project it holds only `defaultBranch` and a push of
+      // `main` fails locally before the request is even made.
+      localRef: defaultBranch,
       // The Stratum-owned ref: re-promotion must move it to the current tip.
       force: true,
     },

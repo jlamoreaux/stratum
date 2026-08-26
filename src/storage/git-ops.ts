@@ -354,8 +354,13 @@ export async function pushTags(
 }
 
 /**
- * Pushes the local `main` branch to a branch on an external remote — e.g.
- * GitHub's `stratum/<changeId>` ref before a PR is opened (#189).
+ * Pushes a local branch to a branch on an external remote — e.g. GitHub's
+ * `stratum/<changeId>` ref before a PR is opened (#189).
+ *
+ * `localRef` is the branch inside `dir` to push and defaults to `main`. It must
+ * match the ref the caller cloned: a `singleBranch` clone of a `develop`- or
+ * `master`-default repo contains only that branch, and asking git.push for a
+ * `main` that is not there fails locally, before any network call.
  *
  * Auth is HTTP basic with the token as the password; GitHub accepts any
  * username alongside a token. `force` defaults to false because `remoteRef` is
@@ -363,13 +368,13 @@ export async function pushTags(
  * force-push there would destroy someone else's work. Pass `force: true`
  * explicitly, and only when overwriting a ref Stratum owns (re-promotion).
  *
- * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
+ * @param opts - Remote URL, target branch, authentication token, the local branch to push, and optional force-push setting.
  * @returns A successful result when the push completes, or an application error when it fails.
  */
 export async function pushBranchToRemote(
   fs: NodeFS,
   dir: string,
-  opts: { url: string; remoteRef: string; token: string; force?: boolean },
+  opts: { url: string; remoteRef: string; token: string; force?: boolean; localRef?: string },
   logger: Logger,
 ): Promise<Result<void, AppError>> {
   const res = await fromPromise(
@@ -378,7 +383,7 @@ export async function pushBranchToRemote(
       dir,
       http,
       url: opts.url,
-      ref: "main",
+      ref: opts.localRef ?? "main",
       remoteRef: opts.remoteRef,
       onAuth: () => ({ username: "x-access-token", password: opts.token }),
       force: opts.force ?? false,
@@ -389,6 +394,7 @@ export async function pushBranchToRemote(
     logger.error("Failed to push branch to remote", res.error, {
       url: opts.url,
       remoteRef: opts.remoteRef,
+      localRef: opts.localRef ?? "main",
     });
     return err(new ExternalServiceError("Git", `Failed to push branch: ${cause}`, res.error));
   }
