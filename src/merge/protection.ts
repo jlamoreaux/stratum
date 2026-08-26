@@ -109,7 +109,11 @@ export function requiredEvaluatorReasons(
 
   const passedByType = new Map<string, boolean>();
   for (const { evaluatorType, result } of evalRuns) {
-    passedByType.set(evaluatorType, result.passed);
+    // A policy may list the same evaluator type more than once (e.g. two diff
+    // evaluators with different forbiddenPatterns). Fold duplicates with AND:
+    // a required type passes only when every run of it passed, so a passing
+    // duplicate can never mask a failure.
+    passedByType.set(evaluatorType, (passedByType.get(evaluatorType) ?? true) && result.passed);
   }
 
   const reasons: string[] = [];

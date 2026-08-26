@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { diffTouchesProtectedConfig, loadPolicy } from "../src/evaluation/policy-loader";
 import type { EvalPolicy } from "../src/evaluation/types";
-import { checkMergeProtection } from "../src/merge/protection";
+import { checkMergeProtection, requiredEvaluatorReasons } from "../src/merge/protection";
 import { readFileFromRepo } from "../src/storage/git-ops";
 import type { Change } from "../src/types";
 import type { Logger } from "../src/utils/logger";
@@ -311,5 +311,45 @@ describe("policy loader merge rules", () => {
     const policy = await loadPolicy("remote", "token", mockLogger);
     expect(policy.merge).toBeUndefined();
     expect(policy.evaluators).toEqual([{ type: "diff" }]);
+  });
+});
+
+describe("requiredEvaluatorReasons", () => {
+  it("folds duplicate evaluator types with AND so a passing duplicate cannot mask a failure", () => {
+    // A policy may list the same type twice (e.g. two diff evaluators with
+    // different forbiddenPatterns). Whichever order the runs land in, one
+    // failure must keep the required type failed.
+    const failFirst = requiredEvaluatorReasons(
+      [
+        { evaluatorType: "diff", result: { passed: false } },
+        { evaluatorType: "diff", result: { passed: true } },
+      ],
+      ["diff"],
+    );
+    expect(failFirst).toEqual(["Required evaluator 'diff' failed"]);
+
+    const failSecond = requiredEvaluatorReasons(
+      [
+        { evaluatorType: "diff", result: { passed: true } },
+        { evaluatorType: "diff", result: { passed: false } },
+      ],
+      ["diff"],
+    );
+    expect(failSecond).toEqual(["Required evaluator 'diff' failed"]);
+
+    const bothPass = requiredEvaluatorReasons(
+      [
+        { evaluatorType: "diff", result: { passed: true } },
+        { evaluatorType: "diff", result: { passed: true } },
+      ],
+      ["diff"],
+    );
+    expect(bothPass).toEqual([]);
+  });
+
+  it("reports a required evaluator that never ran", () => {
+    expect(requiredEvaluatorReasons([], ["sandbox"])).toEqual([
+      "Required evaluator 'sandbox' has not run",
+    ]);
   });
 });

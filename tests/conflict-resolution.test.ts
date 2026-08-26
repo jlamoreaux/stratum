@@ -123,9 +123,16 @@ vi.mock("../src/evaluation/policy-loader", async (importActual) => {
   };
 });
 
-vi.mock("../src/storage/changes", () => ({
-  getChange: vi.fn(),
-}));
+vi.mock("../src/storage/changes", async (importActual) => {
+  const actual = await importActual<typeof import("../src/storage/changes")>();
+  return {
+    // Keep every real export: routes/changes.ts (loaded by src/index.ts)
+    // statically imports several named exports from this module, and a
+    // factory that defines only getChange would break module loading.
+    ...actual,
+    getChange: vi.fn(),
+  };
+});
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(async (_: unknown, token: string) => {
@@ -587,6 +594,45 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
     const body = await res.json<{ code: string; reasons: string[] }>();
     expect(body.code).toBe("PROTECTION_BLOCKED");
     expect(body.reasons[0]).toContain("Requires 1 approval");
+    expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when approvals are required but the conflict has no linked change (never pushes)", async () => {
+    // Default CONFLICT_CTX carries no changeId — the shape of a conflict
+    // recorded before the changeId field existed. With approvals required
+    // there is nothing to verify them against, so the gate must block.
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+    vi.mocked(loadPolicy).mockResolvedValueOnce({
+      evaluators: [],
+      requireAll: true,
+      minScore: 0.7,
+      merge: { requiredApprovals: 1 },
+    });
+
+    const res = await app.fetch(
+      new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+        method: "POST",
+        headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "manual",
+          resolutions: [{ file: "src/foo.ts", content: "export const x = 1;" }],
+        }),
+      }),
+      { STATE: kv, DB: makeDb() },
+    );
+
+    expect(res.status).toBe(403);
+    const body = await res.json<{ code: string; reasons: string[] }>();
+    expect(body.code).toBe("PROTECTION_BLOCKED");
     expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
   });
 
