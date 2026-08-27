@@ -478,6 +478,25 @@ export async function initAndPush(
 }
 
 /**
+ * Hard cap on how many tags a single `includeTags` clone will fetch. Each tag
+ * costs its own fetch round trip (see below), so an unbounded remote tag count
+ * would turn one clone into an unbounded number of requests. Truncation is
+ * never silent: it is reported on the clone result (`tagsTruncated`,
+ * `totalTagCount`) so `listRepoTags` and its callers can surface it (#241).
+ *
+ * Sized against the Workers subrequest budget, not picked round: one
+ * isomorphic-git fetch is TWO subrequests (a GET of
+ * `/info/refs?service=git-upload-pack`, then a POST to `/git-upload-pack`), so
+ * the loop below costs `2 * MAX_TAGS` on top of the clone's own pair and the
+ * `getRemoteInfo` handshake. At 500 that is ~1003 — on the nose of the
+ * ~1000-subrequest cap this codebase budgets against elsewhere (see the note in
+ * `src/storage/state.ts`), which would kill the request outright instead of
+ * degrading. 200 keeps the tag walk near 400 and leaves the rest of the request
+ * room to breathe; repos above it degrade visibly through `truncated`.
+ */
+export const MAX_TAGS = 200;
+
+/**
  * Clones the `main` branch of a repository into an in-memory filesystem.
  *
  * The whole tree lands in worker memory, which is what makes the depth choice
@@ -489,16 +508,48 @@ export async function initAndPush(
  * @param opts - Clone options
  * @param opts.fullHistory - Whether to clone the complete reachable history; otherwise, clone the most recent 50 commits
  * @param opts.ref - The branch to clone; defaults to `main`, but imported repos keep their source branch name (master/trunk/…)
- * @param opts.includeTags - Whether to follow the clone with a fetch of `refs/tags/*`; a `singleBranch` clone never brings tags
- * @returns The cloned filesystem and its working directory, or an application error
+ * @param opts.includeTags - Whether to follow the clone with a per-tag fetch of `refs/tags/*`; a `singleBranch` clone never brings tags. Capped at {@link MAX_TAGS}; see the result's `tagsTruncated`/`totalTagCount`.
+ * @returns The cloned filesystem and its working directory (plus tag-fetch truncation info when `includeTags` was set), or an application error
  */
+
+/** The shape `getRemoteInfo` nests advertised refs into: each `/`-separated
+ * path segment of the ref becomes a nested key, with the oid (or symref
+ * target) only at the leaf. See {@link flattenRefTree}. */
+type RemoteRefTree = { [segment: string]: string | RemoteRefTree };
+
+/**
+ * `getRemoteInfo` builds an object TREE out of the flat ref list it gets from
+ * the remote, splitting every ref on "/" and nesting a level per segment (see
+ * isomorphic-git's `getRemoteInfo`) — so `refs/tags/release/1.0` lands at
+ * `refs.tags.release["1.0"]`, not `refs.tags["release/1.0"]`. A plain
+ * `Object.keys(refs.tags)` therefore only recovers the first path segment of
+ * any hierarchical tag name (yielding a nested object where an oid was
+ * expected). This walks the tree back down, rejoining segments with "/", to
+ * recover the true `name -> oid` pairs regardless of nesting depth.
+ */
+function flattenRefTree(node: RemoteRefTree | undefined, prefix = ""): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!node) return out;
+  for (const [segment, value] of Object.entries(node)) {
+    const name = prefix ? `${prefix}/${segment}` : segment;
+    if (typeof value === "string") {
+      out[name] = value;
+    } else {
+      Object.assign(out, flattenRefTree(value, name));
+    }
+  }
+  return out;
+}
+
 export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
   opts: { fullHistory?: boolean; ref?: string; includeTags?: boolean } = {},
   httpClient: HttpClient = http,
-): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
+): Promise<
+  Result<{ fs: NodeFS; dir: string; tagsTruncated?: boolean; totalTagCount?: number }, AppError>
+> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
 
   const fs = new MemoryFS().toNodeFS();
@@ -529,30 +580,90 @@ export async function cloneRepo(
 
   // isomorphic-git's singleBranch clone requests ONLY the branch tip — tag refs
   // are neither advertised locally nor are their objects fetched. Callers that
-  // need tags (tags listing, backup) opt in to a follow-up fetch of every remote
-  // ref with `tags: true`, which writes refs/tags/* and pulls the tag objects
-  // plus their targets (depth-limited unless fullHistory).
+  // need tags (tags listing, backup) opt in to a follow-up tags-only fetch:
+  // `getRemoteInfo` enumerates `refs/tags/*` cheaply (a ref/oid handshake, no
+  // object data), then each tag is fetched INDIVIDUALLY with `singleBranch:
+  // true` — isomorphic-git's singleBranch fetch requests only the one resolved
+  // oid (`wants = [oid]`), so this pulls each tag's own object graph and
+  // nothing else. A combined `singleBranch: false, tags: true` fetch (the old
+  // approach) instead requests every branch tip the remote advertises, which
+  // for a project with large branches unrelated to any tag pulls substantially
+  // more than the feature needs (#241). depth/unresolvable degradation is
+  // unchanged: each per-tag fetch keeps the same shallow window, and a tag
+  // whose target lies outside it still degrades via `collectRepoTags` rather
+  // than failing the clone.
+  let tagsTruncated = false;
+  let totalTagCount = 0;
   if (opts.includeTags) {
-    const tagFetch = await fromPromise(
-      git.fetch({
-        fs,
-        http: httpClient,
-        dir: DIR,
-        url: remote,
-        singleBranch: false,
-        tags: true,
-        ...(opts.fullHistory ? {} : { depth: 50 }),
-        onAuth: makeAuth(token),
-      }),
+    const remoteInfoResult = await fromPromise(
+      git.getRemoteInfo({ http: httpClient, url: remote, onAuth: makeAuth(token) }),
     );
-    if (!tagFetch.success) {
-      logger.error("Failed to fetch tags after clone", tagFetch.error, { remote });
-      return err(new ExternalServiceError("Git", "Failed to fetch tags", tagFetch.error));
+    if (!remoteInfoResult.success) {
+      logger.error("Failed to enumerate remote tags", remoteInfoResult.error, { remote });
+      return err(
+        new ExternalServiceError("Git", "Failed to enumerate remote tags", remoteInfoResult.error),
+      );
+    }
+
+    // getRemoteInfo nests advertised refs into an object tree keyed by path
+    // segment (`refs.tags.<name>`, or several levels deep for a hierarchical
+    // tag name like `release/1.0` — see `flattenRefTree`); it also advertises
+    // each annotated tag's peeled commit under a `<name>^{}` key alongside the
+    // tag object itself — that suffix marks a peeled target, not a real tag
+    // name, so it's filtered out (we peel annotated tags ourselves in
+    // `collectRepoTags`).
+    const remoteTagsTree = (remoteInfoResult.data.refs as { tags?: RemoteRefTree } | undefined)
+      ?.tags;
+    const tagNames = Object.keys(flattenRefTree(remoteTagsTree)).filter(
+      (name) => !name.endsWith("^{}"),
+    );
+
+    totalTagCount = tagNames.length;
+    tagsTruncated = totalTagCount > MAX_TAGS;
+    // Sort ascending for stable, readable fetch order; when truncating, keep
+    // the highest-sorting names (tail of the ascending sort) rather than the
+    // lowest, since a release listing wants v9.x over v1.x when only one can
+    // fit. This is lexicographic, not chronological, ordering — "v10" sorts
+    // below "v9" — so it's a best-effort signal from names alone, not a
+    // guarantee of "newest".
+    const sortedTagNames = tagNames.sort();
+    const tagNamesToFetch = tagsTruncated ? sortedTagNames.slice(-MAX_TAGS) : sortedTagNames;
+    if (tagsTruncated) {
+      logger.warn("Remote tag count exceeds MAX_TAGS; truncating tags fetch", {
+        remote,
+        totalTagCount,
+        fetchedTagCount: tagNamesToFetch.length,
+        maxTags: MAX_TAGS,
+      });
+    }
+
+    for (const name of tagNamesToFetch) {
+      const tagFetch = await fromPromise(
+        git.fetch({
+          fs,
+          http: httpClient,
+          dir: DIR,
+          url: remote,
+          singleBranch: true,
+          remoteRef: `refs/tags/${name}`,
+          tags: true,
+          ...(opts.fullHistory ? {} : { depth: 50 }),
+          onAuth: makeAuth(token),
+        }),
+      );
+      if (!tagFetch.success) {
+        logger.error("Failed to fetch tag", tagFetch.error, { remote, tag: name });
+        return err(new ExternalServiceError("Git", `Failed to fetch tag: ${name}`, tagFetch.error));
+      }
     }
   }
 
   logger.info("Successfully cloned repository", { remote });
-  return ok({ fs: fs as unknown as NodeFS, dir: DIR });
+  return ok({
+    fs: fs as unknown as NodeFS,
+    dir: DIR,
+    ...(opts.includeTags ? { tagsTruncated, totalTagCount } : {}),
+  });
 }
 
 export async function commitAndPush(
@@ -3039,6 +3150,20 @@ export async function collectRepoTags(
   return entries;
 }
 
+/** Result of {@link listRepoTags}. */
+export interface ListRepoTagsResult {
+  /** The tags actually listed — capped at {@link MAX_TAGS} when the remote
+   * advertises more (see `truncated`). */
+  tags: RepoTagEntry[];
+  /** True when the remote advertised more than {@link MAX_TAGS} tags and the
+   * fetch was capped — reported explicitly, never silent, so callers/UI can
+   * show it rather than presenting a quietly-partial list as complete. */
+  truncated: boolean;
+  /** Total tags the remote advertised, independent of how many were fetched.
+   * Equal to `tags.length` unless `truncated` is true. */
+  totalTagCount: number;
+}
+
 /**
  * Lists the tags in a repository, including entries whose targets cannot be
  * resolved from the cloned history.
@@ -3049,16 +3174,21 @@ export async function collectRepoTags(
  * erroring would make the whole listing unavailable because of one old tag.
  * See `collectRepoTags`.
  *
+ * The underlying fetch is tags-only (per-tag `singleBranch` fetches, never a
+ * whole-branches pull) and capped at {@link MAX_TAGS}; a remote with more tags
+ * than that comes back with `truncated: true` rather than silently dropping
+ * the excess. See the `cloneRepo` `includeTags` option.
+ *
  * @param remote - The repository's remote URL
  * @param token - The authentication token for the remote
- * @returns The repository's tag entries
+ * @returns The repository's tag entries, plus truncation info
  */
 export async function listRepoTags(
   remote: string,
   token: string,
   logger: Logger,
   httpClient: HttpClient = http,
-): Promise<Result<RepoTagEntry[], AppError>> {
+): Promise<Result<ListRepoTagsResult, AppError>> {
   logger.debug("Listing repo tags", { remote });
 
   const cloneResult = await cloneRepo(remote, token, logger, { includeTags: true }, httpClient);
@@ -3072,6 +3202,20 @@ export async function listRepoTags(
     return err(new ExternalServiceError("Git", "Failed to list tags", collected.error));
   }
 
-  logger.info("Successfully listed repo tags", { remote, tagCount: collected.data.length });
-  return ok(collected.data);
+  const truncated = cloneResult.data.tagsTruncated ?? false;
+  const totalTagCount = cloneResult.data.totalTagCount ?? collected.data.length;
+  if (truncated) {
+    logger.warn("Tag listing truncated at MAX_TAGS", {
+      remote,
+      totalTagCount,
+      returnedTagCount: collected.data.length,
+    });
+  }
+
+  logger.info("Successfully listed repo tags", {
+    remote,
+    tagCount: collected.data.length,
+    truncated,
+  });
+  return ok({ tags: collected.data, truncated, totalTagCount });
 }
