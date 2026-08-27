@@ -49,7 +49,17 @@ export const ChangesPage: FC<ChangesProps> = ({ project, changes, canWrite, user
         <div class="empty-state">
           <p>No changes yet.</p>
           <p class="empty-state-hint">
-            Open a change to propose edits and gate them on tests and review before they merge.
+            Changes are proposed from a workspace — a private fork of this project — and gated on
+            tests and review before they merge. From your terminal:
+          </p>
+          <pre class="cli-hint">
+            {`stratum workspace create ${project.namespace}/${project.slug}
+stratum change create --project ${project.namespace}/${project.slug} --workspace <name>`}
+          </pre>
+          <p class="empty-state-hint">
+            <a href="https://docs.usestratum.dev" target="_blank" rel="noopener noreferrer">
+              CLI setup guide →
+            </a>
           </p>
         </div>
       ) : (

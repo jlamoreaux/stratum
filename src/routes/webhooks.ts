@@ -75,12 +75,22 @@ async function requireProjectAdmin(
 
 function sanitizeEvents(value: unknown): string | null {
   if (value === undefined || value === null || value === "" || value === "*") return "*";
-  if (typeof value !== "string") return null;
-  const entries = value
-    .split(",")
+  // Accept both API shapes ("a,b" string) and the management form's repeated
+  // checkboxes (string[]; a checked "All events" box contributes "*").
+  let raw: string[];
+  if (Array.isArray(value)) {
+    if (!value.every((entry): entry is string => typeof entry === "string")) return null;
+    raw = value;
+  } else if (typeof value === "string") {
+    raw = [value];
+  } else {
+    return null;
+  }
+  const entries = raw
+    .flatMap((entry) => entry.split(","))
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
-  if (entries.length === 0) return "*";
+  if (entries.length === 0 || entries.includes("*")) return "*";
   const unknown = entries.filter((entry) => !SUBSCRIBABLE_EVENTS.includes(entry));
   if (unknown.length > 0) return null;
   return entries.join(",");
@@ -106,7 +116,8 @@ app.post("/:namespace/:slug/webhooks", async (c) => {
   if (contentType.includes("application/json")) {
     body = await c.req.json<typeof body>().catch(() => ({}));
   } else {
-    const form = await c.req.parseBody();
+    // all:true keeps every checked events checkbox instead of only the last one.
+    const form = await c.req.parseBody({ all: true });
     body = { url: form.url, events: form.events };
   }
 
@@ -157,13 +168,25 @@ app.post("/:namespace/:slug/webhooks", async (c) => {
 
   if (!contentType.includes("application/json")) {
     // The management page redacts the signing secret, so a form-based creator
-    // would otherwise never see it. Show it exactly once here (not persisted, not
-    // in the URL, no client JS) with a link back to the management page.
+    // would otherwise never see it. Show it exactly once here (not persisted,
+    // not in the URL) with a copy control and a link back to the management page.
     const wh = webhookResult.data;
     const backUrl = `/${project.namespace}/${project.slug}/webhooks`;
+    const nonce = c.get("cspNonce") ?? "";
+    const copyScript = `(function () {
+  var btn = document.getElementById('copy-secret');
+  var secret = document.getElementById('webhook-secret');
+  if (!btn || !secret) return;
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(secret.textContent).then(function () {
+      btn.textContent = 'Copied';
+      setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+})();`;
     return noStore(
       c.html(
-        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Webhook created</title><link rel="stylesheet" href="/ui.css"></head><body><main style="max-width:640px;margin:3rem auto;padding:0 1rem;font-family:monospace"><h1>Webhook created</h1><p><strong>Copy the signing secret now — it will not be shown again.</strong></p><p>URL: <code>${escapeHtml(wh.url)}</code></p><p>Signing secret: <code>${escapeHtml(wh.secret)}</code></p><p>Verify each delivery's <code>X-Stratum-Signature</code> (HMAC-SHA256) with this secret.</p><p><a href="${escapeHtml(backUrl)}">&larr; Back to webhooks</a></p></main></body></html>`,
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Webhook created — Stratum</title><link rel="stylesheet" href="/ui.css"></head><body><main class="main" style="max-width:640px"><div class="card settings-token-reveal"><h3 style="margin-top:0">Webhook created</h3><p class="settings-help"><strong>Copy the signing secret now — it will not be shown again.</strong></p><p class="settings-help">Payload URL: <code>${escapeHtml(wh.url)}</code></p><div class="token-reveal-row"><code class="settings-token" id="webhook-secret">${escapeHtml(wh.secret)}</code><button type="button" class="btn btn-small" id="copy-secret">Copy</button></div><p class="settings-help" style="margin-top:0.75rem">Verify each delivery's <code>X-Stratum-Signature</code> (HMAC-SHA256) with this secret.</p><p style="margin-top:1rem"><a href="${escapeHtml(backUrl)}">&larr; Back to webhooks</a></p></div></main><script nonce="${escapeHtml(nonce)}">${copyScript}</script></body></html>`,
         201,
       ),
     );

@@ -54,11 +54,24 @@ export const WebhooksPage: FC<WebhooksPageProps> = ({
             Payload URL
             <input type="url" name="url" placeholder="https://example.com/hooks/stratum" required />
           </label>
-          <label>
-            Events (comma-separated, or * for all)
-            <input type="text" name="events" placeholder="*" />
-          </label>
-          <p class="webhook-help">Available: {subscribableEvents.join(", ")}</p>
+          <fieldset class="webhook-events">
+            <legend>Events to deliver</legend>
+            <label class="checkbox-label">
+              <input type="checkbox" name="events" value="*" checked />
+              All events
+            </label>
+            <div class="webhook-events-grid">
+              {subscribableEvents.map((event) => (
+                <label class="checkbox-label" key={event}>
+                  <input type="checkbox" name="events" value={event} />
+                  {event}
+                </label>
+              ))}
+            </div>
+            <p class="webhook-help">
+              "All events" wins when checked; otherwise only the selected events are delivered.
+            </p>
+          </fieldset>
           <button type="submit" class="btn btn-primary">
             Add webhook
           </button>
