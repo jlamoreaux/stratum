@@ -3,12 +3,21 @@ import type { Env } from "../types";
 import { constantTimeEqual } from "./crypto";
 import type { Logger } from "./logger";
 
-/** Which credential authorized an admin request. */
+/**
+ * Which credential actually granted an admin request, kept so that callers
+ * writing an audit entry attribute the action to it rather than inferring an
+ * actor from whatever session happened to be attached to the request.
+ */
 export type AdminAuthSource = "api-key" | "user";
 
 export interface AdminAuthResult {
   authorized: boolean;
-  /** Present only when `authorized` is true: which branch granted access. */
+  /**
+   * Set only when `authorized` is true — there is no granting credential to
+   * name otherwise. Read this instead of a request's `userId` when deciding
+   * who to credit: a valid admin key authorizes on its own, so a `userId` can
+   * be present on a request the user did not authorize.
+   */
   via?: AdminAuthSource;
 }
 
