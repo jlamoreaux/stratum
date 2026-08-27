@@ -1,6 +1,7 @@
 import { type Context, Hono } from "hono";
 import { diffTouchesProtectedConfig, loadPolicy } from "../evaluation";
 import type { EvalPolicy } from "../evaluation/types";
+import { GitHubClient } from "../github/client";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { runPostMergeCheck } from "../merge/post-merge";
 import { checkMergeProtection } from "../merge/protection";
@@ -37,6 +38,7 @@ import {
   mergeWorkspaceIntoProject,
   parseStagedTree,
   pushBranchToRemote,
+  resolveLocalTip,
   stagedTreeKey,
   stagedTreeShaKey,
 } from "../storage/git-ops";
@@ -1501,13 +1503,6 @@ app.post("/changes/:id/evaluate", async (c) => {
   return okOrFormRedirect(c, id, { changeId: id, eval: evalResult, evalRuns: recordResult.data });
 });
 
-/**
- * Bound on every direct GitHub API call in the promotion flow below, so one
- * slow GitHub subrequest cannot consume the whole request lifetime and get the
- * worker killed by the platform's own limit instead of failing cleanly.
- */
-const GITHUB_API_TIMEOUT_MS = 15_000;
-
 /** The repository a promotion is targeting, as resolved from the project source. */
 type GithubRepoTarget = { owner: string; repo: string };
 
@@ -1515,22 +1510,6 @@ interface GithubPr {
   number: number;
   html_url: string;
   state: string;
-}
-
-/** One entry of GitHub's `errors` array, as far as this route relies on it. */
-interface GithubErrorDetail {
-  message?: string;
-  code?: string;
-  field?: string;
-}
-
-/** Narrows one element of an untrusted `errors` array before it is read. */
-function isGithubErrorDetail(value: unknown): value is GithubErrorDetail {
-  if (typeof value !== "object" || value === null) return false;
-  const detail = value as Record<string, unknown>;
-  return (["message", "code", "field"] as const).every(
-    (key) => detail[key] === undefined || typeof detail[key] === "string",
-  );
 }
 
 /**
@@ -1605,45 +1584,6 @@ function isUsableGithubUrl(raw: string, target: GithubRepoTarget, prNumber: numb
   return (
     url.pathname.toLowerCase() === `/${target.owner}/${target.repo}/pull/${prNumber}`.toLowerCase()
   );
-}
-
-/**
- * Finds an open GitHub pull request associated with a branch.
- *
- * GitHub 422s PR creation with "a pull request already exists" when the head
- * ref already has one open — either a concurrent promotion, or a retry after
- * `updateChangeStatus` failed post-creation. Looking the PR up and reusing it
- * turns that dead end into a successful, idempotent promotion.
- *
- * @param repo - The GitHub repository to search
- * @param branch - The head branch associated with the pull request
- * @returns The matching pull request, or `undefined` if none is found or the lookup fails.
- */
-async function findOpenPrForHead(
-  repo: GithubRepoTarget,
-  branch: string,
-  headers: Record<string, string>,
-  logger: Logger,
-): Promise<GithubPr | undefined> {
-  const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls?head=${repo.owner}:${branch}&state=open`;
-  let res: Response;
-  try {
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) });
-  } catch (error) {
-    logger.error(
-      "Lookup of existing PR for duplicate head failed",
-      error instanceof Error ? error : undefined,
-      {
-        branch,
-      },
-    );
-    return undefined;
-  }
-  if (!res.ok) return undefined;
-  const body: unknown = await res.json().catch(() => undefined);
-  if (!Array.isArray(body)) return undefined;
-  const pr = body[0];
-  return isUsableGithubPr(pr, repo) ? pr : undefined;
 }
 
 app.post("/changes/:id/github-pr", async (c) => {
@@ -1764,6 +1704,48 @@ app.post("/changes/:id/github-pr", async (c) => {
   });
   if (!cloneResult.success) return appError(cloneResult.error);
 
+  // The evaluation gate is only meaningful if the code published to GitHub is
+  // the code that was evaluated. The clone above is a live read of the
+  // workspace right now, which can have advanced past `change.evaluatedSha`
+  // between evaluation and this request — same TOCTOU the merge path guards
+  // against a few hundred lines up (SEC-2) and #223 pinned on the R2/DO fast
+  // paths. Reject rather than push+promote against unevaluated content:
+  // fails closed, and is the smaller change than re-targeting the push at the
+  // pinned sha (that needs its own answer for what re-promotion then means).
+  // Legacy changes with no evaluatedSha (pre migration 024) skip the check,
+  // matching the merge path's behavior.
+  let publishedSha: string | undefined;
+  if (change.evaluatedSha !== undefined) {
+    // Resolved against `defaultBranch`, matching the clone above: that clone is
+    // singleBranch, so on a project whose default branch is not `main` it holds
+    // that branch and nothing else. Asking for any other ref here throws inside
+    // isomorphic-git and turns a valid promotion into a 502.
+    const tipResult = await resolveLocalTip(
+      cloneResult.data.fs,
+      cloneResult.data.dir,
+      defaultBranch,
+    );
+    if (!tipResult.success) return appError(tipResult.error);
+    publishedSha = tipResult.data;
+    if (publishedSha !== change.evaluatedSha) {
+      logger.warn("Workspace advanced past the evaluated revision; rejecting promotion", {
+        changeId: id,
+        evaluatedSha: change.evaluatedSha,
+        currentTip: publishedSha,
+      });
+      return c.json(
+        {
+          error:
+            "Workspace is stale: it advanced since this change was evaluated. Re-evaluate before promoting.",
+          code: "STALE_WORKSPACE",
+          evaluatedSha: change.evaluatedSha,
+          currentTip: publishedSha,
+        },
+        409,
+      );
+    }
+  }
+
   const pushResult = await pushBranchToRemote(
     cloneResult.data.fs,
     cloneResult.data.dir,
@@ -1845,120 +1827,99 @@ app.post("/changes/:id/github-pr", async (c) => {
   const prBody =
     `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
 
-  const githubHeaders = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${githubToken}`,
-    "User-Agent": "stratum",
-  };
+  // Duplicate-head 422 → look up + reuse the open PR GitHub already has for
+  // this head lives in the client (createOrReusePR): a re-promotion race, or
+  // a retry after `updateChangeStatus` failed post-creation, both 422 here,
+  // and the PR the caller wanted already exists either way.
+  const client = new GitHubClient(githubToken, logger);
+  const result = await client.createOrReusePR(
+    {
+      owner: repo.owner,
+      repo: repo.repo,
+      title: body.title ?? `Stratum: ${change.id}`,
+      body: prBody,
+      head: branch,
+      base,
+      draft: body.draft ?? true,
+    },
+    // A duplicate-head lookup hit is only worth reusing if it's a PR this
+    // route would be willing to persist — otherwise the original create
+    // error is the more useful thing to report (see isUsableGithubPr above).
+    (candidate) => isUsableGithubPr(candidate, repo),
+  );
 
-  let ghRes: Response;
-  try {
-    ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
-      method: "POST",
-      headers: githubHeaders,
-      body: JSON.stringify({
-        title: body.title ?? `Stratum: ${change.id}`,
-        body: prBody,
-        head: branch,
-        base,
-        draft: body.draft ?? true,
-      }),
-      // A slow GitHub response must not hold the request open until the
-      // platform's own subrequest limit kills it.
-      signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
-    });
-  } catch (error) {
-    logger.error("GitHub PR creation request failed", error instanceof Error ? error : undefined, {
-      changeId: id,
-    });
-    return c.json(
-      {
-        error: "GitHub PR creation failed: request timed out or network error",
-        code: "GITHUB_ERROR",
-      },
-      502,
-    );
-  }
-
-  let pr: GithubPr;
-
-  if (!ghRes.ok) {
-    // Surface GitHub's own status + message (never the token) instead of a
-    // generic 400 — a 422 "head invalid" vs. a 404 repo tells the caller
-    // exactly what to fix.
-    const detail = await ghRes.text().catch(() => "");
-    let githubMessage: string | undefined;
-    let errors: GithubErrorDetail[] = [];
-    try {
-      // The branch is already pushed by this point, so anything thrown while
-      // parsing an error body escapes as a bare 500 and loses the structured
-      // GITHUB_ERROR/502 the caller needs. GitHub is not guaranteed to send the
-      // documented shape on every failure, so validate rather than cast:
-      // `{"errors":{}}`, `{"errors":"invalid"}` and `{"errors":[null]}` all
-      // reach `.map()` otherwise.
-      const parsed: unknown = JSON.parse(detail);
-      const body = (typeof parsed === "object" && parsed !== null ? parsed : {}) as {
-        message?: unknown;
-        errors?: unknown;
-      };
-      errors = Array.isArray(body.errors) ? body.errors.filter(isGithubErrorDetail) : [];
-      githubMessage = [
-        typeof body.message === "string" ? body.message : undefined,
-        ...errors.map((e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code)),
-      ]
-        .filter(Boolean)
-        .join("; ");
-    } catch {
-      githubMessage = undefined;
-    }
-
-    // GitHub's duplicate-head 422 ("A pull request already exists for
-    // owner:branch") means the PR the caller wanted already exists — reuse it
-    // rather than failing (see findOpenPrForHead above).
-    const duplicateHead =
-      ghRes.status === 422 &&
-      errors.some((e) => e.message?.toLowerCase().includes("pull request already exists"));
-    const existingPr = duplicateHead
-      ? await findOpenPrForHead(repo, branch, githubHeaders, logger)
-      : undefined;
-
-    if (!existingPr) {
-      logger.error("GitHub PR creation failed", undefined, {
-        status: ghRes.status,
-        changeId: id,
-        githubMessage,
-      });
+  if (!result.success) {
+    if (result.networkError) {
+      logger.error("GitHub PR creation request failed", undefined, { changeId: id });
       return c.json(
         {
-          error: `GitHub PR creation failed (${ghRes.status})${githubMessage ? `: ${githubMessage}` : ""}`,
+          error: "GitHub PR creation failed: request timed out or network error",
           code: "GITHUB_ERROR",
-          githubStatus: ghRes.status,
         },
         502,
       );
     }
-    pr = existingPr;
-  } else {
-    // The branch is already pushed by this point, so a malformed success body
-    // must not escape as an unhandled rejection (a bare 500): map it to the
-    // same structured 502 every other GitHub failure uses.
-    const parsed: unknown = await ghRes.json().catch(() => undefined);
-    if (!isUsableGithubPr(parsed, repo)) {
-      logger.error("GitHub PR creation returned an unusable response body", undefined, {
-        status: ghRes.status,
+    // The branch is already pushed by this point. A 2xx status with a body
+    // the client couldn't parse as JSON is GitHub responding, just not
+    // usefully — the same "unreadable response" the shape-validation failure
+    // below reports for a 2xx body missing the expected fields, not a
+    // GitHub-reported error to relay.
+    if (result.status >= 200 && result.status < 300) {
+      logger.error("GitHub PR creation returned an unparseable response body", undefined, {
+        status: result.status,
         changeId: id,
       });
       return c.json(
         {
           error: "GitHub PR creation failed: unreadable response from GitHub",
           code: "GITHUB_ERROR",
-          githubStatus: ghRes.status,
+          githubStatus: result.status,
         },
         502,
       );
     }
-    pr = parsed;
+    // Surface GitHub's own status + message (never the token) instead of a
+    // generic 400 — a 422 "head invalid" vs. a 404 repo tells the caller
+    // exactly what to fix.
+    const githubMessage = [
+      result.githubMessage,
+      ...result.errors.map((e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code)),
+    ]
+      .filter(Boolean)
+      .join("; ");
+    logger.error("GitHub PR creation failed", undefined, {
+      status: result.status,
+      changeId: id,
+      githubMessage,
+    });
+    return c.json(
+      {
+        error: `GitHub PR creation failed (${result.status})${githubMessage ? `: ${githubMessage}` : ""}`,
+        code: "GITHUB_ERROR",
+        githubStatus: result.status,
+      },
+      502,
+    );
   }
+
+  // The branch is already pushed by this point, so a malformed response body
+  // (created or reused) must not escape as an unhandled rejection (a bare
+  // 500): map it to the same structured 502 every other GitHub failure uses.
+  if (!isUsableGithubPr(result.pr, repo)) {
+    logger.error("GitHub PR creation returned an unusable response body", undefined, {
+      status: result.status,
+      changeId: id,
+    });
+    return c.json(
+      {
+        error: "GitHub PR creation failed: unreadable response from GitHub",
+        code: "GITHUB_ERROR",
+        githubStatus: result.status,
+      },
+      502,
+    );
+  }
+  const pr: GithubPr = result.pr;
 
   const promotedAt = new Date().toISOString();
 
@@ -1972,6 +1933,10 @@ app.post("/changes/:id/github-pr", async (c) => {
     githubPrNumber: pr.number,
     githubPrUrl: pr.html_url,
     githubPrState: pr.state,
+    // The revision actually force-pushed as this PR's head — only known
+    // precisely when the evaluatedSha gate above ran (legacy changes with no
+    // evaluatedSha have no pinned revision to record here).
+    ...(publishedSha !== undefined ? { githubHeadSha: publishedSha } : {}),
     promotedAt,
     promotedBy: userId,
   });

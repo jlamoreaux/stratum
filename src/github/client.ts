@@ -14,6 +14,20 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 const MAX_DELAY_MS = 32000;
 
+/**
+ * Bound on a single GitHub subrequest so one slow response can't hold a
+ * Worker invocation open until the platform's own subrequest limit kills it.
+ * Callers that also retry (the private `request()` method's `maxRetries`)
+ * get a FRESH timeout per attempt, not one deadline shared across the whole
+ * call — the
+ * worst case wall time for a retried request is therefore roughly
+ * `attempts × timeoutMs` plus backoff sleeps between attempts, not
+ * `timeoutMs` total. A caller that needs a hard ceiling on total latency
+ * (e.g. a request lifecycle bound) should pass `maxRetries: 0` alongside the
+ * timeout rather than relying on the timeout alone to cap retries.
+ */
+const DEFAULT_TIMEOUT_MS = 15_000;
+
 export interface GitHubToken {
   accessToken: string;
   refreshToken?: string;
@@ -37,6 +51,61 @@ export interface CreatePROpts {
   body: string;
   head: string;
   base: string;
+  /** Opens the PR as a draft. Defaults to GitHub's own default (false) when omitted. */
+  draft?: boolean;
+}
+
+/** Result of {@link GitHubClient.createOrReusePR}. */
+export type CreateOrReusePRResult =
+  | { success: true; pr: unknown; reused: boolean; status: number }
+  | {
+      success: false;
+      /** `true` when the request itself failed (network error/timeout) — no
+       * GitHub response was received, so `status`/`githubMessage`/`errors`
+       * describe nothing GitHub actually said. */
+      networkError: boolean;
+      status: number;
+      githubMessage?: string;
+      errors: GithubErrorDetail[];
+    };
+
+/** One entry of GitHub's `errors` array, as far as this client relies on it. */
+export interface GithubErrorDetail {
+  message?: string;
+  code?: string;
+  field?: string;
+}
+
+/** Narrows one element of an untrusted `errors` array before it is read. */
+function isGithubErrorDetail(value: unknown): value is GithubErrorDetail {
+  if (typeof value !== "object" || value === null) return false;
+  const detail = value as Record<string, unknown>;
+  return (["message", "code", "field"] as const).every(
+    (key) => detail[key] === undefined || typeof detail[key] === "string",
+  );
+}
+
+/**
+ * Parses a GitHub error response body into its documented `message` +
+ * `errors[]` shape, tolerating anything else GitHub might actually send.
+ * GitHub is not guaranteed to send the documented shape on every failure —
+ * `{"errors":{}}`, `{"errors":"invalid"}`, `{"errors":[null]}`, and a
+ * non-JSON body all reach naive `.map()`/property access otherwise.
+ */
+function parseGithubErrorBody(text: string): { message?: string; errors: GithubErrorDetail[] } {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const body = (typeof parsed === "object" && parsed !== null ? parsed : {}) as {
+      message?: unknown;
+      errors?: unknown;
+    };
+    return {
+      message: typeof body.message === "string" ? body.message : undefined,
+      errors: Array.isArray(body.errors) ? body.errors.filter(isGithubErrorDetail) : [],
+    };
+  } catch {
+    return { errors: [] };
+  }
 }
 
 export interface UpdatePROpts {
@@ -76,6 +145,34 @@ const circuitBreakers = new Map<string, CircuitBreakerState>();
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_TIMEOUT_MS = 60000;
 
+/**
+ * Test-only escape hatch: this module-level state is shared by every
+ * `GitHubClient` instance (and persists for the lifetime of the module), so a
+ * test file that exercises several failing calls against the same
+ * owner/repo can otherwise trip the breaker and starve later, unrelated
+ * assertions in the same run. Not for production use.
+ */
+export function resetCircuitBreakersForTests(): void {
+  circuitBreakers.clear();
+}
+
+/**
+ * Whether calls to `endpoint`'s repository are currently being short-circuited.
+ *
+ * Keyed by the first three path segments (`/repos/<owner>/<repo>`), so the
+ * breaker is per-repository rather than per-endpoint: a repo that is gone,
+ * renamed, or whose token lost access fails every call against it, and there
+ * is nothing to gain by discovering that once per endpoint. The flip side is
+ * blast radius — every caller reaching that repo through this client shares
+ * one breaker, so a burst of failures from one route (promotion, say) can
+ * short-circuit an unrelated one (evaluation reporting) for
+ * {@link CIRCUIT_BREAKER_TIMEOUT_MS}.
+ *
+ * The open→half-open transition happens on read rather than on a timer: there
+ * is no scheduler here, and the next caller after the cooldown is the one that
+ * gets to probe. It is allowed through, and {@link recordCircuitResult} decides
+ * from its outcome whether the breaker closes or re-opens.
+ */
 function isCircuitOpen(endpoint: string): boolean {
   const key = endpoint.split("/").slice(0, 3).join("/");
   const cb = circuitBreakers.get(key);
@@ -90,6 +187,15 @@ function isCircuitOpen(endpoint: string): boolean {
   return false;
 }
 
+/**
+ * Feeds one call's outcome back into its repository's breaker.
+ *
+ * Any success closes the breaker and zeroes the failure count, not just a
+ * success while half-open: the count is meant to measure a *consecutive* run
+ * of failures, so an intervening success means whatever was wrong is no longer
+ * reproducing and the tally should not carry forward into an unrelated later
+ * incident.
+ */
 function recordCircuitResult(endpoint: string, success: boolean): void {
   const key = endpoint.split("/").slice(0, 3).join("/");
   const cb = circuitBreakers.get(key) || { failures: 0, lastFailure: 0, state: "closed" };
@@ -209,14 +315,40 @@ export class GitHubClient {
     this.logger = logger;
   }
 
+  /**
+   * Issues one GitHub API call, with retry/backoff, rate-limit handling, and
+   * the circuit breaker applying by default.
+   *
+   * `maxRetries` and `timeoutMs` are opt-in per call (existing callers that
+   * don't pass them keep exactly the prior behavior: `MAX_RETRIES` retries,
+   * no deadline). Passing `timeoutMs` bounds a single attempt, not the whole
+   * call — see the {@link DEFAULT_TIMEOUT_MS} doc comment for how that
+   * combines with retries. A caller that wants a single bounded attempt
+   * (no automatic retry) should pass `maxRetries: 0` explicitly — e.g. PR
+   * creation is not safe to blindly retry on a network-level failure, since
+   * the client can't tell whether GitHub received the request before the
+   * connection dropped (see `createOrReusePR`, which relies on the
+   * duplicate-head 422 to detect that case instead).
+   */
   private async request<T>(
     endpoint: string,
     options: RequestInit = {},
-    retryCount = 0,
+    requestOpts: { maxRetries?: number; timeoutMs?: number; retryCount?: number } = {},
   ): Promise<
-    | { success: true; data: T }
-    | { success: false; error: string; status: number; rateLimited?: boolean }
+    | { success: true; data: T; status: number }
+    | {
+        success: false;
+        error: string;
+        status: number;
+        rateLimited?: boolean;
+        networkError?: boolean;
+        githubMessage?: string;
+        errors?: GithubErrorDetail[];
+      }
   > {
+    const maxRetries = requestOpts.maxRetries ?? MAX_RETRIES;
+    const retryCount = requestOpts.retryCount ?? 0;
+
     if (isCircuitOpen(endpoint)) {
       return {
         success: false,
@@ -226,9 +358,19 @@ export class GitHubClient {
     }
 
     const url = `${GITHUB_API_BASE}${endpoint}`;
+    // A fresh timeout signal per attempt: a retried call gets the full
+    // `timeoutMs` again on each try, not a shrinking remainder of one shared
+    // deadline (see the doc comment above).
+    const timeoutSignal =
+      requestOpts.timeoutMs !== undefined ? AbortSignal.timeout(requestOpts.timeoutMs) : undefined;
+    const signal =
+      options.signal && timeoutSignal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : (options.signal ?? timeoutSignal);
     try {
       const response = await fetch(url, {
         ...options,
+        signal,
         headers: {
           Authorization: `Bearer ${this.token}`,
           Accept: "application/vnd.github+json",
@@ -245,14 +387,14 @@ export class GitHubClient {
         if (rateLimitRemaining === "0" && rateLimitReset) {
           const resetTime = Number.parseInt(rateLimitReset) * 1000;
           const waitTime = resetTime - Date.now();
-          if (retryCount < MAX_RETRIES && waitTime < MAX_DELAY_MS) {
+          if (retryCount < maxRetries && waitTime < MAX_DELAY_MS) {
             this.logger.warn("Rate limited, waiting and retrying", {
               endpoint,
               waitTime,
               retryCount,
             });
             await new Promise((resolve) => setTimeout(resolve, Math.max(waitTime, 1000)));
-            return this.request(endpoint, options, retryCount + 1);
+            return this.request(endpoint, options, { ...requestOpts, retryCount: retryCount + 1 });
           }
           recordCircuitResult(endpoint, false);
           return {
@@ -265,7 +407,7 @@ export class GitHubClient {
       }
 
       // Handle other retryable errors (5xx)
-      if (response.status >= 500 && retryCount < MAX_RETRIES) {
+      if (response.status >= 500 && retryCount < maxRetries) {
         const delay = getBackoffDelay(retryCount);
         this.logger.warn("Retryable error, backing off", {
           endpoint,
@@ -274,11 +416,12 @@ export class GitHubClient {
           delay,
         });
         await new Promise((resolve) => setTimeout(resolve, delay));
-        return this.request(endpoint, options, retryCount + 1);
+        return this.request(endpoint, options, { ...requestOpts, retryCount: retryCount + 1 });
       }
 
       if (!response.ok) {
         const errorText = await response.text();
+        const { message: githubMessage, errors } = parseGithubErrorBody(errorText);
         this.logger.error("GitHub API error", undefined, {
           endpoint,
           status: response.status,
@@ -289,12 +432,34 @@ export class GitHubClient {
           success: false,
           error: `GitHub API error: ${response.status} - ${errorText}`,
           status: response.status,
+          githubMessage,
+          errors,
         };
       }
 
       recordCircuitResult(endpoint, true);
-      const data = await response.json();
-      return { success: true, data: data as T };
+      // A 2xx response with a body that isn't valid JSON is a malformed
+      // response, not a network failure — GitHub was reached and answered.
+      // Parsed separately from the fetch itself so the outer catch (network
+      // errors/timeouts) doesn't swallow this into the same bucket: a caller
+      // that persists side effects before this point (the promotion route
+      // has already force-pushed the branch) needs to tell "GitHub never
+      // responded" apart from "GitHub responded with garbage".
+      try {
+        const data = await response.json();
+        return { success: true, data: data as T, status: response.status };
+      } catch (parseError) {
+        this.logger.error(
+          "GitHub API response was not valid JSON",
+          parseError instanceof Error ? parseError : undefined,
+          { endpoint, status: response.status },
+        );
+        return {
+          success: false,
+          error: `GitHub API returned a response that could not be parsed as JSON (status ${response.status})`,
+          status: response.status,
+        };
+      }
     } catch (error) {
       this.logger.error("GitHub API request failed", error instanceof Error ? error : undefined, {
         endpoint,
@@ -303,7 +468,8 @@ export class GitHubClient {
       return {
         success: false,
         error: `Request failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-        status: 500,
+        status: 0,
+        networkError: true,
       };
     }
   }
@@ -329,11 +495,105 @@ export class GitHubClient {
           body: opts.body,
           head: opts.head,
           base: opts.base,
+          draft: opts.draft,
         }),
       },
     );
     if (!result.success) return { success: false, error: result.error };
     return { success: true, pr: result.data };
+  }
+
+  /**
+   * Creates a PR from `opts.head`, or reuses the open PR GitHub already has
+   * for that head if one exists.
+   *
+   * GitHub 422s PR creation with "a pull request already exists" when the
+   * head ref already has one open — either a concurrent promotion, or a
+   * retry after the caller failed to persist the result of a prior create.
+   * Looking that PR up and reusing it turns what would otherwise be a dead
+   * end into a successful, idempotent call.
+   *
+   * The raw, `unknown` GitHub response is returned on success rather than a
+   * type asserted from it — callers that persist the result (as the
+   * promotion route does) are expected to validate its shape themselves
+   * against whatever they trust enough to store, since a JSON parse alone
+   * doesn't guarantee GitHub's documented fields are actually present.
+   *
+   * `isReusablePr` gates the lookup hit before it's treated as a successful
+   * reuse: this client has no opinion on what a caller trusts enough to
+   * accept as "the PR" (the promotion route, for one, only accepts an open
+   * PR whose `html_url` is exactly this repo's canonical page for the
+   * matched number — see `isUsableGithubPr`). A lookup hit the predicate
+   * rejects behaves exactly like a lookup that failed or found nothing open:
+   * the ORIGINAL create error is what gets reported, not a new failure about
+   * the lookup response, since that's the one call the caller actually asked
+   * for.
+   *
+   * Required, deliberately not defaulted. The code this replaced always ran
+   * an owner/repo check on the lookup hit, and a parameter defaulting to
+   * "accept anything" would turn that into something a caller drops by
+   * saying nothing. Reuse means persisting a PR this client did not create
+   * and did not choose; the caller has to name what it will accept.
+   *
+   * Both requests this makes use `maxRetries: 0`: a create call is not safe
+   * to retry blindly on a network-level failure (this client can't tell
+   * whether GitHub received it before the connection dropped — a retry could
+   * either double-create or land on the duplicate-head path above, which is
+   * exactly why that path exists), and the lookup is a best-effort read
+   * whose failure already falls back to the original create error below.
+   */
+  async createOrReusePR(
+    opts: CreatePROpts,
+    isReusablePr: (pr: unknown) => boolean,
+  ): Promise<CreateOrReusePRResult> {
+    const result = await this.request<unknown>(
+      `/repos/${opts.owner}/${opts.repo}/pulls`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: opts.title,
+          body: opts.body,
+          head: opts.head,
+          base: opts.base,
+          draft: opts.draft,
+        }),
+      },
+      { maxRetries: 0, timeoutMs: DEFAULT_TIMEOUT_MS },
+    );
+
+    if (result.success) {
+      return { success: true, pr: result.data, reused: false, status: result.status };
+    }
+
+    const duplicateHead =
+      result.status === 422 &&
+      (result.errors ?? []).some((e) =>
+        e.message?.toLowerCase().includes("pull request already exists"),
+      );
+
+    if (duplicateHead) {
+      const lookup = await this.request<unknown>(
+        `/repos/${opts.owner}/${opts.repo}/pulls?head=${opts.owner}:${opts.head}&state=open`,
+        {},
+        { maxRetries: 0, timeoutMs: DEFAULT_TIMEOUT_MS },
+      );
+      const candidate = lookup.success && Array.isArray(lookup.data) ? lookup.data[0] : undefined;
+      if (candidate !== undefined && isReusablePr(candidate)) {
+        return { success: true, pr: candidate, reused: true, status: lookup.status };
+      }
+      // Lookup failed, found nothing open, or found something the caller
+      // won't accept — fall through to the original create error below;
+      // that's still the most useful thing to report.
+    }
+
+    return {
+      success: false,
+      networkError: result.networkError ?? false,
+      status: result.status,
+      githubMessage: result.githubMessage,
+      errors: result.errors ?? [],
+    };
   }
 
   async updatePR(

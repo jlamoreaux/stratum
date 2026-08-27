@@ -38,6 +38,7 @@ vi.mock("../src/storage/git-ops", async (importActual) => {
     cloneRepo: vi.fn(async () => ({ success: true, data: { fs: {}, dir: "/" } })),
     batchMergeStagedTrees: vi.fn(),
     pushBranchToRemote: vi.fn(async () => ({ success: true, data: undefined })),
+    resolveLocalTip: vi.fn(),
   };
 });
 
@@ -175,6 +176,7 @@ import {
   diffTouchesProtectedConfig,
   loadPolicy,
 } from "../src/evaluation";
+import { resetCircuitBreakersForTests } from "../src/github/client";
 import { emitEvent } from "../src/queue/events";
 import { getAgent, getAgentByToken } from "../src/storage/agents";
 import { recordAudit } from "../src/storage/audit";
@@ -199,6 +201,7 @@ import {
   getDiffBetweenRepos,
   mergeWorkspaceIntoProject,
   pushBranchToRemote,
+  resolveLocalTip,
 } from "../src/storage/git-ops";
 import { packObjects } from "../src/storage/object-loader";
 import { recordProvenance } from "../src/storage/provenance";
@@ -2135,6 +2138,12 @@ describe("POST /api/changes/:id/github-pr", () => {
     env = makeEnv();
     env.GITHUB_TOKEN = "ghp_secret_token";
     vi.clearAllMocks();
+    // GitHubClient's circuit breaker is module-level state shared by every
+    // instance — this suite deliberately drives many consecutive GitHub
+    // failures against the same acme/widgets repo across test cases, which
+    // would otherwise trip the breaker and starve later, unrelated
+    // assertions with a spurious 503.
+    resetCircuitBreakersForTests();
     vi.mocked(getUserByToken).mockImplementation(async (_db, token) => {
       if (token === "stratum_user_testtoken00000000000000000") {
         return {
@@ -2248,6 +2257,128 @@ describe("POST /api/changes/:id/github-pr", () => {
         promotedBy: "user_test",
       }),
     );
+  });
+
+  // #243: the evaluation gate is only meaningful if the code published to
+  // GitHub is the code that was evaluated. change.evaluatedSha is the pinned
+  // revision; the clone above is a live read of the workspace, which can have
+  // advanced since evaluation ran.
+  describe("evaluatedSha gate (#243)", () => {
+    it("pushes and promotes, recording the published sha, when the workspace tip matches evaluatedSha", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-evaluated" });
+
+      const res = await promote();
+      expect(res.status).toBe(200);
+      // The ref is the project's default branch (this suite's project defaults
+      // to `develop`), not a hard-coded `main` — see the dedicated case below.
+      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/", "develop");
+
+      // The gate runs strictly before the push (before anything is published).
+      const tipOrder = vi.mocked(resolveLocalTip).mock.invocationCallOrder[0] ?? -1;
+      const pushOrder = vi.mocked(pushBranchToRemote).mock.invocationCallOrder[0] ?? -1;
+      expect(tipOrder).toBeGreaterThan(0);
+      expect(tipOrder).toBeLessThan(pushOrder);
+
+      expect(updateChangeStatus).toHaveBeenCalledWith(
+        env.DB,
+        expect.anything(),
+        "chg_abc123",
+        "promoted",
+        expect.objectContaining({ githubHeadSha: "sha-evaluated" }),
+      );
+    });
+
+    it("rejects the promotion with a structured error when the workspace tip has moved past evaluatedSha", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-advanced" });
+
+      const res = await promote();
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as {
+        error: string;
+        code: string;
+        evaluatedSha: string;
+        currentTip: string;
+      };
+      expect(body.code).toBe("STALE_WORKSPACE");
+      expect(body.evaluatedSha).toBe("sha-evaluated");
+      expect(body.currentTip).toBe("sha-advanced");
+      // Fails closed BEFORE anything is published or persisted.
+      expect(pushBranchToRemote).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    });
+
+    it("502s without pushing when the local tip can't be resolved", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({
+        success: false,
+        error: new AppError(
+          "Git error: Failed to resolve local tip",
+          "EXTERNAL_SERVICE_ERROR",
+          502,
+        ),
+      });
+
+      const res = await promote();
+      expect(res.status).toBe(502);
+      expect(pushBranchToRemote).not.toHaveBeenCalled();
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    });
+
+    // The gate resolves the tip of the branch that was actually cloned. The
+    // clone is singleBranch on the project's default branch, so a project whose
+    // default is not `main` has no `main` for isomorphic-git to resolve: a
+    // hard-coded ref here throws and 502s a promotion that should have passed
+    // the gate. Asserted through the ref the resolver is handed rather than the
+    // status alone, because the resolver is mocked in this suite and would
+    // happily answer for any ref.
+    it("resolves the tip of the project's default branch, not `main`", async () => {
+      vi.mocked(getProject).mockResolvedValue({
+        success: true,
+        data: { ...githubProject, githubDefaultBranch: "release-2026" },
+      });
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-evaluated" });
+
+      const res = await promote();
+      expect(res.status).toBe(200);
+      // Same ref the clone asked for — the two must not drift apart.
+      expect(cloneRepo).toHaveBeenCalledWith(
+        mockWorkspace.remote,
+        "artifacts-token",
+        expect.anything(),
+        { ref: "release-2026", fullHistory: true },
+      );
+      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/", "release-2026");
+    });
+
+    it("skips the gate (legacy live-tip behavior) when the change has no evaluatedSha", async () => {
+      // acceptedChange has no evaluatedSha.
+      const res = await promote();
+      expect(res.status).toBe(200);
+      expect(resolveLocalTip).not.toHaveBeenCalled();
+      expect(updateChangeStatus).toHaveBeenCalledWith(
+        env.DB,
+        expect.anything(),
+        "chg_abc123",
+        "promoted",
+        expect.not.objectContaining({ githubHeadSha: expect.anything() }),
+      );
+    });
   });
 
   it("promotes a bulk-imported project that only has sourceUrl", async () => {
