@@ -179,6 +179,73 @@ describe("GitHubClient.createOrReusePR", () => {
     }
   });
 
+  it("reuses a later lookup entry when the caller's predicate rejects the first", async () => {
+    // `GET /pulls?head=` is head-only, so it can return an open PR that
+    // belongs to a repository this promotion is not pushing to — a project
+    // migrated between GitHub repos is the real case. The predicate is what
+    // tells them apart, so the accepted one may not be first.
+    const wrongRepoPr = { number: 4, html_url: "https://github.com/acme/legacy/pull/4" };
+    const rightRepoPr = { number: 9, html_url: "https://github.com/acme/widgets/pull/9" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            message: "Validation Failed",
+            errors: [{ message: "A pull request already exists for acme:stratum/chg_1." }],
+          },
+          422,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse([wrongRepoPr, rightRepoPr], 200));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const belongsToWidgets = vi.fn(
+      (pr: unknown) =>
+        (pr as { html_url?: string }).html_url === "https://github.com/acme/widgets/pull/9",
+    );
+
+    const client = new GitHubClient("tok", logger);
+    const result = await client.createOrReusePR(opts, belongsToWidgets);
+
+    expect(result).toEqual({ success: true, reused: true, status: 200, pr: rightRepoPr });
+    expect(belongsToWidgets).toHaveBeenCalledWith(wrongRepoPr, 0, [wrongRepoPr, rightRepoPr]);
+    expect(belongsToWidgets).toHaveBeenCalledWith(rightRepoPr, 1, [wrongRepoPr, rightRepoPr]);
+  });
+
+  it("falls back to the original create error when the predicate rejects every lookup entry", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            message: "Validation Failed",
+            errors: [{ message: "A pull request already exists for acme:stratum/chg_1." }],
+          },
+          422,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          [
+            { number: 4, html_url: "https://github.com/acme/legacy/pull/4" },
+            { number: 5, html_url: "https://github.com/acme/other/pull/5" },
+          ],
+          200,
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new GitHubClient("tok", logger);
+    const result = await client.createOrReusePR(opts, () => false);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.status).toBe(422);
+      expect(result.errors[0]?.message).toContain("pull request already exists");
+    }
+  });
+
   it("does not look up a duplicate head when the 422 is not a duplicate-head failure", async () => {
     const fetchMock = vi
       .fn()
