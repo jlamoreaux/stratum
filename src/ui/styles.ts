@@ -900,6 +900,46 @@ button.nav-auth-link {
 .readme-content details { margin: 0.5rem 0; }
 .readme-content summary { cursor: pointer; color: var(--text-muted); }
 
+/* New project form: CSS-only mode toggle (script only re-points the action) */
+.mode-toggle { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+.mode-toggle label {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  padding: 0.45rem 0.9rem; border: 1px solid var(--border-strong);
+  border-radius: 4px; cursor: pointer; color: var(--text-muted);
+  font-size: 0.9rem; user-select: none;
+}
+.mode-toggle label:hover { color: var(--text-body); border-color: var(--border-hover); }
+.mode-toggle label:has(input:checked) {
+  background: var(--accent); border-color: var(--accent-border); color: var(--accent-text);
+}
+.mode-toggle label:has(input:focus-visible) { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+.mode-toggle input[type="radio"] {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+}
+
+.new-project-form .form-field { margin-bottom: 1.1rem; }
+.new-project-form .form-field > label:not(.checkbox-label) { display: block; color: var(--text-body); font-size: 0.85rem; margin-bottom: 0.35rem; }
+.new-project-form input[type="text"],
+.new-project-form input[type="url"],
+.new-project-form select {
+  width: 100%; padding: 0.5rem 0.65rem; background: var(--bg-page);
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  color: var(--text-primary); font-family: inherit; font-size: 0.9rem;
+}
+.new-project-form input:focus-visible,
+.new-project-form select:focus-visible {
+  outline: none; border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px rgba(42, 90, 174, 0.3);
+}
+
+/* Import-mode fields appear (and blank-only ones hide) with the toggle. */
+.new-project-form .import-only { display: none; }
+.new-project-form:has(input[name="mode"][value="import"]:checked) .import-only { display: block; }
+.new-project-form:has(input[name="mode"][value="import"]:checked) .blank-only { display: none; }
+.new-project-form .submit-label-import { display: none; }
+.new-project-form:has(input[name="mode"][value="import"]:checked) .submit-label-blank { display: none; }
+.new-project-form:has(input[name="mode"][value="import"]:checked) .submit-label-import { display: inline; }
+
 /* Project header: identity crumb + tab navigation */
 .project-header { margin-bottom: 1.5rem; }
 .project-header-row {
