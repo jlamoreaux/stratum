@@ -2590,7 +2590,7 @@ export async function applySourceUpdate(
       );
     }
     if (matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)) {
-      const missingMergeBase = await isMissingMergeBase(fs, dir, "main", sourceTip);
+      const missingMergeBase = await isMissingMergeBase(fs, dir, branch, sourceTip);
       return err(
         new AppError(
           `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,

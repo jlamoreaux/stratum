@@ -44,10 +44,11 @@ async function commitFiles(gfs: GitFS, files: Record<string, string>, message = 
   return git.commit({ fs: gfs, dir: DIR, message, author });
 }
 
-/** Rewind main to `sha` (simulates the local repo not yet having later commits). */
-async function rewindMain(gfs: GitFS, sha: string) {
-  await git.writeRef({ fs: gfs, dir: DIR, ref: "refs/heads/main", value: sha, force: true });
-  await git.checkout({ fs: gfs, dir: DIR, ref: "main", force: true });
+/** Rewind `branch` to `sha` (simulates the local repo not yet having later
+ * commits). Takes the branch name so the non-main-default cases can reuse it. */
+async function rewindBranch(gfs: GitFS, sha: string, branch = "main") {
+  await git.writeRef({ fs: gfs, dir: DIR, ref: `refs/heads/${branch}`, value: sha, force: true });
+  await git.checkout({ fs: gfs, dir: DIR, ref: branch, force: true });
 }
 
 /** Mark `oids` as the local repo's shallow boundary — what a real shallow
@@ -61,6 +62,84 @@ async function writeShallowFile(fs: NodeFS, oids: string[]) {
  * to hide, so the shallow boundary file goes away entirely. */
 async function clearShallowFile(fs: NodeFS) {
   await fs.promises.unlink(`${DIR}/.git/shallow`);
+}
+
+/**
+ * Builds the one history shape that genuinely hides a merge base from
+ * isomorphic-git, and places only the in-window objects on disk.
+ *
+ * Exists because that shape is fiddly enough to be worth stating once: the
+ * merge-base search can name an ancestor's oid from a PRESENT commit's own
+ * recorded parent hash without needing that ancestor's object, so the shared
+ * root has to sit at least two hops past the last commit each side really has
+ * — tip -> mid (present, the shallow boundary) -> boundary (ABSENT) ->
+ * sharedRoot (ABSENT, only named inside `boundary`'s own object). The absent
+ * objects are returned so the caller's deepen callbacks can place them, which
+ * is how a deepening fetch is simulated.
+ */
+async function buildHiddenMergeBaseHistory(gfs: GitFS, gitdir: string) {
+  const rootBlob = await blobObject(new TextEncoder().encode("root\n"));
+  const rootTree = await treeObject([{ mode: "100644", name: "root.txt", oid: rootBlob.oid }]);
+  const sharedRoot = await commitObject({
+    tree: rootTree.oid,
+    parents: [],
+    message: "shared root",
+    timestamp: 1_700_000_000,
+  });
+
+  async function buildLine(label: string, tipTimestamp: number) {
+    // `boundary`'s tree is never dereferenced (only commit headers are read
+    // while searching for a merge base), so it's fine to reuse `rootTree`.
+    const boundary = await commitObject({
+      tree: rootTree.oid,
+      parents: [sharedRoot.oid],
+      message: `${label} boundary`,
+      timestamp: 1_700_000_050,
+    });
+    const midBlob = await blobObject(new TextEncoder().encode(`${label}-mid\n`));
+    const midTree = await treeObject([
+      { mode: "100644", name: `${label}-mid.txt`, oid: midBlob.oid },
+    ]);
+    const mid = await commitObject({
+      tree: midTree.oid,
+      parents: [boundary.oid],
+      message: `${label} shallow boundary`,
+      timestamp: 1_700_000_080,
+    });
+    const tipBlob = await blobObject(new TextEncoder().encode(`${label}-tip\n`));
+    const tipTree = await treeObject([{ mode: "100644", name: `${label}.txt`, oid: tipBlob.oid }]);
+    const tip = await commitObject({
+      tree: tipTree.oid,
+      parents: [mid.oid],
+      message: `${label} change`,
+      timestamp: tipTimestamp,
+    });
+    return { boundary, midBlob, midTree, mid, tipBlob, tipTree, tip };
+  }
+
+  const native = await buildLine("native", 1_700_000_100);
+  const source = await buildLine("source", 1_700_000_110);
+
+  // Place everything from `mid` down to the tip on both sides — the shallow
+  // window — but neither `boundary` nor `sharedRoot`.
+  for (const o of [
+    native.midBlob,
+    native.midTree,
+    native.mid,
+    native.tipBlob,
+    native.tipTree,
+    native.tip,
+    source.midBlob,
+    source.midTree,
+    source.mid,
+    source.tipBlob,
+    source.tipTree,
+    source.tip,
+  ]) {
+    await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
+  }
+
+  return { rootBlob, rootTree, sharedRoot, native, source };
 }
 
 describe("applySourceUpdate (real git, in-memory)", () => {
@@ -90,7 +169,7 @@ describe("applySourceUpdate (real git, in-memory)", () => {
     const base = await commitFiles(gfs, { "file.txt": "base\n" }, "base");
     const mid = await commitFiles(gfs, { "file.txt": "v2\n" }, "source c2");
     const sourceTip = await commitFiles(gfs, { "extra.txt": "new\n" }, "source c3");
-    await rewindMain(gfs, base);
+    await rewindBranch(gfs, base);
 
     const result = await applySourceUpdate(fs, DIR, sourceTip, logger);
 
@@ -135,7 +214,7 @@ describe("applySourceUpdate (real git, in-memory)", () => {
     const { fs, gfs } = await initRepo();
     const base = await commitFiles(gfs, { "file.txt": "base\n" }, "base");
     const sourceTip = await commitFiles(gfs, { "source.txt": "from github\n" }, "source");
-    await rewindMain(gfs, base);
+    await rewindBranch(gfs, base);
     const nativeTip = await commitFiles(gfs, { "native.txt": "stratum\n" }, "native");
 
     const result = await applySourceUpdate(fs, DIR, sourceTip, logger);
@@ -156,7 +235,7 @@ describe("applySourceUpdate (real git, in-memory)", () => {
     await commitFiles(gfs, { "file.txt": "base\n" }, "base");
     const sourceTip = await commitFiles(gfs, { "file.txt": "github edit\n" }, "source");
     const base = (await git.log({ fs: gfs, dir: DIR, depth: -1 })).at(-1)?.oid ?? "";
-    await rewindMain(gfs, base);
+    await rewindBranch(gfs, base);
     const nativeTip = await commitFiles(gfs, { "file.txt": "native edit\n" }, "native");
 
     const result = await applySourceUpdate(fs, DIR, sourceTip, logger);
@@ -229,75 +308,11 @@ describe("applySourceUpdateWithDeepening (real git, in-memory)", () => {
     const { fs, gfs } = await initRepo();
     const gitdir = `${DIR}/.git`;
 
-    // isomorphic-git's merge-base search can name an ancestor's oid from a
-    // PRESENT commit's own recorded parent hash without needing that
-    // ancestor's object — so a genuinely hidden merge base requires it to
-    // sit at least two hops past the last commit each side actually has:
-    // tip -> mid (present, the shallow boundary) -> boundary (ABSENT) ->
-    // sharedRoot (ABSENT, only named inside `boundary`'s own object).
-    const rootBlob = await blobObject(new TextEncoder().encode("root\n"));
-    const rootTree = await treeObject([{ mode: "100644", name: "root.txt", oid: rootBlob.oid }]);
-    const sharedRoot = await commitObject({
-      tree: rootTree.oid,
-      parents: [],
-      message: "shared root",
-      timestamp: 1_700_000_000,
-    });
-
-    async function buildLine(label: string, tipTimestamp: number) {
-      // `boundary`'s tree is never dereferenced (only commit headers are read
-      // while searching for a merge base), so it's fine to reuse `rootTree`.
-      const boundary = await commitObject({
-        tree: rootTree.oid,
-        parents: [sharedRoot.oid],
-        message: `${label} boundary`,
-        timestamp: 1_700_000_050,
-      });
-      const midBlob = await blobObject(new TextEncoder().encode(`${label}-mid\n`));
-      const midTree = await treeObject([
-        { mode: "100644", name: `${label}-mid.txt`, oid: midBlob.oid },
-      ]);
-      const mid = await commitObject({
-        tree: midTree.oid,
-        parents: [boundary.oid],
-        message: `${label} shallow boundary`,
-        timestamp: 1_700_000_080,
-      });
-      const tipBlob = await blobObject(new TextEncoder().encode(`${label}-tip\n`));
-      const tipTree = await treeObject([
-        { mode: "100644", name: `${label}.txt`, oid: tipBlob.oid },
-      ]);
-      const tip = await commitObject({
-        tree: tipTree.oid,
-        parents: [mid.oid],
-        message: `${label} change`,
-        timestamp: tipTimestamp,
-      });
-      return { boundary, midBlob, midTree, mid, tipBlob, tipTree, tip };
-    }
-
-    const native = await buildLine("native", 1_700_000_100);
-    const source = await buildLine("source", 1_700_000_110);
-
-    // Place everything from `mid` down to the tip on both sides — the
-    // shallow window — but neither `boundary` nor `sharedRoot`.
-    for (const o of [
-      native.midBlob,
-      native.midTree,
-      native.mid,
-      native.tipBlob,
-      native.tipTree,
-      native.tip,
-      source.midBlob,
-      source.midTree,
-      source.mid,
-      source.tipBlob,
-      source.tipTree,
-      source.tip,
-    ]) {
-      await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
-    }
-    await rewindMain(gfs, native.tip.oid);
+    const { rootBlob, rootTree, sharedRoot, native, source } = await buildHiddenMergeBaseHistory(
+      gfs,
+      gitdir,
+    );
+    await rewindBranch(gfs, native.tip.oid);
     await git.writeRef({
       fs: gfs,
       dir: DIR,
@@ -388,7 +403,7 @@ describe("applySourceUpdateWithDeepening (real git, in-memory)", () => {
     for (const o of [nativeBlob, nativeTree, nativeRoot, sourceBlob, sourceTree, sourceRoot]) {
       await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
     }
-    await rewindMain(gfs, nativeRoot.oid);
+    await rewindBranch(gfs, nativeRoot.oid);
     await git.writeRef({
       fs: gfs,
       dir: DIR,
@@ -433,5 +448,81 @@ describe("applySourceUpdateWithDeepening (real git, in-memory)", () => {
     // Window doubles 2 -> 4 -> 8 (cap), so exactly two deepen rounds run on
     // each side before the loop refuses to grow the window any further.
     expect(deepenCalls).toBe(4);
+  });
+  // #240: the deepening retry is gated on `missingMergeBase === true`, which
+  // `applySourceUpdate` derives by resolving the project's branch. Resolving a
+  // hardcoded "main" instead of the branch actually in play fails on a project
+  // whose default is trunk/master, and `isMissingMergeBase` reports `false` on
+  // a failed resolve — so the whole feature silently switched itself off for
+  // those projects and sync fell straight back to SYNC_DIVERGED. "trunk" is
+  // used deliberately: this repo has no `main` ref at all, so a stray default
+  // cannot make this pass by accident.
+  it("deepens and retries for a project whose default branch is not main", async () => {
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const gfs = fs as GitFS;
+    await git.init({ fs: gfs, dir: DIR, defaultBranch: "trunk" });
+    const gitdir = `${DIR}/.git`;
+
+    const { rootBlob, rootTree, sharedRoot, native, source } = await buildHiddenMergeBaseHistory(
+      gfs,
+      gitdir,
+    );
+
+    await rewindBranch(gfs, native.tip.oid, "trunk");
+    await git.writeRef({
+      fs: gfs,
+      dir: DIR,
+      ref: "refs/remotes/source/trunk",
+      value: source.tip.oid,
+      force: true,
+    });
+    await writeShallowFile(fs, [native.mid.oid, source.mid.oid]);
+    // Nothing anywhere in this repo answers to "main".
+    await expect(git.resolveRef({ fs: gfs, dir: DIR, ref: "main" })).rejects.toThrow();
+
+    let projectDeepened = false;
+    let sourceDeepened = false;
+    const deepen: { project: DeepenFetch; source: DeepenFetch } = {
+      project: async () => {
+        projectDeepened = true;
+        for (const o of [native.boundary, rootBlob, rootTree, sharedRoot]) {
+          await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
+        }
+        return ok(undefined);
+      },
+      source: async () => {
+        sourceDeepened = true;
+        await placeLooseObject(
+          gfs as unknown as FsLike,
+          gitdir,
+          source.boundary.oid,
+          source.boundary.bytes,
+        );
+        await clearShallowFile(fs);
+        return ok(undefined);
+      },
+    };
+
+    const result = await applySourceUpdateWithDeepening(
+      fs,
+      DIR,
+      source.tip.oid,
+      "refs/remotes/source/trunk",
+      2,
+      8,
+      deepen,
+      logger,
+      "trunk",
+    );
+
+    // The retry loop ran at all — the assertion that fails if the missing-base
+    // probe goes back to looking up a hardcoded "main".
+    expect(projectDeepened).toBe(true);
+    expect(sourceDeepened).toBe(true);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.status).toBe("merged");
+    const files = await git.listFiles({ fs: gfs, dir: DIR, ref: "trunk" });
+    expect(files.sort()).toEqual(["native.txt", "source.txt"]);
   });
 });
