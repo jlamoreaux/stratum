@@ -1603,6 +1603,11 @@ app.post("/:namespace/:slug/sync", async (c) => {
   // Read BEFORE creating the job below: this looks up the most recent import
   // job for the project, and the one about to be created would become that,
   // so the lookup would read back the value it is trying to inherit.
+  //
+  // As on the webhook path, this depth reaches the fallback full import rather
+  // than the incremental fetch, which uses its own SYNC_FETCH_DEPTH window
+  // (see `syncOrImportProject`). It is still the recorded depth rather than a
+  // literal, which is what the fallback needs.
   const inheritedDepth = await getLatestImportDepth(c.env.DB, namespace, slug, logger);
   const syncDepth = inheritedDepth ?? DEFAULT_CLONE_DEPTH;
   const createResult = await createImportJob(

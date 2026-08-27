@@ -125,10 +125,15 @@ async function handlePush(
 
   const importId = crypto.randomUUID();
   const sourceUrl = project.sourceUrl ?? project.remote;
-  // The depth the project was actually imported at. Read before the enqueue
-  // (and before the job below is created, which would otherwise become the
-  // "most recent" job this reads back) so a webhook-driven sync cannot quietly
-  // shallow a full-history project.
+  // The depth the project was actually imported at, replacing a hardcoded 10.
+  // Read before the enqueue (and before the job below is created, which would
+  // otherwise become the "most recent" job this reads back).
+  //
+  // Reaches the FALLBACK FULL IMPORT only — the branch `syncOrImportProject`
+  // takes for a project with no parseable Artifacts remote. The incremental
+  // fetch every established project takes ignores this and uses its own
+  // SYNC_FETCH_DEPTH window. Still worth carrying: the fallback re-imports the
+  // whole project, so a wrong depth there is exactly where it is costly.
   const syncDepth =
     (await getLatestImportDepth(env.DB, project.namespace, project.slug, logger)) ??
     DEFAULT_CLONE_DEPTH;
