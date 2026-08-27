@@ -6,6 +6,7 @@ import { updateChangeStatus } from "../src/storage/changes";
 import { getCommitParent, readRepoFiles, revertToCommit } from "../src/storage/git-ops";
 import type { Env, ProjectEntry, SandboxInstance } from "../src/types";
 import type { Logger } from "../src/utils/logger";
+import { makeExecutingSandbox } from "./helpers/fake-sandbox";
 
 vi.mock("../src/storage/git-ops", () => ({
   readRepoFiles: vi.fn(),
@@ -258,6 +259,52 @@ describe("runPostMergeCheck", () => {
     const decodeIndex = commands.findIndex((c) => c.includes("stratum-binary-decode"));
     expect(decodeIndex).toBeGreaterThanOrEqual(0);
     expect(commands.indexOf("npm test")).toBeGreaterThan(decodeIndex);
+  });
+
+  it("never clobbers tracked files sitting at the decode helper paths (#271)", async () => {
+    // Same hazard as the evaluator path, with a sharper consequence: the
+    // helpers are staged into the merged tree and deleted again by the decode
+    // script, so a repo that tracks a file at either name would have the smoke
+    // command run against a tree missing it — failing the check and reverting
+    // a merge that was fine. The sandbox here executes the emitted script for
+    // real, so the assertions describe the tree the command actually sees.
+    const trackedManifest = "release-notes checked into the repo\n";
+    const trackedScript = "module.exports = { theRepoOwnsThisFile: true };\n";
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    vi.mocked(readRepoFiles).mockResolvedValue({
+      success: true,
+      data: new Map([
+        [".stratum-binary-manifest.txt", new TextEncoder().encode(trackedManifest)],
+        [".stratum-binary-decode.cjs", new TextEncoder().encode(trackedScript)],
+        ["assets/logo.png", binaryBytes],
+      ]),
+    });
+    const sandbox = makeExecutingSandbox();
+    const env = {
+      DB: {} as D1Database,
+      SANDBOX: { create: vi.fn().mockResolvedValue(sandbox.instance) },
+    } as unknown as Env;
+
+    const result = await runPostMergeCheck(
+      env,
+      project,
+      {
+        changeId: "chg_1",
+        mergeCommit: "sha_merge",
+        policy: policyWith({ postMergeCommand: "npm test" }),
+      },
+      mockLogger,
+    );
+
+    expect(result.status).toBe("passed");
+    expect(sandbox.files.get(".stratum-binary-manifest.txt")).toBe(trackedManifest);
+    expect(sandbox.files.get(".stratum-binary-decode.cjs")).toBe(trackedScript);
+    expect(Uint8Array.from(sandbox.files.get("assets/logo.png") as Uint8Array)).toEqual(
+      binaryBytes,
+    );
+    expect(sandbox.commands[0]).toBe("node .stratum-binary-decode-1.cjs");
+    expect(sandbox.files.has(".stratum-binary-manifest-1.txt")).toBe(false);
+    expect(sandbox.files.has(".stratum-binary-decode-1.cjs")).toBe(false);
   });
 
   it("honors a custom timeout", async () => {

@@ -1,10 +1,4 @@
-import {
-  BINARY_DECODE_COMMAND,
-  BINARY_DECODE_SCRIPT_PATH,
-  BINARY_MANIFEST_PATH,
-  decodeBinaryFilesScript,
-  encodeForSandboxWrite,
-} from "../evaluation/sandbox-evaluator";
+import { materializeTree } from "../evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../evaluation/types";
 import { emitEvent } from "../queue/events";
 import { updateChangeStatus } from "../storage/changes";
@@ -78,32 +72,15 @@ export async function runPostMergeCheck(
 
     const sandbox = await env.SANDBOX.create();
     try {
-      // readRepoFiles hands back raw bytes (a tree can hold binaries); the
-      // sandbox's writeFile only carries strings, so mirror the sandbox
-      // evaluator's write boundary: valid UTF-8 decodes directly, anything
-      // else is base64-encoded and decoded back to real bytes in the sandbox
-      // before the post-merge command runs.
-      const binaryPaths: string[] = [];
-      for (const [path, bytes] of filesResult.data) {
-        const { content, binary } = encodeForSandboxWrite(bytes);
-        if (binary) binaryPaths.push(path);
-        await sandbox.writeFile(path, content);
-      }
-      if (binaryPaths.length > 0) {
-        await sandbox.writeFile(BINARY_MANIFEST_PATH, binaryPaths.join("\n"));
-        await sandbox.writeFile(BINARY_DECODE_SCRIPT_PATH, decodeBinaryFilesScript);
-        const decodeResult = await sandbox.run(BINARY_DECODE_COMMAND, {
-          timeout: merge?.postMergeTimeoutMs ?? DEFAULT_POST_MERGE_TIMEOUT_MS,
-        });
-        if (decodeResult.exitCode !== 0) {
-          const output = (decodeResult.stdout + decodeResult.stderr)
-            .slice(0, MAX_OUTPUT_IN_REASON)
-            .trim();
-          throw new Error(
-            `Failed to decode ${binaryPaths.length} binary file(s) in sandbox: ${output}`,
-          );
-        }
-      }
+      // readRepoFiles hands back raw bytes (a tree can hold binaries) while
+      // the sandbox's writeFile only carries strings; `materializeTree` owns
+      // that boundary — base64 for anything that is not valid UTF-8, decoded
+      // back to real bytes in the sandbox before the post-merge command runs.
+      // A failure there throws and is reported as a post-merge failure below,
+      // exactly as an inline decode failure was.
+      await materializeTree(sandbox, filesResult.data, {
+        decodeTimeoutMs: merge?.postMergeTimeoutMs ?? DEFAULT_POST_MERGE_TIMEOUT_MS,
+      });
       const runStartedAt = Date.now();
       const run = await sandbox.run(command, {
         timeout: merge?.postMergeTimeoutMs ?? DEFAULT_POST_MERGE_TIMEOUT_MS,

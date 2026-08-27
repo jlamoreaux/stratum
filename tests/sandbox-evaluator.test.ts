@@ -16,6 +16,7 @@ import type { Env, SandboxBinding, SandboxInstance } from "../src/types";
 import { AppError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
 import { err, ok } from "../src/utils/result";
+import { makeExecutingSandbox } from "./helpers/fake-sandbox";
 
 const mockLogger: Logger = {
   trace: vi.fn(),
@@ -49,6 +50,11 @@ function encodeTree(entries: readonly (readonly [string, string])[]): Map<string
 
 const FULL_TREE = encodeTree(FULL_TREE_TEXT);
 
+/**
+ * A stand-in for the repo read. Hands back raw bytes because that is the
+ * contract `readRepoFiles` actually has — a test that fed strings here would
+ * pass while the real evaluator corrupted every binary file in the tree.
+ */
 function makeReadFiles(files: Map<string, Uint8Array> = FULL_TREE) {
   return vi.fn().mockResolvedValue(ok(files));
 }
@@ -184,6 +190,43 @@ describe("SandboxEvaluator — workspace tree materialization", () => {
     const commands = runCalls.map((c) => c.command);
     expect(commands[0]).toBe(BINARY_DECODE_COMMAND);
     expect(commands.slice(1)).toEqual(["npm ci --no-audit --no-fund", "npm test"]);
+  });
+
+  it("never clobbers tracked files sitting at the decode helper paths (#271)", async () => {
+    // The helpers are staged into the same workspace as the repo's own files
+    // and the decode script deletes both of them when it finishes, so a tree
+    // that genuinely tracks a file at either name would have it overwritten
+    // and then unlinked — the evaluated tree would silently be missing a file
+    // the merge would land. The sandbox here runs the emitted script for real,
+    // so this asserts the workspace as the configured command would find it.
+    const trackedManifest = "release-notes checked into the repo\n";
+    const trackedScript = "module.exports = { theRepoOwnsThisFile: true };\n";
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    const tree = new Map(FULL_TREE);
+    tree.set(".stratum-binary-manifest.txt", new TextEncoder().encode(trackedManifest));
+    tree.set(".stratum-binary-decode.cjs", new TextEncoder().encode(trackedScript));
+    tree.set("assets/logo.png", binaryBytes);
+    const sandbox = makeExecutingSandbox();
+    const binding: SandboxBinding = { create: vi.fn().mockResolvedValue(sandbox.instance) };
+
+    const result = await new SandboxEvaluator(binding, repo, makeReadFiles(tree)).evaluate(
+      "",
+      makePolicy(),
+      mockLogger,
+    );
+
+    expect(result.success).toBe(true);
+    // Both tracked files survive, byte for byte.
+    expect(sandbox.files.get(".stratum-binary-manifest.txt")).toBe(trackedManifest);
+    expect(sandbox.files.get(".stratum-binary-decode.cjs")).toBe(trackedScript);
+    // The binary still decoded — moving the helpers aside must not cost that.
+    expect(Uint8Array.from(sandbox.files.get("assets/logo.png") as Uint8Array)).toEqual(
+      binaryBytes,
+    );
+    // Staged under discriminated names, and cleaned up after themselves.
+    expect(sandbox.commands[0]).toBe("node .stratum-binary-decode-1.cjs");
+    expect(sandbox.files.has(".stratum-binary-manifest-1.txt")).toBe(false);
+    expect(sandbox.files.has(".stratum-binary-decode-1.cjs")).toBe(false);
   });
 
   it("does not stage a decode manifest/script when the tree has no binary files", async () => {

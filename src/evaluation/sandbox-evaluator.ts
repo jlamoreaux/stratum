@@ -1,5 +1,5 @@
 import { readRepoFiles } from "../storage/git-ops";
-import type { SandboxBinding } from "../types";
+import type { SandboxBinding, SandboxInstance } from "../types";
 import type { AppError } from "../utils/errors";
 import { ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -145,32 +145,173 @@ export function encodeForSandboxWrite(bytes: Uint8Array): SandboxWriteContent {
 }
 
 /**
- * Where the base64→binary decode manifest and script are staged in the
- * sandbox tree. Exported so `runPostMergeCheck` (post-merge.ts), which writes
- * the same tree read path into a sandbox, can decode binaries the same way.
+ * Preferred staging paths for the base64→binary decode manifest and script.
+ *
+ * Only *preferred*: a repo may legitimately track files of its own at these
+ * names, and staging over one would overwrite the tracked content and then
+ * delete it (the decode script unlinks both the manifest and itself when it
+ * finishes), so `materializeTree` steps aside to a free neighbouring name
+ * whenever the incoming tree already occupies one. Exported because both
+ * callers and their tests reason about the ordinary, collision-free case.
  */
 export const BINARY_MANIFEST_PATH = ".stratum-binary-manifest.txt";
 export const BINARY_DECODE_SCRIPT_PATH = ".stratum-binary-decode.cjs";
-/** Command that runs the decode script — `.cjs` forces CommonJS regardless of the evaluated repo's own package.json `"type"`. */
-export const BINARY_DECODE_COMMAND = `node ${BINARY_DECODE_SCRIPT_PATH}`;
+
+/**
+ * The command that runs the decode script from wherever it was staged.
+ *
+ * A function of the path because the script may have had to move aside from
+ * `BINARY_DECODE_SCRIPT_PATH` to avoid clobbering a tracked file. The `.cjs`
+ * extension the caller passes is load-bearing: it forces CommonJS regardless
+ * of the evaluated repo's own package.json `"type"`, so any fallback name
+ * must keep it.
+ */
+export function binaryDecodeCommandFor(scriptPath: string): string {
+  return `node ${scriptPath}`;
+}
+
+/** The decode command for the ordinary case where nothing displaced the script. */
+export const BINARY_DECODE_COMMAND = binaryDecodeCommandFor(BINARY_DECODE_SCRIPT_PATH);
 
 /**
  * Reads the newline-delimited manifest this evaluator wrote, base64-decodes
  * each listed path in place, then removes the manifest and itself. Node is
  * guaranteed present in the sandbox (the evaluator's own default/most common
  * commands are `npm ci`/`npm install`/`npm test`).
+ *
+ * Takes the manifest path instead of baking in a constant because the
+ * manifest is not always staged at `BINARY_MANIFEST_PATH` — a tree that
+ * already tracks that name pushes it aside — and the script deletes whatever
+ * path it is given, so handing it a stale constant would delete a tracked
+ * file and leave the real manifest behind.
  */
-export const decodeBinaryFilesScript = `const fs = require("fs");
-const manifest = fs.readFileSync(${JSON.stringify(BINARY_MANIFEST_PATH)}, "utf8").split("\\n").filter(Boolean);
+export function decodeBinaryFilesScript(manifestPath: string): string {
+  return `const fs = require("fs");
+const manifest = fs.readFileSync(${JSON.stringify(manifestPath)}, "utf8").split("\\n").filter(Boolean);
 for (const p of manifest) {
   const encoded = fs.readFileSync(p, "utf8");
   fs.writeFileSync(p, Buffer.from(encoded, "base64"));
 }
-fs.unlinkSync(${JSON.stringify(BINARY_MANIFEST_PATH)});
+fs.unlinkSync(${JSON.stringify(manifestPath)});
 fs.unlinkSync(__filename);
 `;
+}
+
+/**
+ * Finds a staging path the tree being materialized does not already use.
+ *
+ * Exists because the decode helpers are written into the same workspace as
+ * the repo's own files and are deleted afterwards: a tree that happens to
+ * track a file at the preferred name would have that file overwritten and
+ * then unlinked before the configured command ever ran — silently evaluating
+ * an incomplete tree, or failing an otherwise valid post-merge check. Names
+ * are only *derived* (a numeric discriminator before the extension) rather
+ * than randomized so the staged paths stay predictable in logs and tests, and
+ * the extension is preserved because `.cjs` decides how Node parses the
+ * script.
+ */
+function freeStagingPath(preferred: string, taken: ReadonlySet<string>): string {
+  const dot = preferred.lastIndexOf(".");
+  const stem = dot > 0 ? preferred.slice(0, dot) : preferred;
+  const extension = dot > 0 ? preferred.slice(dot) : "";
+  let candidate = preferred;
+  let discriminator = 0;
+  while (taken.has(candidate)) {
+    discriminator += 1;
+    candidate = `${stem}-${discriminator}${extension}`;
+  }
+  return candidate;
+}
+
+/** What materializing a tree cost and touched, for callers that meter or log it. */
+export interface MaterializedTree {
+  /** Repo-relative paths that went in base64-encoded and were decoded in place. */
+  binaryPaths: string[];
+  /** Wall-clock ms spent running the in-sandbox decode step; 0 when it did not run. */
+  decodeMs: number;
+}
+
+/**
+ * Writes a whole repo tree into a sandbox and restores its binary files to
+ * their real bytes, leaving the workspace byte-identical to the commit.
+ *
+ * Shared by the evaluator and the post-merge smoke check because both need
+ * exactly this and the sequence has sharp edges that must not be re-derived
+ * per caller: `writeFile` only carries strings on the sandbox's default
+ * transport, so non-UTF-8 files must ride in as base64 and be decoded before
+ * anything reads them; the writes are batched with `allSettled` rather than
+ * `all` so a rejection cannot leave siblings in flight while the caller tears
+ * the sandbox down; and the decode helpers must not be staged on top of a
+ * file the tree actually tracks.
+ *
+ * Throws rather than returning a verdict: a tree that could not be written or
+ * decoded is not a judgement about the code, and each caller already maps a
+ * thrown failure onto its own reporting.
+ */
+export async function materializeTree(
+  sandbox: SandboxInstance,
+  files: ReadonlyMap<string, Uint8Array>,
+  opts: { decodeTimeoutMs: number; logger?: Logger },
+): Promise<MaterializedTree> {
+  // The full tree can hold thousands of files; one round trip per file
+  // dominates latency, so write in bounded concurrent batches.
+  const WRITE_CONCURRENCY = 16;
+  const entries = [...files];
+  const binaryPaths: string[] = [];
+  for (let i = 0; i < entries.length; i += WRITE_CONCURRENCY) {
+    // allSettled, not all: `all` rejects on the first failure while its
+    // siblings are still in flight, and a caller's `finally` would then
+    // destroy the sandbox out from under them. Wait for the whole batch to
+    // settle, then surface the first failure.
+    const settled = await Promise.allSettled(
+      entries.slice(i, i + WRITE_CONCURRENCY).map(([path, bytes]) => {
+        const { content, binary } = encodeForSandboxWrite(bytes);
+        if (binary) binaryPaths.push(path);
+        return sandbox.writeFile(path, content);
+      }),
+    );
+    const failed = settled.find((r) => r.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
+  }
+  opts.logger?.debug("Files written to sandbox", {
+    fileCount: files.size,
+    binaryFileCount: binaryPaths.length,
+  });
+
+  if (binaryPaths.length === 0) return { binaryPaths, decodeMs: 0 };
+
+  // Binary files landed base64-encoded (writeFile has no binary form on this
+  // transport) — decode them back to their real bytes in place before the
+  // caller's commands see the tree, so a corrupted copy never runs.
+  const taken = new Set(files.keys());
+  const manifestPath = freeStagingPath(BINARY_MANIFEST_PATH, taken);
+  const scriptPath = freeStagingPath(BINARY_DECODE_SCRIPT_PATH, taken);
+  await sandbox.writeFile(manifestPath, binaryPaths.join("\n"));
+  await sandbox.writeFile(scriptPath, decodeBinaryFilesScript(manifestPath));
+  const decodeStartedAt = Date.now();
+  const decodeResult = await sandbox.run(binaryDecodeCommandFor(scriptPath), {
+    timeout: opts.decodeTimeoutMs,
+  });
+  const decodeMs = Date.now() - decodeStartedAt;
+  if (decodeResult.exitCode !== 0) {
+    const output = (decodeResult.stdout + decodeResult.stderr)
+      .slice(0, MAX_OUTPUT_IN_REASON)
+      .trim();
+    throw new Error(`Failed to decode ${binaryPaths.length} binary file(s) in sandbox: ${output}`);
+  }
+  opts.logger?.debug("Binary files decoded in sandbox", { binaryFileCount: binaryPaths.length });
+  return { binaryPaths, decodeMs };
+}
 
 export class SandboxEvaluator implements Evaluator {
+  /**
+   * `readFiles` defaults to the real `readRepoFiles` and is a parameter only
+   * so tests can drive the tree read: every interesting failure of this
+   * evaluator (an unreadable blob, a partial tree, a binary file that must
+   * survive the write boundary) lives in what comes back from that read, and
+   * the alternative — standing up a real remote per case — would make those
+   * paths expensive enough to go untested.
+   */
   constructor(
     private sandbox: SandboxBinding,
     private repo: SandboxRepoAccess,
@@ -254,54 +395,15 @@ export class SandboxEvaluator implements Evaluator {
 
       let sandboxMs = 0;
 
-      // The full tree can hold thousands of files; one round trip per file
-      // dominates evaluation latency, so write in bounded concurrent batches.
-      // The sandbox's default HTTP transport only carries strings through
-      // `writeFile` — text bytes decode directly (lossless: re-encoding
-      // well-formed UTF-8 reproduces the original bytes), anything else goes
-      // through base64 and is queued for the in-sandbox decode step below.
-      const WRITE_CONCURRENCY = 16;
-      const entries = [...files];
-      const binaryPaths: string[] = [];
-      for (let i = 0; i < entries.length; i += WRITE_CONCURRENCY) {
-        // allSettled, not all: `all` rejects on the first failure while its
-        // siblings are still in flight, and the `finally` below would then
-        // destroy the sandbox out from under them. Wait for the whole batch to
-        // settle, then surface the first failure.
-        const settled = await Promise.allSettled(
-          entries.slice(i, i + WRITE_CONCURRENCY).map(([path, bytes]) => {
-            const { content, binary } = encodeForSandboxWrite(bytes);
-            if (binary) binaryPaths.push(path);
-            return instance.writeFile(path, content);
-          }),
-        );
-        const failed = settled.find((r) => r.status === "rejected");
-        if (failed?.status === "rejected") throw failed.reason;
-      }
-      logger.debug("Files written to sandbox", {
-        fileCount: files.size,
-        binaryFileCount: binaryPaths.length,
+      // Materializing the tree — string-only writeFile, base64 for binaries,
+      // in-sandbox decode — is shared with the post-merge check so the write
+      // boundary has exactly one implementation. `installTimeoutMs` bounds the
+      // decode step because it is setup, not the scored command.
+      const materialized = await materializeTree(instance, files, {
+        decodeTimeoutMs: installTimeoutMs,
+        logger,
       });
-
-      // Binary files landed base64-encoded (writeFile has no binary form on
-      // this transport) — decode them back to their real bytes in place
-      // before install/test see the tree, so a corrupted copy never runs.
-      if (binaryPaths.length > 0) {
-        await instance.writeFile(BINARY_MANIFEST_PATH, binaryPaths.join("\n"));
-        await instance.writeFile(BINARY_DECODE_SCRIPT_PATH, decodeBinaryFilesScript);
-        const decodeStartedAt = Date.now();
-        const decodeResult = await sb.run(BINARY_DECODE_COMMAND, { timeout: installTimeoutMs });
-        sandboxMs += Date.now() - decodeStartedAt;
-        if (decodeResult.exitCode !== 0) {
-          const output = (decodeResult.stdout + decodeResult.stderr)
-            .slice(0, MAX_OUTPUT_IN_REASON)
-            .trim();
-          throw new Error(
-            `Failed to decode ${binaryPaths.length} binary file(s) in sandbox: ${output}`,
-          );
-        }
-        logger.debug("Binary files decoded in sandbox", { binaryFileCount: binaryPaths.length });
-      }
+      sandboxMs += materialized.decodeMs;
 
       const installCommand = installCommandFor(files);
       if (installCommand !== null) {
