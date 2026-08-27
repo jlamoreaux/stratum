@@ -12,9 +12,17 @@ interface TagsProps {
   /** True when the remote had more tags than the fetch cap and the listing
    * was truncated — surfaced explicitly rather than silently showing a
    * partial list as complete (#241). */
-  truncated?: boolean;
-  /** Total tags the remote advertised; only meaningful alongside `truncated`. */
-  totalTagCount?: number;
+  truncated: boolean;
+  /** Total tags the remote advertised, independent of how many were fetched.
+   *
+   * Required, not optional, because `ListRepoTagsResult` always carries it and
+   * the route passes it straight through. Optional here would admit
+   * `truncated` without a total, and the only way to render that is to fall
+   * back to `tags.length` — which reads "the first 200 of 200 tags. The rest
+   * were not fetched", a sentence that contradicts itself and looks like a
+   * complete listing. That is the exact failure this notice exists to
+   * prevent, so the state is made unrepresentable rather than handled. */
+  totalTagCount: number;
   user?: { id: string; email: string; username: string } | null;
 }
 
@@ -32,8 +40,6 @@ export function formatTagDate(timestamp: number | undefined): string {
 }
 
 /**
- * Renders a project's git tags, annotated and lightweight alike.
- *
  * When `truncated` is set the page says so in place, showing how many of the
  * remote's `totalTagCount` tags are actually listed. That notice is the whole
  * point of the prop pair: the fetch caps tag count at `MAX_TAGS` to stay
@@ -52,8 +58,7 @@ export const TagsPage: FC<TagsProps> = ({ project, tags, truncated, totalTagCoun
 
       {truncated && (
         <div class="empty-state-hint" style="margin-bottom: 1rem;">
-          Showing the first {tags.length} of {totalTagCount ?? tags.length} tags. The rest were not
-          fetched.
+          Showing the first {tags.length} of {totalTagCount} tags. The rest were not fetched.
         </div>
       )}
 
