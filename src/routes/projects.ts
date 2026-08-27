@@ -247,6 +247,12 @@ app.post("/", async (c) => {
     project.id,
   );
 
+  // A browser form lands on the new project; API callers keep the JSON body.
+  // (The import endpoint below does the same.)
+  if (!contentType.includes("application/json")) {
+    return c.redirect(`/${namespace}/${slug}`, 303);
+  }
+
   return created({
     id: projectId,
     name: project.name,

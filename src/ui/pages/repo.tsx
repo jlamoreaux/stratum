@@ -270,7 +270,7 @@ export const RepoPage: FC<RepoProps> = ({
         </div>
       )}
 
-      {hasSource && canSync && project.sourceProvider === "github" && (
+      {hasSource && canSync && files.length > 0 && project.sourceProvider === "github" && (
         <div class="card" style={{ marginTop: "1rem" }}>
           <h3 style={{ marginTop: 0 }}>Prepare a pull request</h3>
           <p style={{ color: "#aaa", marginBottom: "1rem" }}>
@@ -288,7 +288,7 @@ export const RepoPage: FC<RepoProps> = ({
         </div>
       )}
 
-      {hasSource && canSync && project.sourceProvider !== "github" && (
+      {hasSource && canSync && files.length > 0 && project.sourceProvider !== "github" && (
         <div class="card" style={{ marginTop: "1rem" }}>
           <h3 style={{ marginTop: 0 }}>Review your changes</h3>
           <p style={{ color: "#aaa", marginBottom: "1rem" }}>

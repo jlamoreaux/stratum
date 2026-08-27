@@ -65,7 +65,9 @@ export const HomePage: FC<HomeProps> = ({ projects, user }) => {
               <div class="card-meta">
                 {project.namespace}/{project.slug}
               </div>
-              <div class="card-meta">{new Date(project.createdAt).toLocaleDateString()}</div>
+              <div class="card-meta">
+                Created {new Date(project.createdAt).toLocaleDateString()}
+              </div>
             </a>
           ))}
         </div>

@@ -222,6 +222,7 @@ app.post("/settings/rotate-token", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "api-key", value: rotateResult.data }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -260,6 +261,7 @@ app.post("/settings/agents", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "agent", value: createResult.data.plaintext, agentName: name }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });

@@ -13,9 +13,26 @@ interface SettingsPageProps {
   agents: AgentSummary[];
   /** Freshly created credential, shown exactly once after a rotate/create POST. */
   freshToken?: { kind: "api-key" | "agent"; value: string; agentName?: string };
+  /** Per-request CSP nonce for the copy-button script (only rendered with a fresh token). */
+  nonce?: string;
 }
 
-export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }) => {
+/** Clipboard needs script; the value is read from the DOM, never re-serialized. */
+const COPY_TOKEN_SCRIPT = `
+(function () {
+  var btn = document.getElementById('copy-fresh-token');
+  var token = document.getElementById('fresh-token');
+  if (!btn || !token) return;
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(token.textContent).then(function () {
+      btn.textContent = 'Copied';
+      setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+})();
+`;
+
+export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken, nonce }) => {
   return (
     <Layout title="Settings" user={user}>
       <div class="page-header">
@@ -33,7 +50,17 @@ export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }
             Copy it now — it is shown only once.{" "}
             {freshToken.kind === "api-key" ? "Your previous key no longer works." : ""}
           </p>
-          <code class="settings-token">{freshToken.value}</code>
+          <div class="token-reveal-row">
+            <code class="settings-token" id="fresh-token">
+              {freshToken.value}
+            </code>
+            <button type="button" class="btn btn-small" id="copy-fresh-token">
+              Copy
+            </button>
+          </div>
+          {nonce !== undefined && (
+            <script nonce={nonce} dangerouslySetInnerHTML={{ __html: COPY_TOKEN_SCRIPT }} />
+          )}
         </div>
       )}
 

@@ -25,6 +25,16 @@ export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, canWr
       {workspaces.length === 0 ? (
         <div class="empty-state">
           <p>No workspaces yet.</p>
+          <p class="empty-state-hint">
+            A workspace is your private fork of this project — agents and humans commit there, then
+            open a change. From your terminal:
+          </p>
+          <pre class="cli-hint">{`stratum workspace create ${project.namespace}/${project.slug}`}</pre>
+          <p class="empty-state-hint">
+            <a href="https://docs.usestratum.dev" target="_blank" rel="noopener noreferrer">
+              CLI setup guide →
+            </a>
+          </p>
         </div>
       ) : (
         <div class="table-scroll">
