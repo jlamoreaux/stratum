@@ -138,10 +138,10 @@ describe("CSP nonce sweep — pages", () => {
     });
   }
 
-  it("NewProjectPage: import-form script is nonce'd, no inline handlers remain", () => {
+  it("NewProjectPage: unified form script is nonce'd, no inline handlers remain", () => {
     const html = renderToString(<NewProjectPage user={user} nonce={NONCE} />);
     expectCspClean(html, { expectScripts: true });
-    expect(html).toContain('id="import-form"');
+    expect(html).toContain('id="new-project-form"');
   });
 
   it("RepoPage with files and an active import: all scripts nonce'd", () => {

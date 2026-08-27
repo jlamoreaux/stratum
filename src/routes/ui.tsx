@@ -165,7 +165,7 @@ app.get("/new", async (c) => {
   const user = await getCurrentUser(c, logger);
   if (!user) {
     logger.debug("User not authenticated, redirecting to login");
-    return c.redirect("/auth/email");
+    return c.redirect("/auth/login");
   }
 
   logger.debug("Rendering new project page");
@@ -191,7 +191,7 @@ async function loadAgentSummaries(
 app.get("/settings", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const agents = await loadAgentSummaries(c.env.DB, user.id, logger);
   return c.html(<SettingsPage user={user} agents={agents} />);
@@ -201,7 +201,7 @@ app.get("/settings", async (c) => {
 app.post("/settings/rotate-token", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const rotateResult = await rotateUserToken(c.env.DB, user.id, logger);
   if (!rotateResult.success) {
@@ -222,6 +222,7 @@ app.post("/settings/rotate-token", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "api-key", value: rotateResult.data }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -230,7 +231,7 @@ app.post("/settings/rotate-token", async (c) => {
 app.post("/settings/agents", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
@@ -260,6 +261,7 @@ app.post("/settings/agents", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "agent", value: createResult.data.plaintext, agentName: name }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -268,7 +270,7 @@ app.post("/settings/agents", async (c) => {
 app.post("/settings/agents/:id/delete", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const { id } = c.req.param();
   const agentResult = await getAgent(c.env.DB, id, logger);
@@ -1054,7 +1056,7 @@ app.get("/:namespace/:slug/sync", async (c) => {
   }
 
   if (!userId) {
-    return c.redirect("/auth/email");
+    return c.redirect("/auth/login");
   }
 
   const [userResult, projectResult] = await Promise.all([

@@ -120,6 +120,16 @@ app.get("/ui.css", (c) => {
   return c.text(CSS, 200, { "Content-Type": "text/css; charset=UTF-8" });
 });
 
+// Browsers request /favicon.ico on pages with no <link rel="icon"> (raw JSON
+// responses, redirects); serve the same S-mark the layout inlines.
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0d0d0d"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="#7ca9f7" text-anchor="middle">S</text></svg>`;
+app.get("/favicon.ico", (c) =>
+  c.body(FAVICON_SVG, 200, {
+    "Content-Type": "image/svg+xml",
+    "Cache-Control": "public, max-age=86400",
+  }),
+);
+
 // Health check endpoint
 app.route("/api/health", healthRouter);
 
