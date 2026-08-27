@@ -61,6 +61,7 @@ describe("RepoPage — 'Prepare a pull request' card (GitHub)", () => {
     const html = renderToString(
       <RepoPage
         {...baseProps}
+        files={["README.md"]}
         canSync={true}
         project={{
           ...baseProject,
@@ -75,6 +76,23 @@ describe("RepoPage — 'Prepare a pull request' card (GitHub)", () => {
     expect(html).toContain("Open Changes");
     expect(html).toContain("/@alice/my-repo/changes");
     expect(html).toContain("as a pull request");
+  });
+
+  it("(c2) hides the PR card while the repo has no content (import not done)", () => {
+    const html = renderToString(
+      <RepoPage
+        {...baseProps}
+        canSync={true}
+        project={{
+          ...baseProject,
+          sourceUrl: "https://github.com/acme/api",
+          sourceProvider: "github",
+          sourceOwner: "acme",
+          sourceRepo: "api",
+        }}
+      />,
+    );
+    expect(html).not.toContain("Prepare a pull request");
   });
 
   it("(d) hides the GitHub PR card when canSync=false (non-owner)", () => {
@@ -100,6 +118,7 @@ describe("RepoPage — 'Review your changes' card (non-GitHub)", () => {
     const html = renderToString(
       <RepoPage
         {...baseProps}
+        files={["README.md"]}
         canSync={true}
         project={{
           ...baseProject,

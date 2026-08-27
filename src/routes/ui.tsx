@@ -34,10 +34,12 @@ import { getFileContent, isValidFilePath } from "../ui/file-content";
 import { ActivityPage } from "../ui/pages/activity";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
 import { ChangesPage } from "../ui/pages/changes";
+import { ErrorPage } from "../ui/pages/error";
 import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { IssueDetailPage, IssuesPage, NewIssuePage } from "../ui/pages/issues";
 import { NewProjectPage } from "../ui/pages/new-project";
+import { ProjectSettingsPage } from "../ui/pages/project-settings";
 import { RepoPage } from "../ui/pages/repo";
 import { SettingsPage } from "../ui/pages/settings";
 import { SyncPage } from "../ui/pages/sync";
@@ -50,6 +52,20 @@ import { isValidNamespace, isValidSlug } from "../utils/validation";
 import { SUBSCRIBABLE_EVENTS } from "./webhooks";
 
 const app = new Hono<{ Bindings: Env }>();
+
+type PageUser = { id: string; email: string; username: string } | null;
+
+const errorPage = (status: 400 | 404 | 500, message?: string, user?: PageUser) => (
+  <ErrorPage status={status} {...(message !== undefined ? { message } : {})} user={user ?? null} />
+);
+
+/** The minimal project identity every page header needs. */
+const projectRef = (project: ProjectEntry) => ({
+  name: project.name,
+  namespace: project.namespace,
+  slug: project.slug,
+  ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
+});
 
 // Helper to get current user info
 async function getCurrentUser(
@@ -106,12 +122,7 @@ app.get("/", async (c) => {
 
   if (!allProjectsResult.success) {
     logger.error("Failed to list projects", allProjectsResult.error);
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading projects. Please try again.
-      </div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading projects. Please try again.", userResult), 500);
   }
 
   const user = userResult;
@@ -154,7 +165,7 @@ app.get("/new", async (c) => {
   const user = await getCurrentUser(c, logger);
   if (!user) {
     logger.debug("User not authenticated, redirecting to login");
-    return c.redirect("/auth/email");
+    return c.redirect("/auth/login");
   }
 
   logger.debug("Rendering new project page");
@@ -180,7 +191,7 @@ async function loadAgentSummaries(
 app.get("/settings", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const agents = await loadAgentSummaries(c.env.DB, user.id, logger);
   return c.html(<SettingsPage user={user} agents={agents} />);
@@ -190,12 +201,12 @@ app.get("/settings", async (c) => {
 app.post("/settings/rotate-token", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const rotateResult = await rotateUserToken(c.env.DB, user.id, logger);
   if (!rotateResult.success) {
     logger.error("Failed to rotate API key", rotateResult.error);
-    return c.html(issuePageError(500), 500);
+    return c.html(issuePageError(500, user), 500);
   }
 
   await recordAudit(c.env.DB, logger, {
@@ -211,6 +222,7 @@ app.post("/settings/rotate-token", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "api-key", value: rotateResult.data }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -219,11 +231,11 @@ app.post("/settings/rotate-token", async (c) => {
 app.post("/settings/agents", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
-  if (!name) return c.html(issuePageError(400), 400);
+  if (!name) return c.html(issuePageError(400, user), 400);
   const model =
     typeof form.model === "string" && form.model.trim()
       ? form.model.trim().slice(0, 100)
@@ -232,7 +244,7 @@ app.post("/settings/agents", async (c) => {
   const createResult = await createAgent(c.env.DB, user.id, name, logger, model);
   if (!createResult.success) {
     logger.error("Failed to create agent", createResult.error);
-    return c.html(issuePageError(500), 500);
+    return c.html(issuePageError(500, user), 500);
   }
 
   await recordAudit(c.env.DB, logger, {
@@ -249,6 +261,7 @@ app.post("/settings/agents", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "agent", value: createResult.data.plaintext, agentName: name }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -257,7 +270,7 @@ app.post("/settings/agents", async (c) => {
 app.post("/settings/agents/:id/delete", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const { id } = c.req.param();
   const agentResult = await getAgent(c.env.DB, id, logger);
@@ -293,23 +306,13 @@ app.get("/p/:name", async (c) => {
 
   if (!projectResult.success) {
     logger.warn("Project not found", { name });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{name}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${name}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
     logger.warn("Project not found or access denied", { name, userId });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{name}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${name}' not found.`, userResult), 404);
   }
 
   let files: string[] = [];
@@ -351,6 +354,7 @@ app.get("/p/:name", async (c) => {
       project.importCompleted !== false;
   }
   const isOwner = !!userId && project.ownerType === "user" && project.ownerId === userId;
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
 
   const snapshotResult = await readRepoSnapshot(c.env.STATE, project, logger);
   if (snapshotResult.success && snapshotResult.data) {
@@ -407,6 +411,7 @@ app.get("/p/:name", async (c) => {
         name: project.name,
         namespace: project.namespace,
         slug: project.slug,
+        ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
         remote: project.remote,
         createdAt: project.createdAt,
         sourceUrl: getProjectSourceUrl(project),
@@ -427,6 +432,7 @@ app.get("/p/:name", async (c) => {
       syncStatus={syncStatus}
       canSync={canSync}
       isOwner={isOwner}
+      canWrite={canWrite}
       nonce={c.get("cspNonce") ?? ""}
     />,
   );
@@ -450,23 +456,13 @@ app.get("/p/:name/changes", async (c) => {
 
   if (!projectResult.success) {
     logger.warn("Project not found for changes", { name });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{name}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${name}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
     logger.warn("Project not found or access denied", { name, userId });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{name}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${name}' not found.`, userResult), 404);
   }
 
   const changesResult = await listChanges(c.env.DB, logger, name, undefined, {
@@ -474,12 +470,7 @@ app.get("/p/:name/changes", async (c) => {
   });
   if (!changesResult.success) {
     logger.error("Failed to list changes", changesResult.error);
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading changes. Please try again.
-      </div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading changes. Please try again.", userResult), 500);
   }
 
   const view = changesResult.data.map((change) => ({
@@ -492,11 +483,13 @@ app.get("/p/:name/changes", async (c) => {
     createdAt: change.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   logger.debug("Rendering changes page", { name, changeCount: view.length });
   return c.html(
     <ChangesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       changes={view}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -520,28 +513,19 @@ app.get("/changes/:id", async (c) => {
 
   if (!changeResult.success) {
     logger.warn("Change not found", { id });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Change '{id}' not found.</div>,
-      404,
-    );
+    return c.html(errorPage(404, `Change '${id}' not found.`, userResult), 404);
   }
   const change = changeResult.data;
 
   const projectResult = await getProject(c.env.STATE, change.project, logger);
   if (!projectResult.success) {
     logger.error("Project not found for change", projectResult.error, { project: change.project });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Project not found.</div>,
-      500,
-    );
+    return c.html(errorPage(500, "Project not found.", userResult), 500);
   }
 
   if (!(await canReadProject(c.env.DB, projectResult.data, userId, agentOwnerId))) {
     logger.warn("Change not found or access denied", { id, userId });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Not found.</div>,
-      404,
-    );
+    return c.html(errorPage(404, undefined, userResult), 404);
   }
 
   const [evalRunsResult, commentsResult, reviewsResult, costsResult, provenanceResult] =
@@ -607,6 +591,7 @@ app.get("/changes/:id", async (c) => {
       }))
     : [];
 
+  const canReview = !!userResult && (await canWriteProject(c.env.DB, projectResult.data, userId));
   logger.debug("Rendering change detail page", { id });
   return c.html(
     <ChangeDetailPage
@@ -628,7 +613,8 @@ app.get("/changes/:id", async (c) => {
       reviews={reviewsResult.success ? reviewsResult.data : []}
       costs={costsResult.success ? costsResult.data : []}
       diff={diffFiles}
-      canReview={!!userResult && (await canWriteProject(c.env.DB, projectResult.data, userId))}
+      canReview={canReview}
+      projectRef={projectRef(projectResult.data)}
       user={userResult}
     />,
   );
@@ -652,20 +638,12 @@ app.get("/p/:name/workspaces", async (c) => {
 
   if (!projectResult.success) {
     logger.warn("Project not found for workspaces", { name });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{name}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${name}' not found.`, userResult), 404);
   }
 
   if (!(await canReadProject(c.env.DB, projectResult.data, userId, agentOwnerId))) {
     logger.warn("Project not found or access denied", { name, userId });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Not found.</div>,
-      404,
-    );
+    return c.html(errorPage(404, undefined, userResult), 404);
   }
 
   const project = projectResult.data;
@@ -673,12 +651,7 @@ app.get("/p/:name/workspaces", async (c) => {
   const workspacesResult = await listWorkspaces(c.env.STATE, project.id, logger);
   if (!workspacesResult.success) {
     logger.error("Failed to list workspaces", workspacesResult.error);
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading workspaces.
-      </div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading workspaces.", userResult), 500);
   }
 
   const view = workspacesResult.data.map((ws) => ({
@@ -686,11 +659,13 @@ app.get("/p/:name/workspaces", async (c) => {
     createdAt: ws.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   logger.debug("Rendering workspaces page", { name, workspaceCount: view.length });
   return c.html(
     <WorkspacesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       workspaces={view}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -704,10 +679,7 @@ app.get("/:namespace/:slug/changes", async (c) => {
   const logger = createLogger({ path: c.req.path, userId });
 
   if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid project path.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -716,22 +688,12 @@ app.get("/:namespace/:slug/changes", async (c) => {
   ]);
 
   if (!projectResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
   const changesResult = await listChanges(c.env.DB, logger, project.name, undefined, {
@@ -739,12 +701,7 @@ app.get("/:namespace/:slug/changes", async (c) => {
   });
   if (!changesResult.success) {
     logger.error("Failed to list changes", changesResult.error);
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading changes. Please try again.
-      </div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading changes. Please try again.", userResult), 500);
   }
 
   const changes = changesResult.data.map((change) => ({
@@ -757,10 +714,12 @@ app.get("/:namespace/:slug/changes", async (c) => {
     createdAt: change.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <ChangesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       changes={changes}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -774,10 +733,7 @@ app.get("/:namespace/:slug/activity", async (c) => {
   const logger = createLogger({ path: c.req.path, userId });
 
   if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid project path.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -786,39 +742,26 @@ app.get("/:namespace/:slug/activity", async (c) => {
   ]);
 
   if (!projectResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
   const eventsResult = await listProjectEvents(c.env.DB, logger, project.name);
   if (!eventsResult.success) {
     logger.error("Failed to list project events", eventsResult.error);
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading activity. Please try again.
-      </div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading activity. Please try again.", userResult), 500);
   }
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <ActivityPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       events={eventsResult.data}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -832,10 +775,7 @@ app.get("/:namespace/:slug/tags", async (c) => {
   const logger = createLogger({ path: c.req.path, userId });
 
   if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid project path.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -844,44 +784,31 @@ app.get("/:namespace/:slug/tags", async (c) => {
   ]);
 
   if (!projectResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
-  const tagsError = (
-    <div style="padding:2rem;font-family:monospace;color:#f87171;">
-      Error loading tags. Please try again.
-    </div>
-  );
   const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
   if (!readToken.success) {
     logger.error("Failed to mint read token for tags page", readToken.error);
-    return c.html(tagsError, 500);
+    return c.html(errorPage(500, "Error loading tags. Please try again.", userResult), 500);
   }
   const tagsResult = await listRepoTags(project.remote, readToken.data, logger);
   if (!tagsResult.success) {
     logger.error("Failed to list tags", tagsResult.error);
-    return c.html(tagsError, 500);
+    return c.html(errorPage(500, "Error loading tags. Please try again.", userResult), 500);
   }
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <TagsPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       tags={tagsResult.data}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -929,16 +856,13 @@ async function loadIssuePageContext(c: {
   return { project, user, userId, logger };
 }
 
-const issuePageError = (status: 400 | 404 | 500) => (
-  <div style="padding:2rem;font-family:monospace;color:#f87171;">
-    {status === 400 ? "Invalid project path." : status === 404 ? "Not found." : "Server error."}
-  </div>
-);
+const issuePageError = (status: 400 | 404 | 500, user?: PageUser) =>
+  errorPage(status, status === 400 ? "Invalid project path." : undefined, user);
 
 // GET /:namespace/:slug/issues — Issues list
 app.get("/:namespace/:slug/issues", async (c) => {
   const ctx = await loadIssuePageContext(c);
-  if ("errorStatus" in ctx) return c.html(issuePageError(ctx.errorStatus), ctx.errorStatus);
+  if ("errorStatus" in ctx) return c.notFound();
   const { project, user, userId, logger } = ctx;
 
   const statusParam = c.req.query("status");
@@ -954,7 +878,7 @@ app.get("/:namespace/:slug/issues", async (c) => {
   );
   if (!issuesResult.success) {
     logger.error("Failed to list issues", issuesResult.error);
-    return c.html(issuePageError(500), 500);
+    return c.html(issuePageError(500, user), 500);
   }
 
   const [authors, canWrite] = await Promise.all([
@@ -964,7 +888,7 @@ app.get("/:namespace/:slug/issues", async (c) => {
 
   return c.html(
     <IssuesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       issues={issuesResult.data}
       authors={authors}
       filter={filter}
@@ -977,42 +901,32 @@ app.get("/:namespace/:slug/issues", async (c) => {
 // GET /:namespace/:slug/issues/new — New issue form (writers only)
 app.get("/:namespace/:slug/issues/new", async (c) => {
   const ctx = await loadIssuePageContext(c);
-  if ("errorStatus" in ctx) return c.html(issuePageError(ctx.errorStatus), ctx.errorStatus);
+  if ("errorStatus" in ctx) return c.notFound();
   const { project, user, userId } = ctx;
 
   if (!(await canWriteProject(c.env.DB, project, userId))) {
-    return c.html(issuePageError(404), 404);
+    return c.html(issuePageError(404, user), 404);
   }
 
-  return c.html(
-    <NewIssuePage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
-      user={user}
-    />,
-  );
+  return c.html(<NewIssuePage project={projectRef(project)} user={user} />);
 });
 
 // GET /:namespace/:slug/issues/:number — Issue detail
 app.get("/:namespace/:slug/issues/:number", async (c) => {
   const ctx = await loadIssuePageContext(c);
-  if ("errorStatus" in ctx) return c.html(issuePageError(ctx.errorStatus), ctx.errorStatus);
+  if ("errorStatus" in ctx) return c.notFound();
   const { project, user, userId, logger } = ctx;
 
   const number = Number(c.req.param("number"));
   if (!Number.isInteger(number) || number <= 0) {
-    return c.html(issuePageError(400), 400);
+    return c.notFound();
   }
 
   const issueResult = await getIssueByNumber(c.env.DB, logger, project.name, number, {
     projectId: project.id,
   });
   if (!issueResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Issue #{number} not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Issue #${number} not found.`, user), 404);
   }
 
   const [authors, canWrite] = await Promise.all([
@@ -1022,7 +936,7 @@ app.get("/:namespace/:slug/issues/:number", async (c) => {
 
   return c.html(
     <IssueDetailPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       issue={issueResult.data}
       authors={authors}
       canWrite={canWrite}
@@ -1038,10 +952,7 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
   const logger = createLogger({ path: c.req.path, userId });
 
   if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid project path.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -1050,23 +961,13 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
   ]);
 
   if (!projectResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   // Webhook URLs and secrets are sensitive: writers only.
   if (!(await canWriteProject(c.env.DB, project, userId))) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
   const webhooksResult = await listWebhooks(c.env.DB, logger, project.name, {
@@ -1074,12 +975,7 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
   });
   if (!webhooksResult.success) {
     logger.error("Failed to list webhooks", webhooksResult.error);
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading webhooks. Please try again.
-      </div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading webhooks. Please try again.", userResult), 500);
   }
 
   const webhooks = await Promise.all(
@@ -1093,7 +989,7 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
 
   return c.html(
     <WebhooksPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       webhooks={webhooks}
       subscribableEvents={SUBSCRIBABLE_EVENTS}
       user={userResult}
@@ -1109,10 +1005,7 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
   const logger = createLogger({ path: c.req.path, userId });
 
   if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid project path.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -1121,33 +1014,18 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
   ]);
 
   if (!projectResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
   const workspacesResult = await listWorkspaces(c.env.STATE, project.id, logger);
   if (!workspacesResult.success) {
     logger.error("Failed to list workspaces", workspacesResult.error);
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Error loading workspaces. Please try again.
-      </div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading workspaces. Please try again.", userResult), 500);
   }
 
   const workspaces = workspacesResult.data.map((ws) => ({
@@ -1155,10 +1033,12 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
     createdAt: ws.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <WorkspacesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       workspaces={workspaces}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -1172,14 +1052,11 @@ app.get("/:namespace/:slug/sync", async (c) => {
   const logger = createLogger({ path: c.req.path, userId });
 
   if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid project path.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   if (!userId) {
-    return c.redirect("/auth/email");
+    return c.redirect("/auth/login");
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -1188,22 +1065,12 @@ app.get("/:namespace/:slug/sync", async (c) => {
   ]);
 
   if (!projectResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
   const syncStatusResult = await getSyncStatus(c.env.STATE, namespace, slug, logger);
@@ -1237,11 +1104,52 @@ app.get("/:namespace/:slug/sync", async (c) => {
         namespace: project.namespace || namespace,
         slug: project.slug || slug,
         name: project.name,
+        ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
       }}
       syncStatus={syncStatus}
       syncHistory={[]}
       user={userResult}
       nonce={c.get("cspNonce") ?? ""}
+    />,
+  );
+});
+
+// GET /:namespace/:slug/settings — Project settings (writers only; danger zone owner-only)
+app.get("/:namespace/:slug/settings", async (c) => {
+  const { namespace, slug } = c.req.param();
+  const userId = c.get("userId");
+  const logger = createLogger({ path: c.req.path, userId });
+
+  if (!isValidNamespace(namespace) || !isValidSlug(slug)) return c.notFound();
+  if (!userId) return c.redirect("/auth/login");
+
+  const [userResult, projectResult] = await Promise.all([
+    getCurrentUser(c, logger),
+    getProjectByPath(c.env.STATE, namespace, slug, logger),
+  ]);
+
+  if (!projectResult.success) {
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
+  }
+  const project = projectResult.data;
+
+  // Same 404 as a missing project — settings must not leak project existence.
+  if (!(await canWriteProject(c.env.DB, project, userId))) {
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
+  }
+
+  const isOwner = project.ownerType === "user" && project.ownerId === userId;
+  const sourceUrl = getProjectSourceUrl(project);
+
+  return c.html(
+    <ProjectSettingsPage
+      project={{
+        ...projectRef(project),
+        createdAt: project.createdAt,
+        ...(sourceUrl !== undefined ? { sourceUrl } : {}),
+      }}
+      isOwner={isOwner}
+      user={userResult}
     />,
   );
 });
@@ -1255,26 +1163,15 @@ app.get("/:namespace/:slug/blob/*", async (c) => {
   const logger = createLogger({ path: c.req.path, userId });
 
   if (!isValidNamespace(namespace)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Invalid namespace format.
-      </div>,
-      400,
-    );
+    return c.notFound();
   }
 
   if (!isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid slug format.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   if (!filePath || !isValidFilePath(filePath)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Invalid file path.</div>,
-      400,
-    );
+    return c.notFound();
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -1283,58 +1180,38 @@ app.get("/:namespace/:slug/blob/*", async (c) => {
   ]);
 
   if (!projectResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
   const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
   if (!readToken.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Error loading file.</div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading file.", userResult), 500);
   }
   const contentResult = await getFileContent(project.remote, readToken.data, filePath, logger);
   if (!contentResult.success) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">Error loading file.</div>,
-      500,
-    );
+    return c.html(errorPage(500, "Error loading file.", userResult), 500);
   }
 
   const content = contentResult.data;
   if (content.kind === "not-found") {
     return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        File '{filePath}' not found in this repository.
-      </div>,
+      errorPage(404, `File '${filePath}' not found in this repository.`, userResult),
       404,
     );
   }
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <FileViewerPage
-      project={{
-        namespace: project.namespace,
-        slug: project.slug,
-        name: project.name,
-      }}
+      project={projectRef(project)}
       path={filePath}
       content={content}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -1347,23 +1224,12 @@ app.get("/:namespace/:slug", async (c) => {
 
   // Validate namespace format
   if (!isValidNamespace(namespace)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Invalid namespace format. Namespaces must start with @ and contain only lowercase
-        alphanumeric characters and hyphens.
-      </div>,
-      400,
-    );
+    return c.notFound();
   }
 
   // Validate slug format
   if (!isValidSlug(slug)) {
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Invalid slug format. Slugs must be 1-64 characters, alphanumeric, hyphens, or underscores.
-      </div>,
-      400,
-    );
+    return c.notFound();
   }
 
   const userId = c.get("userId");
@@ -1381,23 +1247,13 @@ app.get("/:namespace/:slug", async (c) => {
 
   if (!projectResult.success) {
     logger.warn("Project not found", { namespace, slug });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
   const project = projectResult.data;
 
   if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
     logger.warn("Project not found or access denied", { namespace, slug, userId });
-    return c.html(
-      <div style="padding:2rem;font-family:monospace;color:#f87171;">
-        Project '{namespace}/{slug}' not found.
-      </div>,
-      404,
-    );
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
   let files: string[] = [];
@@ -1425,6 +1281,7 @@ app.get("/:namespace/:slug", async (c) => {
 
   const isOwner = !!userId && project.ownerType === "user" && project.ownerId === userId;
   const canSync = !!getProjectSourceUrl(project) && isOwner && project.importCompleted !== false;
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
 
   const snapshotResult2 = await readRepoSnapshot(c.env.STATE, project, logger);
   if (snapshotResult2.success && snapshotResult2.data) {
@@ -1482,6 +1339,7 @@ app.get("/:namespace/:slug", async (c) => {
         name: project.name,
         namespace: project.namespace,
         slug: project.slug,
+        ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
         remote: project.remote,
         createdAt: project.createdAt,
         sourceUrl: getProjectSourceUrl(project),
@@ -1502,6 +1360,7 @@ app.get("/:namespace/:slug", async (c) => {
       syncStatus={syncStatus}
       canSync={canSync}
       isOwner={isOwner}
+      canWrite={canWrite}
       nonce={c.get("cspNonce") ?? ""}
     />,
   );

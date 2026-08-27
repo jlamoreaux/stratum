@@ -1,5 +1,6 @@
 import { Fragment } from "hono/jsx";
 import type { FC } from "hono/jsx";
+import { ProjectHeader } from "../components/project-header";
 import type { FileContentResult } from "../file-content";
 import { highlightCode } from "../highlight";
 import { Layout } from "../layout";
@@ -51,12 +52,17 @@ interface BreadcrumbProps {
   filePath: string;
 }
 
+/**
+ * Only the project crumb is a link: there is no user-profile route for the
+ * namespace and no directory-listing route for intermediate path segments,
+ * so rendering those as links would promise navigation that doesn't exist.
+ */
 const Breadcrumb: FC<BreadcrumbProps> = ({ namespace, slug, filePath }) => {
   const segments = filePath.split("/").filter((s) => s.length > 0);
 
   return (
     <div class="file-viewer-breadcrumb">
-      <a href={`/${namespace}/${slug}`}>{namespace}</a>
+      <span>{namespace}</span>
       <span class="sep">/</span>
       <a href={`/${namespace}/${slug}`}>{slug}</a>
       {segments.map((segment, i) => {
@@ -67,7 +73,7 @@ const Breadcrumb: FC<BreadcrumbProps> = ({ namespace, slug, filePath }) => {
             {isLast ? (
               <span class="file-viewer-breadcrumb-current">{segment}</span>
             ) : (
-              <a href={`/${namespace}/${slug}`}>{segment}</a>
+              <span>{segment}</span>
             )}
           </Fragment>
         );
@@ -77,19 +83,27 @@ const Breadcrumb: FC<BreadcrumbProps> = ({ namespace, slug, filePath }) => {
 };
 
 interface FileViewerPageProps {
-  project: { namespace: string; slug: string; name: string };
+  project: { namespace: string; slug: string; name: string; visibility?: string };
   path: string;
   content: FileContentResult;
+  canWrite?: boolean;
   user?: { id: string; email: string; username: string } | null;
 }
 
-export const FileViewerPage: FC<FileViewerPageProps> = ({ project, path, content, user }) => {
+export const FileViewerPage: FC<FileViewerPageProps> = ({
+  project,
+  path,
+  content,
+  canWrite,
+  user,
+}) => {
   const { namespace, slug } = project;
   const language = languageFromPath(path);
   const fileName = path.split("/").pop() ?? path;
 
   return (
     <Layout title={`${fileName} — ${project.name}`} user={user}>
+      <ProjectHeader project={project} active="code" canWrite={canWrite ?? false} />
       <div class="page-header">
         <Breadcrumb namespace={namespace} slug={slug} filePath={path} />
       </div>

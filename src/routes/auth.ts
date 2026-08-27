@@ -415,7 +415,12 @@ app.get("/google/callback", async (c) => {
   return c.redirect("/");
 });
 
-app.get("/logout", async (c) => {
+// Logout is state-changing, so it happens on POST (the nav renders a form and
+// the CSRF middleware's same-origin check applies). A GET — old bookmarks,
+// prefetchers, or a cross-site <img> — must not end the session; it just goes home.
+app.get("/logout", (c) => c.redirect("/"));
+
+app.post("/logout", async (c) => {
   const logger = createLogger({
     requestId: crypto.randomUUID(),
     path: c.req.path,
