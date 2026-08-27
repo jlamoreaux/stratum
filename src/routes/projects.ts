@@ -475,6 +475,10 @@ app.post(
                   existingImport.data.sourceUrl,
                   existingImport.data.branch ?? "main",
                   logger,
+                  // Explicit, not left to processImportJob's DEFAULT_CLONE_DEPTH
+                  // default: omitting it silently re-triggers a full-history
+                  // import at depth 10, which is the bug this PR exists to fix.
+                  existingImport.data.depth ?? DEFAULT_CLONE_DEPTH,
                 ).catch((error) => {
                   logger.error(
                     "Unhandled error in background import re-trigger",
@@ -1684,17 +1688,19 @@ app.post("/:namespace/:slug/sync", async (c) => {
       slug,
     });
     c.executionCtx.waitUntil(
-      processSyncJob(c.env, project, importId, sourceUrl, branch, logger).catch((error) => {
-        logger.error(
-          "Unhandled error in background sync job",
-          error instanceof Error ? error : undefined,
-          {
-            namespace,
-            slug,
-            importId,
-          },
-        );
-      }),
+      processSyncJob(c.env, project, importId, sourceUrl, branch, logger, syncDepth).catch(
+        (error) => {
+          logger.error(
+            "Unhandled error in background sync job",
+            error instanceof Error ? error : undefined,
+            {
+              namespace,
+              slug,
+              importId,
+            },
+          );
+        },
+      ),
     );
   }
 
@@ -1796,6 +1802,12 @@ export async function processSyncJob(
   sourceUrl: string,
   branch: string,
   logger: Logger,
+  /**
+   * Clone depth for the legacy import fallback below. Required rather than
+   * defaulted: a default here is indistinguishable from a caller that forgot,
+   * which is exactly how this path kept re-importing at depth 10.
+   */
+  depth: number,
 ) {
   const { namespace, slug } = project;
   const artifactsRepoName = getArtifactsRepoName(namespace, slug);
@@ -1816,8 +1828,6 @@ export async function processSyncJob(
     // orphaned workspace forks. Only projects with no recorded Artifacts remote
     // (initial import never completed, so no forks can exist) still take the
     // import path.
-    const depth = 10; // Default depth for the legacy import fallback
-
     const outcome = await syncOrImportProject(
       env.ARTIFACTS,
       {

@@ -850,6 +850,62 @@ describe("import route edge paths", () => {
     expect(mockImportJobs.get("@usera:retrig2")?.status).toBe("completed");
   });
 
+  /**
+   * The queue-less twin of the retry case. This branch called processImportJob
+   * without a depth argument at all, so it silently took the parameter's own
+   * DEFAULT_CLONE_DEPTH — invisible to a grep for depth literals, and it meant
+   * a full-history project was re-imported shallow whenever the queue was
+   * absent.
+   */
+  it("re-triggers via direct processing at the recorded depth, not the default", async () => {
+    stubFetch(async () => githubRepoMetadata("main"));
+    const { default: app } = await import("../src/index");
+    const { importFromGitHub } = await import("../src/storage/git-ops");
+    vi.mocked(importFromGitHub).mockResolvedValue({
+      success: true,
+      data: { name: "r", remote: "https://artifacts.example.com/repos/r", token: "t" },
+    });
+
+    const env = makeEnv({ IMPORT_QUEUE: undefined });
+    await seedProject(env, { namespace: "@usera", slug: "retrig3", projectId: "proj_r3" });
+    await seedImportJob({
+      namespace: "@usera",
+      slug: "retrig3",
+      projectId: "proj_r3",
+      depth: 0,
+    });
+    const { updateImportStatus } = await import("../src/storage/imports");
+    const { createLogger } = await import("../src/utils/logger");
+    await updateImportStatus(
+      {} as D1Database,
+      "@usera",
+      "retrig3",
+      "failed",
+      createLogger({ component: "Test" }),
+    );
+
+    const background: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => background.push(p),
+      passThroughOnException: () => undefined,
+    } as unknown as ExecutionContext;
+
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/projects/@usera/retrig3/import",
+        { url: "https://github.com/test/repo" },
+        USER_A_HEADERS,
+      ),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    await Promise.all(background);
+
+    expect(vi.mocked(importFromGitHub).mock.calls[0]?.[5]).toBe(0);
+  });
+
   it("falls back to direct processing for a new import when no queue is configured", async () => {
     stubFetch(async () => githubRepoMetadata("main"));
     const { default: app } = await import("../src/index");
