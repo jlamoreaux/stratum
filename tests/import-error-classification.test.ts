@@ -105,3 +105,87 @@ describe("classifyError — Git LFS ordering", () => {
     expect(classifyError("403 unauthorized").type).toBe("AUTH_ERROR");
   });
 });
+
+/**
+ * The message classification reads carries the repository URL, so a bare
+ * substring test lets the repository's NAME decide its error message. Invisible
+ * to any rendering test: the function returns a perfectly well-formed object,
+ * just the wrong one.
+ */
+describe("classifyError — a repository's name must not decide its error message", () => {
+  // Every row is a repository that does not exist, failing with a 404. The
+  // name contains a word that one of the branches used to match on.
+  it.each([
+    ["oauth ⊃ auth", "Repository not found: https://github.com/acme/oauth-server (404)"],
+    ["fetch-utils ⊃ fetch", "Repository not found: https://github.com/acme/fetch-utils (404)"],
+    ["timeout-rs ⊃ timeout", "Repository not found: https://github.com/acme/timeout-rs (404)"],
+    [
+      "connection-pool ⊃ connection",
+      "Repository not found: https://github.com/acme/connection-pool (404)",
+    ],
+    ["network ⊃ network", "Repository not found: https://github.com/acme/network-tools (404)"],
+    [
+      "credentials ⊃ credentials",
+      "fatal: repository 'https://github.com/acme/credentials' not found",
+    ],
+    // The scp-style remote carries the same names and must be stripped too.
+    ["scp-style remote", "fatal: repository 'git@github.com:acme/oauth-server.git' not found"],
+    // An owner, not a repo.
+    ["owner name", "Repository not found: https://github.com/timeout/demo (404)"],
+  ])("reports a missing %s repository as NOT_FOUND", (_label, message) => {
+    const info = classifyError(message);
+    expect(info.type).toBe("NOT_FOUND");
+    expect(info.title).toBe("Repository Not Found");
+  });
+
+  // Narrowing the predicates trades a false positive for a false negative if
+  // done carelessly, so every phrasing git and the GitHub API actually emit
+  // gets its own row.
+  it.each([
+    ["git over https", "fatal: Authentication failed for 'https://github.com/acme/private.git/'"],
+    [
+      "no terminal prompt",
+      "fatal: could not read Username for 'https://github.com': No such device",
+    ],
+    ["ssh refusal", "git@github.com: Permission denied (publickey)."],
+    ["github api", '{"message":"Bad credentials","status":"401"}'],
+    ["private repo via api", '{"message":"Must have admin rights. Requires authentication"}'],
+    ["bare 403", "remote: HTTP 403 while accessing the repository"],
+  ])("still reports a real authentication failure as AUTH_ERROR (%s)", (_label, message) => {
+    const info = classifyError(message);
+    expect(info.type).toBe("AUTH_ERROR");
+    expect(info.title).toBe("Authentication Failed");
+  });
+
+  it.each([
+    [
+      "connection refused",
+      "fatal: unable to access 'https://github.com/acme/x.git/': Failed to connect to github.com port 443: Connection refused",
+    ],
+    ["curl timeout", "error: RPC failed; curl 28 Operation timed out after 30001 milliseconds"],
+    ["dns", "request to https://github.com/acme/x.git failed, reason: getaddrinfo ENOTFOUND"],
+    ["socket", "fetch failed: socket hang up"],
+    ["unreachable", "connect: Network is unreachable"],
+  ])("still reports a real transport failure as NETWORK_ERROR (%s)", (_label, message) => {
+    const info = classifyError(message);
+    expect(info.type).toBe("NETWORK_ERROR");
+    expect(info.title).toBe("Network Error");
+  });
+
+  // A URL path that happens to contain three digits is not an HTTP status.
+  it("does not read digits inside a repository path as a status code", () => {
+    const info = classifyError(
+      "Repository not found: https://github.com/acme/error-403-demo (404)",
+    );
+    expect(info.type).toBe("NOT_FOUND");
+  });
+
+  // The URL strip must not disturb the LFS detection added in #218, whose
+  // batch marker is a path that can legitimately arrive inside a URL.
+  it("still classifies an LFS batch failure whose endpoint is a full URL", () => {
+    const info = classifyError(
+      "batch response: https://github.com/acme/x.git/info/lfs/objects/batch returned 404",
+    );
+    expect(info.title).toBe("Git LFS Not Supported");
+  });
+});

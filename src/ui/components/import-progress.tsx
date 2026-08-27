@@ -87,15 +87,86 @@ const LFS_BATCH_RESPONSE_MARKERS = ["batch response", "/info/lfs/objects/batch"]
  * the ORDER of these branches is load-bearing, and order is exactly what a
  * rendering test cannot see.
  */
+/**
+ * Spans that carry a repository's own name into an error message: a URL, or
+ * git's scp-style `user@host:path` remote. Removed before classification so a
+ * repository called `oauth-server` or `fetch-utils` cannot decide how its
+ * failure is described.
+ */
+const REMOTE_SPAN = /\b[a-z][a-z0-9+.-]*:\/\/\S+|\b[\w.-]+@[\w.-]+:\S+/g;
+
+/**
+ * Markers of a real authentication failure, as git and the GitHub API phrase
+ * them.
+ *
+ * Every entry contains a space, and that is not decoration: neither a URL nor
+ * a ref name can, so a phrase git emits cannot also be something a repository
+ * is called. The bare nouns these replace (`auth`, `credentials`) are exactly
+ * the substrings that made `acme/oauth-server` report an authentication
+ * problem — and because this branch runs first, its answer won over every
+ * other classification.
+ */
+const AUTH_MARKERS = [
+  "authentication failed",
+  "authentication required",
+  "requires authentication",
+  "could not read username",
+  "could not read password",
+  "invalid username or password",
+  "permission denied",
+  "access denied",
+  "bad credentials",
+  "invalid credentials",
+];
+
+/**
+ * Markers of a real transport failure.
+ *
+ * Same rule as {@link AUTH_MARKERS}, with one deliberate exception: Node's
+ * transport codes are single tokens, and no repository is plausibly named
+ * `econnrefused`.
+ */
+const NETWORK_MARKERS = [
+  "connection refused",
+  "connection reset",
+  "connection closed",
+  "connection timed out",
+  "operation timed out",
+  "timed out",
+  "network is unreachable",
+  "network error",
+  "failed to connect",
+  "failed to fetch",
+  "fetch failed",
+  "socket hang up",
+  "econnrefused",
+  "econnreset",
+  "etimedout",
+  "enotfound",
+];
+
+/** Whether `text` carries `code` as a standalone HTTP status, not as digits inside a path. */
+function hasStatus(text: string, code: string): boolean {
+  return new RegExp(`(?<!\\d)${code}(?!\\d)`).test(text);
+}
+
 export function classifyError(errorMessage: string): ErrorInfo {
   const msg = errorMessage.toLowerCase();
+  // Matched against by every branch EXCEPT LFS and not-found below. Those two
+  // read the full message on purpose: LFS_BATCH_RESPONSE_MARKERS requires the
+  // path `/info/lfs/objects/batch`, which legitimately arrives inside a URL,
+  // so stripping there would undo the LFS detection #218 added.
+  const prose = msg.replace(REMOTE_SPAN, " ");
 
   // Authentication errors
+  // 401/403 and a bare "unauthorized" are kept from the original predicate:
+  // read from `prose` they can no longer come from a repository's URL, and
+  // dropping them would trade this bug for a false negative on a real refusal.
   if (
-    msg.includes("auth") ||
-    msg.includes("unauthorized") ||
-    msg.includes("403") ||
-    msg.includes("credentials")
+    AUTH_MARKERS.some((marker) => prose.includes(marker)) ||
+    prose.includes("unauthorized") ||
+    hasStatus(prose, "401") ||
+    hasStatus(prose, "403")
   ) {
     return {
       type: "AUTH_ERROR",
@@ -115,12 +186,7 @@ export function classifyError(errorMessage: string): ErrorInfo {
   }
 
   // Network errors
-  if (
-    msg.includes("network") ||
-    msg.includes("fetch") ||
-    msg.includes("connection") ||
-    msg.includes("timeout")
-  ) {
+  if (NETWORK_MARKERS.some((marker) => prose.includes(marker))) {
     return {
       type: "NETWORK_ERROR",
       title: "Network Error",
@@ -187,7 +253,11 @@ export function classifyError(errorMessage: string): ErrorInfo {
   }
 
   // Rate limiting
-  if (msg.includes("rate limit") || msg.includes("429") || msg.includes("too many requests")) {
+  if (
+    prose.includes("rate limit") ||
+    hasStatus(prose, "429") ||
+    prose.includes("too many requests")
+  ) {
     return {
       type: "RATE_LIMITED",
       title: "Rate Limited",
@@ -202,7 +272,10 @@ export function classifyError(errorMessage: string): ErrorInfo {
   }
 
   // Git errors
-  if (msg.includes("git") || msg.includes("clone") || msg.includes("repository")) {
+  // Still bare nouns, but read from `prose`: a repository named `git-tools` no
+  // longer reaches here through its URL. A ref name can still collide, which
+  // needs the corpus of real messages this branch produces to narrow safely.
+  if (prose.includes("git") || prose.includes("clone") || prose.includes("repository")) {
     return {
       type: "GIT_ERROR",
       title: "Git Operation Failed",
@@ -217,7 +290,7 @@ export function classifyError(errorMessage: string): ErrorInfo {
   }
 
   // Storage / naming conflict errors
-  if (msg.includes("already exists")) {
+  if (prose.includes("already exists")) {
     return {
       type: "ALREADY_EXISTS",
       title: "Import Conflict",
@@ -230,12 +303,14 @@ export function classifyError(errorMessage: string): ErrorInfo {
     };
   }
 
+  // As with the git branch: URL-borne collisions are closed, ref-name ones are
+  // not yet.
   if (
-    msg.includes("disk") ||
-    msg.includes("quota") ||
-    msg.includes("space") ||
-    msg.includes("storage") ||
-    msg.includes("artifacts")
+    prose.includes("disk") ||
+    prose.includes("quota") ||
+    prose.includes("space") ||
+    prose.includes("storage") ||
+    prose.includes("artifacts")
   ) {
     return {
       type: "STORAGE_ERROR",
