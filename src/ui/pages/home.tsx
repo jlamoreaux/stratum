@@ -41,7 +41,7 @@ export const HomePage: FC<HomeProps> = ({ projects, user }) => {
             <>
               <p>Sign in to view your projects.</p>
               <a
-                href="/auth/email"
+                href="/auth/login"
                 class="btn btn-primary"
                 style={{ marginTop: "1rem", display: "inline-block" }}
               >

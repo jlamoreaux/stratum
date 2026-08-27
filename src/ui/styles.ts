@@ -121,6 +121,12 @@ a:hover { text-decoration: underline; }
   text-decoration: none;
 }
 
+.nav-logout-form { display: inline; }
+button.nav-auth-link {
+  background: none; border: none; cursor: pointer;
+  font-family: inherit; font-size: 0.9rem; line-height: inherit;
+}
+
 .main {
   max-width: 1100px;
   margin: 0 auto;

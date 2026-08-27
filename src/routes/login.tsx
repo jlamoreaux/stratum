@@ -38,26 +38,7 @@ app.get("/", (c) => {
         />
         <link rel="stylesheet" href="/ui.css" />
         <style>{`
-          :root {
-            --bg-primary: #0a0a0a;
-            --bg-secondary: #111;
-            --bg-tertiary: #1a1a1a;
-            --text-primary: #f0f0f0;
-            --text-secondary: #888;
-            --text-tertiary: #666;
-            --border: #1e1e1e;
-            --border-hover: #333;
-            --accent: #1a3a6e;
-            --accent-hover: #1f4a8e;
-            --accent-text: #7ca9f7;
-            --accent-text-hover: #a8c8f8;
-            --error-bg: rgba(248, 113, 113, 0.1);
-            --error-border: rgba(248, 113, 113, 0.3);
-            --error-text: #f87171;
-            --success-bg: rgba(74, 222, 128, 0.1);
-            --success-border: rgba(74, 222, 128, 0.3);
-            --success-text: #4ade80;
-          }
+          /* Color tokens come from the shared stylesheet (/ui.css). */
 
           .auth-page {
             min-height: 100vh;
@@ -298,14 +279,6 @@ app.get("/", (c) => {
             line-height: 1.5;
           }
 
-          .auth-help-icon {
-            display: inline-block;
-            width: 16px;
-            height: 16px;
-            margin-right: 0.25rem;
-            vertical-align: middle;
-          }
-
           .magic-link-note {
             margin-top: 1.5rem;
             padding: 1rem;
@@ -433,7 +406,7 @@ app.get("/", (c) => {
                       id="rememberMe"
                       name="rememberMe"
                       value="true"
-                      defaultChecked
+                      checked
                     />
                     <label class="form-checkbox-label" for="rememberMe">
                       Keep me signed in for 30 days
@@ -446,7 +419,6 @@ app.get("/", (c) => {
                 </form>
 
                 <div class="auth-help">
-                  <span class="auth-help-icon">🔐</span>
                   <strong>No password needed.</strong> We use secure magic links that expire in 15
                   minutes. Check your spam folder if you don't see the email.
                 </div>

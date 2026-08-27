@@ -81,21 +81,17 @@ describe("Magic Link Authentication", () => {
     magicStore.clear();
   });
 
-  describe("GET / (auth choice page)", () => {
-    it("should show auth choice page", async () => {
+  describe("GET / (retired auth choice page)", () => {
+    it("redirects to the sign-in page", async () => {
       const res = await emailAuthRouter.fetch(request("/"), env);
-      expect(res.status).toBe(200);
-      const text = await res.text();
-      expect(text).toContain("Welcome to Stratum");
-      expect(text).toContain("Create Account");
-      expect(text).toContain("Sign In");
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth/login");
     });
 
-    it("should show error message when error param provided", async () => {
+    it("carries error/success params over to the sign-in page", async () => {
       const res = await emailAuthRouter.fetch(request("/?error=invalid_email"), env);
-      expect(res.status).toBe(200);
-      const text = await res.text();
-      expect(text).toContain("Please enter a valid email address");
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth/login?error=invalid_email");
     });
   });
 
