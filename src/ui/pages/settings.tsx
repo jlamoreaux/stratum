@@ -111,8 +111,8 @@ export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }
         </form>
       </div>
 
-      <div class="card danger-zone" style={{ borderColor: "#f87171" }}>
-        <h3 style={{ marginTop: 0, color: "#f87171" }}>Danger Zone</h3>
+      <div class="card danger-zone">
+        <h3 style={{ marginTop: 0 }}>Danger Zone</h3>
         <p class="settings-help">
           Permanently delete your account. All your projects and personal data are erased and your
           tokens stop working immediately. Contributions you left in other people's projects are
@@ -126,7 +126,6 @@ export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }
             required
             autocomplete="off"
             placeholder={user.username}
-            style={{ marginRight: "0.5rem" }}
           />
           <button type="submit" class="btn btn-danger">
             Delete account

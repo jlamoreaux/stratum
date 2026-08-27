@@ -389,9 +389,9 @@ export const RepoPage: FC<RepoProps> = ({
       </div>
 
       {isOwner && (
-        <div class="card danger-zone" style={{ marginTop: "1rem", borderColor: "#f87171" }}>
-          <h3 style={{ marginTop: 0, color: "#f87171" }}>Danger Zone</h3>
-          <p style={{ color: "#aaa" }}>
+        <div class="card danger-zone" style={{ marginTop: "1rem" }}>
+          <h3 style={{ marginTop: 0 }}>Danger Zone</h3>
+          <p>
             Permanently delete this project and every byte tied to it — repo, forks, changes, and
             all metadata. This cannot be undone. Type{" "}
             <code>
@@ -406,7 +406,6 @@ export const RepoPage: FC<RepoProps> = ({
               required
               autocomplete="off"
               placeholder={`${project.namespace}/${project.slug}`}
-              style={{ marginRight: "0.5rem" }}
             />
             <button type="submit" class="btn btn-danger">
               Delete project
