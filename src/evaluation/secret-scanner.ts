@@ -149,12 +149,13 @@ function matchSecret(line: string): string | undefined {
 /**
  * Scan raw file content — not a diff — for secrets.
  *
- * Callers that hold the literal bytes about to be committed must use this
+ * Callers that hold the literal bytes about to be committed should use this
  * rather than synthesising a diff to feed `SecretScanEvaluator.evaluate`.
- * Prefixing content lines with "+" is not a lossless encoding: a content line
- * that itself starts with "++" becomes "+++…", which the diff reader skips as
- * a file header, and the secret on it is never scanned. Scanning the content
- * directly removes that escape entirely.
+ * Prefixing content lines with "+" is not a lossless encoding — a content line
+ * starting with "++" is indistinguishable from a "+++" file header by prefix
+ * alone — so the evaluator recovers the distinction from the diff's structure
+ * instead. Scanning content directly needs no such recovery, and is the
+ * simpler thing to reason about when the bytes are already in hand.
  *
  * @returns One issue string per finding, empty when the content is clean.
  */
@@ -177,15 +178,54 @@ export class SecretScanEvaluator implements Evaluator {
   ): Promise<Result<EvalResult, AppError>> {
     const issues: string[] = [];
 
+    // Headers are recognised by POSITION, not by prefix. A diff prefixes every
+    // added line with "+", so file content beginning with "++" arrives as
+    // "+++…" and content beginning with "++ " arrives as "+++ …" — both
+    // indistinguishable from a file header to any prefix test, and both
+    // therefore a way to walk a credential past an always-on blocking gate.
+    //
+    // Git's structure decides instead: "+++ b/path" always immediately follows
+    // "--- a/path", and only before the first hunk of a file. A "+++ …" line
+    // anywhere else is content, so there is no shape a line can take to be
+    // mistaken for a header.
+    //
+    // Anchored on the adjacent header pair rather than on "@@" deliberately.
+    // Scanning only after a hunk header would be the stricter reading, but a
+    // caller that hands over a diff with no "@@" — or a bare list of "+" lines
+    // — would then have every added line skipped, and a scanner that silently
+    // scans nothing is a worse failure than the one this fixes.
+    let inHunkBody = false;
+    let prevWasOldFileHeader = false;
+
     const lines = diff.split("\n");
     lines.forEach((line, idx) => {
-      // Only the unified-diff file header is skipped, and that header always
-      // has a space after the marker ("+++ b/path"). Testing for a bare "+++"
-      // also swallowed a genuine added line whose own text starts with "++",
-      // letting a secret on such a line through unscanned.
-      if (!line.startsWith("+") || line.startsWith("+++ ")) return;
+      if (line.startsWith("diff --git ")) {
+        inHunkBody = false;
+        prevWasOldFileHeader = false;
+        return;
+      }
+      if (line.startsWith("@@")) {
+        inHunkBody = true;
+        prevWasOldFileHeader = false;
+        return;
+      }
+      // Before any hunk, "--- " can only be the old-file header: content lines
+      // carry a "+"/"-"/" " marker and cannot appear here. Inside a hunk it is
+      // a removed line whose text starts with "-- ", which is skipped below.
+      if (!inHunkBody && line.startsWith("--- ")) {
+        prevWasOldFileHeader = true;
+        return;
+      }
+      const isNewFileHeader = !inHunkBody && prevWasOldFileHeader && line.startsWith("+++ ");
+      prevWasOldFileHeader = false;
+      if (isNewFileHeader) return;
+
+      if (!line.startsWith("+")) return;
+      // Exactly one marker, so the patterns see the real file line rather than
+      // one with a "+" welded to its first token.
+      const content = line.slice(1);
       const lineNumber = idx + 1;
-      const name = matchSecret(line);
+      const name = matchSecret(content);
       if (name) {
         issues.push(`${name}: line ${lineNumber}`);
       }
