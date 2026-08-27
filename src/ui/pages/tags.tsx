@@ -1,5 +1,6 @@
 import type { FC } from "hono/jsx";
 import type { RepoTagEntry } from "../../storage/git-ops";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface TagsProps {
@@ -7,7 +8,9 @@ interface TagsProps {
     name: string;
     namespace: string;
     slug: string;
+    visibility?: string;
   };
+  canWrite?: boolean;
   tags: RepoTagEntry[];
   user?: { id: string; email: string; username: string } | null;
 }
@@ -25,22 +28,19 @@ export function formatTagDate(timestamp: number | undefined): string {
   return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
-export const TagsPage: FC<TagsProps> = ({ project, tags, user }) => {
+export const TagsPage: FC<TagsProps> = ({ project, tags, canWrite, user }) => {
   return (
     <Layout title={`Tags — ${project.name}`} user={user}>
-      <div class="page-header">
-        <h1>Tags</h1>
-        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
-          Back to repo
-        </a>
-      </div>
+      <ProjectHeader project={project} active="tags" canWrite={canWrite ?? false} />
 
       {tags.length === 0 ? (
         <div class="empty-state">
           <p>No tags yet.</p>
           <p class="empty-state-hint">
             Push a tag to a workspace remote to create one — the project remote refuses tag pushes.
+            From a cloned workspace:
           </p>
+          <pre class="cli-hint">{"git tag v1.0.0\ngit push origin v1.0.0"}</pre>
         </div>
       ) : (
         <div class="card">

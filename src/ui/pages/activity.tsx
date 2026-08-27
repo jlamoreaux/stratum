@@ -1,5 +1,6 @@
 import type { FC } from "hono/jsx";
 import type { EventRecord } from "../../storage/events";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface ActivityProps {
@@ -7,7 +8,9 @@ interface ActivityProps {
     name: string;
     namespace: string;
     slug: string;
+    visibility?: string;
   };
+  canWrite?: boolean;
   events: EventRecord[];
   user?: { id: string; email: string; username: string } | null;
 }
@@ -89,15 +92,10 @@ function changeLink(event: EventRecord): string | undefined {
   return changeId ? `/changes/${changeId}` : undefined;
 }
 
-export const ActivityPage: FC<ActivityProps> = ({ project, events, user }) => {
+export const ActivityPage: FC<ActivityProps> = ({ project, events, canWrite, user }) => {
   return (
     <Layout title={`Activity — ${project.name}`} user={user}>
-      <div class="page-header">
-        <h1>Activity</h1>
-        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
-          Back to repo
-        </a>
-      </div>
+      <ProjectHeader project={project} active="activity" canWrite={canWrite ?? false} />
 
       {events.length === 0 ? (
         <div class="empty-state">

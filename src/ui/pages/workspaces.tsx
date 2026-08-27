@@ -1,4 +1,5 @@
 import type { FC } from "hono/jsx";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface WorkspacesProps {
@@ -6,24 +7,34 @@ interface WorkspacesProps {
     name: string;
     namespace: string;
     slug: string;
+    visibility?: string;
   };
+  canWrite?: boolean;
   workspaces: Array<{ name: string; createdAt: string }>;
   user?: { id: string; email: string; username: string } | null;
 }
 
-export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, user }) => {
+export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, canWrite, user }) => {
   return (
     <Layout title={`Workspaces — ${project.name}`} user={user}>
+      <ProjectHeader project={project} canWrite={canWrite ?? false} />
       <div class="page-header">
         <h1>Workspaces</h1>
-        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
-          Back to repo
-        </a>
       </div>
 
       {workspaces.length === 0 ? (
         <div class="empty-state">
           <p>No workspaces yet.</p>
+          <p class="empty-state-hint">
+            A workspace is your private fork of this project — agents and humans commit there, then
+            open a change. From your terminal:
+          </p>
+          <pre class="cli-hint">{`stratum workspace create ${project.namespace}/${project.slug}`}</pre>
+          <p class="empty-state-hint">
+            <a href="https://docs.usestratum.dev" target="_blank" rel="noopener noreferrer">
+              CLI setup guide →
+            </a>
+          </p>
         </div>
       ) : (
         <div class="table-scroll">

@@ -380,7 +380,7 @@ app.get("/", (c) => {
             ) : (
               <>
                 <div class="signup-header">
-                  <div class="signup-badge">New Account</div>
+                  <h1 class="signup-title">Create your account</h1>
                   <p class="signup-subtitle">
                     Join Stratum to start managing your projects with AI-powered workflows.
                   </p>
@@ -470,7 +470,7 @@ app.get("/", (c) => {
                   </div>
 
                   <div class="submit-status" id="submitStatus" />
-                  <button type="submit" class="submit-btn" id="submitBtn" disabled>
+                  <button type="submit" class="submit-btn" id="submitBtn">
                     Create Account
                   </button>
                 </form>
@@ -485,8 +485,16 @@ app.get("/", (c) => {
                   Continue with GitHub
                 </a>
 
+                <a href="/auth/google" class="github-btn" style={{ marginTop: "0.5rem" }}>
+                  <svg class="github-icon" viewBox="0 0 24 24" role="img" aria-label="Google">
+                    <title>Google</title>
+                    <path d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z" />
+                  </svg>
+                  Continue with Google
+                </a>
+
                 <div class="auth-footer">
-                  Already have an account? <a href="/auth/email">Sign in</a>
+                  Already have an account? <a href="/auth/login">Sign in</a>
                 </div>
               </>
             )}
@@ -520,6 +528,8 @@ const SIGNUP_SCRIPT = `
 	let debounceTimer = null;
 	let lastCheckedUsername = null;
 	let isUsernameAvailable = false;
+	let usernameTaken = false;
+	let touched = false;
 	let activeRequestId = 0;
 
 	// Username validation regex: 3-39 chars, lowercase alphanumeric + hyphens, no start/end hyphen, no consecutive hyphens
@@ -601,10 +611,12 @@ const SIGNUP_SCRIPT = `
 
 				if (data.available) {
 					isUsernameAvailable = true;
+					usernameTaken = false;
 					updateUsernameStatus('available', 'Username is available!');
 					setUsernameInputState('success');
 				} else {
 					isUsernameAvailable = false;
+					usernameTaken = true;
 					updateUsernameStatus('taken', data.message || 'Username is already taken');
 					setUsernameInputState('error');
 				}
@@ -620,38 +632,29 @@ const SIGNUP_SCRIPT = `
 		}, 300);
 	}
 
+	// Guidance is advisory and only appears once the user has started typing;
+	// the button stays enabled and the submit handler does the real gating.
 	function updateSubmitButton() {
+		if (!touched) return;
 		const email = emailInput.value.trim();
 		const username = usernameInput.value.trim().toLowerCase();
 		const formatValidation = validateUsernameFormat(username);
-		
-		// Enable submit button only if:
-		// 1. Email is provided and valid
-		// 2. Username passes format validation
-		// 3. Username is available
 		const isEmailValid = email.length > 0 && email.includes('@');
-		const canSubmit = isEmailValid && formatValidation.valid && isUsernameAvailable;
-		
-		submitBtn.disabled = !canSubmit;
-		
-		// Show status message explaining why button is disabled
-		if (canSubmit) {
-			submitStatus.textContent = '';
-		} else if (!email) {
-			submitStatus.textContent = 'Please enter your email address';
-		} else if (!isEmailValid) {
+
+		if (email && !isEmailValid) {
 			submitStatus.textContent = 'Please enter a valid email address';
-		} else if (!username) {
-			submitStatus.textContent = 'Please enter a username';
-		} else if (!formatValidation.valid) {
+		} else if (username && !formatValidation.valid) {
 			submitStatus.textContent = formatValidation.message;
-		} else if (!isUsernameAvailable) {
+		} else if (username && usernameTaken) {
 			submitStatus.textContent = 'Username is not available';
+		} else {
+			submitStatus.textContent = '';
 		}
 	}
 
 	// Real-time username validation
 	usernameInput.addEventListener('input', function() {
+		touched = true;
 		const username = this.value.trim().toLowerCase();
 		const validation = validateUsernameFormat(username);
 		
@@ -673,6 +676,7 @@ const SIGNUP_SCRIPT = `
 
 	// Email validation
 	emailInput.addEventListener('input', function() {
+		touched = true;
 		updateSubmitButton();
 	});
 
@@ -689,6 +693,14 @@ const SIGNUP_SCRIPT = `
 			return;
 		}
 		
+		if (usernameTaken) {
+			e.preventDefault();
+			updateUsernameStatus('taken', 'Username is already taken');
+			setUsernameInputState('error');
+			usernameInput.focus();
+			return;
+		}
+
 		// Normalize username before submission
 		usernameInput.value = username;
 		
@@ -697,8 +709,6 @@ const SIGNUP_SCRIPT = `
 		submitBtn.textContent = 'Creating account...';
 	});
 
-	// Initial button state
-	updateSubmitButton();
 })();
 `;
 

@@ -1,5 +1,6 @@
 import type { FC } from "hono/jsx";
 import type { Webhook, WebhookDelivery } from "../../storage/webhooks";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface WebhooksPageProps {
@@ -7,6 +8,7 @@ interface WebhooksPageProps {
     name: string;
     namespace: string;
     slug: string;
+    visibility?: string;
   };
   webhooks: Array<{ webhook: Omit<Webhook, "secret">; deliveries: WebhookDelivery[] }>;
   subscribableEvents: string[];
@@ -36,11 +38,9 @@ export const WebhooksPage: FC<WebhooksPageProps> = ({
   const base = `/api/projects/${project.namespace}/${project.slug}/webhooks`;
   return (
     <Layout title={`Webhooks — ${project.name}`} user={user}>
+      <ProjectHeader project={project} active="settings" canWrite={true} />
       <div class="page-header">
         <h1>Webhooks</h1>
-        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
-          Back to repo
-        </a>
       </div>
 
       <div class="card">
@@ -54,11 +54,24 @@ export const WebhooksPage: FC<WebhooksPageProps> = ({
             Payload URL
             <input type="url" name="url" placeholder="https://example.com/hooks/stratum" required />
           </label>
-          <label>
-            Events (comma-separated, or * for all)
-            <input type="text" name="events" placeholder="*" />
-          </label>
-          <p class="webhook-help">Available: {subscribableEvents.join(", ")}</p>
+          <fieldset class="webhook-events">
+            <legend>Events to deliver</legend>
+            <label class="checkbox-label">
+              <input type="checkbox" name="events" value="*" checked />
+              All events
+            </label>
+            <div class="webhook-events-grid">
+              {subscribableEvents.map((event) => (
+                <label class="checkbox-label" key={event}>
+                  <input type="checkbox" name="events" value={event} />
+                  {event}
+                </label>
+              ))}
+            </div>
+            <p class="webhook-help">
+              "All events" wins when checked; otherwise only the selected events are delivered.
+            </p>
+          </fieldset>
           <button type="submit" class="btn btn-primary">
             Add webhook
           </button>

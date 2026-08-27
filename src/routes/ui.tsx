@@ -39,6 +39,7 @@ import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { IssueDetailPage, IssuesPage, NewIssuePage } from "../ui/pages/issues";
 import { NewProjectPage } from "../ui/pages/new-project";
+import { ProjectSettingsPage } from "../ui/pages/project-settings";
 import { RepoPage } from "../ui/pages/repo";
 import { SettingsPage } from "../ui/pages/settings";
 import { SyncPage } from "../ui/pages/sync";
@@ -57,6 +58,14 @@ type PageUser = { id: string; email: string; username: string } | null;
 const errorPage = (status: 400 | 404 | 500, message?: string, user?: PageUser) => (
   <ErrorPage status={status} {...(message !== undefined ? { message } : {})} user={user ?? null} />
 );
+
+/** The minimal project identity every page header needs. */
+const projectRef = (project: ProjectEntry) => ({
+  name: project.name,
+  namespace: project.namespace,
+  slug: project.slug,
+  ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
+});
 
 // Helper to get current user info
 async function getCurrentUser(
@@ -156,7 +165,7 @@ app.get("/new", async (c) => {
   const user = await getCurrentUser(c, logger);
   if (!user) {
     logger.debug("User not authenticated, redirecting to login");
-    return c.redirect("/auth/email");
+    return c.redirect("/auth/login");
   }
 
   logger.debug("Rendering new project page");
@@ -182,7 +191,7 @@ async function loadAgentSummaries(
 app.get("/settings", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const agents = await loadAgentSummaries(c.env.DB, user.id, logger);
   return c.html(<SettingsPage user={user} agents={agents} />);
@@ -192,7 +201,7 @@ app.get("/settings", async (c) => {
 app.post("/settings/rotate-token", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const rotateResult = await rotateUserToken(c.env.DB, user.id, logger);
   if (!rotateResult.success) {
@@ -213,6 +222,7 @@ app.post("/settings/rotate-token", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "api-key", value: rotateResult.data }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -221,7 +231,7 @@ app.post("/settings/rotate-token", async (c) => {
 app.post("/settings/agents", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
@@ -251,6 +261,7 @@ app.post("/settings/agents", async (c) => {
       user={user}
       agents={agents}
       freshToken={{ kind: "agent", value: createResult.data.plaintext, agentName: name }}
+      nonce={c.get("cspNonce") ?? ""}
     />,
   );
 });
@@ -259,7 +270,7 @@ app.post("/settings/agents", async (c) => {
 app.post("/settings/agents/:id/delete", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/email");
+  if (!user) return c.redirect("/auth/login");
 
   const { id } = c.req.param();
   const agentResult = await getAgent(c.env.DB, id, logger);
@@ -343,6 +354,7 @@ app.get("/p/:name", async (c) => {
       project.importCompleted !== false;
   }
   const isOwner = !!userId && project.ownerType === "user" && project.ownerId === userId;
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
 
   const snapshotResult = await readRepoSnapshot(c.env.STATE, project, logger);
   if (snapshotResult.success && snapshotResult.data) {
@@ -399,6 +411,7 @@ app.get("/p/:name", async (c) => {
         name: project.name,
         namespace: project.namespace,
         slug: project.slug,
+        ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
         remote: project.remote,
         createdAt: project.createdAt,
         sourceUrl: getProjectSourceUrl(project),
@@ -419,6 +432,7 @@ app.get("/p/:name", async (c) => {
       syncStatus={syncStatus}
       canSync={canSync}
       isOwner={isOwner}
+      canWrite={canWrite}
       nonce={c.get("cspNonce") ?? ""}
     />,
   );
@@ -469,11 +483,13 @@ app.get("/p/:name/changes", async (c) => {
     createdAt: change.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   logger.debug("Rendering changes page", { name, changeCount: view.length });
   return c.html(
     <ChangesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       changes={view}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -575,6 +591,7 @@ app.get("/changes/:id", async (c) => {
       }))
     : [];
 
+  const canReview = !!userResult && (await canWriteProject(c.env.DB, projectResult.data, userId));
   logger.debug("Rendering change detail page", { id });
   return c.html(
     <ChangeDetailPage
@@ -596,7 +613,8 @@ app.get("/changes/:id", async (c) => {
       reviews={reviewsResult.success ? reviewsResult.data : []}
       costs={costsResult.success ? costsResult.data : []}
       diff={diffFiles}
-      canReview={!!userResult && (await canWriteProject(c.env.DB, projectResult.data, userId))}
+      canReview={canReview}
+      projectRef={projectRef(projectResult.data)}
       user={userResult}
     />,
   );
@@ -641,11 +659,13 @@ app.get("/p/:name/workspaces", async (c) => {
     createdAt: ws.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   logger.debug("Rendering workspaces page", { name, workspaceCount: view.length });
   return c.html(
     <WorkspacesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       workspaces={view}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -694,10 +714,12 @@ app.get("/:namespace/:slug/changes", async (c) => {
     createdAt: change.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <ChangesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       changes={changes}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -734,10 +756,12 @@ app.get("/:namespace/:slug/activity", async (c) => {
     return c.html(errorPage(500, "Error loading activity. Please try again.", userResult), 500);
   }
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <ActivityPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       events={eventsResult.data}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -779,10 +803,12 @@ app.get("/:namespace/:slug/tags", async (c) => {
     return c.html(errorPage(500, "Error loading tags. Please try again.", userResult), 500);
   }
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <TagsPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       tags={tagsResult.data}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -862,7 +888,7 @@ app.get("/:namespace/:slug/issues", async (c) => {
 
   return c.html(
     <IssuesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       issues={issuesResult.data}
       authors={authors}
       filter={filter}
@@ -882,12 +908,7 @@ app.get("/:namespace/:slug/issues/new", async (c) => {
     return c.html(issuePageError(404, user), 404);
   }
 
-  return c.html(
-    <NewIssuePage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
-      user={user}
-    />,
-  );
+  return c.html(<NewIssuePage project={projectRef(project)} user={user} />);
 });
 
 // GET /:namespace/:slug/issues/:number — Issue detail
@@ -915,7 +936,7 @@ app.get("/:namespace/:slug/issues/:number", async (c) => {
 
   return c.html(
     <IssueDetailPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       issue={issueResult.data}
       authors={authors}
       canWrite={canWrite}
@@ -968,7 +989,7 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
 
   return c.html(
     <WebhooksPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       webhooks={webhooks}
       subscribableEvents={SUBSCRIBABLE_EVENTS}
       user={userResult}
@@ -1012,10 +1033,12 @@ app.get("/:namespace/:slug/workspaces", async (c) => {
     createdAt: ws.createdAt,
   }));
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <WorkspacesPage
-      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      project={projectRef(project)}
       workspaces={workspaces}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -1033,7 +1056,7 @@ app.get("/:namespace/:slug/sync", async (c) => {
   }
 
   if (!userId) {
-    return c.redirect("/auth/email");
+    return c.redirect("/auth/login");
   }
 
   const [userResult, projectResult] = await Promise.all([
@@ -1081,11 +1104,52 @@ app.get("/:namespace/:slug/sync", async (c) => {
         namespace: project.namespace || namespace,
         slug: project.slug || slug,
         name: project.name,
+        ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
       }}
       syncStatus={syncStatus}
       syncHistory={[]}
       user={userResult}
       nonce={c.get("cspNonce") ?? ""}
+    />,
+  );
+});
+
+// GET /:namespace/:slug/settings — Project settings (writers only; danger zone owner-only)
+app.get("/:namespace/:slug/settings", async (c) => {
+  const { namespace, slug } = c.req.param();
+  const userId = c.get("userId");
+  const logger = createLogger({ path: c.req.path, userId });
+
+  if (!isValidNamespace(namespace) || !isValidSlug(slug)) return c.notFound();
+  if (!userId) return c.redirect("/auth/login");
+
+  const [userResult, projectResult] = await Promise.all([
+    getCurrentUser(c, logger),
+    getProjectByPath(c.env.STATE, namespace, slug, logger),
+  ]);
+
+  if (!projectResult.success) {
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
+  }
+  const project = projectResult.data;
+
+  // Same 404 as a missing project — settings must not leak project existence.
+  if (!(await canWriteProject(c.env.DB, project, userId))) {
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
+  }
+
+  const isOwner = project.ownerType === "user" && project.ownerId === userId;
+  const sourceUrl = getProjectSourceUrl(project);
+
+  return c.html(
+    <ProjectSettingsPage
+      project={{
+        ...projectRef(project),
+        createdAt: project.createdAt,
+        ...(sourceUrl !== undefined ? { sourceUrl } : {}),
+      }}
+      isOwner={isOwner}
+      user={userResult}
     />,
   );
 });
@@ -1141,15 +1205,13 @@ app.get("/:namespace/:slug/blob/*", async (c) => {
     );
   }
 
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <FileViewerPage
-      project={{
-        namespace: project.namespace,
-        slug: project.slug,
-        name: project.name,
-      }}
+      project={projectRef(project)}
       path={filePath}
       content={content}
+      canWrite={canWrite}
       user={userResult}
     />,
   );
@@ -1219,6 +1281,7 @@ app.get("/:namespace/:slug", async (c) => {
 
   const isOwner = !!userId && project.ownerType === "user" && project.ownerId === userId;
   const canSync = !!getProjectSourceUrl(project) && isOwner && project.importCompleted !== false;
+  const canWrite = await canWriteProject(c.env.DB, project, userId);
 
   const snapshotResult2 = await readRepoSnapshot(c.env.STATE, project, logger);
   if (snapshotResult2.success && snapshotResult2.data) {
@@ -1276,6 +1339,7 @@ app.get("/:namespace/:slug", async (c) => {
         name: project.name,
         namespace: project.namespace,
         slug: project.slug,
+        ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
         remote: project.remote,
         createdAt: project.createdAt,
         sourceUrl: getProjectSourceUrl(project),
@@ -1296,6 +1360,7 @@ app.get("/:namespace/:slug", async (c) => {
       syncStatus={syncStatus}
       canSync={canSync}
       isOwner={isOwner}
+      canWrite={canWrite}
       nonce={c.get("cspNonce") ?? ""}
     />,
   );
