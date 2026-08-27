@@ -93,10 +93,12 @@ vi.mock("../src/queue/import-queue", () => ({
 
 vi.mock("../src/storage/imports", () => ({
   createImportJob: vi.fn().mockResolvedValue({ success: true }),
+  getLatestImportDepth: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { queueSyncJob } from "../src/queue/import-queue";
 import { getProjectByGitHubRepo } from "../src/storage/github-bridge";
+import { createImportJob, getLatestImportDepth } from "../src/storage/imports";
 
 // ---------------------------------------------------------------------------
 // We test handlePush indirectly by calling the internal function via the
@@ -241,6 +243,7 @@ describe("Webhook push handler: default branch resolution", () => {
       data: project,
     } as unknown as Awaited<ReturnType<typeof getProjectByGitHubRepo>>);
     vi.mocked(queueSyncJob).mockClear();
+    vi.mocked(createImportJob).mockClear();
 
     const { DB, STATE, IMPORT_QUEUE } = makeEnv();
     const { githubWebhookRouter } = await import("../src/github/webhooks");
@@ -285,6 +288,42 @@ describe("Webhook push handler: default branch resolution", () => {
     expect(queueSyncJob).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ branch: "master" }),
+    );
+  });
+
+  // A webhook-driven sync used to re-derive `depth: 10`, so a project imported
+  // with full history was quietly shallowed by the next push to its default
+  // branch.
+  it("carries the project's recorded clone depth into a webhook sync", async () => {
+    vi.mocked(getLatestImportDepth).mockResolvedValue(250);
+    await pushTo("main", PROJECT);
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 250 }),
+    );
+    expect(createImportJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 250 }),
+      expect.anything(),
+    );
+  });
+
+  // The value that a `?? DEFAULT_CLONE_DEPTH` fallback is most likely to eat.
+  it("preserves a recorded depth of 0 (full history) rather than defaulting it", async () => {
+    vi.mocked(getLatestImportDepth).mockResolvedValue(0);
+    await pushTo("main", PROJECT);
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 0 }),
+    );
+  });
+
+  it("falls back to the default depth when no prior job recorded one", async () => {
+    vi.mocked(getLatestImportDepth).mockResolvedValue(undefined);
+    await pushTo("main", PROJECT);
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 10 }),
     );
   });
 

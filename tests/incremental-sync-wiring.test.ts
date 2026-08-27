@@ -375,7 +375,7 @@ describe("projects route processSyncJob (queue-less fallback)", () => {
     });
 
     const env = makeEnv();
-    await processFallbackSyncJob(env, project, "sync_1", GITHUB_URL, "main", noopLogger);
+    await processFallbackSyncJob(env, project, "sync_1", GITHUB_URL, "main", noopLogger, 10);
 
     expect(syncFromGitHub).toHaveBeenCalledWith(
       env.ARTIFACTS,
@@ -409,7 +409,7 @@ describe("projects route processSyncJob (queue-less fallback)", () => {
     });
 
     const env = makeEnv();
-    await processFallbackSyncJob(env, project, "sync_1", GITHUB_URL, "main", noopLogger);
+    await processFallbackSyncJob(env, project, "sync_1", GITHUB_URL, "main", noopLogger, 10);
 
     expect(importFromGitHub).not.toHaveBeenCalled();
     expect(env.ARTIFACTS.delete).not.toHaveBeenCalled();
@@ -430,6 +430,30 @@ describe("projects route processSyncJob (queue-less fallback)", () => {
     expect(writeSnapshotFromRepo).not.toHaveBeenCalled();
   });
 
+  it("carries the caller's depth into the fallback import rather than a hardcoded 10", async () => {
+    // This path hardcoded `const depth = 10`, so a project imported with full
+    // history was silently re-imported shallow whenever the queue was absent.
+    // 0 is the value that matters: it means full history, and it is what a
+    // `?? DEFAULT_CLONE_DEPTH` fallback would eat.
+    const project = makeProject({ remote: LEGACY_REMOTE });
+    vi.mocked(importFromGitHub).mockResolvedValue({
+      success: true,
+      data: { remote: ARTIFACTS_REMOTE, token: "tok" } as never,
+    });
+
+    const env = makeEnv();
+    await processFallbackSyncJob(env, project, "sync_1", GITHUB_URL, "main", noopLogger, 0);
+
+    expect(importFromGitHub).toHaveBeenCalledWith(
+      env.ARTIFACTS,
+      "test__repo",
+      GITHUB_URL,
+      expect.anything(),
+      "main",
+      0,
+    );
+  });
+
   it("falls back to full import for a project without an Artifacts remote", async () => {
     const project = makeProject({ remote: LEGACY_REMOTE });
     vi.mocked(importFromGitHub).mockResolvedValue({
@@ -438,7 +462,7 @@ describe("projects route processSyncJob (queue-less fallback)", () => {
     });
 
     const env = makeEnv();
-    await processFallbackSyncJob(env, project, "sync_1", GITHUB_URL, "main", noopLogger);
+    await processFallbackSyncJob(env, project, "sync_1", GITHUB_URL, "main", noopLogger, 10);
 
     expect(syncFromGitHub).not.toHaveBeenCalled();
     expect(importFromGitHub).toHaveBeenCalledWith(

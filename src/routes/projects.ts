@@ -22,6 +22,7 @@ import {
   createImportJob,
   deleteImportJob,
   getImportProgress,
+  getLatestImportDepth,
   isImportCancelled,
   recoverStalledImport,
   updateImportStatus,
@@ -450,7 +451,9 @@ app.post(
                   slug,
                   githubUrl: existingImport.data.sourceUrl,
                   branch: existingImport.data.branch ?? "main",
-                  depth: DEFAULT_CLONE_DEPTH,
+                  // The depth the job was created with, not a fresh literal —
+                  // a re-trigger must not quietly shallow a full-history import.
+                  depth: existingImport.data.depth ?? DEFAULT_CLONE_DEPTH,
                   initiatedBy: userId,
                 });
               } catch (queueError) {
@@ -472,6 +475,10 @@ app.post(
                   existingImport.data.sourceUrl,
                   existingImport.data.branch ?? "main",
                   logger,
+                  // Explicit, not left to processImportJob's DEFAULT_CLONE_DEPTH
+                  // default: omitting it silently re-triggers a full-history
+                  // import at depth 10, which is the bug this PR exists to fix.
+                  existingImport.data.depth ?? DEFAULT_CLONE_DEPTH,
                 ).catch((error) => {
                   logger.error(
                     "Unhandled error in background import re-trigger",
@@ -564,6 +571,7 @@ app.post(
           slug,
           sourceUrl: body.url,
           branch,
+          depth,
         },
         logger,
       );
@@ -1442,7 +1450,7 @@ app.post(
           slug,
           githubUrl,
           branch,
-          depth: DEFAULT_CLONE_DEPTH,
+          depth: existing.depth ?? DEFAULT_CLONE_DEPTH,
           // Without this the retry path is the one case that never emails the
           // person waiting on the import — which is the gap this PR closes.
           initiatedBy: userId,
@@ -1477,7 +1485,7 @@ app.post(
           githubUrl,
           branch,
           logger,
-          DEFAULT_CLONE_DEPTH,
+          existing.depth ?? DEFAULT_CLONE_DEPTH,
         ).catch((error) => {
           logger.error(
             "Unhandled error in background import retry",
@@ -1596,6 +1604,16 @@ app.post("/:namespace/:slug/sync", async (c) => {
   // Create a new import job for the sync
   const importId = generateProjectId();
   const branch = projectDefaultBranch(project);
+  // Read BEFORE creating the job below: this looks up the most recent import
+  // job for the project, and the one about to be created would become that,
+  // so the lookup would read back the value it is trying to inherit.
+  //
+  // As on the webhook path, this depth reaches the fallback full import rather
+  // than the incremental fetch, which uses its own SYNC_FETCH_DEPTH window
+  // (see `syncOrImportProject`). It is still the recorded depth rather than a
+  // literal, which is what the fallback needs.
+  const inheritedDepth = await getLatestImportDepth(c.env.DB, namespace, slug, logger);
+  const syncDepth = inheritedDepth ?? DEFAULT_CLONE_DEPTH;
   const createResult = await createImportJob(
     c.env.DB,
     {
@@ -1605,6 +1623,7 @@ app.post("/:namespace/:slug/sync", async (c) => {
       slug,
       sourceUrl,
       branch,
+      depth: syncDepth,
     },
     logger,
   );
@@ -1629,7 +1648,7 @@ app.post("/:namespace/:slug/sync", async (c) => {
         slug,
         githubUrl: sourceUrl,
         branch,
-        depth: 10,
+        depth: syncDepth,
         provider: provider ?? undefined,
       });
     } catch (queueError) {
@@ -1669,17 +1688,19 @@ app.post("/:namespace/:slug/sync", async (c) => {
       slug,
     });
     c.executionCtx.waitUntil(
-      processSyncJob(c.env, project, importId, sourceUrl, branch, logger).catch((error) => {
-        logger.error(
-          "Unhandled error in background sync job",
-          error instanceof Error ? error : undefined,
-          {
-            namespace,
-            slug,
-            importId,
-          },
-        );
-      }),
+      processSyncJob(c.env, project, importId, sourceUrl, branch, logger, syncDepth).catch(
+        (error) => {
+          logger.error(
+            "Unhandled error in background sync job",
+            error instanceof Error ? error : undefined,
+            {
+              namespace,
+              slug,
+              importId,
+            },
+          );
+        },
+      ),
     );
   }
 
@@ -1781,6 +1802,12 @@ export async function processSyncJob(
   sourceUrl: string,
   branch: string,
   logger: Logger,
+  /**
+   * Clone depth for the legacy import fallback below. Required rather than
+   * defaulted: a default here is indistinguishable from a caller that forgot,
+   * which is exactly how this path kept re-importing at depth 10.
+   */
+  depth: number,
 ) {
   const { namespace, slug } = project;
   const artifactsRepoName = getArtifactsRepoName(namespace, slug);
@@ -1801,8 +1828,6 @@ export async function processSyncJob(
     // orphaned workspace forks. Only projects with no recorded Artifacts remote
     // (initial import never completed, so no forks can exist) still take the
     // import path.
-    const depth = 10; // Default depth for the legacy import fallback
-
     const outcome = await syncOrImportProject(
       env.ARTIFACTS,
       {

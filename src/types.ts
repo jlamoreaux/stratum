@@ -316,6 +316,13 @@ export interface ImportProgress {
   status: ImportStatus;
   sourceUrl: string;
   branch: string;
+  /**
+   * Clone depth this job ran under, when one was recorded. Absent on jobs
+   * created before migration 040 and on callers with no depth to record;
+   * absent means "fall back to DEFAULT_CLONE_DEPTH", which `0` (full history)
+   * explicitly does not.
+   */
+  depth?: number;
   startedAt: string;
   completedAt?: string;
   updatedAt: string; // For stall detection

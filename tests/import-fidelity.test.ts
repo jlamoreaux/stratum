@@ -80,6 +80,7 @@ vi.mock("../src/storage/imports", () => ({
       status: "queued",
       sourceUrl: params.sourceUrl,
       branch: params.branch,
+      ...(params.depth !== undefined ? { depth: params.depth } : {}),
       startedAt: now,
       updatedAt: now,
       version: 1,
@@ -97,6 +98,11 @@ vi.mock("../src/storage/imports", () => ({
     const job = mockImportJobs.get(`${namespace}:${slug}`);
     return { success: true, data: job ?? null };
   }),
+
+  getLatestImportDepth: vi.fn(
+    async (_db, namespace: string, slug: string) =>
+      mockImportJobs.get(`${namespace}:${slug}`)?.depth,
+  ),
 
   updateImportProgress: vi.fn(async (_db, namespace, slug, updates, _logger) => {
     const key = `${namespace}:${slug}`;
@@ -322,6 +328,7 @@ async function seedImportJob(params: {
   namespace: string;
   slug: string;
   projectId: string;
+  depth?: number;
 }): Promise<ImportProgress> {
   const { createImportJob } = await import("../src/storage/imports");
   const { createLogger } = await import("../src/utils/logger");
@@ -335,6 +342,7 @@ async function seedImportJob(params: {
       slug: params.slug,
       sourceUrl: "https://github.com/test/repo",
       branch: "main",
+      ...(params.depth !== undefined ? { depth: params.depth } : {}),
     },
     logger,
   );
@@ -720,6 +728,82 @@ describe("import route edge paths", () => {
     );
   });
 
+  /**
+   * The issue's headline case (#279): a user imports with full history, hits a
+   * transient failure, and retries. The retry used to rebuild the job from the
+   * stored row and re-derive a hardcoded depth, so a deliberate "full" became a
+   * depth-10 clone — silently, with no error and nothing saying the depth had
+   * changed.
+   *
+   * 0 is the value most likely to be eaten on the way through, since every
+   * consumer reads `depth ?? DEFAULT_CLONE_DEPTH`.
+   */
+  it("retries a full-history import at full history, not the default depth", async () => {
+    stubFetch(async () => githubRepoMetadata("main"));
+    const { default: app } = await import("../src/index");
+    const env = makeEnv();
+
+    await seedProject(env, { namespace: "@usera", slug: "fullhist", projectId: "proj_fh" });
+    await seedImportJob({
+      namespace: "@usera",
+      slug: "fullhist",
+      projectId: "proj_fh",
+      depth: 0,
+    });
+    const { updateImportStatus } = await import("../src/storage/imports");
+    const { createLogger } = await import("../src/utils/logger");
+    await updateImportStatus(
+      {} as D1Database,
+      "@usera",
+      "fullhist",
+      "failed",
+      createLogger({ component: "Test" }),
+    );
+
+    const { DEFAULT_CLONE_DEPTH } = await import("../src/utils/validation");
+    const res = await app.fetch(
+      request("POST", "/api/projects/@usera/fullhist/import/retry", {}, USER_A_HEADERS),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    const send = vi.mocked(env.IMPORT_QUEUE?.send as unknown as ReturnType<typeof vi.fn>);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ depth: 0 }));
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ depth: DEFAULT_CLONE_DEPTH }));
+  });
+
+  it("retries a deep-but-shallow import at the depth it was created with", async () => {
+    stubFetch(async () => githubRepoMetadata("main"));
+    const { default: app } = await import("../src/index");
+    const env = makeEnv();
+
+    await seedProject(env, { namespace: "@usera", slug: "deepish", projectId: "proj_di" });
+    await seedImportJob({
+      namespace: "@usera",
+      slug: "deepish",
+      projectId: "proj_di",
+      depth: 500,
+    });
+    const { updateImportStatus } = await import("../src/storage/imports");
+    const { createLogger } = await import("../src/utils/logger");
+    await updateImportStatus(
+      {} as D1Database,
+      "@usera",
+      "deepish",
+      "failed",
+      createLogger({ component: "Test" }),
+    );
+
+    const res = await app.fetch(
+      request("POST", "/api/projects/@usera/deepish/import/retry", {}, USER_A_HEADERS),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    const send = vi.mocked(env.IMPORT_QUEUE?.send as unknown as ReturnType<typeof vi.fn>);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ depth: 500 }));
+  });
+
   it("re-triggers via direct processing when no queue is configured", async () => {
     stubFetch(async () => githubRepoMetadata("main"));
     const { default: app } = await import("../src/index");
@@ -764,6 +848,62 @@ describe("import route edge paths", () => {
     // Direct path uses the default depth (no stored depth on the import job)
     expect(vi.mocked(importFromGitHub).mock.calls[0]?.[5]).toBe(10);
     expect(mockImportJobs.get("@usera:retrig2")?.status).toBe("completed");
+  });
+
+  /**
+   * The queue-less twin of the retry case. This branch called processImportJob
+   * without a depth argument at all, so it silently took the parameter's own
+   * DEFAULT_CLONE_DEPTH — invisible to a grep for depth literals, and it meant
+   * a full-history project was re-imported shallow whenever the queue was
+   * absent.
+   */
+  it("re-triggers via direct processing at the recorded depth, not the default", async () => {
+    stubFetch(async () => githubRepoMetadata("main"));
+    const { default: app } = await import("../src/index");
+    const { importFromGitHub } = await import("../src/storage/git-ops");
+    vi.mocked(importFromGitHub).mockResolvedValue({
+      success: true,
+      data: { name: "r", remote: "https://artifacts.example.com/repos/r", token: "t" },
+    });
+
+    const env = makeEnv({ IMPORT_QUEUE: undefined });
+    await seedProject(env, { namespace: "@usera", slug: "retrig3", projectId: "proj_r3" });
+    await seedImportJob({
+      namespace: "@usera",
+      slug: "retrig3",
+      projectId: "proj_r3",
+      depth: 0,
+    });
+    const { updateImportStatus } = await import("../src/storage/imports");
+    const { createLogger } = await import("../src/utils/logger");
+    await updateImportStatus(
+      {} as D1Database,
+      "@usera",
+      "retrig3",
+      "failed",
+      createLogger({ component: "Test" }),
+    );
+
+    const background: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => background.push(p),
+      passThroughOnException: () => undefined,
+    } as unknown as ExecutionContext;
+
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/projects/@usera/retrig3/import",
+        { url: "https://github.com/test/repo" },
+        USER_A_HEADERS,
+      ),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    await Promise.all(background);
+
+    expect(vi.mocked(importFromGitHub).mock.calls[0]?.[5]).toBe(0);
   });
 
   it("falls back to direct processing for a new import when no queue is configured", async () => {
