@@ -232,8 +232,12 @@ describe("read helpers honor the branch parameter", () => {
     const result = await readRepoFiles(remote, "tok", logger, undefined, "master");
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.get("a.txt")).toBe("v2\n");
-      expect(result.data.get("b.txt")).toBe("b\n");
+      // readRepoFiles returns raw bytes, not decoded text, so a binary blob
+      // cannot be corrupted on the way out. What this case is actually pinning
+      // is the `master` branch argument, so decode and assert the same content.
+      const text = (name: string) => new TextDecoder().decode(result.data.get(name));
+      expect(text("a.txt")).toBe("v2\n");
+      expect(text("b.txt")).toBe("b\n");
     }
   });
 

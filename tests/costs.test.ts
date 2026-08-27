@@ -166,7 +166,9 @@ describe("evaluator cost reporting", () => {
     const repo = { remote: "https://artifacts.example/ws.git", token: "t", ref: "a".repeat(40) };
     const readFiles = vi
       .fn()
-      .mockResolvedValue(ok(new Map([["src/index.ts", "export const x = 1;"]])));
+      .mockResolvedValue(
+        ok(new Map([["src/index.ts", new TextEncoder().encode("export const x = 1;")]])),
+      );
     const result = await new SandboxEvaluator(sandbox, repo, readFiles).evaluate(
       "diff",
       policy,

@@ -1,3 +1,4 @@
+import { materializeTree } from "../evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../evaluation/types";
 import { emitEvent } from "../queue/events";
 import { updateChangeStatus } from "../storage/changes";
@@ -71,9 +72,15 @@ export async function runPostMergeCheck(
 
     const sandbox = await env.SANDBOX.create();
     try {
-      for (const [path, content] of filesResult.data) {
-        await sandbox.writeFile(path, content);
-      }
+      // readRepoFiles hands back raw bytes (a tree can hold binaries) while
+      // the sandbox's writeFile only carries strings; `materializeTree` owns
+      // that boundary — base64 for anything that is not valid UTF-8, decoded
+      // back to real bytes in the sandbox before the post-merge command runs.
+      // A failure there throws and is reported as a post-merge failure below,
+      // exactly as an inline decode failure was.
+      await materializeTree(sandbox, filesResult.data, {
+        decodeTimeoutMs: merge?.postMergeTimeoutMs ?? DEFAULT_POST_MERGE_TIMEOUT_MS,
+      });
       const runStartedAt = Date.now();
       const run = await sandbox.run(command, {
         timeout: merge?.postMergeTimeoutMs ?? DEFAULT_POST_MERGE_TIMEOUT_MS,
