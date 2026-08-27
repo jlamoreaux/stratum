@@ -34,9 +34,11 @@ const ARTIFACTS_REMOTE = "https://acct.artifacts.cloudflare.net/git/@owner/repo.
 const WS_REMOTE = "https://acct.artifacts.cloudflare.net/git/@owner/myws.git";
 
 /**
- * The commit route resolves the project and workspace through KV before it
- * ever looks at the body, so the test needs that lookup to succeed — otherwise
- * a 404 would pass for a "rejection" and the cap would go untested.
+ * Backs the workspace/project lookups the commit route performs *after* the
+ * body cap (`readJsonWithLimit` runs first, at workspaces.ts:229; `getWorkspace`
+ * and `getProjectById` follow at 283 and 305). The oversized cases never reach
+ * KV at all — this exists so the under-cap control case can get past lookup and
+ * prove the guard does not break an ordinary commit.
  */
 function makeKV(): KVNamespace {
   const store = new Map<string, string>();
@@ -73,9 +75,9 @@ function makeEnv(): Env {
 }
 
 /**
- * Puts the route one step away from parsing: a real project and workspace the
- * owner can reach, so the only thing left to fail is the body size. Without
- * this the request dies at lookup and proves nothing about the limit.
+ * Seeds the project and workspace the under-cap control case needs to succeed.
+ * The oversized cases do not depend on it: the cap rejects before the route
+ * ever looks either up, which is the ordering that makes the guard cheap.
  */
 async function seed(env: Env): Promise<void> {
   const project: ProjectEntry = {
