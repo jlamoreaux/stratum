@@ -457,6 +457,87 @@ describe("applySourceUpdateWithDeepening (real git, in-memory)", () => {
     // each side before the loop refuses to grow the window any further.
     expect(deepenCalls).toBe(4);
   });
+
+  // The window only ever advances by doubling, so a `startDepth` of 0 leaves
+  // `nextWindow` equal to `window` and `increment` at 0: every round deepens by
+  // nothing, the refs stay shallow so the both-sides-complete `break` never
+  // fires, and `window < maxDepth` holds forever. Unreachable from
+  // `syncFromGitHub`'s default, but this function is exported and takes the
+  // depth from its caller. A short timeout so a regression fails fast instead
+  // of hanging the suite.
+  it(
+    "terminates when the caller supplies a non-positive start depth",
+    { timeout: 2000 },
+    async () => {
+      const { fs, gfs } = await initRepo();
+      const gitdir = `${DIR}/.git`;
+
+      const nativeBlob = await blobObject(new TextEncoder().encode("native\n"));
+      const nativeTree = await treeObject([
+        { mode: "100644", name: "native.txt", oid: nativeBlob.oid },
+      ]);
+      const nativeRoot = await commitObject({
+        tree: nativeTree.oid,
+        parents: [],
+        message: "native root",
+        timestamp: 1_700_000_000,
+      });
+      const sourceBlob = await blobObject(new TextEncoder().encode("source\n"));
+      const sourceTree = await treeObject([
+        { mode: "100644", name: "source.txt", oid: sourceBlob.oid },
+      ]);
+      const sourceRoot = await commitObject({
+        tree: sourceTree.oid,
+        parents: [],
+        message: "source root",
+        timestamp: 1_700_000_000,
+      });
+      for (const o of [nativeBlob, nativeTree, nativeRoot, sourceBlob, sourceTree, sourceRoot]) {
+        await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
+      }
+      await rewindBranch(gfs, nativeRoot.oid);
+      await git.writeRef({
+        fs: gfs,
+        dir: DIR,
+        ref: "refs/remotes/source/main",
+        value: sourceRoot.oid,
+        force: true,
+      });
+      // Both sides stay shallow for the whole run, so nothing but the window
+      // bound can end the loop -- which is the property under test.
+      await writeShallowFile(fs, [nativeRoot.oid, sourceRoot.oid]);
+
+      let deepenCalls = 0;
+      const deepen: { project: DeepenFetch; source: DeepenFetch } = {
+        project: async () => {
+          deepenCalls++;
+          return ok(undefined);
+        },
+        source: async () => {
+          deepenCalls++;
+          return ok(undefined);
+        },
+      };
+
+      const result = await applySourceUpdateWithDeepening(
+        fs,
+        DIR,
+        sourceRoot.oid,
+        "refs/remotes/source/main",
+        0,
+        8,
+        deepen,
+        logger,
+      );
+
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.code).toBe("SYNC_DIVERGED");
+      // Floored to 1, the window doubles 1 -> 2 -> 4 -> 8 (cap): three rounds,
+      // two deepen calls each. Unfloored it would never leave 0.
+      expect(deepenCalls).toBe(6);
+    },
+  );
   // #240: the deepening retry is gated on `missingMergeBase === true`, which
   // `applySourceUpdate` derives by resolving the project's branch. Resolving a
   // hardcoded "main" instead of the branch actually in play fails on a project

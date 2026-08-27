@@ -2676,7 +2676,15 @@ export async function applySourceUpdateWithDeepening(
   branch = "main",
 ): Promise<Result<SourceSyncResult, AppError>> {
   let applyResult = await applySourceUpdate(fs, dir, sourceTip, logger, SYSTEM_AUTHOR, branch);
-  let window = startDepth;
+  // Floored at 1 because the window only ever advances by doubling: a
+  // `startDepth` of 0 would make `nextWindow` equal `window`, so `increment`
+  // would be 0, every round would deepen by nothing, the refs would stay
+  // shallow (so the both-sides-complete `break` never fires), and
+  // `window < maxDepth` would hold forever. A negative one diverges instead of
+  // converging. Both are unreachable from `syncFromGitHub`'s SYNC_FETCH_DEPTH
+  // default, but this function is exported and takes the depth from its caller,
+  // so termination should not rest on the caller passing something sane.
+  let window = Math.max(1, startDepth);
 
   while (
     !applyResult.success &&
