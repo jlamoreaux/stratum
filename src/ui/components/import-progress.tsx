@@ -208,6 +208,7 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
   const isComplete = status === "completed";
   const isFailed = status === "failed";
   const isCancelled = status === "cancelled";
+  const isCancelling = status === "cancelling";
 
   const percent = progress.totalFiles
     ? Math.round((progress.processedFiles / progress.totalFiles) * 100)
@@ -233,7 +234,7 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
     <div class="card import-progress-card" data-import-status={status}>
       <div class="import-header">
         <h2>
-          {isActive && <span class="spinner" />}
+          {(isActive || isCancelling) && <span class="spinner" />}
           {isComplete && <span class="icon-success">✓</span>}
           {isFailed && <span class="icon-error">✗</span>}
           {isCancelled && <span class="icon-cancelled">○</span>}
@@ -244,7 +245,9 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
               ? "Failed"
               : isCancelled
                 ? "Cancelled"
-                : "in Progress"}
+                : isCancelling
+                  ? "Cancelling…"
+                  : "in Progress"}
         </h2>
         <span class={`badge badge-${status}`}>{status}</span>
       </div>
@@ -354,7 +357,7 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
         </div>
       )}
 
-      {(isFailed || isCancelled) && (
+      {(isFailed || isCancelled || isCancelling) && (
         <div class="actions-section failed-actions">
           <form
             method="post"
@@ -362,9 +365,14 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
             class="retry-form"
           >
             <button type="submit" class="btn btn-primary">
-              🔄 Retry Import
+              Retry import
             </button>
           </form>
+          {isCancelling && (
+            <p class="help-text">
+              Cancelling can take a moment. If it stays stuck, Retry re-queues the import.
+            </p>
+          )}
         </div>
       )}
 

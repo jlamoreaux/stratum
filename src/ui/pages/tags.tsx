@@ -38,7 +38,9 @@ export const TagsPage: FC<TagsProps> = ({ project, tags, canWrite, user }) => {
           <p>No tags yet.</p>
           <p class="empty-state-hint">
             Push a tag to a workspace remote to create one — the project remote refuses tag pushes.
+            From a cloned workspace:
           </p>
+          <pre class="cli-hint">{"git tag v1.0.0\ngit push origin v1.0.0"}</pre>
         </div>
       ) : (
         <div class="card">

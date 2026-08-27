@@ -52,6 +52,9 @@ export const CSS = `
   --danger-surface: #3d1a1a;
   --danger-border: #6e2a2a;
 
+  /* Long-form prose (READMEs) reads better in a text face; UI stays mono. */
+  --font-prose: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
   /* Aliases the auth pages already reference */
   --bg-primary: var(--bg-page);
   --bg-secondary: var(--bg-card);
@@ -187,6 +190,7 @@ button.nav-auth-link {
 
 .badge {
   display: inline-block;
+  white-space: nowrap;
   padding: 0.15rem 0.5rem;
   border-radius: 3px;
   font-size: 0.8rem;
@@ -534,8 +538,8 @@ button.nav-auth-link {
 .file-tree-file a:hover { color: var(--text-primary); text-decoration: underline; }
 .file-tree-notice { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.75rem; font-style: italic; }
 .file-tree-controls { margin-bottom: 0.5rem; }
-.file-tree-toggle-btn { background: none; border: none; color: var(--text-muted); font-size: 0.75rem; cursor: pointer; padding: 0; font-family: inherit; }
-.file-tree-toggle-btn:hover { color: var(--text-body); }
+.file-tree-toggle-btn { background: none; border: none; color: var(--accent-text); font-size: 0.8rem; cursor: pointer; padding: 0; font-family: inherit; }
+.file-tree-toggle-btn:hover { color: var(--accent-text-hover); text-decoration: underline; }
 
 /* Activity Feed */
 .activity-list { list-style: none; padding: 0; margin: 0; }
@@ -565,7 +569,7 @@ button.nav-auth-link {
 
 /* Webhooks */
 .webhook-form { display: flex; flex-direction: column; gap: 0.75rem; max-width: 480px; }
-.webhook-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text-body); }
+.webhook-form > label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text-body); }
 .webhook-form input {
   background: var(--bg-card); border: 1px solid var(--border-strong); color: #eee;
   padding: 0.5rem; border-radius: 4px; font-family: inherit;
@@ -877,7 +881,7 @@ button.nav-auth-link {
 /* README rendered markdown */
 .readme-card h2 { margin-bottom: 1rem; }
 
-.readme-content { font-size: 0.875rem; line-height: 1.7; color: var(--text-body); }
+.readme-content { font-family: var(--font-prose); font-size: 0.9rem; line-height: 1.7; color: var(--text-body); }
 .readme-content h1 { font-size: 1.3rem; color: var(--text-primary); margin: 1.25rem 0 0.5rem; border-bottom: 1px solid var(--divider); padding-bottom: 0.3rem; }
 .readme-content h2 { font-size: 1.1rem; color: #e0e0e0; margin: 1.1rem 0 0.4rem; border-bottom: 1px solid var(--bg-raised); padding-bottom: 0.25rem; }
 .readme-content h3 { font-size: 0.95rem; color: #d0d0d0; margin: 0.9rem 0 0.3rem; }
@@ -899,6 +903,28 @@ button.nav-auth-link {
 .readme-content hr { border: none; border-top: 1px solid var(--divider); margin: 1rem 0; }
 .readme-content details { margin: 0.5rem 0; }
 .readme-content summary { cursor: pointer; color: var(--text-muted); }
+
+/* Copyable CLI commands inside empty states */
+.cli-hint {
+  display: inline-block; text-align: left; margin: 0.75rem auto 0.25rem;
+  padding: 0.7rem 1rem; background: var(--bg-panel);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 0.8rem; line-height: 1.7; color: var(--text-body);
+  user-select: all; overflow-x: auto; max-width: 100%; white-space: pre;
+}
+
+/* Webhook event subscription checkboxes */
+.webhook-events { border: none; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.webhook-events legend { font-size: 0.85rem; color: var(--text-body); padding: 0; margin-bottom: 0.35rem; }
+.webhook-events-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 0.25rem 1rem; padding-left: 1.4rem;
+}
+.webhook-events .checkbox-label { font-size: 0.82rem; }
+
+/* Reveal-once credential + copy control */
+.token-reveal-row { display: flex; gap: 0.5rem; align-items: stretch; flex-wrap: wrap; }
+.token-reveal-row .settings-token { flex: 1; min-width: 240px; }
 
 /* New project form: CSS-only mode toggle (script only re-points the action) */
 .mode-toggle { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
@@ -981,7 +1007,7 @@ button.nav-auth-link {
 
 /* Commit table */
 .commit-table { table-layout: fixed; width: 100%; }
-.commit-sha { width: 72px; font-size: 0.8rem; color: var(--accent-text); }
+.commit-sha { width: 72px; font-size: 0.8rem; color: var(--text-muted); }
 .commit-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
 .commit-author { width: 160px; font-size: 0.82rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-date { width: 96px; font-size: 0.82rem; color: var(--text-muted); text-align: right; }
