@@ -214,6 +214,35 @@ function recordCircuitResult(endpoint: string, success: boolean): void {
   circuitBreakers.set(key, cb);
 }
 
+/**
+ * Releases a response this client is about to abandon.
+ *
+ * In Cloudflare Workers an unconsumed response body keeps its connection
+ * resources held. The retry paths would otherwise hold theirs for the whole
+ * backoff sleep — seconds, on a rate-limit wait — under exactly the two
+ * conditions (rate limiting, 5xx) where connection pressure is least
+ * affordable. Cancelling beats draining here: the bytes are not wanted, and
+ * cancelling releases immediately instead of after a full read.
+ *
+ * A rejected cancel means the body was already disturbed or errored. That is
+ * not a reason to fail a retry that would otherwise succeed, so it is logged
+ * rather than propagated.
+ */
+async function discardResponseBody(
+  response: Response,
+  logger: Logger,
+  endpoint: string,
+): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch (error) {
+    logger.debug("Could not cancel an abandoned GitHub response body", {
+      endpoint,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 function getBackoffDelay(retryCount: number): number {
   const exponentialDelay = Math.min(BASE_DELAY_MS * 2 ** retryCount, MAX_DELAY_MS);
   const jitter = exponentialDelay * 0.25 * (Math.random() * 2 - 1);
@@ -393,9 +422,11 @@ export class GitHubClient {
               waitTime,
               retryCount,
             });
+            await discardResponseBody(response, this.logger, endpoint);
             await new Promise((resolve) => setTimeout(resolve, Math.max(waitTime, 1000)));
             return this.request(endpoint, options, { ...requestOpts, retryCount: retryCount + 1 });
           }
+          await discardResponseBody(response, this.logger, endpoint);
           recordCircuitResult(endpoint, false);
           return {
             success: false,
@@ -415,6 +446,7 @@ export class GitHubClient {
           retryCount,
           delay,
         });
+        await discardResponseBody(response, this.logger, endpoint);
         await new Promise((resolve) => setTimeout(resolve, delay));
         return this.request(endpoint, options, { ...requestOpts, retryCount: retryCount + 1 });
       }
