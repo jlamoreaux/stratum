@@ -22,6 +22,7 @@ import {
   createImportJob,
   deleteImportJob,
   getImportProgress,
+  getLatestImportDepth,
   isImportCancelled,
   recoverStalledImport,
   updateImportStatus,
@@ -450,7 +451,9 @@ app.post(
                   slug,
                   githubUrl: existingImport.data.sourceUrl,
                   branch: existingImport.data.branch ?? "main",
-                  depth: DEFAULT_CLONE_DEPTH,
+                  // The depth the job was created with, not a fresh literal —
+                  // a re-trigger must not quietly shallow a full-history import.
+                  depth: existingImport.data.depth ?? DEFAULT_CLONE_DEPTH,
                   initiatedBy: userId,
                 });
               } catch (queueError) {
@@ -564,6 +567,7 @@ app.post(
           slug,
           sourceUrl: body.url,
           branch,
+          depth,
         },
         logger,
       );
@@ -1442,7 +1446,7 @@ app.post(
           slug,
           githubUrl,
           branch,
-          depth: DEFAULT_CLONE_DEPTH,
+          depth: existing.depth ?? DEFAULT_CLONE_DEPTH,
           // Without this the retry path is the one case that never emails the
           // person waiting on the import — which is the gap this PR closes.
           initiatedBy: userId,
@@ -1477,7 +1481,7 @@ app.post(
           githubUrl,
           branch,
           logger,
-          DEFAULT_CLONE_DEPTH,
+          existing.depth ?? DEFAULT_CLONE_DEPTH,
         ).catch((error) => {
           logger.error(
             "Unhandled error in background import retry",
@@ -1596,6 +1600,11 @@ app.post("/:namespace/:slug/sync", async (c) => {
   // Create a new import job for the sync
   const importId = generateProjectId();
   const branch = projectDefaultBranch(project);
+  // Read BEFORE creating the job below: this looks up the most recent import
+  // job for the project, and the one about to be created would become that,
+  // so the lookup would read back the value it is trying to inherit.
+  const inheritedDepth = await getLatestImportDepth(c.env.DB, namespace, slug, logger);
+  const syncDepth = inheritedDepth ?? DEFAULT_CLONE_DEPTH;
   const createResult = await createImportJob(
     c.env.DB,
     {
@@ -1605,6 +1614,7 @@ app.post("/:namespace/:slug/sync", async (c) => {
       slug,
       sourceUrl,
       branch,
+      depth: syncDepth,
     },
     logger,
   );
@@ -1629,7 +1639,7 @@ app.post("/:namespace/:slug/sync", async (c) => {
         slug,
         githubUrl: sourceUrl,
         branch,
-        depth: 10,
+        depth: syncDepth,
         provider: provider ?? undefined,
       });
     } catch (queueError) {

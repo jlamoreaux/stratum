@@ -32,6 +32,7 @@ interface ImportJobRow {
   status: ImportStatus;
   source_url: string;
   branch: string;
+  depth: number | null;
   progress_processed_files: number;
   progress_total_files: number | null;
   progress_current_file: string | null;
@@ -124,6 +125,14 @@ function rowToImportProgress(row: ImportJobRow): ImportProgress {
     result.completedAt = row.completed_at;
   }
 
+  // Left absent when NULL rather than defaulted here: NULL means "no depth was
+  // ever recorded" (a row predating migration 040), which callers answer with
+  // DEFAULT_CLONE_DEPTH. Defaulting at this layer would erase the difference
+  // between that and a stored 0, which means full history.
+  if (row.depth !== null && row.depth !== undefined) {
+    result.depth = row.depth;
+  }
+
   return result;
 }
 
@@ -132,6 +141,47 @@ function validateStatus(status: string): ImportStatus {
     return status as ImportStatus;
   }
   throw new AppError(`Invalid import status: ${status}`, "INVALID_STATE", 400);
+}
+
+/**
+ * The clone depth the project's most recent import job ran under, or
+ * `undefined` when none was recorded.
+ *
+ * For the sync paths, which create a NEW job and have to inherit the depth the
+ * project was actually imported at rather than re-deriving a literal. Callers
+ * answer `undefined` with `DEFAULT_CLONE_DEPTH`; a stored `0` is full history
+ * and must survive that `??` intact.
+ *
+ * Narrower than `getImportProgress` on purpose: this reads one integer, where
+ * that returns the whole row and parses the `logs`/`errors` JSON blobs the
+ * webhook sync path has no use for.
+ *
+ * A lookup failure is logged and treated as "not recorded" rather than
+ * propagated — a sync must not fail because the previous job's depth could not
+ * be read, and the fallback is exactly the behavior that preceded this column.
+ */
+export async function getLatestImportDepth(
+  db: D1Database,
+  namespace: string,
+  slug: string,
+  logger: Logger,
+): Promise<number | undefined> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT depth FROM import_jobs WHERE namespace = ? AND slug = ? ORDER BY started_at DESC LIMIT 1",
+      )
+      .bind(namespace, slug)
+      .first<{ depth: number | null }>();
+    return row?.depth ?? undefined;
+  } catch (error) {
+    logger.error(
+      "Failed to read the previous import job's clone depth",
+      error instanceof Error ? error : undefined,
+      { namespace, slug },
+    );
+    return undefined;
+  }
 }
 
 export async function createImportJob(
@@ -143,6 +193,12 @@ export async function createImportJob(
     slug: string;
     sourceUrl: string;
     branch: string;
+    /**
+     * Clone depth this job runs under. Omitted when the caller has none to
+     * record, which stores NULL and lets later jobs fall back to
+     * DEFAULT_CLONE_DEPTH. `0` is full history and is NOT the same as omitted.
+     */
+    depth?: number;
   },
   logger: Logger,
 ): Promise<Result<ImportProgress, AppError>> {
@@ -166,9 +222,9 @@ export async function createImportJob(
     await db
       .prepare(
         `INSERT INTO import_jobs (
-          id, project_id, namespace, slug, status, source_url, branch,
+          id, project_id, namespace, slug, status, source_url, branch, depth,
           progress_processed_files, logs, errors, version, started_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         params.id,
@@ -178,6 +234,7 @@ export async function createImportJob(
         "queued",
         params.sourceUrl,
         params.branch,
+        params.depth ?? null,
         0,
         JSON.stringify(initialLog),
         "[]",
@@ -195,6 +252,7 @@ export async function createImportJob(
       status: "queued",
       sourceUrl: params.sourceUrl,
       branch: params.branch,
+      ...(params.depth !== undefined ? { depth: params.depth } : {}),
       startedAt: now,
       updatedAt: now,
       version: 1, // Initial version for optimistic locking

@@ -6,11 +6,12 @@
 import { Hono } from "hono";
 import { createChange, getChangeByGitHubBranch, updateChangeStatus } from "../storage/changes";
 import { getProjectByGitHubRepo } from "../storage/github-bridge";
-import { createImportJob } from "../storage/imports";
+import { createImportJob, getLatestImportDepth } from "../storage/imports";
 import { getWorkspace } from "../storage/state";
 import { getSyncStatus, setSyncInProgress } from "../storage/sync";
 import { type Env, projectDefaultBranch } from "../types";
 import { type Logger, createLogger } from "../utils/logger";
+import { DEFAULT_CLONE_DEPTH } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -124,6 +125,13 @@ async function handlePush(
 
   const importId = crypto.randomUUID();
   const sourceUrl = project.sourceUrl ?? project.remote;
+  // The depth the project was actually imported at. Read before the enqueue
+  // (and before the job below is created, which would otherwise become the
+  // "most recent" job this reads back) so a webhook-driven sync cannot quietly
+  // shallow a full-history project.
+  const syncDepth =
+    (await getLatestImportDepth(env.DB, project.namespace, project.slug, logger)) ??
+    DEFAULT_CLONE_DEPTH;
 
   // Enqueue FIRST — only write state flags after a successful send().
   const { queueSyncJob } = await import("../queue/import-queue");
@@ -134,7 +142,7 @@ async function handlePush(
     slug: project.slug,
     githubUrl: sourceUrl,
     branch: sourceBranch,
-    depth: 10,
+    depth: syncDepth,
     trigger: "webhook",
   });
 
@@ -149,6 +157,7 @@ async function handlePush(
       slug: project.slug,
       sourceUrl,
       branch: sourceBranch,
+      depth: syncDepth,
     },
     logger,
   );
