@@ -157,6 +157,37 @@ export function resetCircuitBreakersForTests(): void {
 }
 
 /**
+ * Statuses that GitHub uses to answer a *request* rather than to report on the
+ * *repository*.
+ *
+ * The breaker is keyed per repository, so what it measures is whether that
+ * repository is reachable and usable. A `422` saying "a pull request already
+ * exists for this head" is GitHub reached, GitHub answering, and the caller
+ * expected to interpret the answer — it says nothing about repository health,
+ * and it must not move a repository-health counter. That is not academic:
+ * duplicate-head `422`s are the ordinary result of re-promoting a change, and
+ * counting them let five routine re-promotions open the breaker that the
+ * duplicate-head RECOVERY path then has to pass through (see
+ * `createOrReusePR`), turning "PR already exists" into a failed promotion.
+ *
+ * Deliberately narrower than "no 4xx counts": `401`, `403`, and `404` stay
+ * counted, because a repository that is gone, renamed, or beyond the token's
+ * access is precisely the condition {@link isCircuitOpen} exists to stop
+ * rediscovering once per endpoint.
+ */
+const REQUEST_SCOPED_STATUSES = new Set([400, 409, 422]);
+
+/**
+ * Whether a failed response should feed its repository's breaker.
+ *
+ * Transport errors and rate limiting are recorded by their own call sites and
+ * never reach here; this decides only for responses carrying a status.
+ */
+function isCircuitFailureStatus(status: number): boolean {
+  return !REQUEST_SCOPED_STATUSES.has(status);
+}
+
+/**
  * Whether calls to `endpoint`'s repository are currently being short-circuited.
  *
  * Keyed by the first three path segments (`/repos/<owner>/<repo>`), so the
@@ -195,6 +226,14 @@ function isCircuitOpen(endpoint: string): boolean {
  * of failures, so an intervening success means whatever was wrong is no longer
  * reproducing and the tally should not carry forward into an unrelated later
  * incident.
+ *
+ * Not every failed call gets here. A response the caller is expected to
+ * interpret (see {@link isCircuitFailureStatus}) is NEITHER recorded as a
+ * failure nor as a success — it is skipped entirely. Recording it as a success
+ * would zero a genuine consecutive-failure run because one `422` landed in the
+ * middle of it, which is the opposite of what a consecutive counter is for; and
+ * while half-open, skipping correctly leaves the breaker half-open, since a
+ * probe that drew a request-scoped answer learned nothing about the repository.
  */
 function recordCircuitResult(endpoint: string, success: boolean): void {
   const key = endpoint.split("/").slice(0, 3).join("/");
@@ -459,7 +498,9 @@ export class GitHubClient {
           status: response.status,
           error: errorText,
         });
-        recordCircuitResult(endpoint, false);
+        if (isCircuitFailureStatus(response.status)) {
+          recordCircuitResult(endpoint, false);
+        }
         return {
           success: false,
           error: `GitHub API error: ${response.status} - ${errorText}`,
