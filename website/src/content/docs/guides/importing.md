@@ -100,8 +100,11 @@ Bidirectional GitHub sync — inbound webhooks and outbound PR promotion, i.e.
 ## Unsupported content
 
 **Git submodules are not supported.** A repository containing a gitlink tree
-entry (the `160000` mode git uses for a submodule reference) or a
-`.gitmodules` file is rejected with a `SUBMODULES_UNSUPPORTED` error.
+entry (the `160000` mode git uses for a submodule reference) at any depth, or a
+root-level `.gitmodules` file, is rejected. A gated push is refused over the
+git protocol, `POST /api/projects/{name}/changes` answers 400, and an import
+ends as `failed` — each carrying an explanatory message rather than a
+machine-readable submodule code.
 
 On import the check is best-effort. When the just-imported tree can be read,
 submodule content fails the import with `status: "failed"` — before the

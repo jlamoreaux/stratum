@@ -82,10 +82,15 @@ limitation recorded below.
   across runs under a per-run cap), with a tested restore path
   (`docs/runbooks/backup-restore.md`).
 - Git submodules are not supported (#258). A gitlink tree entry (mode 160000)
-  or a `.gitmodules` file is detected and rejected with a structured
-  `SUBMODULES_UNSUPPORTED` (422) error at the three points repo content enters
-  Stratum — GitHub import, a gated push, and REST change creation (the last two
-  share one scan, in the diff the change gate computes). Change creation fails
+  at any depth, or a root-level `.gitmodules` file, is detected and rejected at
+  the three points repo content enters Stratum — GitHub import, a gated push,
+  and REST change creation (the last two share one scan, in the diff the change
+  gate computes). The rejection carries the `SUBMODULES_UNSUPPORTED` code
+  internally, but each entry point reports it in its own transport's terms: a
+  gated push answers 200 with a per-ref `ng` reason and a permanent
+  `push rejected` message, `POST /api/projects/{name}/changes` answers 400 with
+  the explanatory message, and an import records the queue job as `failed`
+  rather than answering any request at all. Change creation fails
   closed unconditionally: submodule content is refused, and so is a change
   whose scan could not run — that is the gate that keeps submodule content out
   of a server-side merge, which would otherwise corrupt it silently

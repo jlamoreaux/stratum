@@ -47,8 +47,13 @@ codes are in the [OpenAPI specification](/reference/openapi/).
 - `NOT_REDRIVABLE` — the deletion job is not in an incomplete state
 - `GONE` — the resource was deleted
 - `INVALID_PATH` — the requested path is invalid
-- `SUBMODULES_UNSUPPORTED` — a gitlink entry and/or `.gitmodules` file was
-  found on import, or in the workspace a change is being created from — a
-  gated push and `POST /api/projects/{name}/changes` alike, since both run the
-  same scan; git submodules are not supported
-  (see [Importing from GitHub](/guides/importing/#unsupported-content))
+- `SUBMODULES_UNSUPPORTED` — a gitlink entry (any depth) and/or a root-level
+  `.gitmodules` file was found on import, or in the workspace a change is being
+  created from — a gated push and `POST /api/projects/{name}/changes` alike,
+  since both run the same scan; git submodules are not supported
+  (see [Importing from GitHub](/guides/importing/#unsupported-content)).
+  This code is internal and is **not** returned to API clients as a code:
+  `POST /api/projects/{name}/changes` reports it as a plain 400 carrying the
+  explanatory message, a gated push reports it over the git protocol as a
+  per-ref `ng` reason, and an import records a `failed` queue job. Match on the
+  message, not on this identifier.
