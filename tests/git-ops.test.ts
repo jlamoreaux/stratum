@@ -7,9 +7,12 @@ import {
   buildUnifiedDiff,
   extractTokenSecret,
   freshRepoToken,
+  getDiffBetweenRepos,
   mergeWorkspaceIntoProject,
   readRepoFiles,
   readTreeAtCommit,
+  scanForSubmoduleContent,
+  submoduleUnsupportedError,
   walkDir,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
@@ -568,5 +571,241 @@ describe("mergeWorkspaceIntoProject merge-failure classification (#185)", () => 
     expect(result.success).toBe(true);
     if (result.success) expect(result.data).toBe("merged-sha");
     expect(git.push).toHaveBeenCalled();
+  });
+});
+
+/** Builds a one-commit local repo (real git objects, no network) on `main` —
+ * or on `opts.branch`, and ONLY on it, so a test can prove a caller reads the
+ * branch it was handed rather than a hard-coded `main` — optionally with a
+ * nested gitlink entry and/or a root `.gitmodules` file. A
+ * gitlink lives inside a real `vendor` subtree because a tree entry name
+ * cannot contain a slash — a flat "vendor/lib" entry is a tree git cannot
+ * produce, so the walker in `scanForSubmoduleContent` would not be exercised
+ * the way it is in practice. */
+async function seedSubmoduleRepo(
+  fs: NodeFS,
+  dir: string,
+  opts: { gitlink?: boolean; gitmodules?: boolean; branch?: string } = {},
+): Promise<string> {
+  const gitfs = fs as unknown as Parameters<typeof git.init>[0]["fs"];
+  await git.init({ fs: gitfs, dir, defaultBranch: "main" });
+
+  const rootEntries: {
+    mode: string;
+    path: string;
+    oid: string;
+    type: "blob" | "tree" | "commit";
+  }[] = [];
+  const readmeOid = await git.writeBlob({
+    fs: gitfs,
+    dir,
+    blob: new TextEncoder().encode("hi\n"),
+  });
+  rootEntries.push({ mode: "100644", path: "README.md", oid: readmeOid, type: "blob" });
+
+  if (opts.gitlink) {
+    // The gitlink's oid is the submodule's commit -- never read as a blob, so
+    // it doesn't need to exist as an object (mirrors squash-merge-modes.test.ts).
+    const vendorTreeOid = await git.writeTree({
+      fs: gitfs,
+      dir,
+      tree: [{ mode: "160000", path: "lib", oid: "a".repeat(40), type: "commit" }],
+    });
+    rootEntries.push({ mode: "040000", path: "vendor", oid: vendorTreeOid, type: "tree" });
+  }
+  if (opts.gitmodules) {
+    const gitmodulesOid = await git.writeBlob({
+      fs: gitfs,
+      dir,
+      blob: new TextEncoder().encode(
+        '[submodule "lib"]\n\tpath = vendor/lib\n\turl = https://example.test/lib.git\n',
+      ),
+    });
+    rootEntries.push({ mode: "100644", path: ".gitmodules", oid: gitmodulesOid, type: "blob" });
+  }
+
+  const treeOid = await git.writeTree({ fs: gitfs, dir, tree: rootEntries });
+  const author = { name: "Test", email: "test@example.com", timestamp: 0, timezoneOffset: 0 };
+  const commit = await git.writeCommit({
+    fs: gitfs,
+    dir,
+    commit: { tree: treeOid, parent: [], author, committer: author, message: "seed" },
+  });
+  await git.writeRef({
+    fs: gitfs,
+    dir,
+    ref: `refs/heads/${opts.branch ?? "main"}`,
+    value: commit,
+    force: true,
+  });
+  return commit;
+}
+
+describe("scanForSubmoduleContent (#258)", () => {
+  it("reports nothing unsupported for an ordinary tree", async () => {
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const commit = await seedSubmoduleRepo(fs, "/", {});
+
+    const result = await scanForSubmoduleContent(fs, commit, noopLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual({ gitlinkPaths: [], hasGitmodules: false });
+  });
+
+  it("detects a gitlink entry nested in a subtree", async () => {
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const commit = await seedSubmoduleRepo(fs, "/", { gitlink: true });
+
+    const result = await scanForSubmoduleContent(fs, commit, noopLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.gitlinkPaths).toEqual(["vendor/lib"]);
+      expect(result.data.hasGitmodules).toBe(false);
+    }
+  });
+
+  it("detects a root .gitmodules file even without a gitlink entry", async () => {
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const commit = await seedSubmoduleRepo(fs, "/", { gitmodules: true });
+
+    const result = await scanForSubmoduleContent(fs, commit, noopLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.gitlinkPaths).toEqual([]);
+      expect(result.data.hasGitmodules).toBe(true);
+    }
+  });
+});
+
+describe("submoduleUnsupportedError (#258)", () => {
+  it("names the gitlink path(s) with a 422 SUBMODULES_UNSUPPORTED error", () => {
+    const error = submoduleUnsupportedError({ gitlinkPaths: ["vendor/lib"], hasGitmodules: false });
+
+    expect(error.code).toBe("SUBMODULES_UNSUPPORTED");
+    expect(error.statusCode).toBe(422);
+    expect(error.message).toContain("vendor/lib");
+  });
+
+  it("names .gitmodules when only the config file is present", () => {
+    const error = submoduleUnsupportedError({ gitlinkPaths: [], hasGitmodules: true });
+
+    expect(error.code).toBe("SUBMODULES_UNSUPPORTED");
+    expect(error.message).toContain(".gitmodules");
+  });
+});
+
+describe("getDiffBetweenRepos rejects submodule content (#258)", () => {
+  const workspaceUrl = "https://artifacts.example.test/git/ns/ws.git";
+  const baseUrl = "https://artifacts.example.test/git/ns/project.git";
+
+  beforeEach(() => {
+    vi.mocked(git.clone).mockReset();
+    vi.mocked(git.resolveRef).mockReset();
+  });
+
+  /** Wires `git.clone` (mocked at the module level) to build a tiny local
+   * repo directly into the fs/dir it's handed, keyed by which url is being
+   * "cloned" -- exactly what a real clone of that remote would leave behind,
+   * without any network layer. */
+  function stubClones(build: (url: string, fs: NodeFS, dir: string) => Promise<void> | void): void {
+    vi.mocked(git.clone).mockImplementation(async (opts: unknown) => {
+      const { fs, dir, url } = opts as { fs: NodeFS; dir: string; url: string };
+      await build(url, fs, dir);
+    });
+  }
+
+  it("rejects when the workspace tree contains a gitlink entry", async () => {
+    stubClones(async (url, fs, dir) => {
+      await seedSubmoduleRepo(fs, dir, url === workspaceUrl ? { gitlink: true } : {});
+    });
+
+    const result = await getDiffBetweenRepos(
+      baseUrl,
+      "base-token",
+      workspaceUrl,
+      "ws-token",
+      noopLogger,
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("SUBMODULES_UNSUPPORTED");
+      expect(result.error.message).toContain("vendor/lib");
+    }
+    // Rejected before ever resolving the workspace tip -- no partial change
+    // record's worth of extra work happens past the scan.
+    expect(git.resolveRef).not.toHaveBeenCalled();
+  });
+
+  it("rejects when the workspace tree contains only .gitmodules", async () => {
+    stubClones(async (url, fs, dir) => {
+      await seedSubmoduleRepo(fs, dir, url === workspaceUrl ? { gitmodules: true } : {});
+    });
+
+    const result = await getDiffBetweenRepos(
+      baseUrl,
+      "base-token",
+      workspaceUrl,
+      "ws-token",
+      noopLogger,
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.code).toBe("SUBMODULES_UNSUPPORTED");
+      expect(result.error.message).toContain(".gitmodules");
+    }
+  });
+
+  it("scans the branch it was asked for, not a hard-coded main (#258)", async () => {
+    // A project imported from a repo whose default branch is `trunk` has no
+    // `main` anywhere: base repo, workspace fork and both clones are on
+    // `trunk`. Scanning `main` regardless would fail to resolve the ref and
+    // surface an opaque git error, so a submodule push would get past the
+    // guard on exactly the projects it was not hard-coded for.
+    stubClones(async (url, fs, dir) => {
+      await seedSubmoduleRepo(fs, dir, {
+        branch: "trunk",
+        ...(url === workspaceUrl ? { gitlink: true } : {}),
+      });
+    });
+
+    const result = await getDiffBetweenRepos(
+      baseUrl,
+      "base-token",
+      workspaceUrl,
+      "ws-token",
+      noopLogger,
+      "trunk",
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      // The structured rejection specifically — not a generic git failure
+      // from scanning a ref this project does not have.
+      expect(result.error.code).toBe("SUBMODULES_UNSUPPORTED");
+      expect(result.error.message).toContain("vendor/lib");
+    }
+  });
+
+  it("does not reject an ordinary workspace diff", async () => {
+    let workspaceCommit = "";
+    stubClones(async (url, fs, dir) => {
+      const commit = await seedSubmoduleRepo(fs, dir, {});
+      if (url === workspaceUrl) workspaceCommit = commit;
+    });
+    vi.mocked(git.resolveRef).mockImplementation(async () => workspaceCommit);
+
+    const result = await getDiffBetweenRepos(
+      baseUrl,
+      "base-token",
+      workspaceUrl,
+      "ws-token",
+      noopLogger,
+    );
+
+    expect(result.success).toBe(true);
   });
 });

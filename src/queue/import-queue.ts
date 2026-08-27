@@ -5,7 +5,14 @@
 
 import { syncOrImportProject } from "../services/project-sync";
 import { isTargetDeleting } from "../storage/deletion";
-import { importFromGitHub } from "../storage/git-ops";
+import {
+  type SubmoduleContentReport,
+  cloneRepo,
+  freshRepoToken,
+  importFromGitHub,
+  scanForSubmoduleContent,
+  submoduleUnsupportedError,
+} from "../storage/git-ops";
 import { getProviderFromUrl } from "../storage/git-providers";
 import { finalizeImportSnapshot } from "../storage/import-finalize";
 import { deleteImportJob, isImportCancelled, updateImportStatus } from "../storage/imports";
@@ -178,6 +185,49 @@ async function checkAndHandleCancellation(
 }
 
 /**
+ * Best-effort read of a just-imported repo's tree for submodule content
+ * (#258). Returns `null` when the guard could not run at all -- the read
+ * token could not be minted, the clone failed, or the tree walk failed -- so
+ * the caller can distinguish "did not scan" from "scanned, found nothing".
+ * Each underlying failure is already logged where it happens; what none of
+ * those sites can say, and the caller does, is that the submodule guard was
+ * therefore skipped for this import.
+ *
+ * `branch` is the branch that was actually imported, and both the clone and
+ * the scan must use it: an imported repo keeps its source branch name
+ * (master/trunk/...), so hard-coding `main` here would make the scan fail to
+ * find its ref on exactly those projects and silently downgrade the guard to
+ * "skipped" for every one of them.
+ */
+async function readSubmoduleReport(
+  env: Env,
+  remote: string,
+  branch: string,
+  logger: Logger,
+): Promise<SubmoduleContentReport | null> {
+  // Every failure mode collapses to null, including a thrown one. The caller
+  // treats null as "not scanned" and lets the import through with a warning, so
+  // a rejected promise here has to reach that path too — without the catch it
+  // would escape to the job's outer handler and fail an import for an infra
+  // hiccup, which is the opposite of the best-effort contract documented at the
+  // call site.
+  try {
+    const tokenResult = await freshRepoToken(env.ARTIFACTS, remote, "read", logger);
+    if (!tokenResult.success) return null;
+    const cloneResult = await cloneRepo(remote, tokenResult.data, logger, { ref: branch });
+    if (!cloneResult.success) return null;
+    const scanResult = await scanForSubmoduleContent(cloneResult.data.fs, branch, logger);
+    return scanResult.success ? scanResult.data : null;
+  } catch (error) {
+    logger.warn("Submodule scan threw while reading the imported tree", {
+      remote,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
  * Process a GitHub import job
  * This is the core import logic that runs within the queue consumer
  */
@@ -301,6 +351,66 @@ async function processImportJob(
       "Repository cloned, finalizing import",
     );
 
+    // Fail closed on git submodules (#258). The raw import above (Artifacts
+    // cloning the source directly) preserves a gitlink entry byte-for-byte, but
+    // every later consumer of this repo's tree -- squash merges, the repo
+    // browser, the sandbox evaluator -- goes through isomorphic-git/MemoryFS,
+    // which silently drops a gitlink on checkout (see scanForSubmoduleContent's
+    // doc comment). This is the last point the imported repo is still
+    // disposable, so reject here rather than completing an import a later merge
+    // could then silently corrupt. A failure to even run the scan does not
+    // block the import -- it is the same best-effort clone
+    // `writeSnapshotFromRepo` performs moments later, and an infra hiccup here
+    // should not be indistinguishable from a real rejection -- but it is said
+    // out loud, because "did not scan" and "scanned, found nothing" are not
+    // the same state and only one of them leaves the guard unenforced.
+    const submoduleReport = await readSubmoduleReport(
+      env,
+      importResult.data.remote,
+      branch,
+      logger,
+    );
+    // The scan is a full clone plus a tree walk, so it is a phase long enough
+    // for a cancellation to land inside it -- and the rejection branch below
+    // returns before the next checkpoint, so without this the user who hit
+    // cancel gets told their repo was refused for submodules instead of that
+    // it was cancelled. Every other phase boundary in this job checks here for
+    // the same reason.
+    if (await checkAndHandleCancellation(env, namespace, slug)) {
+      await recordImportCancelled(env.DB, namespace, slug, logger);
+      msg.ack();
+      return;
+    }
+
+    if (submoduleReport === null) {
+      logger.warn(
+        "Submodule guard skipped: could not read the imported tree; import proceeds unscanned",
+        { namespace, slug, remote: importResult.data.remote },
+      );
+    } else if (submoduleReport.gitlinkPaths.length > 0 || submoduleReport.hasGitmodules) {
+      const error = submoduleUnsupportedError(submoduleReport);
+      logger.warn("Rejecting import: repository contains unsupported submodule content", {
+        namespace,
+        slug,
+        gitlinkPaths: submoduleReport.gitlinkPaths,
+        hasGitmodules: submoduleReport.hasGitmodules,
+      });
+      await handleImportFailure(env, {
+        importId,
+        namespace,
+        slug,
+        githubUrl,
+        branch,
+        error,
+        startedAt,
+        // Same as every other failure path: without the initiator the user who
+        // started this import is never told why it stopped.
+        ...(initiatedBy !== undefined ? { initiatedBy } : {}),
+      });
+      await updateImportStatus(env.DB, namespace, slug, "failed", logger, error.message);
+      msg.ack();
+      return;
+    }
     // Built here, persisted below. `importCompleted: true` must not reach KV
     // until every way this run can still end in a non-terminal-success state
     // has been ruled out, or a cancelled or failed import leaves behind a
@@ -955,7 +1065,13 @@ async function sendFailureNotification(
   }
 }
 /**
- * Classify error type from error message
+ * Reduce an import failure to a stable, coarse error type.
+ *
+ * The failures arrive as free-form messages from GitHub, Artifacts and git, so
+ * the raw text is useless for grouping. This tag is what the stored import
+ * record and the failure notification key off, which is why every new terminal
+ * failure mode (submodule rejection included) needs a branch here rather than
+ * falling into `UNKNOWN_ERROR` and becoming invisible in aggregate.
  */
 function classifyError(error: Error): string {
   const message = error.message.toLowerCase();
@@ -979,6 +1095,9 @@ function classifyError(error: Error): string {
   if (message.includes("rate limit") || message.includes("429")) {
     return "RATE_LIMITED";
   }
+  if (message.includes("submodule")) {
+    return "UNSUPPORTED_CONTENT";
+  }
   if (message.includes("disk") || message.includes("quota") || message.includes("space")) {
     return "STORAGE_ERROR";
   }
@@ -993,7 +1112,14 @@ function classifyError(error: Error): string {
 }
 
 /**
- * Handle import failure with logging, storage, and alerting
+ * The single place a terminal import failure is turned into everything the
+ * outside world sees: the log line, the metric, the stored failure record, and
+ * the email to the person who started it.
+ *
+ * Every failing path funnels through here so a new failure mode cannot ship
+ * with only some of those effects — most easily by forgetting `initiatedBy`,
+ * which leaves the user who triggered the import waiting on a notification
+ * that only ever reached the instance admin.
  */
 async function handleImportFailure(
   env: Env,
