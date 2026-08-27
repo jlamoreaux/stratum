@@ -121,6 +121,26 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     expect(importFn).not.toHaveBeenCalled();
   });
 
+  // #240: the deepening loop's starting window assumes the project clone and the
+  // source fetch begin at the SAME depth. cloneRepo used to pin itself to 50
+  // while the fetch honoured the caller's `depth`, so a caller asking for more
+  // got a project side shallower than the loop believed -- and with
+  // depth === maxDepth the loop starts at its cap, so it returns SYNC_DIVERGED
+  // without ever deepening the project, even though the source already has the
+  // base. Today both default to DEFAULT_SHALLOW_DEPTH, so the bug is invisible
+  // until someone passes a depth or retunes the constant.
+  it("clones the project at the same depth it fetches the source", async () => {
+    const { artifacts } = makeArtifacts();
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "main", 100);
+
+    expect(result.success).toBe(true);
+    expect(git.clone).toHaveBeenCalledWith(expect.objectContaining({ url: REMOTE, depth: 100 }));
+    expect(git.fetch).toHaveBeenCalledWith(
+      expect.objectContaining({ remote: "source", depth: 100 }),
+    );
+  });
+
   // #181: an imported repo keeps its SOURCE default branch name. Every leg of
   // the sync — clone, merge base, head fallback, and push — has to follow it,
   // or the sync fails at the clone (the remote has no `main`) or, worse,

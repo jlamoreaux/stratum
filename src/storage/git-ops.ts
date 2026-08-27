@@ -492,11 +492,22 @@ export async function initAndPush(
  * @param opts.includeTags - Whether to follow the clone with a fetch of `refs/tags/*`; a `singleBranch` clone never brings tags
  * @returns The cloned filesystem and its working directory, or an application error
  */
+/**
+ * Commits fetched for a shallow clone when the caller does not ask for more.
+ *
+ * Shared with {@link SYNC_FETCH_DEPTH} rather than written twice: the sync path
+ * clones the project and fetches the source, and its deepening loop assumes
+ * both started at the same window. Two independently-written 50s would agree
+ * today and drift the first time either was tuned, with the only symptom a
+ * spurious SYNC_DIVERGED.
+ */
+const DEFAULT_SHALLOW_DEPTH = 50;
+
 export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  opts: { fullHistory?: boolean; ref?: string; includeTags?: boolean } = {},
+  opts: { fullHistory?: boolean; ref?: string; includeTags?: boolean; depth?: number } = {},
   httpClient: HttpClient = http,
 ): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
@@ -517,7 +528,14 @@ export async function cloneRepo(
       // reachable history so the resulting pack is reachability-closed and restores
       // to the true tip — a 50-commit shallow clone silently drops older ancestors,
       // producing a snapshot that can't be restored past commit 50.
-      ...(opts.fullHistory ? {} : { depth: 50 }),
+      //
+      // `depth` is overridable because a caller that deepens afterwards has to
+      // start both sides at the SAME window. `syncFromGitHub` fetches the source
+      // at its own `depth`; if this clone stayed pinned at 50 while that was
+      // larger, the project side would sit shallower than the retry loop's
+      // starting window believes, and a merge base the source already has could
+      // be reported as SYNC_DIVERGED without the project ever being deepened.
+      ...(opts.fullHistory ? {} : { depth: opts.depth ?? DEFAULT_SHALLOW_DEPTH }),
       onAuth: makeAuth(token),
     }),
   );
@@ -2456,7 +2474,7 @@ export async function importFromGitHub(
 
 /** Depth for the source fetch during an incremental sync — matches the shallow
  * depth {@link cloneRepo} uses for the local clone it fetches into. */
-const SYNC_FETCH_DEPTH = 50;
+const SYNC_FETCH_DEPTH = DEFAULT_SHALLOW_DEPTH;
 
 /**
  * Cap on the total fetch window {@link syncFromGitHub} will grow to while
@@ -2770,7 +2788,13 @@ export async function syncFromGitHub(
   if (!tokenResult.success) return err(tokenResult.error);
   const token = tokenResult.data;
 
-  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch, fullHistory: false });
+  // Same `depth` as the source fetch below: the retry loop's starting window
+  // assumes both sides begin equally shallow.
+  const cloneResult = await cloneRepo(remote, token, logger, {
+    ref: branch,
+    fullHistory: false,
+    depth,
+  });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
