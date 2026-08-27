@@ -370,6 +370,18 @@ async function processImportJob(
       branch,
       logger,
     );
+    // The scan is a full clone plus a tree walk, so it is a phase long enough
+    // for a cancellation to land inside it -- and the rejection branch below
+    // returns before the next checkpoint, so without this the user who hit
+    // cancel gets told their repo was refused for submodules instead of that
+    // it was cancelled. Every other phase boundary in this job checks here for
+    // the same reason.
+    if (await checkAndHandleCancellation(env, namespace, slug)) {
+      await recordImportCancelled(env.DB, namespace, slug, logger);
+      msg.ack();
+      return;
+    }
+
     if (submoduleReport === null) {
       logger.warn(
         "Submodule guard skipped: could not read the imported tree; import proceeds unscanned",

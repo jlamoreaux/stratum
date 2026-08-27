@@ -965,6 +965,37 @@ describe("End-to-End Import Flow", () => {
       );
     });
 
+    it("reports a cancellation that lands during the scan as cancelled, not as a submodule failure", async () => {
+      // The scan clones and walks a tree, so it is wide enough for a user's
+      // cancel to arrive mid-flight. Reporting that as "failed: submodules"
+      // would blame the repo for something the user chose, and would fire a
+      // failure notification for an import nobody was still waiting on.
+      const { freshRepoToken, cloneRepo } = await import("../../src/storage/git-ops");
+      const { cancelImportJob } = await import("../../src/storage/imports");
+      const { createLogger } = await import("../../src/utils/logger");
+      const cancelLogger = createLogger({ component: "Test" });
+      vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+      vi.mocked(cloneRepo).mockImplementation(async () => {
+        // Cancel while the scan is in flight — the window this guards.
+        await cancelImportJob(env.DB, "@userA", "cancelled-mid-scan", cancelLogger);
+        return { success: true, data: await buildScannedRepo({ gitlink: true }) };
+      });
+
+      const { updateImportStatus } = await import("../../src/storage/imports");
+      await runImport("cancelled-mid-scan");
+
+      // A cancelled import is marked "cancelled" and then deleted, so assert
+      // on the status transition rather than on the (now absent) job.
+      const statuses = vi
+        .mocked(updateImportStatus)
+        .mock.calls.filter((call) => call[2] === "cancelled-mid-scan")
+        .map((call) => call[3]);
+      expect(statuses).toContain("cancelled");
+      // The point of the guard: the gitlink in the tree must NOT turn the
+      // user's cancellation into a submodule rejection.
+      expect(statuses).not.toContain("failed");
+    });
+
     it("completes normally when the tree has neither a gitlink nor .gitmodules", async () => {
       const { freshRepoToken, cloneRepo } = await import("../../src/storage/git-ops");
       vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
