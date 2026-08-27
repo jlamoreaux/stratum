@@ -519,15 +519,17 @@ export class GitHubClient {
    * against whatever they trust enough to store, since a JSON parse alone
    * doesn't guarantee GitHub's documented fields are actually present.
    *
-   * `isReusablePr` gates the lookup hit before it's treated as a successful
+   * `isReusablePr` selects the lookup hit that gets treated as a successful
    * reuse: this client has no opinion on what a caller trusts enough to
    * accept as "the PR" (the promotion route, for one, only accepts an open
    * PR whose `html_url` is exactly this repo's canonical page for the
-   * matched number — see `isUsableGithubPr`). A lookup hit the predicate
-   * rejects behaves exactly like a lookup that failed or found nothing open:
-   * the ORIGINAL create error is what gets reported, not a new failure about
-   * the lookup response, since that's the one call the caller actually asked
-   * for.
+   * matched number — see `isUsableGithubPr`). It is applied across every PR
+   * the lookup returns, not just the first, since the lookup is head-scoped
+   * and a head can carry more than one open PR. A lookup whose entries the
+   * predicate all reject behaves exactly like a lookup that failed or found
+   * nothing open: the ORIGINAL create error is what gets reported, not a new
+   * failure about the lookup response, since that's the one call the caller
+   * actually asked for.
    *
    * Required, deliberately not defaulted. The code this replaced always ran
    * an owner/repo check on the lookup hit, and a parameter defaulting to
@@ -578,8 +580,15 @@ export class GitHubClient {
         {},
         { maxRetries: 0, timeoutMs: DEFAULT_TIMEOUT_MS },
       );
-      const candidate = lookup.success && Array.isArray(lookup.data) ? lookup.data[0] : undefined;
-      if (candidate !== undefined && isReusablePr(candidate)) {
+      // Searched rather than index-then-test: `GET /pulls?head=` is head-only
+      // and can legitimately return more than one open PR, and the predicate
+      // is what decides which of them belongs to the repository being pushed
+      // to. Testing only the first entry would fail the reuse path in exactly
+      // the case the predicate exists for. Order is GitHub's; no preference is
+      // expressed here beyond "the first one the caller accepts".
+      const candidates: unknown[] = lookup.success && Array.isArray(lookup.data) ? lookup.data : [];
+      const candidate = candidates.find(isReusablePr);
+      if (candidate !== undefined) {
         return { success: true, pr: candidate, reused: true, status: lookup.status };
       }
       // Lookup failed, found nothing open, or found something the caller
