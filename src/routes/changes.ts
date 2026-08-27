@@ -1,5 +1,5 @@
 import { type Context, Hono } from "hono";
-import { loadPolicy } from "../evaluation";
+import { diffTouchesProtectedConfig, loadPolicy } from "../evaluation";
 import type { EvalPolicy } from "../evaluation/types";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { runPostMergeCheck } from "../merge/post-merge";
@@ -13,8 +13,8 @@ import {
   runEvaluation,
 } from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
-import { dismissApprovals } from "../storage/change-reviews";
 import {
+  dismissApprovalsAndUpdateStatus,
   getChange,
   getChangesByIds,
   listChanges,
@@ -463,6 +463,14 @@ app.post("/changes/:id/merge", async (c) => {
   if (force && !forceAllowed) {
     return badRequest("Force merge is disabled by this project's policy");
   }
+  // A change that edits the merge-protection config can never be force-merged,
+  // even where the policy allows force — force skips the approval gate that keeps
+  // a protection relaxation from landing with no human review (SA-3).
+  if (force && change.touchesProtectedConfig) {
+    return badRequest(
+      "This change modifies the merge-protection config and cannot be force-merged; it requires a human approval",
+    );
+  }
 
   if (!MERGEABLE_STATUSES.includes(change.status) && !force) {
     return badRequest("Change must be approved, accepted, or promoted before merging");
@@ -705,6 +713,12 @@ app.post("/changes/:id/merge", async (c) => {
           workspaceName: change.workspace,
           conflictingFiles: mergeResult.error.conflictingFiles,
           detectedAt: new Date().toISOString(),
+          // The Change whose merge attempt hit this conflict. A manual resolution
+          // is part of landing THIS change, not a change of its own — the
+          // resolve route uses it to check the review trail this change already
+          // has (SA-5 follow-up, #260) rather than demanding fresh approvals
+          // with no UI to grant them against resolved bytes.
+          changeId: id,
         }),
         { expirationTtl: 7 * 24 * 60 * 60 },
       );
@@ -1366,20 +1380,56 @@ app.post("/changes/:id/evaluate", async (c) => {
     evaluateCostSamples,
   );
 
+  const newStatus = evalResult.passed ? "accepted" : "needs_changes";
+  const statusOpts = {
+    evalScore: evalResult.score,
+    evalPassed: evalResult.passed,
+    evalReason: evalResult.reason,
+    evaluatedSha,
+    evaluatedTreeOid,
+    // Re-pin to the commit this re-evaluation actually ran against (#115).
+    ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
+    // Recompute the protected-config flag from the diff this run actually saw
+    // (SA-3). Re-evaluation re-pins evaluatedSha to the new tip, which is what
+    // the merge route's staleness check compares against — so leaving the flag
+    // at its creation-time value would let a change that was benign when opened
+    // acquire a policy edit, pass the staleness check, and merge without the
+    // approval the flag exists to force.
+    touchesProtectedConfig: diffTouchesProtectedConfig(diff),
+  };
+
   // Stale-approval dismissal (#193): a different evaluated sha means any prior
   // 'approve' verdicts were given for code the reviewer never saw — drop them
   // before re-pinning, so a re-push can't merge on approvals for the old
   // revision. request_changes verdicts survive, and a no-op re-evaluation of
   // the same sha (including legacy changes with no recorded sha) keeps
-  // approvals. Dismiss BEFORE the sha update: if the dismissal fails we bail
-  // with the old sha still pinned, never with stale approvals against a new one.
+  // approvals.
+  //
+  // The dismissal and the evaluatedSha/status re-pin run as ONE D1 batch
+  // (#238): dismissApprovals (DELETE on change_reviews) and updateChangeStatus
+  // (UPDATE on changes) used to be two separate writes, so a transient D1
+  // failure on the second one could land the dismissal without ever re-pinning
+  // the sha — losing the approvals for good while a retry against the old,
+  // still-pinned sha found none left to lose. Batching them makes the two
+  // writes all-or-nothing, and the review.approvals_dismissed audit entry is
+  // only recorded once the batch itself has actually succeeded.
   if (change.evaluatedSha !== undefined && change.evaluatedSha !== evaluatedSha) {
-    const dismissResult = await dismissApprovals(c.env.DB, logger, id);
-    if (!dismissResult.success) {
-      logger.error("Failed to dismiss stale approvals", dismissResult.error);
-      return internalError(dismissResult.error.message);
+    const batchResult = await dismissApprovalsAndUpdateStatus(
+      c.env.DB,
+      logger,
+      id,
+      newStatus,
+      statusOpts,
+    );
+    if (!batchResult.success) {
+      logger.error(
+        "Failed to atomically dismiss stale approvals and update change status",
+        batchResult.error,
+      );
+      return internalError(batchResult.error.message);
     }
-    if (dismissResult.data.length > 0) {
+    const { dismissedReviewerIds } = batchResult.data;
+    if (dismissedReviewerIds.length > 0) {
       const auditResult = await recordAudit(c.env.DB, logger, {
         action: "review.approvals_dismissed",
         actorType: "user",
@@ -1387,38 +1437,25 @@ app.post("/changes/:id/evaluate", async (c) => {
         subject: id,
         detail: {
           project: change.project,
-          dismissed: dismissResult.data.length,
-          dismissedReviewerIds: dismissResult.data,
+          dismissed: dismissedReviewerIds.length,
+          dismissedReviewerIds,
           previousEvaluatedSha: change.evaluatedSha,
           evaluatedSha,
         },
       });
       if (!auditResult.success) {
-        // The approvals are already dismissed; do not fail the request. Log
-        // the gap so a missing audit record for a real dismissal is detectable.
+        // The dismissal + re-pin already landed together; do not fail the
+        // request. Log the gap so a missing audit record for a real
+        // dismissal is detectable.
         logger.error("Failed to audit approval dismissal", auditResult.error, { changeId: id });
       }
     }
-  }
-
-  const updateResult = await updateChangeStatus(
-    c.env.DB,
-    logger,
-    id,
-    evalResult.passed ? "accepted" : "needs_changes",
-    {
-      evalScore: evalResult.score,
-      evalPassed: evalResult.passed,
-      evalReason: evalResult.reason,
-      evaluatedSha,
-      evaluatedTreeOid,
-      // Re-pin to the commit this re-evaluation actually ran against (#115).
-      ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
-    },
-  );
-  if (!updateResult.success) {
-    logger.error("Failed to update change status", updateResult.error);
-    return badRequest(updateResult.error.message);
+  } else {
+    const updateResult = await updateChangeStatus(c.env.DB, logger, id, newStatus, statusOpts);
+    if (!updateResult.success) {
+      logger.error("Failed to update change status", updateResult.error);
+      return badRequest(updateResult.error.message);
+    }
   }
 
   // Layer mode: report the verdict to the change's linked GitHub PR (comment

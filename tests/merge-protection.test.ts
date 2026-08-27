@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { loadPolicy } from "../src/evaluation/policy-loader";
+import { diffTouchesProtectedConfig, loadPolicy } from "../src/evaluation/policy-loader";
 import type { EvalPolicy } from "../src/evaluation/types";
-import { checkMergeProtection } from "../src/merge/protection";
+import { checkMergeProtection, requiredEvaluatorReasons } from "../src/merge/protection";
 import { readFileFromRepo } from "../src/storage/git-ops";
 import type { Change } from "../src/types";
 import type { Logger } from "../src/utils/logger";
@@ -167,6 +167,19 @@ describe("checkMergeProtection", () => {
     expect(result.success && result.data.allowed).toBe(true);
   });
 
+  it("requires a human approval for a change that edits the protection config, even with no merge block", async () => {
+    const db = makeProtectionD1({ approvals: 0 });
+    const policyChange: Change = { ...change, touchesProtectedConfig: true };
+    // No merge block at all — a policy-file edit must still be gated.
+    const policy: EvalPolicy = { evaluators: [] };
+
+    const result = await checkMergeProtection(db, mockLogger, policyChange, policy);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.allowed).toBe(false);
+    expect(result.data.reasons[0]).toBe("Requires 1 approval, has 0");
+  });
+
   it("does not count the author's own approval toward requiredApprovals", async () => {
     // The author (alice) is the only approver — a self-approval must not satisfy
     // requiredApprovals: 1.
@@ -179,6 +192,23 @@ describe("checkMergeProtection", () => {
     if (!result.success) return;
     expect(result.data.allowed).toBe(false);
     expect(result.data.reasons[0]).toBe("Requires 1 approval, has 0");
+  });
+
+  it("allows a protection-config change once it has an approval", async () => {
+    const db = makeProtectionD1({ approvals: 1 });
+    const policyChange: Change = { ...change, touchesProtectedConfig: true };
+    const policy: EvalPolicy = { evaluators: [] };
+
+    const result = await checkMergeProtection(db, mockLogger, policyChange, policy);
+    expect(result.success && result.data.allowed).toBe(true);
+  });
+
+  it("does not gate a normal change that leaves the protection config untouched", async () => {
+    const db = makeProtectionD1({ approvals: 0 });
+    const policy: EvalPolicy = { evaluators: [] };
+
+    const result = await checkMergeProtection(db, mockLogger, change, policy);
+    expect(result.success && result.data.allowed).toBe(true);
   });
 
   it("counts a non-author approval toward requiredApprovals", async () => {
@@ -202,6 +232,30 @@ describe("checkMergeProtection", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.reasons).toHaveLength(3);
+  });
+});
+
+describe("diffTouchesProtectedConfig", () => {
+  it("detects an edit to .stratum/policy.yaml", () => {
+    const diff = [
+      "diff --git a/.stratum/policy.yaml b/.stratum/policy.yaml",
+      "--- a/.stratum/policy.yaml",
+      "+++ b/.stratum/policy.yaml",
+      "@@ -1,1 +1,1 @@",
+      "-requiredApprovals: 1",
+      "+requiredApprovals: 0",
+    ].join("\n");
+    expect(diffTouchesProtectedConfig(diff)).toBe(true);
+  });
+
+  it("detects an edit to stratum.config.json", () => {
+    const diff = "diff --git a/stratum.config.json b/stratum.config.json\n+{}";
+    expect(diffTouchesProtectedConfig(diff)).toBe(true);
+  });
+
+  it("ignores a diff that only touches ordinary source files", () => {
+    const diff = "diff --git a/src/index.ts b/src/index.ts\n+const x = 1;";
+    expect(diffTouchesProtectedConfig(diff)).toBe(false);
   });
 });
 
@@ -257,5 +311,45 @@ describe("policy loader merge rules", () => {
     const policy = await loadPolicy("remote", "token", mockLogger);
     expect(policy.merge).toBeUndefined();
     expect(policy.evaluators).toEqual([{ type: "diff" }]);
+  });
+});
+
+describe("requiredEvaluatorReasons", () => {
+  it("folds duplicate evaluator types with AND so a passing duplicate cannot mask a failure", () => {
+    // A policy may list the same type twice (e.g. two diff evaluators with
+    // different forbiddenPatterns). Whichever order the runs land in, one
+    // failure must keep the required type failed.
+    const failFirst = requiredEvaluatorReasons(
+      [
+        { evaluatorType: "diff", result: { passed: false } },
+        { evaluatorType: "diff", result: { passed: true } },
+      ],
+      ["diff"],
+    );
+    expect(failFirst).toEqual(["Required evaluator 'diff' failed"]);
+
+    const failSecond = requiredEvaluatorReasons(
+      [
+        { evaluatorType: "diff", result: { passed: true } },
+        { evaluatorType: "diff", result: { passed: false } },
+      ],
+      ["diff"],
+    );
+    expect(failSecond).toEqual(["Required evaluator 'diff' failed"]);
+
+    const bothPass = requiredEvaluatorReasons(
+      [
+        { evaluatorType: "diff", result: { passed: true } },
+        { evaluatorType: "diff", result: { passed: true } },
+      ],
+      ["diff"],
+    );
+    expect(bothPass).toEqual([]);
+  });
+
+  it("reports a required evaluator that never ran", () => {
+    expect(requiredEvaluatorReasons([], ["sandbox"])).toEqual([
+      "Required evaluator 'sandbox' has not run",
+    ]);
   });
 });

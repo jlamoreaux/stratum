@@ -893,7 +893,9 @@ app.get("/:namespace/:slug/tags", async (c) => {
   return c.html(
     <TagsPage
       project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
-      tags={tagsResult.data}
+      tags={tagsResult.data.tags}
+      truncated={tagsResult.data.truncated}
+      totalTagCount={tagsResult.data.totalTagCount}
       user={userResult}
     />,
   );

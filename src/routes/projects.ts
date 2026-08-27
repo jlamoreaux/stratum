@@ -1066,12 +1066,14 @@ app.get("/:namespace/:slug/tags", async (c) => {
     return internalError(tagsResult.error.message);
   }
 
-  logger.info("Tags retrieved", { namespace, slug, tagCount: tagsResult.data.length });
+  logger.info("Tags retrieved", { namespace, slug, tagCount: tagsResult.data.tags.length });
   return ok({
     namespace,
     slug,
     path: `/${namespace}/${slug}`,
-    tags: tagsResult.data,
+    tags: tagsResult.data.tags,
+    truncated: tagsResult.data.truncated,
+    totalTagCount: tagsResult.data.totalTagCount,
   });
 });
 

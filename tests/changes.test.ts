@@ -10,6 +10,10 @@ vi.mock("../src/storage/changes", () => ({
   getChangesByIds: vi.fn(),
   listChanges: vi.fn(),
   updateChangeStatus: vi.fn(async () => ({ success: true, data: undefined })),
+  dismissApprovalsAndUpdateStatus: vi.fn(async () => ({
+    success: true,
+    data: { dismissedReviewerIds: [] },
+  })),
   // Default: this request won the transition, so the merge path emits + records.
   markChangeMerged: vi.fn(async () => ({ success: true, data: { transitioned: true } })),
   mergeTransitionOpts: (
@@ -52,6 +56,7 @@ vi.mock("../src/storage/deletion", () => ({
 
 vi.mock("../src/evaluation", () => ({
   loadPolicy: vi.fn(),
+  diffTouchesProtectedConfig: vi.fn(() => false),
   DiffEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
       success: true,
@@ -129,7 +134,6 @@ vi.mock("../src/storage/provenance", () => ({
 }));
 
 vi.mock("../src/storage/change-reviews", () => ({
-  dismissApprovals: vi.fn(async () => ({ success: true, data: [] })),
   countApprovals: vi.fn(async () => ({ success: true, data: 0 })),
 }));
 
@@ -143,7 +147,19 @@ vi.mock("../src/queue/events", () => ({
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
-  getUser: vi.fn(async () => ({ success: false, error: new Error("nf") })),
+  // Agent auth resolves the agent's owner via getUser (fail-closed on the
+  // owner lookup); default to a live owner so agent-token tests authenticate
+  // as before unless a test overrides this to exercise the deleting/failed path.
+  getUser: vi.fn(async () => ({
+    success: true,
+    data: {
+      id: "usr_owner",
+      email: "owner@example.com",
+      username: "owner",
+      tokenHash: "hash",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  })),
 }));
 
 // Need to setup mocks in beforeEach instead
@@ -153,13 +169,18 @@ vi.mock("../src/storage/agents", () => ({
   getAgent: vi.fn(),
 }));
 
-import { CompositeEvaluator, SecretScanEvaluator, loadPolicy } from "../src/evaluation";
+import {
+  CompositeEvaluator,
+  SecretScanEvaluator,
+  diffTouchesProtectedConfig,
+  loadPolicy,
+} from "../src/evaluation";
 import { emitEvent } from "../src/queue/events";
 import { getAgent, getAgentByToken } from "../src/storage/agents";
 import { recordAudit } from "../src/storage/audit";
-import { dismissApprovals } from "../src/storage/change-reviews";
 import {
   createChange,
+  dismissApprovalsAndUpdateStatus,
   getChange,
   getChangesByIds,
   listChanges,
@@ -1217,6 +1238,23 @@ describe("POST /api/changes/:id/merge", () => {
     const body = (await res.json()) as { merged: boolean };
     expect(body.merged).toBe(true);
     expect(mergeWorkspaceIntoProject).toHaveBeenCalled();
+  });
+
+  it("refuses to force-merge a change that edits the protection config, even with allowForce (SA-3)", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, touchesProtectedConfig: true },
+    });
+    // Even where the policy permits force, a protection-config edit can't skip
+    // the approval gate.
+    vi.mocked(loadPolicy).mockResolvedValue({ ...mockPolicy, merge: { allowForce: true } });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/merge?force=true", undefined, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(mergeWorkspaceIntoProject).not.toHaveBeenCalled();
   });
 
   it("passes explicit squash strategy to merge implementation", async () => {
@@ -3092,7 +3130,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
     });
     vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(recordEvalRuns).mockResolvedValue({ success: true, data: [] });
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
+      success: true,
+      data: { dismissedReviewerIds: ["user_1"] },
+    });
     vi.mocked(recordAudit).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(CompositeEvaluator).mockImplementation(
       () =>
@@ -3102,31 +3143,31 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
     );
   });
 
-  it("dismisses stale approvals when re-evaluation lands a new sha", async () => {
+  it("atomically dismisses stale approvals and re-pins the sha in one batch call (#238)", async () => {
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
       env,
     );
     expect(res.status).toBe(200);
 
-    expect(dismissApprovals).toHaveBeenCalledWith(env.DB, expect.any(Object), "chg_abc123");
-    // Fail-closed ordering: approvals are dropped before the new sha is pinned.
-    const dismissOrder = vi.mocked(dismissApprovals).mock.invocationCallOrder[0] ?? 0;
-    const updateOrder = vi.mocked(updateChangeStatus).mock.invocationCallOrder[0] ?? 0;
-    expect(dismissOrder).toBeLessThan(updateOrder);
-    expect(updateChangeStatus).toHaveBeenCalledWith(
+    // The dismissal and the status/sha re-pin are ONE call now, not two
+    // separate writes — see storage/changes.ts dismissApprovalsAndUpdateStatus.
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
       env.DB,
       expect.any(Object),
       "chg_abc123",
       "accepted",
       expect.objectContaining({ evaluatedSha: "new_sha" }),
     );
+    // The plain, non-atomic updateChangeStatus must not also run for this path
+    // — that would reintroduce the two-write race #238 removes.
+    expect(updateChangeStatus).not.toHaveBeenCalled();
   });
 
   it("records an audit entry for the dismissal", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
       success: true,
-      data: ["user_1", "user_2"],
+      data: { dismissedReviewerIds: ["user_1", "user_2"] },
     });
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
@@ -3147,10 +3188,17 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
         evaluatedSha: "new_sha",
       },
     });
+    // The audit entry is only recorded once the batch itself has succeeded.
+    const batchOrder = vi.mocked(dismissApprovalsAndUpdateStatus).mock.invocationCallOrder[0] ?? 0;
+    const auditOrder = vi.mocked(recordAudit).mock.invocationCallOrder[0] ?? 0;
+    expect(batchOrder).toBeLessThan(auditOrder);
   });
 
   it("logs but does not fail the request when auditing the dismissal fails", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
+      success: true,
+      data: { dismissedReviewerIds: ["user_1"] },
+    });
     vi.mocked(recordAudit).mockResolvedValue({
       success: false,
       error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
@@ -3161,9 +3209,72 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
 
-    // The dismissal already happened; a failed audit write must not fail the request.
+    // The dismissal + re-pin batch already landed; a failed audit write must
+    // not fail the request.
     expect(res.status).toBe(200);
-    expect(updateChangeStatus).toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalled();
+  });
+
+  it("recomputes the protected-config flag from the re-evaluated diff", async () => {
+    // A change that was benign when opened can acquire a policy edit before
+    // re-evaluation. Re-evaluation re-pins evaluatedSha to the new tip, which is
+    // what the merge route's staleness check compares against — so if the flag
+    // kept its creation-time value, the relaxation would merge without the
+    // approval SA-3 requires.
+    const policyDiff =
+      "diff --git a/.stratum/policy.yaml b/.stratum/policy.yaml\n+requiredApprovals: 0";
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: {
+        diff: policyDiff,
+        workspaceOid: "new_sha",
+        workspaceTreeOid: "new_tree",
+        workspaceSha: "new_sha",
+      },
+    });
+    vi.mocked(diffTouchesProtectedConfig).mockReturnValue(true);
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // Detection must run against the diff this re-evaluation actually saw, not
+    // the one the change was opened with.
+    expect(diffTouchesProtectedConfig).toHaveBeenCalledWith(policyDiff);
+    // The evaluated sha changes here (old_sha -> new_sha), so the re-pin goes
+    // through the atomic dismiss+update batch (#238), not the plain
+    // updateChangeStatus path.
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ touchesProtectedConfig: true }),
+    );
+  });
+
+  it("clears the protected-config flag when the re-evaluated diff no longer touches it", async () => {
+    // The recomputation must be symmetric: dropping the policy edit before
+    // re-evaluation must clear the flag, not leave the change permanently gated.
+    vi.mocked(diffTouchesProtectedConfig).mockReturnValue(false);
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // The default beforeEach setup re-pins a new evaluated sha, so this also
+    // goes through the atomic dismiss+update batch (#238).
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ touchesProtectedConfig: false }),
+    );
   });
 
   it("keeps approvals when the re-evaluated sha is unchanged", async () => {
@@ -3182,8 +3293,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
     expect(res.status).toBe(200);
-    expect(dismissApprovals).not.toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
+    // No approvals at risk here, so the plain single-write path is used.
+    expect(updateChangeStatus).toHaveBeenCalled();
   });
 
   it("keeps approvals on a legacy change with no recorded evaluated sha", async () => {
@@ -3197,22 +3310,25 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
     expect(res.status).toBe(200);
-    expect(dismissApprovals).not.toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).not.toHaveBeenCalled();
   });
 
   it("skips the audit entry when there were no approvals to dismiss", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: [] });
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
+      success: true,
+      data: { dismissedReviewerIds: [] },
+    });
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
       env,
     );
     expect(res.status).toBe(200);
-    expect(dismissApprovals).toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
   });
 
-  it("fails closed without re-pinning the sha when dismissal fails", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({
+  it("fails closed — without re-pinning the sha or losing approvals — when the atomic batch fails (#238)", async () => {
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
       success: false,
       error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
     });
@@ -3222,7 +3338,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
     expect(res.status).toBe(500);
-    // The old evaluated sha stays pinned: stale approvals never coexist with a new sha.
+    // Neither write is applied outside the failed batch: no separate
+    // updateChangeStatus fallback, and no audit entry for a dismissal that
+    // never actually landed.
     expect(updateChangeStatus).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 });

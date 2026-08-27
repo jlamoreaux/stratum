@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { computeBackfillPlan } from "../storage/backfill-plan";
+import { recordAudit } from "../storage/audit";
+import { backfillWebhookProjectIds, computeBackfillPlan } from "../storage/backfill-plan";
 import type { Env } from "../types";
 import { isAdminRequest } from "../utils/admin";
 import { createLogger } from "../utils/logger";
@@ -7,6 +8,11 @@ import { forbidden, internalError, ok } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
 
+/**
+ * Accepts either the X-Admin-API-Key header or an authenticated admin user,
+ * deliberately matching /plan's contract: an operator running the dry-run and
+ * the apply back-to-back should not need two different credentials.
+ */
 async function requireAdmin(c: {
   env: Env;
   req: { header: (n: string) => string | undefined; path: string; method: string };
@@ -41,6 +47,56 @@ app.get("/plan", async (c) => {
   const plan = await computeBackfillPlan(c.env, auth.logger);
   if (!plan.success) return internalError(plan.error.message);
   return ok({ plan: plan.data });
+});
+
+// Only a name resolving to exactly one project across all namespaces is
+// stamped. Ambiguous and unresolved rows are left NULL and reported rather
+// than guessed: a bare project name can collide across tenants, so a guess
+// here would hand a legacy webhook (and its deliveries) to the wrong tenant.
+// `remainingNullRows` is reported because it is the step-2 verification for
+// issue #235 — it should read 0 after a clean run.
+//
+// This is step 1-2 of a 3-step coordinated fix (issue #235); the name-based
+// fallback in webhookBelongsToProject/listWebhooks intentionally stays in
+// place until this has actually run in production and the remaining NULL
+// count is verified at zero.
+app.post("/webhooks/apply", async (c) => {
+  const auth = await requireAdmin(c);
+  if (!auth.ok) return forbidden("Administrator access required");
+  const { logger } = auth;
+
+  const report = await backfillWebhookProjectIds(c.env, logger);
+  if (!report.success) return internalError(report.error.message);
+
+  const auditResult = await recordAudit(c.env.DB, logger, {
+    action: "webhook.project_id_backfilled",
+    actorType: c.get("userId") ? "user" : "system",
+    ...(c.get("userId") !== undefined ? { actorId: c.get("userId") } : {}),
+    detail: {
+      updated: report.data.updated,
+      skipped: report.data.skipped.length,
+      remainingNullRows: report.data.remainingNullRows,
+    },
+  });
+  if (!auditResult.success) {
+    // The rows are already stamped by this point and nothing here can unwind
+    // them, so a failed audit write is a partial success, not a failure: the
+    // mutation landed, its provenance record did not. Deliberately NOT a 500
+    // — that would tell an operator the backfill did not happen when it did,
+    // and would throw away the `remainingNullRows` count this endpoint exists
+    // to report (the step-2 verification for #235), pushing them toward a
+    // re-run to recover numbers they already earned. Instead the gap is made
+    // explicit in the log and in `audited` below, so it can neither be missed
+    // nor mistaken for a clean run. (Auditing before the mutation, the
+    // deletion-runner's fail-hard order, isn't available here: the entry's
+    // detail is the run's own counts.)
+    logger.error("Backfill applied but its audit entry failed to persist", auditResult.error, {
+      updated: report.data.updated,
+      remainingNullRows: report.data.remainingNullRows,
+    });
+  }
+
+  return ok({ report: report.data, audited: auditResult.success });
 });
 
 export { app as backfillRouter };
