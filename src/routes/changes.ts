@@ -1803,6 +1803,31 @@ app.post("/changes/:id/github-pr", async (c) => {
       prNumber: storedPr.number,
       repo: `${repo.owner}/${repo.repo}`,
     });
+    // The force-push above moved the PR's head, so the stored `githubHeadSha`
+    // now describes the PREVIOUS revision. This path is every re-promotion, so
+    // without this write the recorded published revision is stale (or missing,
+    // on rows predating the column) for every change promoted more than once,
+    // and nothing surfaces the discrepancy. Undefined only for a legacy change
+    // with no `evaluatedSha`, where the gate above never ran and there is no
+    // confirmed revision to record — the same guard the create path uses.
+    if (publishedSha !== undefined) {
+      const headShaResult = await updateChangeStatus(c.env.DB, logger, id, "promoted", {
+        githubHeadSha: publishedSha,
+      });
+      if (!headShaResult.success) {
+        // Not fatal: the branch is pushed and the PR exists, so the promotion
+        // genuinely happened. Failing here would let a transient D1 error break
+        // a re-promotion that previously could not fail after the push, and the
+        // degraded outcome is exactly the stale sha this write is fixing.
+        // Contrast the create path below, where a failed write loses the PR
+        // number itself and the next promotion would re-create the PR.
+        logger.error(
+          "Re-promotion succeeded but the published revision was not recorded",
+          headShaResult.error,
+          { changeId: id, publishedSha },
+        );
+      }
+    }
     return okOrFormRedirect(c, id, {
       changeId: id,
       github: {

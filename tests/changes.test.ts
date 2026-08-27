@@ -2953,19 +2953,20 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(updateChangeStatus).not.toHaveBeenCalled();
   });
 
+  const reusableStoredPr = {
+    status: "promoted" as const,
+    githubOwner: "acme",
+    githubRepo: "widgets",
+    githubBranch: "stratum/chg_abc123",
+    githubPrNumber: 7,
+    githubPrUrl: "https://github.com/acme/widgets/pull/7",
+    githubPrState: "open",
+  };
+
   it("re-promotion re-pushes the branch and reuses the existing PR", async () => {
     vi.mocked(getChange).mockResolvedValue({
       success: true,
-      data: {
-        ...acceptedChange,
-        status: "promoted",
-        githubOwner: "acme",
-        githubRepo: "widgets",
-        githubBranch: "stratum/chg_abc123",
-        githubPrNumber: 7,
-        githubPrUrl: "https://github.com/acme/widgets/pull/7",
-        githubPrState: "open",
-      },
+      data: { ...acceptedChange, ...reusableStoredPr },
     });
     const res = await promote();
     expect(res.status).toBe(200);
@@ -2978,7 +2979,77 @@ describe("POST /api/changes/:id/github-pr", () => {
         pullRequestUrl: "https://github.com/acme/widgets/pull/7",
       }),
     );
+  });
+
+  // The reuse path returns before the create path's updateChangeStatus, so the
+  // revision it just force-pushed has to be recorded here or not at all. This
+  // is every re-promotion, so a miss leaves github_head_sha describing the
+  // PREVIOUS head while the branch on GitHub has moved.
+  it("re-promotion records the revision it just published, not the one it replaced", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: {
+        ...acceptedChange,
+        ...reusableStoredPr,
+        evaluatedSha: "sha-second",
+        githubHeadSha: "sha-first",
+      },
+    });
+    vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-second" });
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      "promoted",
+      { githubHeadSha: "sha-second" },
+    );
+    // Only the sha: re-promotion is not treated as a fresh promotion event, so
+    // promoted_at/promoted_by are deliberately left alone.
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      "promoted",
+      expect.not.objectContaining({ promotedAt: expect.anything() }),
+    );
+  });
+
+  it("re-promotion of a legacy change with no evaluatedSha records no sha", async () => {
+    // No evaluatedSha means the staleness gate never ran, so there is no
+    // confirmed published revision to record — writing one would be inventing it.
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...acceptedChange, ...reusableStoredPr, evaluatedSha: undefined },
+    });
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    expect(resolveLocalTip).not.toHaveBeenCalled();
     expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  it("re-promotion still succeeds when recording the published revision fails", async () => {
+    // The branch is pushed and the PR exists, so the promotion genuinely
+    // happened; a D1 blip must not turn it into an error.
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...acceptedChange, ...reusableStoredPr, evaluatedSha: "sha-second" },
+    });
+    vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-second" });
+    vi.mocked(updateChangeStatus).mockResolvedValue({
+      success: false,
+      error: new AppError("d1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    expect(updateChangeStatus).toHaveBeenCalled();
   });
 
   // Rows written before this route validated GitHub responses can hold
