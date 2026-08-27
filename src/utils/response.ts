@@ -37,6 +37,15 @@ export function internalError(message: string): Response {
   return error(message, 500);
 }
 
+/**
+ * Unlike its sibling helpers above, this one routes through `appError` so the
+ * response carries a machine-readable `code` alongside the message. That
+ * matters more here than for the others: a 413 from `readJsonWithLimit` is
+ * emitted mid-read, before any route handler has run, so the client gets no
+ * route-specific context to interpret it by. The code is the only stable signal
+ * telling a caller to retry with a smaller payload rather than treat the
+ * failure as a generic 4xx and give up (or worse, retry unchanged).
+ */
 export function payloadTooLarge(message: string): Response {
   return appError(new PayloadTooLargeError(message));
 }

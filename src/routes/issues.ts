@@ -36,6 +36,10 @@ const MAX_BODY_LENGTH = 20_000;
 const MAX_ISSUE_BODY_BYTES = 1024 * 1024;
 const MAX_ISSUE_UPDATE_BODY_BYTES = 1024 * 1024;
 const MAX_COMMENT_LENGTH = 20_000;
+// Same reasoning as MAX_ISSUE_BODY_BYTES: MAX_COMMENT_LENGTH truncates only
+// after the parse, so without a cap on the raw read a caller could still make
+// the isolate buffer an arbitrarily large body just to have it thrown away.
+const MAX_COMMENT_BODY_BYTES = 1024 * 1024;
 const MAX_LABEL_LENGTH = 50;
 const MAX_LABELS_PER_ISSUE = 20;
 /** Longest ?q= text the search filter accepts (bounds the LIKE pattern). */
@@ -505,7 +509,11 @@ app.post("/:namespace/:slug/issues/:number/comments", async (c) => {
   let body: { body?: unknown };
   const contentType = c.req.header("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    body = await c.req.json<typeof body>().catch(() => ({}));
+    const parsed = await readJsonWithLimit<typeof body>(c, MAX_COMMENT_BODY_BYTES, logger).catch(
+      () => ({}),
+    );
+    if (parsed instanceof Response) return parsed;
+    body = parsed;
   } else {
     const form = await c.req.parseBody();
     body = { body: form.body };

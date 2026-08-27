@@ -11,7 +11,9 @@ import { validateUsername } from "../utils/username-validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Delete-confirmation body is a single confirm string.
+// A backstop against an unbounded read, not a real limit: this route reads back
+// only a short confirmation value, so 1 MiB is already far more headroom than
+// any request matching the route's contract could use.
 const MAX_ACCOUNT_DELETE_BODY_BYTES = 1024 * 1024;
 
 // NOTE: user creation has no API route. Accounts are bootstrapped only through

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { readJsonWithLimit } from "../src/utils/request-body";
 
+/**
+ * `readJsonWithLimit` takes a structural `BodyLimitedContext` rather than a real
+ * Hono `Context` specifically so it can be driven from a bare Request; this is
+ * the seam that buys us. Testing through a live Hono app instead would put
+ * routing and middleware between the assertion and the cap, and could not
+ * produce the malformed headers several cases below depend on.
+ */
 function ctxFor(request: Request) {
   return {
     req: {
@@ -10,7 +17,13 @@ function ctxFor(request: Request) {
   };
 }
 
-/** A stream that yields the given chunks one at a time via `pull`. */
+/**
+ * Hands the body over one chunk per `pull` rather than as a single buffer, so
+ * the reader has to accumulate across iterations. That incremental delivery is
+ * what puts the *streaming* cap under test: a body handed over whole would be
+ * caught (or missed) by the declared-Content-Length pre-check instead, and the
+ * mid-read abort these tests exist to pin down would never run.
+ */
 function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   let i = 0;
   return new ReadableStream({
@@ -25,6 +38,14 @@ function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   });
 }
 
+/**
+ * Takes `contentLength` independently of the bytes actually enqueued, on
+ * purpose: the cap has two enforcement paths that disagree exactly when the
+ * header lies, so the tests need to set the declared length to something other
+ * than the truth — understated, overstated, or absent — to pin down which path
+ * fired. Deriving the header from the chunks would make those cases impossible
+ * to express.
+ */
 function requestWithStream(chunks: Uint8Array[], opts: { contentLength?: number } = {}): Request {
   const headers = new Headers({ "content-type": "application/json" });
   if (opts.contentLength !== undefined) {

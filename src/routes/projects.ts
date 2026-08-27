@@ -78,7 +78,9 @@ const app = new Hono<{ Bindings: Env }>();
 const MAX_PROJECT_CREATE_BODY_BYTES = 1024 * 1024;
 // Import body is a repo URL + a few short fields.
 const MAX_PROJECT_IMPORT_BODY_BYTES = 1024 * 1024;
-// Delete-confirmation body is a single confirm string.
+// Same backstop rationale as MAX_ACCOUNT_DELETE_BODY_BYTES in routes/users.ts:
+// only a short confirmation value is ever read back, so 1 MiB is headroom no
+// legitimate request can reach rather than a limit anyone will meet.
 const MAX_PROJECT_DELETE_BODY_BYTES = 1024 * 1024;
 
 function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
