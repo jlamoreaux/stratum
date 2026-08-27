@@ -141,6 +141,22 @@ describe("syncFromGitHub (incremental sync wrapper)", () => {
     );
   });
 
+  // #240: `depth` reaches three places -- the clone, the source fetch, and the
+  // deepening loop's starting window. The first two are forwarded by
+  // isomorphic-git into the upload-pack `deepen <n>` line, so a non-positive
+  // value from a caller becomes a protocol error from the remote rather than
+  // anything the retry helper's own floor could catch. Flooring inside the
+  // helper was therefore not enough; it has to happen at this entry point.
+  it("floors a non-positive caller depth before it reaches the wire", async () => {
+    const { artifacts } = makeArtifacts();
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "main", 0);
+
+    expect(result.success).toBe(true);
+    expect(git.clone).toHaveBeenCalledWith(expect.objectContaining({ url: REMOTE, depth: 1 }));
+    expect(git.fetch).toHaveBeenCalledWith(expect.objectContaining({ remote: "source", depth: 1 }));
+  });
+
   // #181: an imported repo keeps its SOURCE default branch name. Every leg of
   // the sync — clone, merge base, head fallback, and push — has to follow it,
   // or the sync fails at the clone (the remote has no `main`) or, worse,

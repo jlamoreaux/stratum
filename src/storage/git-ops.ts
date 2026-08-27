@@ -2780,7 +2780,21 @@ export async function syncFromGitHub(
   depth = SYNC_FETCH_DEPTH,
   maxDepth = SYNC_MAX_FETCH_DEPTH,
 ): Promise<Result<SourceSyncResult, AppError>> {
-  logger.debug("Incrementally syncing from source", { remote, sourceUrl, branch, depth });
+  // Normalised once, here, rather than at each use. `depth` reaches three
+  // places: this clone, the source fetch, and the deepening loop's starting
+  // window. The first two are forwarded by isomorphic-git into the upload-pack
+  // `deepen <n>` line, and a server is entitled to reject `deepen 0` or a
+  // negative — a protocol error from the remote, raised before the retry
+  // helper's own floor could ever apply. Flooring at the entry point keeps all
+  // three consistent and keeps a caller from turning a sync into a
+  // wire-level failure.
+  const startDepth = Math.max(1, depth);
+  logger.debug("Incrementally syncing from source", {
+    remote,
+    sourceUrl,
+    branch,
+    depth: startDepth,
+  });
 
   // One write-scoped token covers the clone, every deepening fetch of the
   // Artifacts side, and the push-back.
@@ -2788,12 +2802,12 @@ export async function syncFromGitHub(
   if (!tokenResult.success) return err(tokenResult.error);
   const token = tokenResult.data;
 
-  // Same `depth` as the source fetch below: the retry loop's starting window
+  // Same depth as the source fetch below: the retry loop's starting window
   // assumes both sides begin equally shallow.
   const cloneResult = await cloneRepo(remote, token, logger, {
     ref: branch,
     fullHistory: false,
-    depth,
+    depth: startDepth,
   });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
@@ -2809,7 +2823,15 @@ export async function syncFromGitHub(
   }
 
   const fetchResult = await fromPromise(
-    git.fetch({ fs, http, dir, remote: "source", ref: branch, singleBranch: true, depth }),
+    git.fetch({
+      fs,
+      http,
+      dir,
+      remote: "source",
+      ref: branch,
+      singleBranch: true,
+      depth: startDepth,
+    }),
   );
   if (!fetchResult.success) {
     const cause = fetchResult.error.message;
@@ -2911,7 +2933,7 @@ export async function syncFromGitHub(
     dir,
     sourceTip,
     `refs/remotes/source/${branch}`,
-    depth,
+    startDepth,
     maxDepth,
     { project: deepenProject, source: deepenSource },
     logger,
