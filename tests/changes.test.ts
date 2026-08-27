@@ -2258,7 +2258,9 @@ describe("POST /api/changes/:id/github-pr", () => {
 
       const res = await promote();
       expect(res.status).toBe(200);
-      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/");
+      // The ref is the project's default branch (this suite's project defaults
+      // to `develop`), not a hard-coded `main` — see the dedicated case below.
+      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/", "develop");
 
       // The gate runs strictly before the push (before anything is published).
       const tipOrder = vi.mocked(resolveLocalTip).mock.invocationCallOrder[0] ?? -1;
@@ -2317,6 +2319,36 @@ describe("POST /api/changes/:id/github-pr", () => {
       expect(res.status).toBe(502);
       expect(pushBranchToRemote).not.toHaveBeenCalled();
       expect(updateChangeStatus).not.toHaveBeenCalled();
+    });
+
+    // The gate resolves the tip of the branch that was actually cloned. The
+    // clone is singleBranch on the project's default branch, so a project whose
+    // default is not `main` has no `main` for isomorphic-git to resolve: a
+    // hard-coded ref here throws and 502s a promotion that should have passed
+    // the gate. Asserted through the ref the resolver is handed rather than the
+    // status alone, because the resolver is mocked in this suite and would
+    // happily answer for any ref.
+    it("resolves the tip of the project's default branch, not `main`", async () => {
+      vi.mocked(getProject).mockResolvedValue({
+        success: true,
+        data: { ...githubProject, githubDefaultBranch: "release-2026" },
+      });
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-evaluated" });
+
+      const res = await promote();
+      expect(res.status).toBe(200);
+      // Same ref the clone asked for — the two must not drift apart.
+      expect(cloneRepo).toHaveBeenCalledWith(
+        mockWorkspace.remote,
+        "artifacts-token",
+        expect.anything(),
+        { ref: "release-2026", fullHistory: true },
+      );
+      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/", "release-2026");
     });
 
     it("skips the gate (legacy live-tip behavior) when the change has no evaluatedSha", async () => {

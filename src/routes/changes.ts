@@ -1675,7 +1675,15 @@ app.post("/changes/:id/github-pr", async (c) => {
   // matching the merge path's behavior.
   let publishedSha: string | undefined;
   if (change.evaluatedSha !== undefined) {
-    const tipResult = await resolveLocalTip(cloneResult.data.fs, cloneResult.data.dir);
+    // Resolved against `defaultBranch`, matching the clone above: that clone is
+    // singleBranch, so on a project whose default branch is not `main` it holds
+    // that branch and nothing else. Asking for any other ref here throws inside
+    // isomorphic-git and turns a valid promotion into a 502.
+    const tipResult = await resolveLocalTip(
+      cloneResult.data.fs,
+      cloneResult.data.dir,
+      defaultBranch,
+    );
     if (!tipResult.success) return appError(tipResult.error);
     publishedSha = tipResult.data;
     if (publishedSha !== change.evaluatedSha) {

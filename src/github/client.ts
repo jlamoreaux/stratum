@@ -156,6 +156,23 @@ export function resetCircuitBreakersForTests(): void {
   circuitBreakers.clear();
 }
 
+/**
+ * Whether calls to `endpoint`'s repository are currently being short-circuited.
+ *
+ * Keyed by the first three path segments (`/repos/<owner>/<repo>`), so the
+ * breaker is per-repository rather than per-endpoint: a repo that is gone,
+ * renamed, or whose token lost access fails every call against it, and there
+ * is nothing to gain by discovering that once per endpoint. The flip side is
+ * blast radius — every caller reaching that repo through this client shares
+ * one breaker, so a burst of failures from one route (promotion, say) can
+ * short-circuit an unrelated one (evaluation reporting) for
+ * {@link CIRCUIT_BREAKER_TIMEOUT_MS}.
+ *
+ * The open→half-open transition happens on read rather than on a timer: there
+ * is no scheduler here, and the next caller after the cooldown is the one that
+ * gets to probe. It is allowed through, and {@link recordCircuitResult} decides
+ * from its outcome whether the breaker closes or re-opens.
+ */
 function isCircuitOpen(endpoint: string): boolean {
   const key = endpoint.split("/").slice(0, 3).join("/");
   const cb = circuitBreakers.get(key);
@@ -170,6 +187,15 @@ function isCircuitOpen(endpoint: string): boolean {
   return false;
 }
 
+/**
+ * Feeds one call's outcome back into its repository's breaker.
+ *
+ * Any success closes the breaker and zeroes the failure count, not just a
+ * success while half-open: the count is meant to measure a *consecutive* run
+ * of failures, so an intervening success means whatever was wrong is no longer
+ * reproducing and the tally should not carry forward into an unrelated later
+ * incident.
+ */
 function recordCircuitResult(endpoint: string, success: boolean): void {
   const key = endpoint.split("/").slice(0, 3).join("/");
   const cb = circuitBreakers.get(key) || { failures: 0, lastFailure: 0, state: "closed" };

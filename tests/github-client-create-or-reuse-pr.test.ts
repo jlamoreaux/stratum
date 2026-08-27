@@ -12,6 +12,15 @@ const logger: Logger = {
   child: vi.fn(() => logger),
 };
 
+/**
+ * Builds a real `Response` for a stubbed `fetch`.
+ *
+ * The client consumes the response object itself — `response.status`, its
+ * headers, and `response.json()`/`response.text()` — so these tests have to
+ * hand it the genuine article rather than a plain object shaped like one.
+ * Cases that exercise the malformed-body path deliberately bypass this helper
+ * and construct their own non-JSON `Response`.
+ */
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -54,11 +63,15 @@ describe("GitHubClient.createPR", () => {
 });
 
 describe("GitHubClient.createOrReusePR", () => {
-  // These cases are about the create/lookup/error plumbing, not about what a
-  // caller trusts, so they accept whatever the lookup returns. The predicate
-  // is a required argument precisely so that choice is visible here rather
-  // than inherited from a default (the promotion route passes
-  // isUsableGithubPr instead).
+  /**
+   * A predicate that accepts any lookup hit.
+   *
+   * These cases are about the create/lookup/error plumbing, not about what a
+   * caller trusts, so they accept whatever the lookup returns. The predicate
+   * is a required argument precisely so that choice is visible here rather
+   * than inherited from a default (the promotion route passes
+   * isUsableGithubPr instead).
+   */
   const acceptAny = () => true;
 
   const opts = {
@@ -166,7 +179,7 @@ describe("GitHubClient.createOrReusePR", () => {
     }
   });
 
-  it("does not look up a duplicate head when the caller accepts nothing (default predicate) but the failure isn't a duplicate-head 422", async () => {
+  it("does not look up a duplicate head when the 422 is not a duplicate-head failure", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(

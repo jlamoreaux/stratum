@@ -402,7 +402,7 @@ export async function pushBranchToRemote(
 }
 
 /**
- * Resolves the tip commit of an already-cloned repository's default branch.
+ * Resolves the tip commit of `ref` in an already-cloned repository.
  *
  * Distinct from {@link getCommitLog}, which clones fresh: this reads the `fs`/`dir`
  * of a clone the caller already has open, so it costs no extra network round trip.
@@ -410,9 +410,24 @@ export async function pushBranchToRemote(
  * force-push to GitHub is still the revision recorded as `change.evaluatedSha` —
  * the clone is a live read of the workspace, which can have advanced since
  * evaluation ran.
+ *
+ * `ref` is required and deliberately not defaulted to `"main"`. Callers hand
+ * this a clone they made themselves, and those clones are routinely
+ * `singleBranch` on a project-configured default branch — a `main` default
+ * would resolve a ref that does not exist in such a clone and fail a valid
+ * promotion, which is exactly the bug a silent default hid here before. The
+ * caller already knows which ref it cloned; making it say so keeps the two
+ * from drifting apart again.
+ *
+ * @param ref - The ref to resolve, which must exist in this clone — normally
+ * the same ref the caller passed to {@link cloneRepo}.
  */
-export async function resolveLocalTip(fs: NodeFS, dir: string): Promise<Result<string, AppError>> {
-  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+export async function resolveLocalTip(
+  fs: NodeFS,
+  dir: string,
+  ref: string,
+): Promise<Result<string, AppError>> {
+  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref }));
   if (!tipResult.success) {
     return err(new ExternalServiceError("Git", "Failed to resolve local tip", tipResult.error));
   }
