@@ -1,4 +1,5 @@
 import type { FC } from "hono/jsx";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface WorkspacesProps {
@@ -6,19 +7,19 @@ interface WorkspacesProps {
     name: string;
     namespace: string;
     slug: string;
+    visibility?: string;
   };
+  canWrite?: boolean;
   workspaces: Array<{ name: string; createdAt: string }>;
   user?: { id: string; email: string; username: string } | null;
 }
 
-export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, user }) => {
+export const WorkspacesPage: FC<WorkspacesProps> = ({ project, workspaces, canWrite, user }) => {
   return (
     <Layout title={`Workspaces — ${project.name}`} user={user}>
+      <ProjectHeader project={project} canWrite={canWrite ?? false} />
       <div class="page-header">
         <h1>Workspaces</h1>
-        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
-          Back to repo
-        </a>
       </div>
 
       {workspaces.length === 0 ? (

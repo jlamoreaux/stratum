@@ -1,5 +1,6 @@
 import type { FC } from "hono/jsx";
 import type { RepoTagEntry } from "../../storage/git-ops";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface TagsProps {
@@ -7,7 +8,9 @@ interface TagsProps {
     name: string;
     namespace: string;
     slug: string;
+    visibility?: string;
   };
+  canWrite?: boolean;
   tags: RepoTagEntry[];
   user?: { id: string; email: string; username: string } | null;
 }
@@ -25,15 +28,10 @@ export function formatTagDate(timestamp: number | undefined): string {
   return date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
-export const TagsPage: FC<TagsProps> = ({ project, tags, user }) => {
+export const TagsPage: FC<TagsProps> = ({ project, tags, canWrite, user }) => {
   return (
     <Layout title={`Tags — ${project.name}`} user={user}>
-      <div class="page-header">
-        <h1>Tags</h1>
-        <a class="btn" href={`/${project.namespace}/${project.slug}`}>
-          Back to repo
-        </a>
-      </div>
+      <ProjectHeader project={project} active="tags" canWrite={canWrite ?? false} />
 
       {tags.length === 0 ? (
         <div class="empty-state">

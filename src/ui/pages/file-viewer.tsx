@@ -1,5 +1,6 @@
 import { Fragment } from "hono/jsx";
 import type { FC } from "hono/jsx";
+import { ProjectHeader } from "../components/project-header";
 import type { FileContentResult } from "../file-content";
 import { highlightCode } from "../highlight";
 import { Layout } from "../layout";
@@ -82,19 +83,27 @@ const Breadcrumb: FC<BreadcrumbProps> = ({ namespace, slug, filePath }) => {
 };
 
 interface FileViewerPageProps {
-  project: { namespace: string; slug: string; name: string };
+  project: { namespace: string; slug: string; name: string; visibility?: string };
   path: string;
   content: FileContentResult;
+  canWrite?: boolean;
   user?: { id: string; email: string; username: string } | null;
 }
 
-export const FileViewerPage: FC<FileViewerPageProps> = ({ project, path, content, user }) => {
+export const FileViewerPage: FC<FileViewerPageProps> = ({
+  project,
+  path,
+  content,
+  canWrite,
+  user,
+}) => {
   const { namespace, slug } = project;
   const language = languageFromPath(path);
   const fileName = path.split("/").pop() ?? path;
 
   return (
     <Layout title={`${fileName} — ${project.name}`} user={user}>
+      <ProjectHeader project={project} active="code" canWrite={canWrite ?? false} />
       <div class="page-header">
         <Breadcrumb namespace={namespace} slug={slug} filePath={path} />
       </div>

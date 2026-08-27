@@ -1,4 +1,5 @@
 import type { FC } from "hono/jsx";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 /**
@@ -42,6 +43,7 @@ interface SyncPageProps {
     namespace: string;
     slug: string;
     name: string;
+    visibility?: string;
   };
   syncStatus: SyncStatus;
   syncHistory: Array<{
@@ -67,13 +69,9 @@ export const SyncPage: FC<SyncPageProps> = ({ project, syncStatus, syncHistory, 
   return (
     <Layout title={`Sync — ${project.name}`} user={user}>
       <div class="container">
+        <ProjectHeader project={project} active="settings" canWrite={true} />
         <div class="page-header">
-          <h1>Sync Status</h1>
-          <div class="header-actions">
-            <a href={`/${project.namespace}/${project.slug}`} class="btn btn-secondary">
-              ← Back to Project
-            </a>
-          </div>
+          <h1>Sync</h1>
         </div>
 
         {!hasSource && (

@@ -894,6 +894,35 @@ a:hover { text-decoration: underline; }
 .readme-content details { margin: 0.5rem 0; }
 .readme-content summary { cursor: pointer; color: var(--text-muted); }
 
+/* Project header: identity crumb + tab navigation */
+.project-header { margin-bottom: 1.5rem; }
+.project-header-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.75rem 1rem; flex-wrap: wrap; margin-bottom: 0.75rem;
+}
+.project-crumb {
+  display: flex; align-items: baseline; gap: 0.4rem;
+  font-size: 1.25rem; overflow-wrap: anywhere;
+}
+.project-crumb-namespace { color: var(--text-muted); }
+.project-crumb-sep { color: var(--text-faint); }
+.project-crumb-name { font-weight: 700; color: var(--text-primary); }
+.project-crumb-name:hover { color: var(--accent-text); text-decoration: none; }
+.project-tabs {
+  display: flex; gap: 0.25rem; border-bottom: 1px solid var(--border);
+  overflow-x: auto; scrollbar-width: none;
+}
+.project-tabs::-webkit-scrollbar { display: none; }
+.project-tab {
+  padding: 0.45rem 0.85rem; color: var(--text-muted); font-size: 0.9rem;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap;
+}
+.project-tab:hover { color: var(--text-body); text-decoration: none; }
+.project-tab-active { color: var(--text-primary); border-bottom-color: var(--accent-text); }
+
+/* Project settings */
+.settings-links { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
 /* Error pages (400/404/500) */
 .error-page { max-width: 480px; margin: 4rem auto; text-align: center; }
 .error-page-code {

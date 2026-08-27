@@ -4,6 +4,7 @@ import sanitizeHtml from "sanitize-html";
 import type { GitProvider, ImportProgress } from "../../types";
 import { FileTree } from "../components/file-tree";
 import { ImportProgressCard } from "../components/import-progress";
+import { ProjectHeader } from "../components/project-header";
 import { buildFileTree } from "../file-tree";
 import { Layout } from "../layout";
 
@@ -72,6 +73,7 @@ interface RepoProps {
     name: string;
     namespace: string;
     slug: string;
+    visibility?: string;
     remote: string;
     createdAt: string;
     sourceUrl?: string;
@@ -97,6 +99,8 @@ interface RepoProps {
   } | null;
   canSync?: boolean;
   isOwner?: boolean;
+  /** Whether the viewer can open project settings (shows the Settings tab). */
+  canWrite?: boolean;
   /** Per-request CSP nonce, threaded to every script-rendering child. */
   nonce: string;
 }
@@ -158,6 +162,7 @@ export const RepoPage: FC<RepoProps> = ({
   syncStatus,
   canSync,
   isOwner,
+  canWrite,
   nonce,
 }) => {
   const hasSource = !!project.sourceUrl;
@@ -167,56 +172,36 @@ export const RepoPage: FC<RepoProps> = ({
 
   return (
     <Layout title={project.name} user={user}>
-      <div class="page-header">
-        <h1>{project.name}</h1>
-        <div class="header-actions">
-          {hasSource && canSync && (
-            <form
-              method="post"
-              action={`/api/projects/${project.namespace}/${project.slug}/sync`}
-              style={{ display: "inline" }}
+      <ProjectHeader project={project} active="code" canWrite={canWrite ?? isOwner}>
+        {hasSource && canSync && (
+          <form
+            method="post"
+            action={`/api/projects/${project.namespace}/${project.slug}/sync`}
+            style={{ display: "inline" }}
+          >
+            <button
+              type="submit"
+              class={`btn ${hasUpdates ? "btn-primary" : "btn-secondary"}`}
+              disabled={isSyncing}
             >
-              <button
-                type="submit"
-                class={`btn ${hasUpdates ? "btn-primary" : "btn-secondary"}`}
-                disabled={isSyncing}
-              >
-                {isSyncing ? (
-                  <>
-                    <span class="spinner-small" /> Syncing...
-                  </>
-                ) : hasUpdates ? (
-                  <>
-                    {getProviderIcon(project.sourceProvider)} Sync Now{" "}
-                    {syncStatus?.commitsBehind
-                      ? `(${syncStatus.commitsBehind} commit${syncStatus.commitsBehind > 1 ? "s" : ""} behind)`
-                      : ""}
-                  </>
-                ) : (
-                  <>{getProviderIcon(project.sourceProvider)} Sync Now</>
-                )}
-              </button>
-            </form>
-          )}
-          <a class="btn" href={`/${project.namespace}/${project.slug}/issues`}>
-            Issues
-          </a>
-          <a class="btn" href={`/${project.namespace}/${project.slug}/activity`}>
-            Activity
-          </a>
-          <a class="btn" href={`/${project.namespace}/${project.slug}/tags`}>
-            Tags
-          </a>
-          {isOwner && (
-            <a class="btn" href={`/${project.namespace}/${project.slug}/webhooks`}>
-              Webhooks
-            </a>
-          )}
-          <a class="btn btn-primary" href={`/${project.namespace}/${project.slug}/changes`}>
-            View changes
-          </a>
-        </div>
-      </div>
+              {isSyncing ? (
+                <>
+                  <span class="spinner-small" /> Syncing...
+                </>
+              ) : hasUpdates ? (
+                <>
+                  Sync Now{" "}
+                  {syncStatus?.commitsBehind
+                    ? `(${syncStatus.commitsBehind} commit${syncStatus.commitsBehind > 1 ? "s" : ""} behind)`
+                    : ""}
+                </>
+              ) : (
+                <>Sync Now</>
+              )}
+            </button>
+          </form>
+        )}
+      </ProjectHeader>
 
       {/* Sync Status Banner */}
       {hasSource && (
@@ -387,32 +372,6 @@ export const RepoPage: FC<RepoProps> = ({
           </div>
         </div>
       </div>
-
-      {isOwner && (
-        <div class="card danger-zone" style={{ marginTop: "1rem" }}>
-          <h3 style={{ marginTop: 0 }}>Danger Zone</h3>
-          <p>
-            Permanently delete this project and every byte tied to it — repo, forks, changes, and
-            all metadata. This cannot be undone. Type{" "}
-            <code>
-              {project.namespace}/{project.slug}
-            </code>{" "}
-            to confirm.
-          </p>
-          <form method="post" action={`/api/projects/${project.namespace}/${project.slug}/delete`}>
-            <input
-              type="text"
-              name="confirm"
-              required
-              autocomplete="off"
-              placeholder={`${project.namespace}/${project.slug}`}
-            />
-            <button type="submit" class="btn btn-danger">
-              Delete project
-            </button>
-          </form>
-        </div>
-      )}
     </Layout>
   );
 };
