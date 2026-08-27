@@ -2497,11 +2497,17 @@ async function isMissingMergeBase(
 }
 
 /**
- * Whether `ref`'s local history currently ends at a shallow-fetch boundary
- * (recorded in `.git/shallow`) rather than a true root — i.e. whether fetching
- * more depth for `ref` could reveal additional ancestors. A ref whose full
- * reachable history is already present locally cannot be deepened any
+ * Whether ANY commit reachable from `ref` sits on a shallow-fetch boundary
+ * (recorded in `.git/shallow`) rather than being a true root — i.e. whether
+ * fetching more depth for `ref` could reveal additional ancestors. A ref whose
+ * full reachable history is already present locally cannot be deepened any
  * further, so retrying its fetch would just repeat the same result.
+ *
+ * Deliberately not "is the OLDEST reachable commit a boundary": `.git/shallow`
+ * can hold several boundary oids, and a merge commit can reach a truncated
+ * line and a fully-present older line at once. Judging by the oldest commit
+ * alone would then see the complete root, call the ref non-shallow, and stop
+ * {@link applySourceUpdateWithDeepening} while history was still fetchable.
  */
 async function isRefShallow(fs: NodeFS, dir: string, ref: string): Promise<boolean> {
   const gitdir = `${dir === "/" ? "" : dir}/.git`;
@@ -2516,10 +2522,18 @@ async function isRefShallow(fs: NodeFS, dir: string, ref: string): Promise<boole
       .filter(Boolean),
   );
   if (boundary.size === 0) return false;
-  const log = await fromPromise(git.log({ fs, dir, ref, depth: -1 }));
+  // No `depth`: the documented way to ask for an unbounded walk. Passing a
+  // sentinel like -1 only works by accident — isomorphic-git stops on
+  // `commits.length === depth`, a strict equality a growing count never
+  // satisfies for a negative number. If that check ever became `>=`, the walk
+  // would end on its first iteration and every ref would look non-shallow.
+  const log = await fromPromise(git.log({ fs, dir, ref }));
   if (!log.success) return false;
-  const oldest = log.data.at(-1);
-  return oldest !== undefined && boundary.has(oldest.oid);
+  // Every reachable commit, not just the oldest one. `.git/shallow` legitimately
+  // holds several boundary oids, and a merge commit can reach both a shallow
+  // boundary AND an older complete root; the globally oldest commit is then the
+  // root, which would hide a ref that genuinely still has history to fetch.
+  return log.data.some((commit) => boundary.has(commit.oid));
 }
 
 export interface SourceSyncResult {
@@ -2788,10 +2802,15 @@ export async function syncFromGitHub(
   if (!tipResult.success) return err(tipResult.error);
   const sourceTip = tipResult.data;
 
-  // Deepens each side by re-fetching its already-added remote with `relative:
-  // true`, which extends the shallow boundary from wherever it currently sits
-  // instead of re-fetching from the tip. Only invoked when `isRefShallow`
-  // confirms that side actually has more local history to reveal.
+  /**
+   * Deepens the PROJECT side (the Artifacts clone at `origin`) by `increment`
+   * commits. Exists as a closure so {@link applySourceUpdateWithDeepening} can
+   * own the retry/doubling policy without knowing anything about this repo's
+   * remotes, auth, or transport. Re-fetches the already-added remote with
+   * `relative: true`, which extends the shallow boundary from wherever it
+   * currently sits instead of re-fetching from the tip; only invoked when
+   * {@link isRefShallow} confirms this side actually has more history to reveal.
+   */
   const deepenProject: DeepenFetch = async (increment) => {
     const result = await fromPromise(
       git.fetch({
@@ -2818,6 +2837,13 @@ export async function syncFromGitHub(
     }
     return ok(undefined);
   };
+  /**
+   * Deepens the SOURCE side (the upstream public repo at `source`) by
+   * `increment` commits. Separate from {@link deepenProject} because the two
+   * remotes differ in the ways that matter here: the source is anonymous (no
+   * `onAuth`) and its failures must name the source URL, not the Artifacts
+   * remote, so an operator reading the log can tell which fetch gave out.
+   */
   const deepenSource: DeepenFetch = async (increment) => {
     const result = await fromPromise(
       git.fetch({

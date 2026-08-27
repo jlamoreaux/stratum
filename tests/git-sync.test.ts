@@ -87,6 +87,14 @@ async function buildHiddenMergeBaseHistory(gfs: GitFS, gitdir: string) {
     timestamp: 1_700_000_000,
   });
 
+  /**
+   * Builds one side's four-commit line off the shared root. Factored out
+   * because both sides must be shaped IDENTICALLY for the fixture to prove
+   * anything: if one line were shorter, the merge base could be found from the
+   * objects already on disk and the test would pass without any deepening.
+   * `tipTimestamp` is the caller's, so the two tips can be ordered relative to
+   * each other — commit age decides the order isomorphic-git walks history in.
+   */
   async function buildLine(label: string, tipTimestamp: number) {
     // `boundary`'s tree is never dereferenced (only commit headers are read
     // while searching for a merge base), so it's fine to reuse `rootTree`.
@@ -524,5 +532,113 @@ describe("applySourceUpdateWithDeepening (real git, in-memory)", () => {
     expect(result.data.status).toBe("merged");
     const files = await git.listFiles({ fs: gfs, dir: DIR, ref: "trunk" });
     expect(files.sort()).toEqual(["native.txt", "source.txt"]);
+  });
+
+  // Regression: `isRefShallow` used to judge a ref by its OLDEST reachable
+  // commit alone. A merge commit can reach two lines at once — one truncated at
+  // a `.git/shallow` boundary, one complete back to an older root — and then the
+  // globally oldest commit is that complete root, not the boundary. The ref was
+  // therefore reported non-shallow, the deepening loop broke out immediately,
+  // and sync failed with SYNC_DIVERGED while the merge base was still one fetch
+  // away. Shaped so ONLY the project side is truncated: if the check regresses,
+  // no side looks shallow and nothing is deepened at all.
+  it("deepens a branch whose merge commit reaches both a shallow boundary and an older complete root", async () => {
+    const { fs, gfs } = await initRepo();
+    const gitdir = `${DIR}/.git`;
+
+    const { rootBlob, rootTree, sharedRoot, native, source } = await buildHiddenMergeBaseHistory(
+      gfs,
+      gitdir,
+    );
+    // The source side is COMPLETE here — its own boundary commit and the shared
+    // root are already on disk, so nothing about it is shallow.
+    for (const o of [source.boundary, rootBlob, rootTree, sharedRoot]) {
+      await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
+    }
+
+    // An unrelated, fully-present root that is OLDER than anything in the
+    // shallow window — this is what makes the oldest reachable commit the wrong
+    // commit to judge shallowness by.
+    const legacyBlob = await blobObject(new TextEncoder().encode("legacy\n"));
+    const legacyTree = await treeObject([
+      { mode: "100644", name: "legacy.txt", oid: legacyBlob.oid },
+    ]);
+    const legacyRoot = await commitObject({
+      tree: legacyTree.oid,
+      parents: [],
+      message: "legacy root",
+      timestamp: 1_699_000_000,
+    });
+    // The merge commit itself: one parent walks into the truncated native line,
+    // the other into the complete legacy root. Reuses the native tip's tree so
+    // the eventual three-way merge is the same clean one the other cases make.
+    const mergeTip = await commitObject({
+      tree: native.tipTree.oid,
+      parents: [native.tip.oid, legacyRoot.oid],
+      message: "merge legacy history",
+      timestamp: 1_700_000_120,
+    });
+    for (const o of [legacyBlob, legacyTree, legacyRoot, mergeTip]) {
+      await placeLooseObject(gfs as unknown as FsLike, gitdir, o.oid, o.bytes);
+    }
+
+    await rewindBranch(gfs, mergeTip.oid);
+    await git.writeRef({
+      fs: gfs,
+      dir: DIR,
+      ref: "refs/remotes/source/main",
+      value: source.tip.oid,
+      force: true,
+    });
+    // Only the native line is truncated.
+    await writeShallowFile(fs, [native.mid.oid]);
+
+    // Precondition guard: the fixture only exercises the bug while the oldest
+    // reachable commit is the complete root rather than the shallow boundary.
+    const walk = await git.log({ fs: gfs, dir: DIR, ref: "main" });
+    expect(walk.at(-1)?.oid).toBe(legacyRoot.oid);
+    expect(walk.map((c) => c.oid)).toContain(native.mid.oid);
+
+    let projectDeepened = false;
+    let sourceDeepened = false;
+    const deepen: { project: DeepenFetch; source: DeepenFetch } = {
+      project: async () => {
+        projectDeepened = true;
+        await placeLooseObject(
+          gfs as unknown as FsLike,
+          gitdir,
+          native.boundary.oid,
+          native.boundary.bytes,
+        );
+        // The native line now reaches the shared root too — nothing left to hide.
+        await clearShallowFile(fs);
+        return ok(undefined);
+      },
+      source: async () => {
+        sourceDeepened = true;
+        return ok(undefined);
+      },
+    };
+
+    const result = await applySourceUpdateWithDeepening(
+      fs,
+      DIR,
+      source.tip.oid,
+      "refs/remotes/source/main",
+      2,
+      8,
+      deepen,
+      logger,
+    );
+
+    // The assertion that fails if shallowness is judged by the oldest commit.
+    expect(projectDeepened).toBe(true);
+    // The source has its full history already; re-fetching it would be wasted work.
+    expect(sourceDeepened).toBe(false);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.status).toBe("merged");
+    const mergedFiles = await git.listFiles({ fs: gfs, dir: DIR, ref: "main" });
+    expect(mergedFiles.sort()).toEqual(["native.txt", "source.txt"]);
   });
 });
