@@ -48,5 +48,7 @@ codes are in the [OpenAPI specification](/reference/openapi/).
 - `GONE` — the resource was deleted
 - `INVALID_PATH` — the requested path is invalid
 - `SUBMODULES_UNSUPPORTED` — a gitlink entry and/or `.gitmodules` file was
-  found on import or in a pushed workspace; git submodules are not supported
+  found on import, or in the workspace a change is being created from — a
+  gated push and `POST /api/projects/{name}/changes` alike, since both run the
+  same scan; git submodules are not supported
   (see [Importing from GitHub](/guides/importing/#unsupported-content))

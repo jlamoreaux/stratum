@@ -113,8 +113,11 @@ Honestly, several:
 - **Evaluation runs synchronously** at change creation — there's no async
   evaluation queue yet, so very slow evaluators stretch the request.
 - **Git submodules are not supported.** A gitlink entry or `.gitmodules` file
-  is detected and rejected — with a clear error — at import and at a gated
-  push, rather than risk a server-side merge silently corrupting it. See
+  is rejected — with a clear error — whenever a change is created, on a gated
+  push and through the REST API alike, rather than risk a server-side merge
+  silently corrupting it. The same check runs on import, but there it is
+  best-effort: an import whose tree can't be read proceeds unscanned with a
+  warning. See
   [Importing from GitHub](/guides/importing/#unsupported-content).
 
 See

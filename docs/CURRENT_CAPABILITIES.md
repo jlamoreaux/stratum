@@ -82,13 +82,21 @@ limitation recorded below.
   across runs under a per-run cap), with a tested restore path
   (`docs/runbooks/backup-restore.md`).
 - Git submodules are not supported (#258). A gitlink tree entry (mode 160000)
-  or a `.gitmodules` file is detected and rejected at the two points repo
-  content enters Stratum — GitHub import and a gated push — with a structured
-  `SUBMODULES_UNSUPPORTED` (422) error, so a repo using submodules fails
-  closed instead of importing partially and being corrupted by a later
-  server-side merge (isomorphic-git's checkout silently drops a gitlink from
-  the materialized working tree). Recursive submodule clone/browse is future
-  work; see `docs/user-guide/importing.md#unsupported-content`.
+  or a `.gitmodules` file is detected and rejected with a structured
+  `SUBMODULES_UNSUPPORTED` (422) error at the three points repo content enters
+  Stratum — GitHub import, a gated push, and REST change creation (the last two
+  share one scan, in the diff the change gate computes). Change creation fails
+  closed unconditionally: submodule content is refused, and so is a change
+  whose scan could not run — that is the gate that keeps submodule content out
+  of a server-side merge, which would otherwise corrupt it silently
+  (isomorphic-git's checkout drops a gitlink from the materialized working
+  tree). The import guard is deliberately best-effort: if the imported tree
+  cannot be read at all — the read token cannot be minted, the clone fails, or
+  the scan itself errors — the import proceeds with a warning and is left
+  unscanned rather than failing a healthy repo on an infrastructure hiccup, so
+  a completed import is not on its own proof the repo is submodule-free.
+  Recursive submodule clone/browse is future work; see
+  `user-guide/importing.md#unsupported-content`.
 
 ## Git LFS: not supported
 

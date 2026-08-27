@@ -183,6 +183,18 @@ vi.mock("../src/storage/git-ops", () => ({
   getCommitLog: vi.fn(),
   readFileFromRepo: vi.fn(),
   freshRepoToken: vi.fn(),
+  // The post-import submodule guard (#258). Left unconfigured it rejects the
+  // token mint the way every other mock in this suite does nothing, so the
+  // guard skips itself and the pre-existing tests below are unaffected; the
+  // rejection test drives it explicitly. The real scan is covered against
+  // genuine tree objects in tests/integration/import-flow.test.ts.
+  scanForSubmoduleContent: vi.fn(),
+  submoduleUnsupportedError: vi.fn(
+    () =>
+      new Error(
+        "Repository uses git submodules (found gitlink entry at vendor/lib), which Stratum does not support yet. Remove submodules and retry.",
+      ),
+  ),
 }));
 
 vi.mock("../src/storage/repo-snapshot", () => ({
@@ -1070,6 +1082,53 @@ describe("import queue consumer", () => {
 
     expect(mockImportJobs.get("@usera:repo")?.status).toBe("failed");
     expect(emailSend).toHaveBeenCalledTimes(2);
+    const recipients = emailSend.mock.calls.map(
+      (call) => (call as unknown as [{ to: string }])[0].to,
+    );
+    expect(recipients).toContain("userA@example.com");
+    expect(recipients).toContain("admin@example.com");
+  });
+
+  it("emails the triggering user when the import is rejected for submodules (#258)", async () => {
+    // The submodule rejection is a terminal import failure like any other, and
+    // the person who started the import is the only one who can act on it —
+    // dropping the initiator here would leave them staring at a stalled import
+    // while only the instance admin learns why.
+    const { handleImportQueue } = await import("../src/queue/import-queue");
+    const { importFromGitHub, freshRepoToken, cloneRepo, scanForSubmoduleContent } = await import(
+      "../src/storage/git-ops"
+    );
+    vi.mocked(importFromGitHub).mockResolvedValue({
+      success: true,
+      data: {
+        name: "usera__repo",
+        remote: "https://artifacts.example.com/repos/usera__repo",
+        token: "tok_x",
+      },
+    });
+    vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+    vi.mocked(cloneRepo).mockResolvedValue({
+      success: true,
+      data: { fs: {} as never, dir: "/" },
+    });
+    vi.mocked(scanForSubmoduleContent).mockResolvedValue({
+      success: true,
+      data: { gitlinkPaths: ["vendor/lib"], hasGitmodules: false },
+    });
+
+    const emailSend = vi.fn(async () => ({ messageId: "m1" }));
+    const env = makeEnv({
+      EMAIL: { send: emailSend },
+      ADMIN_EMAIL: "admin@example.com",
+      EMAIL_FROM_ADDRESS: "alerts@stratum.dev",
+    });
+    await seedProject(env, { namespace: "@usera", slug: "repo", projectId: "proj_1" });
+    await seedImportJob({ namespace: "@usera", slug: "repo", projectId: "proj_1" });
+
+    const message = createMockMessage(importMessage({ initiatedBy: "user_A" }));
+    await handleImportQueue(createMockBatch([message]), env);
+
+    expect(mockImportJobs.get("@usera:repo")?.status).toBe("failed");
     const recipients = emailSend.mock.calls.map(
       (call) => (call as unknown as [{ to: string }])[0].to,
     );

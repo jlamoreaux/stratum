@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import { type EventActor, emitEvent } from "../queue/events";
 import { createChangeWithEvaluation, createWorkspaceFork } from "../services/change-flow";
 import { getAgentByToken } from "../storage/agents";
+import { updateChangeStatus } from "../storage/changes";
 import { isTargetDeleting } from "../storage/deletion";
 import {
   artifactsRepoNameFromRemote,
@@ -657,10 +659,12 @@ async function forwardPackToWorkspace(
 }
 
 /**
- * Best-effort teardown of the server-managed fork when a gated push dies
- * before its change exists: nothing references the workspace yet, so leaving
- * it would leak an Artifacts repo + KV entry per failed push. Failures are
- * logged with enough coordinates to find the orphan by hand.
+ * Best-effort teardown of the server-managed fork when a gated push ends
+ * without a change anyone can act on -- it died before the change existed, or
+ * the change gate rejected it permanently. Nothing owner-visible depends on
+ * the workspace in either case, so leaving it would leak an Artifacts repo +
+ * KV entry per failed push, once per retry. Failures are logged with enough
+ * coordinates to find the orphan by hand.
  */
 async function cleanupPushWorkspace(
   env: Env,
@@ -689,6 +693,55 @@ async function cleanupPushWorkspace(
       error: deleteResult.error.message,
     });
   }
+}
+
+/**
+ * Close the change a gated push created after the change gate has rejected it
+ * for good.
+ *
+ * A deterministic rejection (submodule content, #258) is decided AFTER the
+ * change row exists, and no retry can make that change pass -- so leaving it
+ * `open` would put a change in the owner's queue that only ever wastes their
+ * time, and every retried push would add another. It is closed as `rejected`
+ * rather than deleted because the storage layer has no change-delete path and
+ * because the refusal is worth keeping in the audit trail; the accompanying
+ * `change.rejected` event keeps consumers that saw `change.created` from
+ * tracking it as open forever.
+ *
+ * Every failure here is logged and swallowed: the pusher must still get the
+ * protocol-level rejection, which is the part that actually protects them.
+ */
+async function closeRejectedChange(
+  env: Env,
+  logger: ReturnType<typeof createLogger>,
+  args: {
+    changeId: string;
+    projectId: string;
+    projectName: string;
+    reason: string;
+    actor: EventActor;
+  },
+): Promise<void> {
+  const updateResult = await updateChangeStatus(env.DB, logger, args.changeId, "rejected", {
+    evalPassed: false,
+    evalReason: args.reason,
+  });
+  if (!updateResult.success) {
+    logger.warn("Gated push cleanup: could not close the rejected change", {
+      changeId: args.changeId,
+      projectId: args.projectId,
+      error: updateResult.error.message,
+    });
+    return;
+  }
+  await emitEvent(
+    env.DB,
+    env.EVENTS_QUEUE,
+    { type: "change.rejected", project: args.projectName, changeId: args.changeId },
+    args.actor,
+    logger,
+    args.projectId,
+  );
 }
 
 // POST /@:namespace/:slug.git/git-receive-pack — push to the project ref.
@@ -858,6 +911,22 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
     // permanent-rejection message instead of the generic "re-evaluate it"
     // guidance below.
     if (outcome.error.code === "SUBMODULES_UNSUPPORTED") {
+      // The change already exists by the time the scan runs (it is created
+      // before the diff), so refusing without releasing it would leave an open
+      // change, a workspace entry and an Artifacts fork behind on every retry.
+      const rejectedChangeId = outcome.error.context?.changeId;
+      if (typeof rejectedChangeId === "string") {
+        await closeRejectedChange(c.env, logger, {
+          changeId: rejectedChangeId,
+          projectId: project.id,
+          projectName: `${namespace}/${slug}`,
+          reason: outcome.error.message,
+          actor: identity?.agentId
+            ? { type: "agent", id: identity.agentId }
+            : { type: "user", ...(identity?.userId !== undefined ? { id: identity.userId } : {}) },
+        });
+      }
+      await cleanupPushWorkspace(c.env, project.id, forkedName, forkResult.data.remote, logger);
       return refuseAll(`push rejected: ${outcome.error.message}`, [
         "Git submodules are not supported. Remove submodules (or flatten them into the repo) and push again.",
       ]);

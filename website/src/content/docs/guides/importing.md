@@ -101,10 +101,21 @@ Bidirectional GitHub sync — inbound webhooks and outbound PR promotion, i.e.
 
 **Git submodules are not supported.** A repository containing a gitlink tree
 entry (the `160000` mode git uses for a submodule reference) or a
-`.gitmodules` file is detected up front and the import fails with
-`status: "failed"` and a `SUBMODULES_UNSUPPORTED` error — before the project
-is ever marked imported. The same check runs on a gated push to a project's
-default branch, so a workspace containing a submodule can't be merged either.
+`.gitmodules` file is rejected with a `SUBMODULES_UNSUPPORTED` error.
+
+On import the check is best-effort. When the just-imported tree can be read,
+submodule content fails the import with `status: "failed"` — before the
+project is ever marked imported. When the tree cannot be read at all (the read
+token cannot be minted, the clone fails, or the scan itself errors) the import
+proceeds with a warning and is left unscanned, rather than failing a healthy
+repository because of an infrastructure hiccup. So a completed import is not
+on its own proof that a repository is submodule-free.
+
+The same scan runs whenever a change is created — on a gated push to a
+project's default branch and on `POST /api/projects/{name}/changes` alike —
+and there it is unconditional: a change carrying submodule content is refused,
+and so is one whose scan could not run. That is the gate that keeps submodule
+content out of a merge.
 
 This is deliberate: git's checkout silently drops a gitlink entry when
 Stratum's server-side git layer materializes a working tree, so partially

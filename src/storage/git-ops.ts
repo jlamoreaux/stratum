@@ -2023,8 +2023,9 @@ export interface SubmoduleContentReport {
  * missing -- exactly the silent corruption #258 forbids. Reading the tree
  * object directly is the only way to reliably detect a gitlink.
  *
- * Called at the two points repo content enters Stratum -- GitHub import and a
- * gated push's change creation -- so an unsupported repo is rejected up front
+ * Called at every point repo content enters Stratum -- GitHub import, and
+ * change creation for both a gated push and the REST API (both go through
+ * {@link getDiffBetweenRepos}) -- so an unsupported repo is rejected up front
  * with a clear, structured error instead of partially importing or reaching a
  * server-side merge.
  */
@@ -2841,6 +2842,22 @@ function deletedFileDiff(path: string, content: string): string {
   return `diff --git a/${path} b/${path}\ndeleted file mode 100644\n--- a/${path}\n+++ /dev/null\n@@ -1,${lineCount} +0,0 @@\n${body}\n`;
 }
 
+/**
+ * Produce the change-gate's view of a workspace fork: the unified diff against
+ * its base project plus the exact workspace revision that diff was computed
+ * from.
+ *
+ * Both sides are cloned at the SAME `branch` -- an imported project keeps its
+ * source branch name (master/trunk/...), and its fork inherits it -- so a caller
+ * that passes the project's real default branch gets a diff of like against
+ * like. Every ref this function reads (the submodule scan, the tip resolution,
+ * the file listing) must use that same `branch`, or the work silently happens
+ * against a ref that does not exist on a non-`main` project.
+ *
+ * The returned tip and tree oids come from this one clone so a caller can pin
+ * evaluation to precisely the revision that was diffed, instead of re-resolving
+ * later and racing a concurrent push.
+ */
 export async function getDiffBetweenRepos(
   baseRemote: string,
   baseToken: string,
@@ -2874,7 +2891,7 @@ export async function getDiffBetweenRepos(
   // here -- ahead of the full file listing/content read below -- rejects with a
   // clear, structured error instead of leaving a change record stuck on an
   // opaque diff failure.
-  const submoduleScan = await scanForSubmoduleContent(workspaceFs, "main", logger);
+  const submoduleScan = await scanForSubmoduleContent(workspaceFs, branch, logger);
   if (!submoduleScan.success) return err(submoduleScan.error);
   if (submoduleScan.data.gitlinkPaths.length > 0 || submoduleScan.data.hasGitmodules) {
     logger.warn("Rejecting change: workspace contains unsupported submodule content", {

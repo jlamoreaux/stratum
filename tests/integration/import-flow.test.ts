@@ -817,7 +817,14 @@ describe("End-to-End Import Flow", () => {
       return { fs, dir };
     }
 
-    async function runImport(slug: string) {
+    /**
+     * Drives one whole import job through the queue consumer and hands back
+     * the stored progress record — the only externally visible verdict on
+     * whether the submodule guard rejected, skipped, or passed the repo.
+     * `branch` is the branch the user selected for the import, which the
+     * guard is required to scan (a repo imported from `trunk` has no `main`).
+     */
+    async function runImport(slug: string, branch = "main") {
       const { importFromGitHub } = await import("../../src/storage/git-ops");
       vi.mocked(importFromGitHub).mockResolvedValue({
         success: true,
@@ -837,7 +844,7 @@ describe("End-to-End Import Flow", () => {
         namespace: "@userA",
         slug,
         githubUrl: "https://github.com/test/repo",
-        branch: "main",
+        branch,
         depth: 10,
         timestamp: new Date().toISOString(),
       });
@@ -906,11 +913,11 @@ describe("End-to-End Import Flow", () => {
           },
         },
         {
-          // The scan reads the tree at `main`. A repo whose default branch is
-          // `master` has no such ref, so the walk itself fails and the guard
-          // never runs -- the concrete shape the skip takes for any imported
-          // repo that keeps a non-`main` source branch name.
-          name: "tree walk fails (repo's branch is not `main`)",
+          // The scan reads the tree at the imported branch. A clone that comes
+          // back without that ref at all (a half-written fork, a fetch that
+          // dropped the branch) makes the walk itself fail, so the guard never
+          // produces a report.
+          name: "tree walk fails (cloned tree has no such ref)",
           arrange: async () => {
             vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
             vi.mocked(cloneRepo).mockResolvedValue({
@@ -926,6 +933,36 @@ describe("End-to-End Import Flow", () => {
         const progress = await runImport(`scan-unavailable-${index}`);
         expect(progress.data?.status, testCase.name).toBe("completed");
       }
+    });
+
+    it("scans the imported branch, so a non-`main` repo is still rejected (#258)", async () => {
+      // An imported repo keeps its source branch name, and nothing in it is
+      // called `main`. Scanning `main` regardless would fail to resolve the
+      // ref, collapse to "could not scan", and wave the repo through — the
+      // guard silently unenforced for every project not on `main`.
+      const { freshRepoToken, cloneRepo } = await import("../../src/storage/git-ops");
+      vi.mocked(freshRepoToken).mockResolvedValue({ success: true, data: "scan-token" });
+      vi.mocked(cloneRepo).mockResolvedValue({
+        success: true,
+        data: await buildScannedRepo({ gitlink: true, branch: "trunk" }),
+      });
+
+      const progress = await runImport("trunk-gitlink-project", "trunk");
+
+      expect(progress.data?.status).toBe("failed");
+      expect(
+        progress.data?.logs.some(
+          (log) => log.message.includes("submodule") || log.message.includes("gitlink"),
+        ),
+      ).toBe(true);
+      // The clone has to be pinned to that branch too — a clone of `main`
+      // would leave the scan nothing correct to read.
+      expect(vi.mocked(cloneRepo)).toHaveBeenCalledWith(
+        expect.any(String),
+        "scan-token",
+        expect.anything(),
+        { ref: "trunk" },
+      );
     });
 
     it("completes normally when the tree has neither a gitlink nor .gitmodules", async () => {

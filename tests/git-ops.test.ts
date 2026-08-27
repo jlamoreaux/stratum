@@ -574,8 +574,10 @@ describe("mergeWorkspaceIntoProject merge-failure classification (#185)", () => 
   });
 });
 
-/** Builds a one-commit local repo (real git objects, no network) on `main`,
- * optionally with a nested gitlink entry and/or a root `.gitmodules` file. A
+/** Builds a one-commit local repo (real git objects, no network) on `main` —
+ * or on `opts.branch`, and ONLY on it, so a test can prove a caller reads the
+ * branch it was handed rather than a hard-coded `main` — optionally with a
+ * nested gitlink entry and/or a root `.gitmodules` file. A
  * gitlink lives inside a real `vendor` subtree because a tree entry name
  * cannot contain a slash — a flat "vendor/lib" entry is a tree git cannot
  * produce, so the walker in `scanForSubmoduleContent` would not be exercised
@@ -583,7 +585,7 @@ describe("mergeWorkspaceIntoProject merge-failure classification (#185)", () => 
 async function seedSubmoduleRepo(
   fs: NodeFS,
   dir: string,
-  opts: { gitlink?: boolean; gitmodules?: boolean } = {},
+  opts: { gitlink?: boolean; gitmodules?: boolean; branch?: string } = {},
 ): Promise<string> {
   const gitfs = fs as unknown as Parameters<typeof git.init>[0]["fs"];
   await git.init({ fs: gitfs, dir, defaultBranch: "main" });
@@ -629,7 +631,13 @@ async function seedSubmoduleRepo(
     dir,
     commit: { tree: treeOid, parent: [], author, committer: author, message: "seed" },
   });
-  await git.writeRef({ fs: gitfs, dir, ref: "refs/heads/main", value: commit, force: true });
+  await git.writeRef({
+    fs: gitfs,
+    dir,
+    ref: `refs/heads/${opts.branch ?? "main"}`,
+    value: commit,
+    force: true,
+  });
   return commit;
 }
 
@@ -748,6 +756,37 @@ describe("getDiffBetweenRepos rejects submodule content (#258)", () => {
     if (!result.success) {
       expect(result.error.code).toBe("SUBMODULES_UNSUPPORTED");
       expect(result.error.message).toContain(".gitmodules");
+    }
+  });
+
+  it("scans the branch it was asked for, not a hard-coded main (#258)", async () => {
+    // A project imported from a repo whose default branch is `trunk` has no
+    // `main` anywhere: base repo, workspace fork and both clones are on
+    // `trunk`. Scanning `main` regardless would fail to resolve the ref and
+    // surface an opaque git error, so a submodule push would get past the
+    // guard on exactly the projects it was not hard-coded for.
+    stubClones(async (url, fs, dir) => {
+      await seedSubmoduleRepo(fs, dir, {
+        branch: "trunk",
+        ...(url === workspaceUrl ? { gitlink: true } : {}),
+      });
+    });
+
+    const result = await getDiffBetweenRepos(
+      baseUrl,
+      "base-token",
+      workspaceUrl,
+      "ws-token",
+      noopLogger,
+      "trunk",
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      // The structured rejection specifically — not a generic git failure
+      // from scanning a ref this project does not have.
+      expect(result.error.code).toBe("SUBMODULES_UNSUPPORTED");
+      expect(result.error.message).toContain("vendor/lib");
     }
   });
 

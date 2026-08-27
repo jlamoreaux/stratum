@@ -192,10 +192,17 @@ async function checkAndHandleCancellation(
  * Each underlying failure is already logged where it happens; what none of
  * those sites can say, and the caller does, is that the submodule guard was
  * therefore skipped for this import.
+ *
+ * `branch` is the branch that was actually imported, and both the clone and
+ * the scan must use it: an imported repo keeps its source branch name
+ * (master/trunk/...), so hard-coding `main` here would make the scan fail to
+ * find its ref on exactly those projects and silently downgrade the guard to
+ * "skipped" for every one of them.
  */
 async function readSubmoduleReport(
   env: Env,
   remote: string,
+  branch: string,
   logger: Logger,
 ): Promise<SubmoduleContentReport | null> {
   // Every failure mode collapses to null, including a thrown one. The caller
@@ -207,9 +214,9 @@ async function readSubmoduleReport(
   try {
     const tokenResult = await freshRepoToken(env.ARTIFACTS, remote, "read", logger);
     if (!tokenResult.success) return null;
-    const cloneResult = await cloneRepo(remote, tokenResult.data, logger);
+    const cloneResult = await cloneRepo(remote, tokenResult.data, logger, { ref: branch });
     if (!cloneResult.success) return null;
-    const scanResult = await scanForSubmoduleContent(cloneResult.data.fs, "main", logger);
+    const scanResult = await scanForSubmoduleContent(cloneResult.data.fs, branch, logger);
     return scanResult.success ? scanResult.data : null;
   } catch (error) {
     logger.warn("Submodule scan threw while reading the imported tree", {
@@ -357,7 +364,12 @@ async function processImportJob(
     // should not be indistinguishable from a real rejection -- but it is said
     // out loud, because "did not scan" and "scanned, found nothing" are not
     // the same state and only one of them leaves the guard unenforced.
-    const submoduleReport = await readSubmoduleReport(env, importResult.data.remote, logger);
+    const submoduleReport = await readSubmoduleReport(
+      env,
+      importResult.data.remote,
+      branch,
+      logger,
+    );
     if (submoduleReport === null) {
       logger.warn(
         "Submodule guard skipped: could not read the imported tree; import proceeds unscanned",
@@ -379,6 +391,9 @@ async function processImportJob(
         branch,
         error,
         startedAt,
+        // Same as every other failure path: without the initiator the user who
+        // started this import is never told why it stopped.
+        ...(initiatedBy !== undefined ? { initiatedBy } : {}),
       });
       await updateImportStatus(env.DB, namespace, slug, "failed", logger, error.message);
       msg.ack();
@@ -1038,7 +1053,13 @@ async function sendFailureNotification(
   }
 }
 /**
- * Classify error type from error message
+ * Reduce an import failure to a stable, coarse error type.
+ *
+ * The failures arrive as free-form messages from GitHub, Artifacts and git, so
+ * the raw text is useless for grouping. This tag is what the stored import
+ * record and the failure notification key off, which is why every new terminal
+ * failure mode (submodule rejection included) needs a branch here rather than
+ * falling into `UNKNOWN_ERROR` and becoming invisible in aggregate.
  */
 function classifyError(error: Error): string {
   const message = error.message.toLowerCase();
@@ -1079,7 +1100,14 @@ function classifyError(error: Error): string {
 }
 
 /**
- * Handle import failure with logging, storage, and alerting
+ * The single place a terminal import failure is turned into everything the
+ * outside world sees: the log line, the metric, the stored failure record, and
+ * the email to the person who started it.
+ *
+ * Every failing path funnels through here so a new failure mode cannot ship
+ * with only some of those effects — most easily by forgetting `initiatedBy`,
+ * which leaves the user who triggered the import waiting on a notification
+ * that only ever reached the instance admin.
  */
 async function handleImportFailure(
   env: Env,

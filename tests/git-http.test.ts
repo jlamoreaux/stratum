@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import app from "../src/index";
 import { isGitHttpPath } from "../src/routes/git-http";
+import { updateChangeStatus } from "../src/storage/changes";
 import { freshRepoToken } from "../src/storage/git-ops";
 import type { Env, ProjectEntry } from "../src/types";
 import { AppError } from "../src/utils/errors";
@@ -49,6 +50,17 @@ vi.mock("../src/services/change-flow", async (importActual) => {
         evalRuns: [],
       },
     })),
+  };
+});
+
+// The gated-push submodule path closes the change it created (#258); the
+// storage call is stubbed so the assertion is about WHAT the route does with
+// the rejected change, not about D1.
+vi.mock("../src/storage/changes", async (importActual) => {
+  const actual = await importActual<typeof import("../src/storage/changes")>();
+  return {
+    ...actual,
+    updateChangeStatus: vi.fn(async () => ({ success: true, data: undefined })),
   };
 });
 
@@ -1502,6 +1514,51 @@ describe("git smart-HTTP proxy — gated push (slice 2b)", () => {
     // Unlike a transient processing failure, this is permanent -- the pusher
     // must not be told to re-evaluate a change that can never pass.
     expect(text).not.toContain("re-evaluate");
+  });
+
+  it("leaves no orphaned change or workspace behind when submodules are rejected (#258)", async () => {
+    // The change row already exists when the submodule scan rejects, so a bare
+    // refusal would strand an open change, a workspace entry and an Artifacts
+    // fork -- one full set per retried push.
+    const env = gatedEnv();
+    await seedProject(env);
+    await seedWorkspace(
+      env,
+      "push-abcd1234",
+      "https://acct.artifacts.cloudflare.net/git/@owner/push-abcd1234.git",
+    );
+    stubFetch(() => upstreamPushOk());
+    vi.mocked(createChangeWithEvaluation).mockResolvedValueOnce(
+      err(
+        new AppError(
+          "Repository uses git submodules (found gitlink entry at vendor/lib), which Stratum does not support yet. Remove submodules and retry.",
+          "SUBMODULES_UNSUPPORTED",
+          400,
+          { changeId: "chg_stuck_submodule" },
+        ),
+      ),
+    );
+
+    await app.fetch(
+      req("/@owner/repo.git/git-receive-pack", {
+        method: "POST",
+        headers: basic(OWNER_TOKEN),
+        body: MAIN_PUSH,
+      }),
+      env,
+    );
+
+    // The change is closed rather than left open in the owner's queue.
+    expect(vi.mocked(updateChangeStatus)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "chg_stuck_submodule",
+      "rejected",
+      expect.objectContaining({ evalPassed: false }),
+    );
+    // …and the fork + workspace entry it was created from are released.
+    expect(vi.mocked(env.ARTIFACTS.delete)).toHaveBeenCalledWith("push-abcd1234");
+    expect(await env.STATE.get("workspace:proj_1:push-abcd1234")).toBeNull();
   });
 
   it("cleans up the fork when the upstream transport fails", async () => {
