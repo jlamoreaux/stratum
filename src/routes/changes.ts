@@ -51,6 +51,7 @@ import { getWaitUntil } from "../utils/execution-ctx";
 import { newId } from "../utils/ids";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import {
   appError,
   badRequest,
@@ -63,6 +64,13 @@ import {
 } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Change-creation body is just a workspace name.
+const MAX_CHANGE_CREATE_BODY_BYTES = 1024 * 1024;
+// changeIds is a list of ids, capped post-parse by MAX_MERGE_BATCH.
+const MAX_MERGE_BATCH_BODY_BYTES = 1024 * 1024;
+// GitHub PR promotion body is a handful of short strings.
+const MAX_GITHUB_PR_BODY_BYTES = 1024 * 1024;
 
 // Merge-policy cache (ADR 004). Reading the policy clones the repo; under a swarm
 // of concurrent merges that per-request clone both throttles and de-coalesces the
@@ -247,7 +255,12 @@ app.post("/projects/:name/changes", async (c) => {
     return c.json({ error: "Project is being deleted", code: "TARGET_DELETING" }, 409);
   }
 
-  const body = await c.req.json<{ workspace?: unknown }>().catch(() => ({ workspace: undefined }));
+  const body = await readJsonWithLimit<{ workspace?: unknown }>(
+    c,
+    MAX_CHANGE_CREATE_BODY_BYTES,
+    logger,
+  ).catch(() => ({ workspace: undefined }));
+  if (body instanceof Response) return body;
   if (typeof body.workspace !== "string" || !body.workspace.trim()) {
     return badRequest("workspace is required");
   }
@@ -870,9 +883,12 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
   if (!(await canWriteProject(c.env.DB, project, userId)))
     return forbidden("Project access denied");
 
-  const body = await c.req
-    .json<{ changeIds?: unknown; force?: unknown }>()
-    .catch(() => ({ changeIds: undefined, force: undefined }));
+  const body = await readJsonWithLimit<{ changeIds?: unknown; force?: unknown }>(
+    c,
+    MAX_MERGE_BATCH_BODY_BYTES,
+    logger,
+  ).catch(() => ({ changeIds: undefined, force: undefined }));
+  if (body instanceof Response) return body;
   if (!Array.isArray(body.changeIds) || body.changeIds.length === 0) {
     return badRequest("changeIds (non-empty array) is required");
   }
@@ -1684,9 +1700,12 @@ app.post("/changes/:id/github-pr", async (c) => {
   }
   const repo = { owner: parsedRepo.info.owner, repo: parsedRepo.info.repo };
 
-  const body = await c.req
-    .json<{ title?: string; body?: string; draft?: boolean }>()
-    .catch(() => ({}) as { title?: string; body?: string; draft?: boolean });
+  const body = await readJsonWithLimit<{ title?: string; body?: string; draft?: boolean }>(
+    c,
+    MAX_GITHUB_PR_BODY_BYTES,
+    logger,
+  ).catch(() => ({}) as { title?: string; body?: string; draft?: boolean });
+  if (body instanceof Response) return body;
 
   // The PR base is the project's own recorded default branch, never a
   // caller-supplied value (SA-6). This endpoint acts with the instance-wide

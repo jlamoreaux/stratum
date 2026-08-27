@@ -172,10 +172,15 @@ describe("S7 — commit route identifier validation", () => {
     const env = await makeSeededEnv();
     // Spread across files that each sit UNDER the per-file cap, so this
     // exercises the AGGREGATE accounting rather than the per-file guard:
-    // 4 x 3M chars = 12M UTF-16 units (under 25 MiB by string length) but
-    // 4 x 9 MiB = 36 MiB of UTF-8 (over it).
+    // 3 x 3M chars = 9M UTF-16 units (under 25 MiB by string length) but
+    // 3 x 9 MiB = 27 MiB of UTF-8 (over it).
+    //
+    // 27 MiB, not 36: the pre-parse body cap added for #264 rejects anything
+    // over 32 MiB with a 413 before the body is even parsed, which would mask
+    // this aggregate check. Sitting between the two caps keeps each one tested
+    // by the band it actually governs.
     const cjk: Record<string, string> = {};
-    for (let i = 0; i < 4; i++) cjk[`cjk${i}.txt`] = "\u4e00".repeat(3 * 1024 * 1024);
+    for (let i = 0; i < 3; i++) cjk[`cjk${i}.txt`] = "\u4e00".repeat(3 * 1024 * 1024);
     const res = await app.fetch(commitReq({ files: cjk }), env);
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("too large");
@@ -236,9 +241,11 @@ describe("S7 — commit route identifier validation", () => {
 
   it("rejects a payload over the total byte cap before cloning", async () => {
     const env = await makeSeededEnv();
-    // Four 9 MiB files: each under the per-file cap, 36 MiB in aggregate.
+    // Three 9 MiB files: each under the per-file cap, 27 MiB in aggregate —
+    // over the 25 MiB aggregate cap but under the 32 MiB pre-parse cap, so the
+    // 413 path does not mask this one.
     const files: Record<string, string> = {};
-    for (let i = 0; i < 4; i++) files[`big${i}.bin`] = "x".repeat(9 * 1024 * 1024);
+    for (let i = 0; i < 3; i++) files[`big${i}.bin`] = "x".repeat(9 * 1024 * 1024);
     const res = await app.fetch(commitReq({ files }), env);
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("too large");

@@ -23,6 +23,7 @@ import type { Env } from "../types";
 import { getArtifactsRepoName, projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
 import { createLogger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import {
   badRequest,
   created,
@@ -39,6 +40,13 @@ const app = new Hono<{ Bindings: Env }>();
 // Commit payload bounds — the commit clones into an in-isolate MemoryFS.
 const MAX_COMMIT_FILES = 2000;
 const MAX_COMMIT_BYTES = 25 * 1024 * 1024;
+// Pre-parse read ceiling: comfortably above the 25 MiB post-parse aggregate
+// (JSON framing — quoting, escaping, keys — inflates the wire size above the
+// raw file bytes) while still well short of the ~128 MB isolate budget once
+// the parsed object graph is accounted for.
+const MAX_COMMIT_BODY_BYTES = 32 * 1024 * 1024;
+// The create-workspace body is just an optional name string.
+const MAX_CREATE_WORKSPACE_BODY_BYTES = 1024 * 1024;
 
 // POST /projects/:namespace/:slug/workspaces - Create a workspace
 app.post("/:namespace/:slug/workspaces", async (c) => {
@@ -78,7 +86,12 @@ app.post("/:namespace/:slug/workspaces", async (c) => {
     return c.json({ error: "Project is being deleted", code: "TARGET_DELETING" }, 409);
   }
 
-  const body = await c.req.json<{ name?: unknown }>().catch(() => ({ name: undefined }));
+  const body = await readJsonWithLimit<{ name?: unknown }>(
+    c,
+    MAX_CREATE_WORKSPACE_BODY_BYTES,
+    logger,
+  ).catch(() => ({ name: undefined }));
+  if (body instanceof Response) return body;
   const workspaceName = isValidSlug(body.name) ? body.name : `ws-${Date.now()}`;
 
   // Get the Artifacts repo using the namespaced name
@@ -207,9 +220,18 @@ app.post("/:name/commit", async (c) => {
   // KV keys. Workspace names are slugs by construction; project ids are
   // crypto.randomUUID() values — anything else (a ':', a path, an empty
   // string) is a key-injection probe and is rejected outright.
+  //
+  // Deliberately ahead of the body read: rejecting a malformed name costs
+  // nothing, while reading the body — even bounded — spends the request's
+  // budget on a caller already known to be probing.
   if (!isValidSlug(workspaceName)) return badRequest("invalid workspace name");
 
-  const body = await c.req.json<{ files?: unknown; message?: unknown; projectId?: unknown }>();
+  const body = await readJsonWithLimit<{
+    files?: unknown;
+    message?: unknown;
+    projectId?: unknown;
+  }>(c, MAX_COMMIT_BODY_BYTES, logger);
+  if (body instanceof Response) return body;
   if (!isStringRecord(body.files))
     return badRequest("files must be an object of string paths to string contents");
   if (typeof body.message !== "string" || !body.message.trim())

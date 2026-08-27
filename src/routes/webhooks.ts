@@ -15,8 +15,12 @@ import { canWriteProject } from "../utils/authz";
 import { escapeHtml } from "../utils/html";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import { badRequest, created, forbidden, internalError, notFound, ok } from "../utils/response";
 import { validateWebhookUrl } from "../utils/validation";
+
+// Webhook config body is small (a URL string + an events list).
+const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -105,7 +109,11 @@ app.post("/:namespace/:slug/webhooks", async (c) => {
   let body: { url?: unknown; events?: unknown };
   const contentType = c.req.header("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    body = await c.req.json<typeof body>().catch(() => ({}));
+    const parsed = await readJsonWithLimit<typeof body>(c, MAX_WEBHOOK_BODY_BYTES, logger).catch(
+      () => ({}),
+    );
+    if (parsed instanceof Response) return parsed;
+    body = parsed;
   } else {
     const form = await c.req.parseBody();
     body = { url: form.url, events: form.events };
