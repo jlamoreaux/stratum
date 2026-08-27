@@ -233,10 +233,10 @@ describe("UI GET /:namespace/:slug/tags", () => {
     expect(hidden.status).toBe(404);
   });
 
-  it("400s an invalid project path", async () => {
+  it("404s an invalid project path (malformed URLs address nothing)", async () => {
     const env = makeEnv();
     const res = await app.fetch(req("/@bad__ns!/repo/tags"), env);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
   });
 
   it("500s when the read token cannot be minted", async () => {

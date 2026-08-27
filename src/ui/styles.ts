@@ -894,6 +894,16 @@ a:hover { text-decoration: underline; }
 .readme-content details { margin: 0.5rem 0; }
 .readme-content summary { cursor: pointer; color: var(--text-muted); }
 
+/* Error pages (400/404/500) */
+.error-page { max-width: 480px; margin: 4rem auto; text-align: center; }
+.error-page-code {
+  font-size: 3.5rem; font-weight: 700; color: var(--text-faint);
+  letter-spacing: 0.1em; line-height: 1;
+}
+.error-page-title { font-size: 1.4rem; font-weight: 700; margin: 0.75rem 0 0.5rem; }
+.error-page-hint { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem; overflow-wrap: anywhere; }
+.error-page-actions { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+
 /* Commit table */
 .commit-table { table-layout: fixed; width: 100%; }
 .commit-sha { width: 72px; font-size: 0.8rem; color: var(--accent-text); }

@@ -51,12 +51,17 @@ interface BreadcrumbProps {
   filePath: string;
 }
 
+/**
+ * Only the project crumb is a link: there is no user-profile route for the
+ * namespace and no directory-listing route for intermediate path segments,
+ * so rendering those as links would promise navigation that doesn't exist.
+ */
 const Breadcrumb: FC<BreadcrumbProps> = ({ namespace, slug, filePath }) => {
   const segments = filePath.split("/").filter((s) => s.length > 0);
 
   return (
     <div class="file-viewer-breadcrumb">
-      <a href={`/${namespace}/${slug}`}>{namespace}</a>
+      <span>{namespace}</span>
       <span class="sep">/</span>
       <a href={`/${namespace}/${slug}`}>{slug}</a>
       {segments.map((segment, i) => {
@@ -67,7 +72,7 @@ const Breadcrumb: FC<BreadcrumbProps> = ({ namespace, slug, filePath }) => {
             {isLast ? (
               <span class="file-viewer-breadcrumb-current">{segment}</span>
             ) : (
-              <a href={`/${namespace}/${slug}`}>{segment}</a>
+              <span>{segment}</span>
             )}
           </Fragment>
         );

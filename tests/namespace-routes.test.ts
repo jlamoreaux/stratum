@@ -320,11 +320,12 @@ describe("Namespace Routes", () => {
       expect(html).toContain("public-project");
     });
 
-    it("returns 400 for invalid namespace format (no @ prefix)", async () => {
-      // Routes without @ prefix should return 400 bad request
+    it("returns 404 for invalid namespace format (no @ prefix)", async () => {
+      // A malformed project URL addresses nothing; the global notFound handler
+      // answers (JSON here — no Accept: text/html on the request).
       const res = await app.fetch(request("GET", "/invalid/test-project"), env);
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(404);
     });
 
     it("displays import progress when import is active", async () => {
@@ -752,10 +753,10 @@ describe("Namespace Routes", () => {
       expect(res.status).toBe(200);
     });
 
-    it("rejects namespace without @ prefix via 400", async () => {
+    it("rejects namespace without @ prefix via 404", async () => {
       const res = await app.fetch(request("GET", "/invalid-namespace/project"), env);
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(404);
     });
   });
 
