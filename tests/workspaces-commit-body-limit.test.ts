@@ -33,6 +33,11 @@ import { commitAndPush } from "../src/storage/git-ops";
 const ARTIFACTS_REMOTE = "https://acct.artifacts.cloudflare.net/git/@owner/repo.git";
 const WS_REMOTE = "https://acct.artifacts.cloudflare.net/git/@owner/myws.git";
 
+/**
+ * The commit route resolves the project and workspace through KV before it
+ * ever looks at the body, so the test needs that lookup to succeed — otherwise
+ * a 404 would pass for a "rejection" and the cap would go untested.
+ */
 function makeKV(): KVNamespace {
   const store = new Map<string, string>();
   return {
@@ -53,6 +58,12 @@ function makeKV(): KVNamespace {
   } as unknown as KVNamespace;
 }
 
+/**
+ * Supplies only the binding the pre-parse path actually reads. `ARTIFACTS` and
+ * `DB` are left as bare objects on purpose: the cap must reject before either
+ * is touched, so a test that somehow reached them would throw rather than
+ * quietly pass.
+ */
 function makeEnv(): Env {
   return {
     ARTIFACTS: {} as Env["ARTIFACTS"],
@@ -61,6 +72,11 @@ function makeEnv(): Env {
   } as Env;
 }
 
+/**
+ * Puts the route one step away from parsing: a real project and workspace the
+ * owner can reach, so the only thing left to fail is the body size. Without
+ * this the request dies at lookup and proves nothing about the limit.
+ */
 async function seed(env: Env): Promise<void> {
   const project: ProjectEntry = {
     id: "00000000-0000-4000-8000-000000000001",
@@ -113,6 +129,8 @@ function streamingCommitRequest(totalBytes: number): Request {
   } as RequestInit);
 }
 
+/** The control case: proves the cap rejects oversized bodies without also
+ * breaking an ordinary commit, which a too-eager guard easily would. */
 function smallCommitRequest(): Request {
   return new Request("http://localhost/api/workspaces/myws/commit", {
     method: "POST",

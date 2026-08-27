@@ -29,6 +29,12 @@ const ISSUES_API = "/api/projects/testns/my-project/issues";
 /** Route-level cap in src/routes/issues.ts (MAX_COMMENT_BODY_BYTES). */
 const COMMENT_CAP_BYTES = 1024 * 1024;
 
+/**
+ * Builds the app over a real SQLite D1 with a real user, project and issue, so
+ * the request reaches the body-parse step through the genuine auth and lookup
+ * path. Stubbing those out would let a 401 or 404 masquerade as the 413 this
+ * file is meant to pin down.
+ */
 async function makeApp() {
   const { db, raw } = makeSqliteD1();
   const now = "2026-01-01T00:00:00.000Z";
