@@ -2554,8 +2554,8 @@ paths:
           $ref: "#/components/responses/SessionRequired"
         "409":
           description: >
-            Invalid input, or the caller already holds the maximum of 20 active
-            tokens (code TOKEN_LIMIT_REACHED). Revoked tokens do not count.
+            The caller already holds the maximum of 20 active tokens
+            (code TOKEN_LIMIT_REACHED). Revoked tokens do not count.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

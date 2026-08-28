@@ -131,7 +131,9 @@ describe("POST /api/users/me/tokens", () => {
     expect(recordAudit).toHaveBeenCalledWith(
       env.DB,
       expect.any(Object),
-      expect.objectContaining({ action: "token.created", actorId: "usr_1" }),
+      // `subject` is the indexed field an audit query filters on, so the token
+      // id belongs there rather than buried in the free-form detail blob.
+      expect.objectContaining({ action: "token.created", actorId: "usr_1", subject: "tok_1" }),
     );
   });
 
@@ -174,6 +176,24 @@ describe("POST /api/users/me/tokens", () => {
     );
     expect(res.status).toBe(409);
   });
+
+  it("400s a storage validation failure instead of reporting it as a conflict", async () => {
+    // A 409 tells the caller to free a token slot and retry, which can never
+    // fix a rejected name or expiry.
+    vi.mocked(createApiToken).mockResolvedValue({
+      success: false,
+      error: { message: "name already in use", code: "INVALID_TOKEN_NAME", statusCode: 400 },
+    } as never);
+    // A body the route itself accepts, so the rejection can only come from
+    // storage — which is the mapping under test.
+    const res = await makeApp(SESSION).fetch(
+      req("POST", "/api/users/me/tokens", { name: "ci" }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "INVALID_TOKEN_NAME" });
+  });
 });
 
 describe("GET and DELETE", () => {
@@ -215,7 +235,7 @@ describe("GET and DELETE", () => {
     expect(recordAudit).toHaveBeenCalledWith(
       env.DB,
       expect.any(Object),
-      expect.objectContaining({ action: "token.revoked" }),
+      expect.objectContaining({ action: "token.revoked", subject: "tok_1" }),
     );
   });
 });

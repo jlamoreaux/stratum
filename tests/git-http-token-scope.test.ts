@@ -45,7 +45,10 @@ vi.mock("../src/storage/api-tokens", async (importActual) => {
   };
 });
 
-vi.mock("../src/storage/users", () => ({
+// Spread the real module: src/index.ts pulls other exports (createUser,
+// getUserByEmail) from here, and a replacement object would leave them absent.
+vi.mock("../src/storage/users", async (importActual) => ({
+  ...(await importActual<typeof import("../src/storage/users")>()),
   getUserByToken: vi.fn(async (_db: unknown, token: string) =>
     token === LEGACY_TOKEN
       ? { success: true, data: { id: "user_owner", email: "o@x.io", username: "owner" } }

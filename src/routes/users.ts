@@ -191,7 +191,13 @@ app.post("/me/tokens", async (c) => {
     ...(expiresInDays !== undefined ? { expiresInDays } : {}),
   });
   if (!result.success) {
-    if (result.error.statusCode === 409 || result.error.statusCode === 400) {
+    // A rejected name or expiry is a 400; only the active-token cap is a 409.
+    // Reporting a validation failure as a conflict tells the caller to retry
+    // after freeing a slot, which will never help.
+    if (result.error.statusCode === 400) {
+      return c.json({ error: result.error.message, code: result.error.code }, 400);
+    }
+    if (result.error.statusCode === 409) {
       return c.json({ error: result.error.message, code: result.error.code }, 409);
     }
     return internalError(result.error.message);
@@ -201,7 +207,10 @@ app.post("/me/tokens", async (c) => {
     action: "token.created",
     actorType: "user",
     actorId: access.userId,
-    detail: { tokenId: result.data.token.id, scope: result.data.token.scope },
+    // The token id is the audit subject, matching the settings-form routes —
+    // `subject` is what an audit query filters on; `detail` is not indexed.
+    subject: result.data.token.id,
+    detail: { scope: result.data.token.scope },
   });
 
   // The plaintext exists nowhere else after this response, so it must not be
@@ -239,7 +248,7 @@ app.delete("/me/tokens/:id", async (c) => {
     action: "token.revoked",
     actorType: "user",
     actorId: access.userId,
-    detail: { tokenId },
+    subject: tokenId,
   });
   return ok({ revoked: tokenId });
 });

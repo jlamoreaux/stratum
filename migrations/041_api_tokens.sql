@@ -28,6 +28,6 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   revoked_at TEXT
 );
 
--- The authentication hot path looks a token up by hash on every request.
-CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+-- No index on token_hash: the UNIQUE constraint above already creates one, and
+-- that is what the authentication hot path's lookup by hash uses.
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);

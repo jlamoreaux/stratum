@@ -183,6 +183,17 @@ describe("GET /settings — the token listing", () => {
     const disabled = await (await get("/settings?notice=legacy-disabled")).text();
     expect(disabled).toContain("legacy API key has been disabled");
   });
+
+  it.each(["constructor", "toString", "__proto__", "valueOf"])(
+    "renders no notice for the inherited name %s",
+    async (name) => {
+      // A bare index lookup on the notice table resolves these to values off
+      // Object.prototype, which are not notices at all.
+      const clean = await (await get("/settings")).text();
+      const html = await (await get(`/settings?notice=${name}`)).text();
+      expect(html).toBe(clean);
+    },
+  );
 });
 
 describe("POST /settings/tokens — creating a token", () => {

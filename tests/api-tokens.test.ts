@@ -13,10 +13,10 @@ import {
   createApiToken,
   listApiTokens,
   narrowTokenScope,
+  resolveApiToken,
   revokeApiToken,
   touchApiTokenLastUsed,
 } from "../src/storage/api-tokens";
-import { resolveApiToken } from "../src/storage/api-tokens";
 import { disableLegacyToken, getUserByToken } from "../src/storage/users";
 import { hashToken } from "../src/utils/crypto";
 import type { Logger } from "../src/utils/logger";
