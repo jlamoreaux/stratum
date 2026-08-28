@@ -112,6 +112,13 @@ Honestly, several:
   access.
 - **Evaluation runs synchronously** at change creation — there's no async
   evaluation queue yet, so very slow evaluators stretch the request.
+- **Git submodules are not supported.** A gitlink entry at any depth, or a
+  root-level `.gitmodules` file, is rejected — with a clear error — whenever a
+  change is created, on a gated push and through the REST API alike, rather than risk a server-side merge
+  silently corrupting it. The same check runs on import, but there it is
+  best-effort: an import whose tree can't be read proceeds unscanned with a
+  warning. See
+  [Importing from GitHub](/guides/importing/#unsupported-content).
 
 See
 [`docs/CURRENT_CAPABILITIES.md`](https://github.com/stratum-eng/stratum/blob/main/docs/CURRENT_CAPABILITIES.md)

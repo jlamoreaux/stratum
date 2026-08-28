@@ -45,6 +45,20 @@ export class ConflictError extends AppError {
   }
 }
 
+/**
+ * Exists so an over-cap body can be *thrown* from deep inside a util or storage
+ * layer and still surface as a 413 with its code intact: `handleError` maps any
+ * `AppError` to a coded response, whereas a plain `Error` collapses into a 500
+ * that tells the caller nothing actionable. Routes that already have the
+ * response in hand should prefer `payloadTooLarge()` in `./response`.
+ */
+export class PayloadTooLargeError extends AppError {
+  constructor(message = "Request body too large") {
+    super(message, "PAYLOAD_TOO_LARGE", 413);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
 export class ExternalServiceError extends AppError {
   constructor(
     service: string,

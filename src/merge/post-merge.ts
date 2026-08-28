@@ -1,9 +1,11 @@
+import { materializeTree } from "../evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../evaluation/types";
 import { emitEvent } from "../queue/events";
 import { updateChangeStatus } from "../storage/changes";
 import { recordCosts } from "../storage/costs";
 import { freshRepoToken, getCommitParent, readRepoFiles, revertToCommit } from "../storage/git-ops";
 import type { Env, ProjectEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import type { Logger } from "../utils/logger";
 
 const DEFAULT_POST_MERGE_TIMEOUT_MS = 60_000;
@@ -48,10 +50,19 @@ export async function runPostMergeCheck(
     return { status: "skipped", reason: `Could not mint repo token: ${tokenResult.error.message}` };
   }
   const projectToken = tokenResult.data;
+  const branch = projectDefaultBranch(project);
 
   let failureReason: string;
   try {
-    const filesResult = await readRepoFiles(project.remote, projectToken, logger);
+    // `ref` is undefined here on purpose: the smoke check reads the tree the
+    // merge just produced, i.e. the branch tip, not a pinned commit.
+    const filesResult = await readRepoFiles(
+      project.remote,
+      projectToken,
+      logger,
+      undefined,
+      branch,
+    );
     if (!filesResult.success) {
       return {
         status: "skipped",
@@ -61,9 +72,15 @@ export async function runPostMergeCheck(
 
     const sandbox = await env.SANDBOX.create();
     try {
-      for (const [path, content] of filesResult.data) {
-        await sandbox.writeFile(path, content);
-      }
+      // readRepoFiles hands back raw bytes (a tree can hold binaries) while
+      // the sandbox's writeFile only carries strings; `materializeTree` owns
+      // that boundary — base64 for anything that is not valid UTF-8, decoded
+      // back to real bytes in the sandbox before the post-merge command runs.
+      // A failure there throws and is reported as a post-merge failure below,
+      // exactly as an inline decode failure was.
+      await materializeTree(sandbox, filesResult.data, {
+        decodeTimeoutMs: merge?.postMergeTimeoutMs ?? DEFAULT_POST_MERGE_TIMEOUT_MS,
+      });
       const runStartedAt = Date.now();
       const run = await sandbox.run(command, {
         timeout: merge?.postMergeTimeoutMs ?? DEFAULT_POST_MERGE_TIMEOUT_MS,
@@ -101,6 +118,7 @@ export async function runPostMergeCheck(
     projectToken,
     opts.mergeCommit,
     logger,
+    branch,
   );
   if (!parentResult.success) {
     return {
@@ -115,6 +133,7 @@ export async function runPostMergeCheck(
     parentResult.data,
     `Revert merge ${opts.mergeCommit.slice(0, 7)}: post-merge check failed`,
     logger,
+    branch,
   );
   if (!revertResult.success) {
     return {

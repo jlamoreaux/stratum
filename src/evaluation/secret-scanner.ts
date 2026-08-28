@@ -133,6 +133,43 @@ function highEntropyCandidate(line: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Name the first secret pattern a single line of text matches, or undefined.
+ *
+ * Takes the line already stripped of any diff marker, so the same rules apply
+ * to diff-derived and raw content.
+ */
+function matchSecret(line: string): string | undefined {
+  for (const { name, pattern } of SECRET_PATTERNS) {
+    if (pattern.test(line)) return name;
+  }
+  return highEntropyCandidate(line) ? "High-Entropy Credential" : undefined;
+}
+
+/**
+ * Scan raw file content — not a diff — for secrets.
+ *
+ * Callers that hold the literal bytes about to be committed should use this
+ * rather than synthesising a diff to feed `SecretScanEvaluator.evaluate`.
+ * Prefixing content lines with "+" is not a lossless encoding — a content line
+ * starting with "++" is indistinguishable from a "+++" file header by prefix
+ * alone — so the evaluator recovers the distinction from the diff's structure
+ * instead. Scanning content directly needs no such recovery, and is the
+ * simpler thing to reason about when the bytes are already in hand.
+ *
+ * @returns One issue string per finding, empty when the content is clean.
+ */
+export function scanContentForSecrets(files: Array<{ file: string; content: string }>): string[] {
+  const issues: string[] = [];
+  for (const { file, content } of files) {
+    content.split("\n").forEach((line, idx) => {
+      const name = matchSecret(line);
+      if (name) issues.push(`${name}: ${file} line ${idx + 1}`);
+    });
+  }
+  return issues;
+}
+
 export class SecretScanEvaluator implements Evaluator {
   async evaluate(
     diff: string,
@@ -141,18 +178,56 @@ export class SecretScanEvaluator implements Evaluator {
   ): Promise<Result<EvalResult, AppError>> {
     const issues: string[] = [];
 
+    // Headers are recognised by POSITION, not by prefix. A diff prefixes every
+    // added line with "+", so file content beginning with "++" arrives as
+    // "+++…" and content beginning with "++ " arrives as "+++ …" — both
+    // indistinguishable from a file header to any prefix test, and both
+    // therefore a way to walk a credential past an always-on blocking gate.
+    //
+    // Git's structure decides instead: "+++ b/path" always immediately follows
+    // "--- a/path", and only before the first hunk of a file. A "+++ …" line
+    // anywhere else is content, so there is no shape a line can take to be
+    // mistaken for a header.
+    //
+    // Anchored on the adjacent header pair rather than on "@@" deliberately.
+    // Scanning only after a hunk header would be the stricter reading, but a
+    // caller that hands over a diff with no "@@" — or a bare list of "+" lines
+    // — would then have every added line skipped, and a scanner that silently
+    // scans nothing is a worse failure than the one this fixes.
+    let inHunkBody = false;
+    let prevWasOldFileHeader = false;
+
     const lines = diff.split("\n");
     lines.forEach((line, idx) => {
-      if (!line.startsWith("+") || line.startsWith("+++")) return;
-      const lineNumber = idx + 1;
-      for (const { name, pattern } of SECRET_PATTERNS) {
-        if (pattern.test(line)) {
-          issues.push(`${name}: line ${lineNumber}`);
-          return;
-        }
+      if (line.startsWith("diff --git ")) {
+        inHunkBody = false;
+        prevWasOldFileHeader = false;
+        return;
       }
-      if (highEntropyCandidate(line)) {
-        issues.push(`High-Entropy Credential: line ${lineNumber}`);
+      if (line.startsWith("@@")) {
+        inHunkBody = true;
+        prevWasOldFileHeader = false;
+        return;
+      }
+      // Before any hunk, "--- " can only be the old-file header: content lines
+      // carry a "+"/"-"/" " marker and cannot appear here. Inside a hunk it is
+      // a removed line whose text starts with "-- ", which is skipped below.
+      if (!inHunkBody && line.startsWith("--- ")) {
+        prevWasOldFileHeader = true;
+        return;
+      }
+      const isNewFileHeader = !inHunkBody && prevWasOldFileHeader && line.startsWith("+++ ");
+      prevWasOldFileHeader = false;
+      if (isNewFileHeader) return;
+
+      if (!line.startsWith("+")) return;
+      // Exactly one marker, so the patterns see the real file line rather than
+      // one with a "+" welded to its first token.
+      const content = line.slice(1);
+      const lineNumber = idx + 1;
+      const name = matchSecret(content);
+      if (name) {
+        issues.push(`${name}: line ${lineNumber}`);
       }
     });
 

@@ -1,9 +1,9 @@
 import { Hono } from "hono";
-import { importFromGitHub } from "../storage/git-ops";
+import { syncOrImportProject } from "../services/project-sync";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
-import { listProjects } from "../storage/state";
+import { listProjects, setProject } from "../storage/state";
 import { checkForSyncUpdates, getProjectSourceUrl, updateProjectAfterSync } from "../storage/sync";
-import { type Env, artifactsRepoName } from "../types";
+import { type Env, artifactsRepoName, projectDefaultBranch } from "../types";
 import { createLogger } from "../utils/logger";
 
 // The former unauthenticated `POST /projects/:name/sync` handler was removed: it
@@ -53,31 +53,50 @@ export async function syncAllProjects(
       }
 
       projectLogger.info("Syncing project", { commitsBehind: checkResult.data.commitsBehind });
-      const branch = project.sourceDefaultBranch || project.githubDefaultBranch || "main";
-      const result = await importFromGitHub(
+      const branch = projectDefaultBranch(project);
+
+      // #190: existing projects sync INCREMENTALLY into their Artifacts repo —
+      // never delete-and-re-import, which destroyed Stratum-native commits and
+      // orphaned workspace forks. Only projects without a recorded Artifacts
+      // remote (no repo to preserve) still take the legacy import path.
+      const outcome = await syncOrImportProject(
         env.ARTIFACTS,
-        artifactsRepoName(project),
-        sourceUrl,
+        {
+          remote: project.remote,
+          artifactsRepoName: artifactsRepoName(project),
+          sourceUrl,
+          branch,
+          logContext: { namespace: project.namespace, slug: project.slug },
+        },
         projectLogger,
-        branch,
       );
-      if (result.success) {
+      const syncedRemote = outcome.remote;
+      const syncError = outcome.error;
+      const succeeded = syncError === undefined;
+
+      if (succeeded) {
         projectLogger.info("Project synced successfully");
         // NOTE: writeSnapshotFromRepo must be called after any new sync trigger added here
         await writeSnapshotFromRepo(
           env.STATE,
           env.ARTIFACTS,
           {
-            remote: result.data.remote,
+            remote: syncedRemote,
             namespace: project.namespace,
             slug: project.slug,
+            defaultBranch: projectDefaultBranch(project),
           },
           projectLogger,
         );
         if (checkResult.data.latestCommit) {
+          // The remote only changes on the legacy full-import fallback —
+          // incremental sync keeps the existing repo (and thus the remote)
+          // stable. Persisting it here is required: otherwise the next cron
+          // run still sees the legacy remote and re-runs the destructive
+          // full import.
           const updateResult = await updateProjectAfterSync(
             env.STATE,
-            project,
+            { ...project, remote: syncedRemote },
             checkResult.data.latestCommit,
             projectLogger,
           );
@@ -89,11 +108,31 @@ export async function syncAllProjects(
             projectLogger.error("Failed to record sync metadata", updateResult.error);
             continue;
           }
+        } else if (syncedRemote !== project.remote) {
+          // No commit sha to record, but the fallback import minted a NEW
+          // Artifacts repo. The remote must still be persisted on its own:
+          // leaving it unwritten sends the next cron run down the legacy
+          // branch again, and importFromGitHub deletes the repo it just
+          // created. No provider returns hasUpdates without a latestCommit
+          // today, so this is a guard against that invariant drifting, not a
+          // live path — hence remote-only, with lastSyncedCommit left alone
+          // rather than stamped with a placeholder that would poison the
+          // next comparison.
+          const setResult = await setProject(
+            env.STATE,
+            { ...project, remote: syncedRemote },
+            projectLogger,
+          );
+          if (!setResult.success) {
+            failed++;
+            projectLogger.error("Failed to persist imported remote", setResult.error);
+            continue;
+          }
         }
         synced++;
       } else {
         failed++;
-        projectLogger.error("Project sync failed", result.error);
+        projectLogger.error("Project sync failed", syncError);
       }
     } catch (error) {
       failed++;

@@ -174,8 +174,14 @@ export interface ImportJobMessage {
   sourceUrl?: string;
   provider?: GitProvider;
   branch: string;
+  /** Clone depth (1..MAX_CLONE_DEPTH); 0 means full history (depth omitted from the clone). */
   depth: number;
   timestamp: string;
+  /**
+   * User id of the account that triggered the import. Failure notifications are
+   * emailed to this user's address (in addition to the ADMIN_EMAIL copy).
+   */
+  initiatedBy?: string;
 }
 
 // Git provider types
@@ -250,6 +256,26 @@ export function artifactsRepoName(project: ProjectEntry): string {
   return getArtifactsRepoName(project.namespace, project.slug);
 }
 
+/**
+ * The default branch of the project's Artifacts repo.
+ *
+ * `Artifacts.import` mirrors the SOURCE branch name into the target repo — it
+ * does not rename it to `main` (the push gate in routes/git-http.ts relies on
+ * this: a repo imported with a `master`/`trunk` default has no refs/heads/main).
+ * Workspace forks copy the parent's default branch under the same name, so this
+ * is also the branch every fork-based git op must target. Stratum-native repos
+ * (created via initAndPush) always have `main`, which the final fallback covers.
+ *
+ * Single source of truth for the `sourceDefaultBranch || githubDefaultBranch ||
+ * "main"` chain previously inlined at the push gate, sync, and PR paths.
+ */
+export function projectDefaultBranch(project: {
+  sourceDefaultBranch?: string;
+  githubDefaultBranch?: string;
+}): string {
+  return project.sourceDefaultBranch || project.githubDefaultBranch || "main";
+}
+
 export interface WorkspaceEntry {
   name: string;
   remote: string;
@@ -290,6 +316,13 @@ export interface ImportProgress {
   status: ImportStatus;
   sourceUrl: string;
   branch: string;
+  /**
+   * Clone depth this job ran under, when one was recorded. Absent on jobs
+   * created before migration 040 and on callers with no depth to record;
+   * absent means "fall back to DEFAULT_CLONE_DEPTH", which `0` (full history)
+   * explicitly does not.
+   */
+  depth?: number;
   startedAt: string;
   completedAt?: string;
   updatedAt: string; // For stall detection
@@ -400,6 +433,15 @@ export interface Change {
   agentModel?: string;
   /** The authoring agent's prompt hash, snapshotted at change creation. */
   agentPromptHash?: string;
+  /** True when the change's diff modifies a merge-protection config file
+   * (.stratum/policy.yaml / stratum.config.json). Such a change requires a human
+   * approval and cannot be force-merged, so protection can't be silently relaxed. */
+  touchesProtectedConfig?: boolean;
+  /** The human author of the change (the acting user, or an agent's owning
+   * user). Their own review does not count toward `merge.requiredApprovals`.
+   * NULL on legacy rows and on changes with no Stratum author (e.g. inbound
+   * GitHub PRs). */
+  createdByUserId?: string;
   /**
    * The workspace commit sha the evaluation ran against. The merge gate merges
    * *this* sha (not the workspace's live tip, #115), so a re-push between eval and

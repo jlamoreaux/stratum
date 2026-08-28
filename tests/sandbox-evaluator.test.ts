@@ -1,15 +1,22 @@
+import git from "isomorphic-git";
 import { describe, expect, it, vi } from "vitest";
 import {
+  BINARY_DECODE_COMMAND,
+  type RepoFilesReader,
   SandboxEvaluator,
   type SandboxRepoAccess,
+  encodeForSandboxWrite,
   installCommandFor,
 } from "../src/evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../src/evaluation/types";
 import { buildEvaluators } from "../src/services/change-flow";
+import { type NodeFS, readTreeAtCommit } from "../src/storage/git-ops";
+import { MemoryFS } from "../src/storage/memory-fs";
 import type { Env, SandboxBinding, SandboxInstance } from "../src/types";
 import { AppError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
 import { err, ok } from "../src/utils/result";
+import { makeExecutingSandbox } from "./helpers/fake-sandbox";
 
 const mockLogger: Logger = {
   trace: vi.fn(),
@@ -28,15 +35,27 @@ const repo: SandboxRepoAccess = {
 };
 
 /** A realistic workspace tree: sources the diff never touched, manifest, lockfile. */
-const FULL_TREE = new Map<string, string>([
+const FULL_TREE_TEXT: [string, string][] = [
   ["package.json", JSON.stringify({ name: "app", scripts: { test: "vitest run" } })],
   ["package-lock.json", JSON.stringify({ lockfileVersion: 3 })],
   ["src/index.ts", "export { add } from './math';"],
   ["src/math.ts", "export const add = (a: number, b: number) => a + b;"],
   ["tests/math.test.ts", "import { add } from '../src/math';"],
-]);
+];
 
-function makeReadFiles(files: Map<string, string> = FULL_TREE) {
+/** Encodes a path → text map into the raw-bytes contract readRepoFiles returns. */
+function encodeTree(entries: readonly (readonly [string, string])[]): Map<string, Uint8Array> {
+  return new Map(entries.map(([path, content]) => [path, new TextEncoder().encode(content)]));
+}
+
+const FULL_TREE = encodeTree(FULL_TREE_TEXT);
+
+/**
+ * A stand-in for the repo read. Hands back raw bytes because that is the
+ * contract `readRepoFiles` actually has — a test that fed strings here would
+ * pass while the real evaluator corrupted every binary file in the tree.
+ */
+function makeReadFiles(files: Map<string, Uint8Array> = FULL_TREE) {
   return vi.fn().mockResolvedValue(ok(files));
 }
 
@@ -108,7 +127,9 @@ describe("SandboxEvaluator — workspace tree materialization", () => {
     await evaluator.evaluate("diff --git a/src/math.ts b/src/math.ts", makePolicy(), mockLogger);
 
     expect(instance.writeFile).toHaveBeenCalledTimes(FULL_TREE.size);
-    for (const [path, content] of FULL_TREE) {
+    // Every file here is valid UTF-8 text, so it round-trips through the
+    // sandbox write boundary as the original decoded string, not base64.
+    for (const [path, content] of FULL_TREE_TEXT) {
       expect(instance.writeFile).toHaveBeenCalledWith(path, content);
     }
   });
@@ -140,15 +161,180 @@ describe("SandboxEvaluator — workspace tree materialization", () => {
     expect(result.success).toBe(false);
   });
 
-  it("passes ref: undefined through when no commit is pinned", async () => {
-    const { binding } = makeMockSandbox({ exitCode: 0 });
-    const readFiles = makeReadFiles();
-    const unpinned: SandboxRepoAccess = { remote: repo.remote, token: repo.token };
-    const evaluator = new SandboxEvaluator(binding, unpinned, readFiles);
+  it("base64-encodes a binary blob and decodes it in-sandbox before install/test run", async () => {
+    // 00 80 C0 AF FF is not valid UTF-8 (a stray continuation byte, an
+    // overlong encoding, and a byte that's never valid) — a plain TextDecoder
+    // would silently replace it with U+FFFD and the original bytes would be
+    // gone by the time the sandbox saw them.
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    const tree = new Map(FULL_TREE);
+    tree.set("assets/logo.png", binaryBytes);
+    const { binding, instance, runCalls } = makeMockSandbox({ exitCode: 0 });
+    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles(tree));
+
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+
+    expect(result.success).toBe(true);
+    // The sandbox transport only carries strings through writeFile: the binary
+    // file must have gone through as base64, not raw/UTF-8-decoded bytes.
+    const writeCalls = (instance.writeFile as ReturnType<typeof vi.fn>).mock.calls as [
+      string,
+      string,
+    ][];
+    const logoCall = writeCalls.find(([path]) => path === "assets/logo.png");
+    expect(logoCall?.[1]).toBe(btoa(String.fromCharCode(...binaryBytes)));
+    // A manifest + decode script must have been staged, and the decode command
+    // run before the install/test commands.
+    expect(writeCalls.some(([path]) => path === ".stratum-binary-manifest.txt")).toBe(true);
+    expect(writeCalls.some(([path]) => path === ".stratum-binary-decode.cjs")).toBe(true);
+    const commands = runCalls.map((c) => c.command);
+    expect(commands[0]).toBe(BINARY_DECODE_COMMAND);
+    expect(commands.slice(1)).toEqual(["npm ci --no-audit --no-fund", "npm test"]);
+  });
+
+  it("never clobbers tracked files sitting at the decode helper paths (#271)", async () => {
+    // The helpers are staged into the same workspace as the repo's own files
+    // and the decode script deletes both of them when it finishes, so a tree
+    // that genuinely tracks a file at either name would have it overwritten
+    // and then unlinked — the evaluated tree would silently be missing a file
+    // the merge would land. The sandbox here runs the emitted script for real,
+    // so this asserts the workspace as the configured command would find it.
+    const trackedManifest = "release-notes checked into the repo\n";
+    const trackedScript = "module.exports = { theRepoOwnsThisFile: true };\n";
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    const tree = new Map(FULL_TREE);
+    tree.set(".stratum-binary-manifest.txt", new TextEncoder().encode(trackedManifest));
+    tree.set(".stratum-binary-decode.cjs", new TextEncoder().encode(trackedScript));
+    tree.set("assets/logo.png", binaryBytes);
+    const sandbox = makeExecutingSandbox();
+    const binding: SandboxBinding = { create: vi.fn().mockResolvedValue(sandbox.instance) };
+
+    const result = await new SandboxEvaluator(binding, repo, makeReadFiles(tree)).evaluate(
+      "",
+      makePolicy(),
+      mockLogger,
+    );
+
+    expect(result.success).toBe(true);
+    // Both tracked files survive, byte for byte.
+    expect(sandbox.files.get(".stratum-binary-manifest.txt")).toBe(trackedManifest);
+    expect(sandbox.files.get(".stratum-binary-decode.cjs")).toBe(trackedScript);
+    // The binary still decoded — moving the helpers aside must not cost that.
+    expect(Uint8Array.from(sandbox.files.get("assets/logo.png") as Uint8Array)).toEqual(
+      binaryBytes,
+    );
+    // Staged under discriminated names, and cleaned up after themselves.
+    expect(sandbox.commands[0]).toBe("node .stratum-binary-decode-1.cjs");
+    expect(sandbox.files.has(".stratum-binary-manifest-1.txt")).toBe(false);
+    expect(sandbox.files.has(".stratum-binary-decode-1.cjs")).toBe(false);
+  });
+
+  it("does not stage a decode manifest/script when the tree has no binary files", async () => {
+    const { binding, instance, runCalls } = makeMockSandbox({ exitCode: 0 });
+    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles());
 
     await evaluator.evaluate("", makePolicy(), mockLogger);
 
-    expect(readFiles).toHaveBeenCalledWith(repo.remote, repo.token, mockLogger, undefined);
+    const writeCalls = (instance.writeFile as ReturnType<typeof vi.fn>).mock.calls as [
+      string,
+      string,
+    ][];
+    expect(writeCalls.some(([path]) => path === ".stratum-binary-manifest.txt")).toBe(false);
+    expect(runCalls.map((c) => c.command)).not.toContain(BINARY_DECODE_COMMAND);
+  });
+
+  it("fails (err) when the in-sandbox binary decode step exits non-zero", async () => {
+    const binaryBytes = new Uint8Array([0x00, 0x80, 0xc0, 0xaf, 0xff]);
+    const tree = new Map(FULL_TREE);
+    tree.set("assets/logo.png", binaryBytes);
+    const { binding, runCalls } = makeMockSandbox({
+      exitCode: 0,
+      runResults: {
+        [BINARY_DECODE_COMMAND]: { exitCode: 1, stderr: "ENOENT: no such file" },
+      },
+    });
+    const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles(tree));
+
+    const result = await evaluator.evaluate("", makePolicy(), mockLogger);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("Failed to decode");
+      expect(result.error.message).toContain("ENOENT");
+    }
+    // The decode step failing must stop the run before install/test.
+    expect(runCalls.map((c) => c.command)).toEqual([BINARY_DECODE_COMMAND]);
+  });
+
+  it("requires `ref` at the type level — a SandboxRepoAccess cannot be built unpinned (#252)", () => {
+    // This is a compile-time guarantee, not a runtime assertion: `ref` on
+    // SandboxRepoAccess is a required `string`, so the object literal below
+    // is a type error and the whole file fails `tsc` if it ever stops being
+    // one. That makes the fail-closed pinned-commit read structural rather
+    // than resting on every construction site remembering to pass a ref.
+    // @ts-expect-error — ref is required; omitting it must not compile.
+    const unpinned: SandboxRepoAccess = { remote: repo.remote, token: repo.token };
+    expect(unpinned.remote).toBe(repo.remote);
+  });
+
+  it("an unreadable blob under the pinned ref produces an error verdict, never a pass (#252)", async () => {
+    // Wires the evaluator to the REAL readTreeAtCommit — the fail-closed path
+    // `SandboxRepoAccess.ref` being required now guarantees is the only one
+    // reachable — against a tree with one dangling blob oid. The regression
+    // this guards: a partial tree must never be handed to the sandbox as if
+    // it were complete, because that could let a broken/incomplete checkout
+    // score a false pass in a merge gate.
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+    const dir = "/";
+    await git.init({ fs, dir, defaultBranch: "main" });
+    const goodBlob = await git.writeBlob({
+      fs,
+      dir,
+      blob: new TextEncoder().encode("still readable"),
+    });
+    const treeOid = await git.writeTree({
+      fs,
+      dir,
+      tree: [
+        { mode: "100644", path: "good.txt", oid: goodBlob, type: "blob" },
+        // A dangling oid: listed in the tree but the object does not exist —
+        // simulates the unreadable-blob case the fail-closed path must catch.
+        {
+          mode: "100644",
+          path: "missing.txt",
+          oid: "0123456789abcdef0123456789abcdef01234567",
+          type: "blob",
+        },
+      ],
+    });
+    const author = { name: "Test", email: "test@example.com", timestamp: 0, timezoneOffset: 0 };
+    const commitSha = await git.writeCommit({
+      fs,
+      dir,
+      commit: { tree: treeOid, parent: [], author, committer: author, message: "broken tree" },
+    });
+
+    const pinnedRepo: SandboxRepoAccess = {
+      remote: repo.remote,
+      token: repo.token,
+      ref: commitSha,
+    };
+    // Bypasses the network clone: reads straight from the local repo built
+    // above at the pinned commit, exactly as `readRepoFiles` would once
+    // cloned. Exercises the real fail-closed logic, not a mock of it.
+    const pinnedReader: RepoFilesReader = (_remote, _token, logger, ref) =>
+      readTreeAtCommit(fs, dir, ref, logger);
+    const { binding } = makeMockSandbox({ exitCode: 0 });
+    const evaluator = new SandboxEvaluator(binding, pinnedRepo, pinnedReader);
+
+    const result = await evaluator.evaluate("ignored diff", makePolicy(), mockLogger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain("Could not read workspace tree");
+    expect(result.error.message).toContain("missing.txt");
+    // No verdict was fabricated from the partial tree: no sandbox ever ran.
+    expect(binding.create).not.toHaveBeenCalled();
   });
 
   it("fails (err) with a clear reason when the tree cannot be read, without creating a sandbox", async () => {
@@ -194,7 +380,7 @@ describe("SandboxEvaluator — dependency install", () => {
   });
 
   it("skips the install step entirely when there is no package.json", async () => {
-    const tree = new Map([["main.py", "print('hi')"]]);
+    const tree = encodeTree([["main.py", "print('hi')"]]);
     const { binding, runCalls } = makeMockSandbox({ exitCode: 0 });
     const evaluator = new SandboxEvaluator(binding, repo, makeReadFiles(tree));
 
@@ -262,18 +448,18 @@ describe("SandboxEvaluator — dependency install", () => {
 describe("installCommandFor", () => {
   it("maps manifest/lockfile presence to the right command", () => {
     expect(installCommandFor(new Map())).toBeNull();
-    expect(installCommandFor(new Map([["package.json", "{}"]]))).toBe(
+    expect(installCommandFor(encodeTree([["package.json", "{}"]]))).toBe(
       "npm install --no-audit --no-fund",
     );
     expect(
       installCommandFor(
-        new Map([
+        encodeTree([
           ["package.json", "{}"],
           ["package-lock.json", "{}"],
         ]),
       ),
     ).toBe("npm ci --no-audit --no-fund");
-    expect(installCommandFor(new Map([["package-lock.json", "{}"]]))).toBeNull();
+    expect(installCommandFor(encodeTree([["package-lock.json", "{}"]]))).toBeNull();
   });
 
   it("treats npm-shrinkwrap.json as a lockfile", () => {
@@ -282,7 +468,7 @@ describe("installCommandFor", () => {
     // unpinned `npm install`.
     expect(
       installCommandFor(
-        new Map([
+        encodeTree([
           ["package.json", "{}"],
           ["npm-shrinkwrap.json", "{}"],
         ]),
@@ -291,7 +477,7 @@ describe("installCommandFor", () => {
     // Both present is still a frozen install (npm prefers the shrinkwrap).
     expect(
       installCommandFor(
-        new Map([
+        encodeTree([
           ["package.json", "{}"],
           ["npm-shrinkwrap.json", "{}"],
           ["package-lock.json", "{}"],
@@ -299,7 +485,29 @@ describe("installCommandFor", () => {
       ),
     ).toBe("npm ci --no-audit --no-fund");
     // A lockfile alone is still not an npm project.
-    expect(installCommandFor(new Map([["npm-shrinkwrap.json", "{}"]]))).toBeNull();
+    expect(installCommandFor(encodeTree([["npm-shrinkwrap.json", "{}"]]))).toBeNull();
+  });
+});
+
+describe("encodeForSandboxWrite", () => {
+  it("round-trips UTF-8 text byte-for-byte, byte-order mark included", () => {
+    // A UTF-8 BOM is three real bytes of the blob. `TextDecoder`'s default
+    // `ignoreBOM: false` swallows them, so a Windows-authored source file
+    // would reach the sandbox three bytes shorter than it is in the repo --
+    // silently, since the decode still succeeds and the text path is taken.
+    const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("hi\n")]);
+    const encoded = encodeForSandboxWrite(withBom);
+    expect(encoded.binary).toBe(false);
+    expect(new TextEncoder().encode(encoded.content)).toEqual(withBom);
+  });
+
+  it("takes the base64 path for bytes that are not valid UTF-8", () => {
+    // A lone 0xff can never appear in well-formed UTF-8, so the strict
+    // decoder must reject it rather than substitute U+FFFD.
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]);
+    const encoded = encodeForSandboxWrite(bytes);
+    expect(encoded.binary).toBe(true);
+    expect(Uint8Array.from(atob(encoded.content), (c) => c.charCodeAt(0))).toEqual(bytes);
   });
 });
 
@@ -331,7 +539,7 @@ describe("SandboxEvaluator — exit code behaviour", () => {
 });
 
 describe("SandboxEvaluator — test output parsing", () => {
-  const treeWithoutManifest = new Map([["src/app.ts", "export {};"]]);
+  const treeWithoutManifest = encodeTree([["src/app.ts", "export {};"]]);
 
   function evaluatorWithTestOutput(exitCode: number, stdout: string) {
     const { binding } = makeMockSandbox({ exitCode, stdout });

@@ -2,11 +2,20 @@ import git from "isomorphic-git";
 import { type NodeFS, cloneRepo, extractTreeObjects, freshRepoToken } from "../storage/git-ops";
 import { packObjects } from "../storage/object-loader";
 import type { Env, ProjectEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
 
 export const DEFAULT_MAX_BACKUP_BYTES = 128 * 1024 * 1024;
+
+/**
+ * How many dropped tag names the tag-only-repo warning will name inline.
+ * The count is always reported in full; only the sample is bounded, so a
+ * repo with a very large tag set cannot produce a log entry too big to be
+ * recorded at all.
+ */
+const MAX_LOGGED_TAG_NAMES = 50;
 
 /** A tag ref captured in a snapshot: refs/tags/<name> → oid (the annotated tag
  * object for annotated tags, the target itself for lightweight ones). */
@@ -81,7 +90,38 @@ export async function walkRepoObjects(
     log = await git.log({ fs, dir, depth: -1 });
   } catch (error) {
     if (error instanceof Error && error.name === "NotFoundError") {
-      logger.debug("Repo has no commits; skipping as empty", { dir });
+      // No HEAD history, but the repo can still have tag refs pointing at
+      // objects reached no other way (unborn HEAD, tag-only repo — #251).
+      // The full fix (a backup-format migration: optional tipSha, restore
+      // without refs/heads/main) is a product decision tracked separately;
+      // until then this loses those objects, so make the loss explicit and
+      // loud instead of a silent "empty" debug line.
+      let tagNames: string[] = [];
+      try {
+        tagNames = await git.listTags({ fs, dir });
+      } catch {
+        // Unreadable ref store on an already-unborn HEAD: nothing more to
+        // report than "no commits", so fall through to the debug case below.
+      }
+      if (tagNames.length > 0) {
+        // Name the tags, but cap the list: this warning exists to make the
+        // loss visible, and a repo with thousands of tags would push the line
+        // past the log pipeline's per-entry limit and lose the whole thing --
+        // the failure mode the warning is here to prevent. `tagCount` is the
+        // number that always survives; `tags` is the sample.
+        const sorted = [...tagNames].sort();
+        logger.warn(
+          "Repo has no commits (unborn HEAD) but has tag refs; skipping as empty and DROPPING these tags — tag-only backup is not yet supported (#251)",
+          {
+            dir,
+            tagCount: sorted.length,
+            tags: sorted.slice(0, MAX_LOGGED_TAG_NAMES),
+            ...(sorted.length > MAX_LOGGED_TAG_NAMES ? { tagsTruncated: true } : {}),
+          },
+        );
+      } else {
+        logger.debug("Repo has no commits; skipping as empty", { dir });
+      }
       return ok({ empty: true });
     }
     logger.error("Failed to read repo log", error instanceof Error ? error : undefined, { dir });
@@ -379,6 +419,7 @@ export async function snapshotRepo(
   // Worker's memory budget so a normal repo never approaches it.
   const clone = await cloneRepo(project.remote, token.data, logger, {
     fullHistory: true,
+    ref: projectDefaultBranch(project),
     includeTags: true,
   });
   if (!clone.success) return err(clone.error);

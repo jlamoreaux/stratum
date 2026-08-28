@@ -5,6 +5,7 @@ import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { PhaseTimer } from "../utils/phase-timer";
 import { type Result, err, fromPromise, ok } from "../utils/result";
+import { isTraversalPath } from "../utils/validation";
 import { commitObject } from "./git-objects";
 import { MODE_SYMLINK, MemoryFS } from "./memory-fs";
 import { packObjects, placeLooseObject, unpackObjects } from "./object-loader";
@@ -130,6 +131,13 @@ export interface MergeWorkspaceOptions {
    * workspace history, else the merge fails closed.
    */
   workspaceSha?: string;
+  /**
+   * Default branch of the project repo AND its workspace fork (Artifacts forks
+   * copy the parent's default branch under the same name). Defaults to "main";
+   * pass projectDefaultBranch(project) for imported repos whose default is
+   * master/trunk/….
+   */
+  branch?: string;
 }
 
 /**
@@ -246,15 +254,15 @@ export async function freshRepoToken(
 }
 
 /**
- * Publishes the local `main` branch to a remote repository.
+ * Publishes the local default branch to a remote repository.
  *
- * `force` is opt-in because it overwrites the remote's `main` outright — the
- * project's canonical branch — so defaulting it on would discard any commits
- * pushed by someone else since this clone was taken. Backup restore is the
- * caller that does pass it, to publish a reconstructed repo over an existing
- * one; `pushTags` mirrors the same opt-in for the same reason.
+ * `force` is opt-in because it overwrites the remote's default branch outright
+ * — the project's canonical branch — so defaulting it on would discard any
+ * commits pushed by someone else since this clone was taken. Backup restore is
+ * the caller that does pass it, to publish a reconstructed repo over an
+ * existing one; `pushTags` mirrors the same opt-in for the same reason.
  *
- * @param opts - Controls whether an existing remote `main` branch may be overwritten.
+ * @param opts - Controls whether the existing remote branch may be overwritten, and which branch to push (default `main`, since imported repos keep their source branch name).
  * @returns No value on success, or an application error if the push fails.
  */
 export async function pushMain(
@@ -263,16 +271,17 @@ export async function pushMain(
   fs: NodeFS,
   dir: string,
   logger: Logger,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; branch?: string },
 ): Promise<Result<void, AppError>> {
+  const branch = opts?.branch ?? "main";
   const res = await fromPromise(
     git.push({
       fs,
       dir,
       http,
       url: remote,
-      ref: "main",
-      remoteRef: "main",
+      ref: branch,
+      remoteRef: branch,
       onAuth: makeAuth(token),
       force: opts?.force ?? false,
     }),
@@ -345,8 +354,13 @@ export async function pushTags(
 }
 
 /**
- * Pushes the local `main` branch to a branch on an external remote — e.g.
- * GitHub's `stratum/<changeId>` ref before a PR is opened (#189).
+ * Pushes a local branch to a branch on an external remote — e.g. GitHub's
+ * `stratum/<changeId>` ref before a PR is opened (#189).
+ *
+ * `localRef` is the branch inside `dir` to push and defaults to `main`. It must
+ * match the ref the caller cloned: a `singleBranch` clone of a `develop`- or
+ * `master`-default repo contains only that branch, and asking git.push for a
+ * `main` that is not there fails locally, before any network call.
  *
  * Auth is HTTP basic with the token as the password; GitHub accepts any
  * username alongside a token. `force` defaults to false because `remoteRef` is
@@ -354,13 +368,13 @@ export async function pushTags(
  * force-push there would destroy someone else's work. Pass `force: true`
  * explicitly, and only when overwriting a ref Stratum owns (re-promotion).
  *
- * @param opts - Remote URL, target branch, authentication token, and optional force-push setting.
+ * @param opts - Remote URL, target branch, authentication token, the local branch to push, and optional force-push setting.
  * @returns A successful result when the push completes, or an application error when it fails.
  */
 export async function pushBranchToRemote(
   fs: NodeFS,
   dir: string,
-  opts: { url: string; remoteRef: string; token: string; force?: boolean },
+  opts: { url: string; remoteRef: string; token: string; force?: boolean; localRef?: string },
   logger: Logger,
 ): Promise<Result<void, AppError>> {
   const res = await fromPromise(
@@ -369,7 +383,7 @@ export async function pushBranchToRemote(
       dir,
       http,
       url: opts.url,
-      ref: "main",
+      ref: opts.localRef ?? "main",
       remoteRef: opts.remoteRef,
       onAuth: () => ({ username: "x-access-token", password: opts.token }),
       force: opts.force ?? false,
@@ -380,10 +394,44 @@ export async function pushBranchToRemote(
     logger.error("Failed to push branch to remote", res.error, {
       url: opts.url,
       remoteRef: opts.remoteRef,
+      localRef: opts.localRef ?? "main",
     });
     return err(new ExternalServiceError("Git", `Failed to push branch: ${cause}`, res.error));
   }
   return ok(undefined);
+}
+
+/**
+ * Resolves the tip commit of `ref` in an already-cloned repository.
+ *
+ * Distinct from {@link getCommitLog}, which clones fresh: this reads the `fs`/`dir`
+ * of a clone the caller already has open, so it costs no extra network round trip.
+ * Promotion (#243) uses this to confirm the workspace clone it is about to
+ * force-push to GitHub is still the revision recorded as `change.evaluatedSha` —
+ * the clone is a live read of the workspace, which can have advanced since
+ * evaluation ran.
+ *
+ * `ref` is required and deliberately not defaulted to `"main"`. Callers hand
+ * this a clone they made themselves, and those clones are routinely
+ * `singleBranch` on a project-configured default branch — a `main` default
+ * would resolve a ref that does not exist in such a clone and fail a valid
+ * promotion, which is exactly the bug a silent default hid here before. The
+ * caller already knows which ref it cloned; making it say so keeps the two
+ * from drifting apart again.
+ *
+ * @param ref - The ref to resolve, which must exist in this clone — normally
+ * the same ref the caller passed to {@link cloneRepo}.
+ */
+export async function resolveLocalTip(
+  fs: NodeFS,
+  dir: string,
+  ref: string,
+): Promise<Result<string, AppError>> {
+  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref }));
+  if (!tipResult.success) {
+    return err(new ExternalServiceError("Git", "Failed to resolve local tip", tipResult.error));
+  }
+  return ok(tipResult.data);
 }
 
 /**
@@ -463,6 +511,25 @@ export async function initAndPush(
 }
 
 /**
+ * Hard cap on how many tags a single `includeTags` clone will fetch. Each tag
+ * costs its own fetch round trip (see below), so an unbounded remote tag count
+ * would turn one clone into an unbounded number of requests. Truncation is
+ * never silent: it is reported on the clone result (`tagsTruncated`,
+ * `totalTagCount`) so `listRepoTags` and its callers can surface it (#241).
+ *
+ * Sized against the Workers subrequest budget, not picked round: one
+ * isomorphic-git fetch is TWO subrequests (a GET of
+ * `/info/refs?service=git-upload-pack`, then a POST to `/git-upload-pack`), so
+ * the loop below costs `2 * MAX_TAGS` on top of the clone's own pair and the
+ * `getRemoteInfo` handshake. At 500 that is ~1003 — on the nose of the
+ * ~1000-subrequest cap this codebase budgets against elsewhere (see the note in
+ * `src/storage/state.ts`), which would kill the request outright instead of
+ * degrading. 200 keeps the tag walk near 400 and leaves the rest of the request
+ * room to breathe; repos above it degrade visibly through `truncated`.
+ */
+export const MAX_TAGS = 200;
+
+/**
  * Clones the `main` branch of a repository into an in-memory filesystem.
  *
  * The whole tree lands in worker memory, which is what makes the depth choice
@@ -473,16 +540,59 @@ export async function initAndPush(
  * @param token - The authentication token for the repository
  * @param opts - Clone options
  * @param opts.fullHistory - Whether to clone the complete reachable history; otherwise, clone the most recent 50 commits
- * @param opts.includeTags - Whether to follow the clone with a fetch of `refs/tags/*`; a `singleBranch` clone never brings tags
- * @returns The cloned filesystem and its working directory, or an application error
+ * @param opts.ref - The branch to clone; defaults to `main`, but imported repos keep their source branch name (master/trunk/…)
+ * @param opts.includeTags - Whether to follow the clone with a per-tag fetch of `refs/tags/*`; a `singleBranch` clone never brings tags. Capped at {@link MAX_TAGS}; see the result's `tagsTruncated`/`totalTagCount`.
+ * @returns The cloned filesystem and its working directory (plus tag-fetch truncation info when `includeTags` was set), or an application error
  */
+/**
+ * Commits fetched for a shallow clone when the caller does not ask for more.
+ *
+ * Shared with {@link SYNC_FETCH_DEPTH} rather than written twice: the sync path
+ * clones the project and fetches the source, and its deepening loop assumes
+ * both started at the same window. Two independently-written 50s would agree
+ * today and drift the first time either was tuned, with the only symptom a
+ * spurious SYNC_DIVERGED.
+ */
+const DEFAULT_SHALLOW_DEPTH = 50;
+
+/** The shape `getRemoteInfo` nests advertised refs into: each `/`-separated
+ * path segment of the ref becomes a nested key, with the oid (or symref
+ * target) only at the leaf. See {@link flattenRefTree}. */
+type RemoteRefTree = { [segment: string]: string | RemoteRefTree };
+
+/**
+ * `getRemoteInfo` builds an object TREE out of the flat ref list it gets from
+ * the remote, splitting every ref on "/" and nesting a level per segment (see
+ * isomorphic-git's `getRemoteInfo`) — so `refs/tags/release/1.0` lands at
+ * `refs.tags.release["1.0"]`, not `refs.tags["release/1.0"]`. A plain
+ * `Object.keys(refs.tags)` therefore only recovers the first path segment of
+ * any hierarchical tag name (yielding a nested object where an oid was
+ * expected). This walks the tree back down, rejoining segments with "/", to
+ * recover the true `name -> oid` pairs regardless of nesting depth.
+ */
+function flattenRefTree(node: RemoteRefTree | undefined, prefix = ""): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!node) return out;
+  for (const [segment, value] of Object.entries(node)) {
+    const name = prefix ? `${prefix}/${segment}` : segment;
+    if (typeof value === "string") {
+      out[name] = value;
+    } else {
+      Object.assign(out, flattenRefTree(value, name));
+    }
+  }
+  return out;
+}
+
 export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  opts: { fullHistory?: boolean; includeTags?: boolean } = {},
+  opts: { fullHistory?: boolean; ref?: string; includeTags?: boolean; depth?: number } = {},
   httpClient: HttpClient = http,
-): Promise<Result<{ fs: NodeFS; dir: string }, AppError>> {
+): Promise<
+  Result<{ fs: NodeFS; dir: string; tagsTruncated?: boolean; totalTagCount?: number }, AppError>
+> {
   logger.debug("Cloning repository", { remote, fullHistory: opts.fullHistory ?? false });
 
   const fs = new MemoryFS().toNodeFS();
@@ -492,13 +602,23 @@ export async function cloneRepo(
       http: httpClient,
       dir: DIR,
       url: remote,
-      ref: "main",
+      // The repo's default branch: "main" for Stratum-native repos, but imported
+      // repos keep their source branch name (master/trunk/…) — see
+      // projectDefaultBranch in ../types.
+      ref: opts.ref ?? "main",
       singleBranch: true,
       // Merges only need recent history (fast shallow clone). Backup needs the FULL
       // reachable history so the resulting pack is reachability-closed and restores
       // to the true tip — a 50-commit shallow clone silently drops older ancestors,
       // producing a snapshot that can't be restored past commit 50.
-      ...(opts.fullHistory ? {} : { depth: 50 }),
+      //
+      // `depth` is overridable because a caller that deepens afterwards has to
+      // start both sides at the SAME window. `syncFromGitHub` fetches the source
+      // at its own `depth`; if this clone stayed pinned at 50 while that was
+      // larger, the project side would sit shallower than the retry loop's
+      // starting window believes, and a merge base the source already has could
+      // be reported as SYNC_DIVERGED without the project ever being deepened.
+      ...(opts.fullHistory ? {} : { depth: opts.depth ?? DEFAULT_SHALLOW_DEPTH }),
       onAuth: makeAuth(token),
     }),
   );
@@ -510,30 +630,90 @@ export async function cloneRepo(
 
   // isomorphic-git's singleBranch clone requests ONLY the branch tip — tag refs
   // are neither advertised locally nor are their objects fetched. Callers that
-  // need tags (tags listing, backup) opt in to a follow-up fetch of every remote
-  // ref with `tags: true`, which writes refs/tags/* and pulls the tag objects
-  // plus their targets (depth-limited unless fullHistory).
+  // need tags (tags listing, backup) opt in to a follow-up tags-only fetch:
+  // `getRemoteInfo` enumerates `refs/tags/*` cheaply (a ref/oid handshake, no
+  // object data), then each tag is fetched INDIVIDUALLY with `singleBranch:
+  // true` — isomorphic-git's singleBranch fetch requests only the one resolved
+  // oid (`wants = [oid]`), so this pulls each tag's own object graph and
+  // nothing else. A combined `singleBranch: false, tags: true` fetch (the old
+  // approach) instead requests every branch tip the remote advertises, which
+  // for a project with large branches unrelated to any tag pulls substantially
+  // more than the feature needs (#241). depth/unresolvable degradation is
+  // unchanged: each per-tag fetch keeps the same shallow window, and a tag
+  // whose target lies outside it still degrades via `collectRepoTags` rather
+  // than failing the clone.
+  let tagsTruncated = false;
+  let totalTagCount = 0;
   if (opts.includeTags) {
-    const tagFetch = await fromPromise(
-      git.fetch({
-        fs,
-        http: httpClient,
-        dir: DIR,
-        url: remote,
-        singleBranch: false,
-        tags: true,
-        ...(opts.fullHistory ? {} : { depth: 50 }),
-        onAuth: makeAuth(token),
-      }),
+    const remoteInfoResult = await fromPromise(
+      git.getRemoteInfo({ http: httpClient, url: remote, onAuth: makeAuth(token) }),
     );
-    if (!tagFetch.success) {
-      logger.error("Failed to fetch tags after clone", tagFetch.error, { remote });
-      return err(new ExternalServiceError("Git", "Failed to fetch tags", tagFetch.error));
+    if (!remoteInfoResult.success) {
+      logger.error("Failed to enumerate remote tags", remoteInfoResult.error, { remote });
+      return err(
+        new ExternalServiceError("Git", "Failed to enumerate remote tags", remoteInfoResult.error),
+      );
+    }
+
+    // getRemoteInfo nests advertised refs into an object tree keyed by path
+    // segment (`refs.tags.<name>`, or several levels deep for a hierarchical
+    // tag name like `release/1.0` — see `flattenRefTree`); it also advertises
+    // each annotated tag's peeled commit under a `<name>^{}` key alongside the
+    // tag object itself — that suffix marks a peeled target, not a real tag
+    // name, so it's filtered out (we peel annotated tags ourselves in
+    // `collectRepoTags`).
+    const remoteTagsTree = (remoteInfoResult.data.refs as { tags?: RemoteRefTree } | undefined)
+      ?.tags;
+    const tagNames = Object.keys(flattenRefTree(remoteTagsTree)).filter(
+      (name) => !name.endsWith("^{}"),
+    );
+
+    totalTagCount = tagNames.length;
+    tagsTruncated = totalTagCount > MAX_TAGS;
+    // Sort ascending for stable, readable fetch order; when truncating, keep
+    // the highest-sorting names (tail of the ascending sort) rather than the
+    // lowest, since a release listing wants v9.x over v1.x when only one can
+    // fit. This is lexicographic, not chronological, ordering — "v10" sorts
+    // below "v9" — so it's a best-effort signal from names alone, not a
+    // guarantee of "newest".
+    const sortedTagNames = tagNames.sort();
+    const tagNamesToFetch = tagsTruncated ? sortedTagNames.slice(-MAX_TAGS) : sortedTagNames;
+    if (tagsTruncated) {
+      logger.warn("Remote tag count exceeds MAX_TAGS; truncating tags fetch", {
+        remote,
+        totalTagCount,
+        fetchedTagCount: tagNamesToFetch.length,
+        maxTags: MAX_TAGS,
+      });
+    }
+
+    for (const name of tagNamesToFetch) {
+      const tagFetch = await fromPromise(
+        git.fetch({
+          fs,
+          http: httpClient,
+          dir: DIR,
+          url: remote,
+          singleBranch: true,
+          remoteRef: `refs/tags/${name}`,
+          tags: true,
+          ...(opts.fullHistory ? {} : { depth: 50 }),
+          onAuth: makeAuth(token),
+        }),
+      );
+      if (!tagFetch.success) {
+        logger.error("Failed to fetch tag", tagFetch.error, { remote, tag: name });
+        return err(new ExternalServiceError("Git", `Failed to fetch tag: ${name}`, tagFetch.error));
+      }
     }
   }
 
   logger.info("Successfully cloned repository", { remote });
-  return ok({ fs: fs as unknown as NodeFS, dir: DIR });
+  return ok({
+    fs: fs as unknown as NodeFS,
+    dir: DIR,
+    ...(opts.includeTags ? { tagsTruncated, totalTagCount } : {}),
+  });
 }
 
 export async function commitAndPush(
@@ -545,11 +725,32 @@ export async function commitAndPush(
   message: string,
   logger: Logger,
   author: Author = SYSTEM_AUTHOR,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.debug("Committing and pushing changes", {
     remote,
     changeCount: Object.keys(changes).length,
   });
+
+  // S7 (#130): the change map can come straight from a request body, and each
+  // key is joined onto the clone dir below. Mirror resolveConflict's guards at
+  // this choke point so EVERY caller gets them: no `../`/absolute traversal
+  // out of the repo tree, and a per-file size cap (the MemoryFS lives in a
+  // ~128MB isolate).
+  for (const [path, content] of Object.entries(changes)) {
+    if (isTraversalPath(path)) {
+      return err(
+        new AppError(
+          `Invalid file path: ${path} — path traversal is not allowed`,
+          "INVALID_INPUT",
+          422,
+        ),
+      );
+    }
+    if (new TextEncoder().encode(content).length > MAX_FILE_BYTES) {
+      return err(new AppError(`File ${path} exceeds maximum size of 10 MB`, "INVALID_INPUT", 422));
+    }
+  }
 
   const base = dir.endsWith("/") ? dir : `${dir}/`;
   for (const [path, content] of Object.entries(changes)) {
@@ -575,7 +776,7 @@ export async function commitAndPush(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
   );
   if (!pushResult.success) {
     logger.error("Failed to push to remote", pushResult.error, { remote });
@@ -584,6 +785,30 @@ export async function commitAndPush(
 
   logger.info("Successfully committed and pushed changes", { remote, sha: commitResult.data });
   return ok(commitResult.data);
+}
+
+/**
+ * Resolve the tip commit of a ref that was just fetched: prefer `FETCH_HEAD`
+ * (set by the fetch that just ran), falling back to the fetched remote's
+ * tracking ref for backends that don't populate `FETCH_HEAD`.
+ */
+async function resolveFetchedTip(
+  fs: NodeFS,
+  dir: string,
+  remoteTrackingRef: string,
+  logger: Logger,
+  errorMessage: string,
+  logContext: Record<string, unknown>,
+): Promise<Result<string, AppError>> {
+  const fetchHeadResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
+  if (fetchHeadResult.success) return ok(fetchHeadResult.data);
+
+  const remoteRefResult = await fromPromise(git.resolveRef({ fs, dir, ref: remoteTrackingRef }));
+  if (!remoteRefResult.success) {
+    logger.error(errorMessage, remoteRefResult.error, logContext);
+    return err(new ExternalServiceError("Git", errorMessage, remoteRefResult.error));
+  }
+  return ok(remoteRefResult.data);
 }
 
 /**
@@ -609,12 +834,13 @@ export async function mergeWorkspaceIntoProject(
   });
 
   const author = options.author ?? SYSTEM_AUTHOR;
+  const branch = options.branch ?? "main";
   const timer = options.timer;
   const measure = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     timer ? timer.measure(name, fn) : fn();
 
   const cloneResult = await measure("projectCloneMs", () =>
-    cloneRepo(projectRemote, projectToken, logger),
+    cloneRepo(projectRemote, projectToken, logger, { ref: branch }),
   );
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
@@ -639,7 +865,7 @@ export async function mergeWorkspaceIntoProject(
         http,
         dir,
         remote: "workspace",
-        ref: "main",
+        ref: branch,
         singleBranch: true,
         onAuth: makeAuth(workspaceToken),
       }),
@@ -671,27 +897,16 @@ export async function mergeWorkspaceIntoProject(
     }
     workspaceSha = options.workspaceSha;
   } else {
-    const resolveFetchResult = await fromPromise(git.resolveRef({ fs, dir, ref: "FETCH_HEAD" }));
-    if (resolveFetchResult.success) {
-      workspaceSha = resolveFetchResult.data;
-    } else {
-      const resolveRemoteResult = await fromPromise(
-        git.resolveRef({ fs, dir, ref: "refs/remotes/workspace/main" }),
-      );
-      if (!resolveRemoteResult.success) {
-        logger.error("Failed to resolve workspace ref", resolveRemoteResult.error, {
-          workspaceRemote,
-        });
-        return err(
-          new ExternalServiceError(
-            "Git",
-            "Failed to resolve workspace ref",
-            resolveRemoteResult.error,
-          ),
-        );
-      }
-      workspaceSha = resolveRemoteResult.data;
-    }
+    const tipResult = await resolveFetchedTip(
+      fs,
+      dir,
+      `refs/remotes/workspace/${branch}`,
+      logger,
+      "Failed to resolve workspace ref",
+      { workspaceRemote },
+    );
+    if (!tipResult.success) return err(tipResult.error);
+    workspaceSha = tipResult.data;
   }
 
   // SEC-2: content is content-addressed on the staged paths; the cold path merges
@@ -714,7 +929,7 @@ export async function mergeWorkspaceIntoProject(
   }
 
   if (options.strategy === "squash") {
-    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author, logger);
+    return squashMerge(fs, dir, workspaceSha, projectRemote, projectToken, author, logger, branch);
   }
 
   const mergeResult = await measure("mergeMs", () =>
@@ -722,7 +937,7 @@ export async function mergeWorkspaceIntoProject(
       git.merge({
         fs,
         dir,
-        ours: "main",
+        ours: branch,
         theirs: workspaceSha,
         author,
         message: "Merge workspace into project",
@@ -777,7 +992,7 @@ export async function mergeWorkspaceIntoProject(
         dir,
         http,
         url: projectRemote,
-        ref: "main",
+        ref: branch,
         onAuth: makeAuth(projectToken),
       }),
     ),
@@ -806,13 +1021,18 @@ export interface FastForwardResult {
   commit?: string;
 }
 
+/** Local ref used to push a pinned (non-tip) workspace commit to the project. */
+const PINNED_MERGE_REF = "refs/heads/stratum-pinned-merge";
+
 /**
- * Attempt a fast-forward of the project's main to the workspace tip, skipping the
- * project clone and the in-memory 3-way merge that {@link mergeWorkspaceIntoProject}
- * performs. Correctness does not depend on a cached head: the non-force push is
- * accepted by Artifacts only when the project ref is still `expectedParent` (a
- * true fast-forward). Any race or non-descendant tip returns `fastForwarded:
- * false` so the caller falls back to the proven cold merge.
+ * Attempt a fast-forward of the project's main to the pinned workspace commit
+ * (the evaluated sha, #124) — or the workspace tip for legacy unpinned changes —
+ * skipping the project clone and the in-memory 3-way merge that
+ * {@link mergeWorkspaceIntoProject} performs. Correctness does not depend on a
+ * cached head: the non-force push is accepted by Artifacts only when the project
+ * ref is still `expectedParent` (a true fast-forward). Any race or non-descendant
+ * target returns `fastForwarded: false` so the caller falls back to the proven
+ * cold merge.
  *
  * Note: this still fetches the workspace fork (its objects live in a separate
  * Artifacts repo); what it removes is the project clone (`depth:50`) + `git.merge`.
@@ -825,41 +1045,66 @@ export async function fastForwardMerge(
   expectedParent: string,
   logger: Logger,
   timer?: PhaseTimer,
-  /** SEC-2: if set, refuse to fast-forward unless the workspace tip equals this
-   * (the evaluated sha), so a re-committed workspace can't be FF-merged
-   * unevaluated. On mismatch the caller cold-merges, which rejects it. */
-  expectedWorkspaceSha?: string,
+  /** #124: the evaluated workspace commit (`change.workspace_head_sha`). When
+   * set, the fast-forward TARGETS this sha: if the live tip moved past it
+   * (re-push between evaluation and merge), the PINNED sha is pushed — not the
+   * unevaluated tip. If the pinned sha is no longer present in the fetched
+   * workspace history (force-push rewound it), the merge fails closed with
+   * `PINNED_SHA_UNREACHABLE`. Omit for legacy live-tip behavior (changes that
+   * predate migration 024). */
+  pinnedWorkspaceSha?: string,
+  /** Default branch shared by the project repo and its workspace fork. */
+  branch = "main",
 ): Promise<Result<FastForwardResult, AppError>> {
   const measure = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     timer ? timer.measure(name, fn) : fn();
 
   const cloneResult = await measure("workspaceFetchMs", () =>
-    cloneRepo(workspaceRemote, workspaceToken, logger),
+    cloneRepo(workspaceRemote, workspaceToken, logger, { ref: branch }),
   );
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
-  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+  const tipResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
   if (!tipResult.success) {
     return err(new ExternalServiceError("Git", "Failed to resolve workspace tip", tipResult.error));
   }
   const workspaceTip = tipResult.data;
 
-  // SEC-2: don't fast-forward a workspace that moved since evaluation. Fall back
-  // to cold merge (pinned) which returns STALE_WORKSPACE.
-  if (expectedWorkspaceSha !== undefined && workspaceTip !== expectedWorkspaceSha) {
-    logger.warn("Workspace tip changed since evaluation; refusing fast-forward", {
+  // The commit this merge will land. Defaults to the live tip (legacy changes
+  // with no pinned sha); a pinned change always lands its EVALUATED commit.
+  let target = workspaceTip;
+  if (pinnedWorkspaceSha !== undefined && pinnedWorkspaceSha !== workspaceTip) {
+    // Re-push between evaluation and merge. The merge gate is only sound if the
+    // commit that lands is the one that was evaluated (#123/#124), so merge the
+    // pinned sha — after proving it still exists in the fetched history.
+    const pinnedResult = await fromPromise(git.readCommit({ fs, dir, oid: pinnedWorkspaceSha }));
+    if (!pinnedResult.success) {
+      logger.error("Pinned workspace sha not reachable in workspace; failing closed", undefined, {
+        workspaceRemote,
+        pinnedWorkspaceSha,
+        workspaceTip,
+      });
+      return err(
+        new AppError(
+          "Evaluated workspace commit is no longer present in the workspace history; re-evaluate the change before merging",
+          "PINNED_SHA_UNREACHABLE",
+          409,
+        ),
+      );
+    }
+    logger.warn("Workspace tip moved since evaluation; fast-forwarding to the pinned sha", {
       workspaceRemote,
-      expected: expectedWorkspaceSha,
-      actual: workspaceTip,
+      pinned: pinnedWorkspaceSha,
+      tip: workspaceTip,
     });
-    return ok({ fastForwarded: false });
+    target = pinnedWorkspaceSha;
   }
 
-  // A fast-forward is only possible if the workspace tip descends from the
+  // A fast-forward is only possible if the merge target descends from the
   // project's current head. If not (or history is too shallow to tell), cold-merge.
   const descResult = await fromPromise(
-    git.isDescendent({ fs, dir, oid: workspaceTip, ancestor: expectedParent, depth: -1 }),
+    git.isDescendent({ fs, dir, oid: target, ancestor: expectedParent, depth: -1 }),
   );
   if (!descResult.success) {
     // Most commonly: expectedParent is older than the shallow workspace clone, so
@@ -867,13 +1112,29 @@ export async function fastForwardMerge(
     // never fast-forwards and would otherwise look like the FF path "works".
     logger.warn("Could not determine workspace descent; falling back to cold merge", {
       workspaceRemote,
-      workspaceTip,
+      target,
       expectedParent,
     });
     return ok({ fastForwarded: false });
   }
   if (descResult.data !== true) {
     return ok({ fastForwarded: false });
+  }
+
+  // Push the target. The common case (target === tip) pushes the clone's `main`
+  // exactly as before; a pinned non-tip target is pushed via a local ref written
+  // at the pinned commit — O(1) extra work, no additional network round trips.
+  let pushRef = branch;
+  if (target !== workspaceTip) {
+    const writeRefResult = await fromPromise(
+      git.writeRef({ fs, dir, ref: PINNED_MERGE_REF, value: target, force: true }),
+    );
+    if (!writeRefResult.success) {
+      return err(
+        new ExternalServiceError("Git", "Failed to write pinned merge ref", writeRefResult.error),
+      );
+    }
+    pushRef = PINNED_MERGE_REF;
   }
 
   const pushResult = await measure("pushMs", () =>
@@ -883,8 +1144,8 @@ export async function fastForwardMerge(
         dir,
         http,
         url: projectRemote,
-        ref: "main",
-        remoteRef: "main",
+        ref: pushRef,
+        remoteRef: branch,
         onAuth: makeAuth(projectToken),
       }),
     ),
@@ -894,8 +1155,11 @@ export async function fastForwardMerge(
     return ok({ fastForwarded: false });
   }
 
-  logger.info("Fast-forwarded project to workspace tip", { projectRemote, sha: workspaceTip });
-  return ok({ fastForwarded: true, commit: workspaceTip });
+  logger.info("Fast-forwarded project to evaluated workspace commit", {
+    projectRemote,
+    sha: target,
+  });
+  return ok({ fastForwarded: true, commit: target });
 }
 
 export interface BatchWorkspace {
@@ -1158,8 +1422,10 @@ const TREE_OID_HEX_LEN = 40;
 
 /**
  * Stage a workspace's tip TREE to R2 (ADR 004 Task 3): one value =
- * `[40-byte tipTreeOid][packed tree objects]`. Recomputed on every commit so the
- * merge always sees the LIVE tip (no stale snapshot) without fetching the fork.
+ * `[40-byte tipTreeOid][packed tree objects]`. Recomputed on every commit. The
+ * caller stores it under both the latest-tip key (overwritten per commit) and a
+ * sha-keyed copy (`<key>/sha/<commitSha>`, #124) so the merge can consume the
+ * tree of the EVALUATED commit even if the workspace was re-pushed since.
  */
 export async function stageWorkspaceTree(
   bucket: R2Bucket,
@@ -1215,6 +1481,18 @@ export function parseStagedTree(value: Uint8Array): StagedTree {
   return { treeOid, objects };
 }
 
+/** R2 key of the latest-tip staged tree for a workspace (overwritten per commit). */
+export function stagedTreeKey(projectId: string, workspace: string): string {
+  return `repos/${projectId}/ws/${workspace}`;
+}
+
+/** #124: sha-keyed staged-tree copy — immutable per workspace commit, so the
+ * merge can read the EVALUATED commit's tree after a re-push overwrote the
+ * latest-tip key. */
+export function stagedTreeShaKey(projectId: string, workspace: string, sha: string): string {
+  return `${stagedTreeKey(projectId, workspace)}/sha/${sha}`;
+}
+
 /** Load a workspace's staged tip tree from R2 (see stageWorkspaceTree). */
 export async function loadStagedTree(bucket: R2Bucket, key: string): Promise<StagedTree | null> {
   const obj = await bucket.get(key);
@@ -1226,13 +1504,23 @@ export interface StagedTreeItem {
   changeId: string;
   baseSha: string;
   staged: StagedTree;
+  /** #124: tree oid the change was evaluated against. When set, the synthetic
+   * commit is only built and merged if the staged tree matches — validating at
+   * the merge layer that what lands is exactly the evaluated content. */
+  expectedTreeOid?: string;
 }
 
 export interface StagedItemResult {
   changeId: string;
   merged: boolean;
   commit?: string;
+  /** Why the item did not merge (validation failure vs plain conflict). */
+  reason?: string;
 }
+
+/** Reason reported when a staged tree fails the evaluated-tree validation. */
+export const STALE_STAGED_TREE_REASON =
+  "Workspace changed since evaluation: staged tree does not match the evaluated revision";
 
 /**
  * Group-commit batch over R2-staged workspace trees (ADR 004 Task 5): operates on
@@ -1250,37 +1538,57 @@ export async function batchMergeStagedTrees(
   projectToken: string,
   items: StagedTreeItem[],
   _logger: Logger,
+  branch = "main",
 ): Promise<Result<StagedItemResult[], AppError>> {
   const gitdir = `${dir === "/" ? "" : dir}/.git`;
+
+  // #124 validation (O(1) per item — a string compare): a staged tree that does
+  // not match the tree the change was evaluated against must not be synthesized
+  // into a commit, let alone merged. Sha-keyed staging makes this a corruption
+  // guard rather than a common path.
+  const eligible = items.map(
+    (item) => item.expectedTreeOid === undefined || item.staged.treeOid === item.expectedTreeOid,
+  );
 
   // Phase 1 (off the merge critical path): place every item's objects, then build
   // the synthetic commits. The synth SHA-1 (`commitObject`) is async crypto with real
   // per-call overhead — running them sequentially inside the merge loop was the
   // dominant cost; `Promise.all` lets the crypto overlap. (Placement stays sequential:
   // concurrent writes race on MemoryFS object-dir creation.)
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item || !eligible[i]) continue;
     for (const o of item.staged.objects) await placeLooseObject(fs, gitdir, o.oid, o.bytes);
   }
   const synths = await Promise.all(
-    items.map((item) =>
-      commitObject({
-        tree: item.staged.treeOid,
-        parents: [item.baseSha],
-        message: `change ${item.changeId}`,
-        timestamp: Math.floor(Date.now() / 1000),
-      }),
+    items.map((item, i) =>
+      eligible[i]
+        ? commitObject({
+            tree: item.staged.treeOid,
+            parents: [item.baseSha],
+            message: `change ${item.changeId}`,
+            timestamp: Math.floor(Date.now() / 1000),
+          })
+        : Promise.resolve(null),
     ),
   );
-  for (const synth of synths) await placeLooseObject(fs, gitdir, synth.oid, synth.bytes);
+  for (const synth of synths) {
+    if (synth) await placeLooseObject(fs, gitdir, synth.oid, synth.bytes);
+  }
 
   // Phase 2: serial merge loop (the ref advance must be serialized). Checkpoint/
   // restore around each so a conflict can't dirty the next.
   const results: StagedItemResult[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
+    if (!item) continue;
+    if (!eligible[i]) {
+      results.push({ changeId: item.changeId, merged: false, reason: STALE_STAGED_TREE_REASON });
+      continue;
+    }
     const synthOid = synths[i]?.oid;
-    if (!item || !synthOid) continue;
-    const checkpoint = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+    if (!synthOid) continue;
+    const checkpoint = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
     if (!checkpoint.success) {
       results.push({ changeId: item.changeId, merged: false });
       continue;
@@ -1290,16 +1598,16 @@ export async function batchMergeStagedTrees(
         const merged = await git.merge({
           fs,
           dir,
-          ours: "main",
+          ours: branch,
           theirs: synthOid,
           author: SYSTEM_AUTHOR,
           message: `Merge change ${item.changeId}`,
         });
-        await git.checkout({ fs, dir, ref: "main" });
+        await git.checkout({ fs, dir, ref: branch });
         // git.merge omits `oid` when already up to date (the change's tree is already
-        // in main) — that's a successful no-op merge, not a conflict. Fall back to the
-        // current head so it's reported merged.
-        return merged.oid ?? (await git.resolveRef({ fs, dir, ref: "main" }));
+        // in the default branch) — that's a successful no-op merge, not a conflict.
+        // Fall back to the current head so it's reported merged.
+        return merged.oid ?? (await git.resolveRef({ fs, dir, ref: branch }));
       })(),
     );
     if (attempt.success && attempt.data) {
@@ -1309,14 +1617,14 @@ export async function batchMergeStagedTrees(
       // If restoration itself fails the FS is corrupt — abort the whole batch
       // rather than merge subsequent items against a dirty state.
       const restoreRef = await fromPromise(
-        git.writeRef({ fs, dir, ref: "main", value: checkpoint.data, force: true }),
+        git.writeRef({ fs, dir, ref: branch, value: checkpoint.data, force: true }),
       );
       if (!restoreRef.success) {
         return err(
           new ExternalServiceError("Git", "Failed to restore ref after conflict", restoreRef.error),
         );
       }
-      const restoreCheckout = await fromPromise(git.checkout({ fs, dir, ref: "main" }));
+      const restoreCheckout = await fromPromise(git.checkout({ fs, dir, ref: branch }));
       if (!restoreCheckout.success) {
         return err(
           new ExternalServiceError(
@@ -1332,7 +1640,7 @@ export async function batchMergeStagedTrees(
 
   if (results.some((r) => r.merged)) {
     const pushResult = await fromPromise(
-      git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+      git.push({ fs, dir, http, url: projectRemote, ref: branch, onAuth: makeAuth(projectToken) }),
     );
     if (!pushResult.success) {
       return err(new ExternalServiceError("Git", "Batch push failed", pushResult.error));
@@ -1428,13 +1736,14 @@ export async function squashMerge(
   projectToken: string,
   author: Author,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.debug("Performing squash merge", { projectRemote, workspaceSha });
 
   const workspaceFilesResult = await listFilesAtCommit(projectFs, workspaceSha, logger);
   if (!workspaceFilesResult.success) return err(workspaceFilesResult.error);
 
-  const projectFilesResult = await listFilesAtCommit(projectFs, "main", logger);
+  const projectFilesResult = await listFilesAtCommit(projectFs, branch, logger);
   if (!projectFilesResult.success) return err(projectFilesResult.error);
 
   const workspaceFiles = workspaceFilesResult.data;
@@ -1565,12 +1874,16 @@ export async function squashMerge(
   const changeCount = changed.length + deleted.length;
   if (changeCount === 0) {
     const resolveResult = await fromPromise(
-      git.resolveRef({ fs: projectFs, dir: projectDir, ref: "main" }),
+      git.resolveRef({ fs: projectFs, dir: projectDir, ref: branch }),
     );
     if (!resolveResult.success) {
-      logger.error("Failed to resolve main ref", resolveResult.error, { projectRemote });
+      logger.error("Failed to resolve default-branch ref", resolveResult.error, { projectRemote });
       return err(
-        new ExternalServiceError("Git", "Failed to resolve main ref", resolveResult.error),
+        new ExternalServiceError(
+          "Git",
+          "Failed to resolve default-branch ref",
+          resolveResult.error,
+        ),
       );
     }
     return ok(resolveResult.data);
@@ -1597,7 +1910,7 @@ export async function squashMerge(
       dir: projectDir,
       http,
       url: projectRemote,
-      ref: "main",
+      ref: branch,
       onAuth: makeAuth(projectToken),
     }),
   );
@@ -1611,7 +1924,9 @@ export async function squashMerge(
 }
 
 const MAX_REPO_FILES = 500;
-const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+/** Per-file ceiling for a commit. Exported so the workspace route enforces the
+ * SAME number this choke point does, instead of a copy that can drift. */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 export interface ResolveConflictOpts {
   projectRemote: string;
@@ -1621,6 +1936,8 @@ export interface ResolveConflictOpts {
   strategy: "accept-project" | "accept-workspace" | "manual";
   manualResolutions?: { file: string; content: string }[];
   conflictingFiles?: string[];
+  /** Default branch shared by the project repo and its workspace fork ("main" if omitted). */
+  branch?: string;
 }
 
 /**
@@ -1632,6 +1949,7 @@ export async function resolveConflict(
   logger: Logger,
 ): Promise<Result<{ commitSha: string }, AppError>> {
   const { projectRemote, projectToken, workspaceRemote, workspaceToken, strategy } = opts;
+  const branch = opts.branch ?? "main";
 
   logger.info("Resolving conflict", { strategy, projectRemote });
 
@@ -1665,12 +1983,14 @@ export async function resolveConflict(
       }
     }
 
-    const cloneResult = await cloneRepo(projectRemote, projectToken, logger);
+    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, {
+      ref: branch,
+    });
     if (!cloneResult.success) return err(cloneResult.error);
     const { fs, dir } = cloneResult.data;
 
     // Guard: total file count
-    const filesResult = await listFilesAtCommit(fs, "main", logger);
+    const filesResult = await listFilesAtCommit(fs, branch, logger);
     if (!filesResult.success) return err(filesResult.error);
     if (filesResult.data.length > MAX_REPO_FILES) {
       return err(
@@ -1695,18 +2015,22 @@ export async function resolveConflict(
       fileMap,
       "Resolved merge conflict manually",
       logger,
+      SYSTEM_AUTHOR,
+      branch,
     );
     if (!commitResult.success) return mapPushError(commitResult.error);
     return ok({ commitSha: commitResult.data });
   }
 
   if (strategy === "accept-project") {
-    const cloneResult = await cloneRepo(projectRemote, projectToken, logger);
+    const cloneResult = await cloneRepo(projectRemote, projectToken, logger, {
+      ref: branch,
+    });
     if (!cloneResult.success) return err(cloneResult.error);
     const { fs, dir } = cloneResult.data;
 
     // Guard: total file count
-    const filesResult = await listFilesAtCommit(fs, "main", logger);
+    const filesResult = await listFilesAtCommit(fs, branch, logger);
     if (!filesResult.success) return err(filesResult.error);
     if (filesResult.data.length > MAX_REPO_FILES) {
       return err(
@@ -1736,7 +2060,7 @@ export async function resolveConflict(
 
     if (Object.keys(fileMap).length === 0) {
       // No conflicting files to re-stage — resolve HEAD as the "commit"
-      const refResult = await fromPromise(git.resolveRef({ fs, dir, ref: "main" }));
+      const refResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
       if (!refResult.success) return err(new AppError("Failed to resolve HEAD", "GIT_ERROR", 500));
       return ok({ commitSha: refResult.data });
     }
@@ -1749,18 +2073,22 @@ export async function resolveConflict(
       fileMap,
       "Resolved merge conflict: accepted project changes",
       logger,
+      SYSTEM_AUTHOR,
+      branch,
     );
     if (!commitResult.success) return mapPushError(commitResult.error);
     return ok({ commitSha: commitResult.data });
   }
 
   if (strategy === "accept-workspace") {
-    const projectClone = await cloneRepo(projectRemote, projectToken, logger);
+    const projectClone = await cloneRepo(projectRemote, projectToken, logger, {
+      ref: branch,
+    });
     if (!projectClone.success) return err(projectClone.error);
     const { fs: projectFs, dir: projectDir } = projectClone.data;
 
     // Guard: total file count in project
-    const filesResult = await listFilesAtCommit(projectFs, "main", logger);
+    const filesResult = await listFilesAtCommit(projectFs, branch, logger);
     if (!filesResult.success) return err(filesResult.error);
     if (filesResult.data.length > MAX_REPO_FILES) {
       return err(
@@ -1772,7 +2100,9 @@ export async function resolveConflict(
       );
     }
 
-    const workspaceClone = await cloneRepo(workspaceRemote, workspaceToken, logger);
+    const workspaceClone = await cloneRepo(workspaceRemote, workspaceToken, logger, {
+      ref: branch,
+    });
     if (!workspaceClone.success) return err(workspaceClone.error);
     const { fs: wsFs, dir: wsDir } = workspaceClone.data;
 
@@ -1795,7 +2125,7 @@ export async function resolveConflict(
 
     if (Object.keys(fileMap).length === 0) {
       const refResult = await fromPromise(
-        git.resolveRef({ fs: projectFs, dir: projectDir, ref: "main" }),
+        git.resolveRef({ fs: projectFs, dir: projectDir, ref: branch }),
       );
       if (!refResult.success) return err(new AppError("Failed to resolve HEAD", "GIT_ERROR", 500));
       return ok({ commitSha: refResult.data });
@@ -1809,6 +2139,8 @@ export async function resolveConflict(
       fileMap,
       "Resolved merge conflict: accepted workspace changes",
       logger,
+      SYSTEM_AUTHOR,
+      branch,
     );
     if (!commitResult.success) return mapPushError(commitResult.error);
     return ok({ commitSha: commitResult.data });
@@ -1828,6 +2160,88 @@ function mapPushError(error: AppError): Result<never, AppError> {
     return err(new AppError("GitHub token expired or insufficient permissions", "AUTH_ERROR", 401));
   }
   return err(error);
+}
+
+export interface SubmoduleContentReport {
+  /** Paths of gitlink (mode 160000 / walk type "commit") tree entries found. */
+  gitlinkPaths: string[];
+  /** Whether a `.gitmodules` file exists at the repo root. */
+  hasGitmodules: boolean;
+}
+
+/**
+ * Scans commit `ref`'s full tree for submodule-related content Stratum does
+ * not support (#258): gitlink entries (the tree-level marker for a submodule
+ * pointer) and a `.gitmodules` file (the config git uses to declare them).
+ *
+ * This walks the TREE OBJECT, not a checked-out working copy. That matters:
+ * isomorphic-git's checkout silently ignores a gitlink entry -- it writes
+ * nothing to the working tree and raises nothing (see the `mkdir-index`/
+ * `commit-tree` cases in its checkout implementation, and MemoryFS's
+ * `MODE_GITLINK` override, which only fires for an index write that never
+ * happens on checkout). A consumer that walked the checked-out filesystem
+ * instead would see an ordinary-looking tree with the submodule quietly
+ * missing -- exactly the silent corruption #258 forbids. Reading the tree
+ * object directly is the only way to reliably detect a gitlink.
+ *
+ * Called at every point repo content enters Stratum -- GitHub import, and
+ * change creation for both a gated push and the REST API (both go through
+ * {@link getDiffBetweenRepos}) -- so an unsupported repo is rejected up front
+ * with a clear, structured error instead of partially importing or reaching a
+ * server-side merge.
+ */
+export async function scanForSubmoduleContent(
+  fs: NodeFS,
+  ref: string,
+  logger: Logger,
+): Promise<Result<SubmoduleContentReport, AppError>> {
+  const gitlinkPaths: string[] = [];
+  let hasGitmodules = false;
+  const walkResult = await fromPromise(
+    git.walk({
+      fs,
+      dir: DIR,
+      trees: [git.TREE({ ref })],
+      map: async (filepath, [entry]) => {
+        if (!entry) return;
+        const type = await entry.type();
+        if (type === "commit") {
+          gitlinkPaths.push(filepath);
+        } else if (type === "blob" && filepath === ".gitmodules") {
+          hasGitmodules = true;
+        }
+      },
+    }),
+  );
+  if (!walkResult.success) {
+    logger.error("Failed to scan tree for submodule content", walkResult.error, { ref });
+    return err(
+      new ExternalServiceError("Git", `Failed to scan tree at commit: ${ref}`, walkResult.error),
+    );
+  }
+  return ok({ gitlinkPaths, hasGitmodules });
+}
+
+/** Builds the standard fail-closed error for submodule content found by
+ * {@link scanForSubmoduleContent} (#258). */
+export function submoduleUnsupportedError(report: SubmoduleContentReport): AppError {
+  const found: string[] = [];
+  if (report.gitlinkPaths.length > 0) {
+    const shown = report.gitlinkPaths.slice(0, 5);
+    const rest = report.gitlinkPaths.length - shown.length;
+    found.push(
+      `gitlink entr${report.gitlinkPaths.length === 1 ? "y" : "ies"} at ${shown.join(", ")}${
+        rest > 0 ? `, and ${rest} more` : ""
+      }`,
+    );
+  }
+  if (report.hasGitmodules) found.push(".gitmodules");
+  return new AppError(
+    `Repository uses git submodules (found ${found.join(" and ")}), which Stratum does not support yet. Remove submodules and retry.`,
+    "SUBMODULES_UNSUPPORTED",
+    422,
+    { gitlinkPaths: report.gitlinkPaths, hasGitmodules: report.hasGitmodules },
+  );
 }
 
 async function listFilesAtCommit(
@@ -1895,10 +2309,11 @@ export async function readFileFromRepo(
   token: string,
   path: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.debug("Reading file from repo", { remote, path });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs } = cloneResult.data;
@@ -1920,10 +2335,11 @@ export async function listFilesInRepo(
   remote: string,
   token: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string[], AppError>> {
   logger.debug("Listing files in repo", { remote });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs, dir } = cloneResult.data;
@@ -1931,23 +2347,32 @@ export async function listFilesInRepo(
 }
 
 /**
- * Read the full working tree (paths → text contents) in a single clone.
- * Used by the post-merge smoke check and the sandbox evaluator to populate a
- * sandbox. When `ref` (a commit sha) is given, the tree of that commit is read
- * instead of the clone's HEAD, so callers can pin the exact evaluated commit —
- * cloned in full, since a pinned sha can fall outside a shallow clone's depth
+ * Read the full working tree (paths → raw bytes) in a single clone. Used by
+ * the post-merge smoke check and the sandbox evaluator to populate a sandbox.
+ * When `ref` (a commit sha) is given, the tree of that commit is read instead
+ * of the clone's HEAD, so callers can pin the exact evaluated commit — cloned
+ * in full, since a pinned sha can fall outside a shallow clone's depth
  * window; a ref still not reachable after that is an error, never a silent
  * fall-through to evaluating something else.
+ *
+ * Bytes are returned as-is (no UTF-8 decoding): a repo tree can contain
+ * binary files (images, fonts, `.wasm`, compiled fixtures), and `TextDecoder`
+ * is lossy for anything that isn't valid UTF-8. Callers decode to text only
+ * where text is genuinely needed.
  */
 export async function readRepoFiles(
   remote: string,
   token: string,
   logger: Logger,
   ref?: string,
-): Promise<Result<Map<string, string>, AppError>> {
+  branch = "main",
+): Promise<Result<Map<string, Uint8Array>, AppError>> {
   logger.debug("Reading repo files", { remote, ref });
 
-  const cloneResult = await cloneRepo(remote, token, logger, { fullHistory: ref !== undefined });
+  const cloneResult = await cloneRepo(remote, token, logger, {
+    ref: branch,
+    ...(ref !== undefined ? { fullHistory: true } : {}),
+  });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -1958,11 +2383,13 @@ export async function readRepoFiles(
   const filesResult = await walkDir(fs, dir, "", logger);
   if (!filesResult.success) return err(filesResult.error);
 
-  const contents = new Map<string, string>();
+  const contents = new Map<string, Uint8Array>();
   for (const path of filesResult.data) {
     try {
-      const raw = await fs.promises.readFile(`/${path}`, { encoding: "utf8" });
-      contents.set(path, typeof raw === "string" ? raw : new TextDecoder().decode(raw));
+      // No `encoding` option: MemoryFS's readFile returns the raw bytes
+      // unmodified when no encoding is requested.
+      const raw = await fs.promises.readFile(`/${path}`);
+      contents.set(path, typeof raw === "string" ? new TextEncoder().encode(raw) : raw);
     } catch (error) {
       logger.warn("Skipping unreadable file in repo tree", {
         path,
@@ -1973,13 +2400,13 @@ export async function readRepoFiles(
   return ok(contents);
 }
 
-/** Every file (path → text contents) in the tree of one commit. Exported for tests. */
+/** Every file (path → raw bytes) in the tree of one commit. Exported for tests. */
 export async function readTreeAtCommit(
   fs: NodeFS,
   dir: string,
   commitSha: string,
   logger: Logger,
-): Promise<Result<Map<string, string>, AppError>> {
+): Promise<Result<Map<string, Uint8Array>, AppError>> {
   const listResult = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
   if (!listResult.success) {
     logger.error("Failed to list files at commit", listResult.error, { commitSha });
@@ -1992,7 +2419,7 @@ export async function readTreeAtCommit(
     );
   }
 
-  const contents = new Map<string, string>();
+  const contents = new Map<string, Uint8Array>();
   for (const path of listResult.data) {
     const blobResult = await fromPromise(git.readBlob({ fs, dir, oid: commitSha, filepath: path }));
     if (!blobResult.success) {
@@ -2008,7 +2435,7 @@ export async function readTreeAtCommit(
         ),
       );
     }
-    contents.set(path, new TextDecoder().decode(blobResult.data.blob));
+    contents.set(path, blobResult.data.blob);
   }
   return ok(contents);
 }
@@ -2019,8 +2446,9 @@ export async function getCommitParent(
   token: string,
   commitSha: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -2047,10 +2475,11 @@ export async function revertToCommit(
   targetSha: string,
   message: string,
   logger: Logger,
+  branch = "main",
 ): Promise<Result<string, AppError>> {
   logger.info("Reverting repo to commit tree", { remote, targetSha });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
@@ -2092,14 +2521,14 @@ export async function revertToCommit(
   const revertSha = writeResult.data;
 
   const refResult = await fromPromise(
-    git.writeRef({ fs, dir, ref: "refs/heads/main", value: revertSha, force: true }),
+    git.writeRef({ fs, dir, ref: `refs/heads/${branch}`, value: revertSha, force: true }),
   );
   if (!refResult.success) {
     return err(new ExternalServiceError("Git", "Failed to update ref", refResult.error));
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
   );
   if (!pushResult.success) {
     logger.error("Failed to push revert commit", pushResult.error, { remote });
@@ -2160,10 +2589,11 @@ export async function getCommitLog(
   token: string,
   logger: Logger,
   depth = 20,
+  branch = "main",
 ): Promise<Result<CommitLogEntry[], AppError>> {
   logger.debug("Getting commit log", { remote, depth });
 
-  const cloneResult = await cloneRepo(remote, token, logger);
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
 
   const { fs, dir } = cloneResult.data;
@@ -2206,9 +2636,11 @@ export async function importFromGitHub(
       }, timeoutMs);
     });
 
+    // depth <= 0 means "full history": omit depth from the import request so the
+    // Artifacts backend clones without a shallow cutoff.
     const doImport = () =>
       artifacts.import({
-        source: { url: githubUrl, branch, depth },
+        source: { url: githubUrl, branch, ...(depth > 0 ? { depth } : {}) },
         target: { name },
       });
 
@@ -2272,6 +2704,522 @@ export async function importFromGitHub(
   }
 }
 
+/** Depth for the source fetch during an incremental sync — matches the shallow
+ * depth {@link cloneRepo} uses for the local clone it fetches into. */
+const SYNC_FETCH_DEPTH = DEFAULT_SHALLOW_DEPTH;
+
+/**
+ * Cap on the total fetch window {@link syncFromGitHub} will grow to while
+ * retrying a merge that failed only because a shallow clone hid the common
+ * ancestor. Each retry round doubles the current window (SYNC_FETCH_DEPTH ->
+ * 100 -> 200 -> 400 -> capped here) via `git.fetch`'s `relative: true` option,
+ * which extends the shallow boundary from wherever it currently sits rather
+ * than re-fetching from the tip. 500 is a deliberate bound: large enough to
+ * reach a merge base past a few weeks of active commits on either side, small
+ * enough that a genuinely diverged repo can't drive unbounded clone work on
+ * every scheduled sync.
+ */
+const SYNC_MAX_FETCH_DEPTH = 500;
+
+/**
+ * Whether commits `ours` and `theirs` in `dir` have no single common ancestor
+ * `git.merge` can use as a merge base. isomorphic-git throws the same
+ * `MergeNotSupportedError` both for this AND for conflict shapes its diff3
+ * algorithm can't auto-resolve — the two are indistinguishable from the error
+ * alone, so this recomputes the merge base directly to tell them apart. The
+ * caller uses the result to decide whether deepening the shallow history could
+ * plausibly fix the failure, versus a hard content conflict that more history
+ * can't resolve.
+ */
+async function isMissingMergeBase(
+  fs: NodeFS,
+  dir: string,
+  ours: string,
+  theirs: string,
+): Promise<boolean> {
+  const oursOid = await fromPromise(git.resolveRef({ fs, dir, ref: ours }));
+  if (!oursOid.success) return false;
+  const bases = await fromPromise(git.findMergeBase({ fs, dir, oids: [oursOid.data, theirs] }));
+  // A read failure here isn't proof either way; treat conservatively as "not a
+  // missing-base case" rather than risk looping on an unrelated error.
+  if (!bases.success) return false;
+  return bases.data.length !== 1;
+}
+
+/**
+ * Whether ANY commit reachable from `ref` sits on a shallow-fetch boundary
+ * (recorded in `.git/shallow`) rather than being a true root — i.e. whether
+ * fetching more depth for `ref` could reveal additional ancestors. A ref whose
+ * full reachable history is already present locally cannot be deepened any
+ * further, so retrying its fetch would just repeat the same result.
+ *
+ * Deliberately not "is the OLDEST reachable commit a boundary": `.git/shallow`
+ * can hold several boundary oids, and a merge commit can reach a truncated
+ * line and a fully-present older line at once. Judging by the oldest commit
+ * alone would then see the complete root, call the ref non-shallow, and stop
+ * {@link applySourceUpdateWithDeepening} while history was still fetchable.
+ */
+async function isRefShallow(fs: NodeFS, dir: string, ref: string): Promise<boolean> {
+  const gitdir = `${dir === "/" ? "" : dir}/.git`;
+  const shallowFile = await fromPromise(
+    fs.promises.readFile(`${gitdir}/shallow`, { encoding: "utf8" }),
+  );
+  if (!shallowFile.success) return false;
+  const boundary = new Set(
+    String(shallowFile.data)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+  if (boundary.size === 0) return false;
+  // No `depth`: the documented way to ask for an unbounded walk. Passing a
+  // sentinel like -1 only works by accident — isomorphic-git stops on
+  // `commits.length === depth`, a strict equality a growing count never
+  // satisfies for a negative number. If that check ever became `>=`, the walk
+  // would end on its first iteration and every ref would look non-shallow.
+  const log = await fromPromise(git.log({ fs, dir, ref }));
+  if (!log.success) return false;
+  // Every reachable commit, not just the oldest one. `.git/shallow` legitimately
+  // holds several boundary oids, and a merge commit can reach both a shallow
+  // boundary AND an older complete root; the globally oldest commit is then the
+  // root, which would hide a ref that genuinely still has history to fetch.
+  return log.data.some((commit) => boundary.has(commit.oid));
+}
+
+export interface SourceSyncResult {
+  /** "up-to-date": main already contains the source tip (no-op, nothing pushed);
+   * "fast-forwarded": main advanced to the source tip; "merged": source commits
+   * and Stratum-native commits were joined by a merge commit. */
+  status: "up-to-date" | "fast-forwarded" | "merged";
+  /** The resulting tip of `main`. */
+  commit: string;
+}
+
+/**
+ * Apply an already-fetched source tip onto the local `main` branch.
+ *
+ * Fast-forwards when main is an ancestor of the source tip, no-ops when the
+ * source tip is already reachable from main (Stratum-native commits ahead), and
+ * otherwise attempts a true three-way merge so native history is PRESERVED
+ * alongside new source commits. If neither is possible — a force-pushed source,
+ * conflicting edits, or shallow/grafted history hiding the common ancestor —
+ * this fails with `SYNC_DIVERGED` and leaves `main` untouched. It never falls
+ * back to any destructive re-import (#190).
+ *
+ * `SYNC_DIVERGED` is reserved for actual divergence. An operational merge
+ * failure (corrupt objects, IO) surfaces as `ExternalServiceError` instead, so
+ * the caller is not told to reconcile history that is in fact fine.
+ */
+export async function applySourceUpdate(
+  fs: NodeFS,
+  dir: string,
+  sourceTip: string,
+  logger: Logger,
+  author: Author = SYSTEM_AUTHOR,
+  branch = "main",
+): Promise<Result<SourceSyncResult, AppError>> {
+  const mergeResult = await fromPromise(
+    git.merge({
+      fs,
+      dir,
+      ours: branch,
+      theirs: sourceTip,
+      author,
+      message: `Sync source commit ${sourceTip.slice(0, 7)} into ${branch}`,
+    }),
+  );
+  if (!mergeResult.success) {
+    const cause = mergeResult.error.message;
+    logger.error("Source update could not be applied", mergeResult.error, { sourceTip, cause });
+    // Only a real content divergence earns SYNC_DIVERGED: isomorphic-git throws
+    // MergeConflictError for conflicting edits and MergeNotSupportedError for
+    // conflict shapes it can't auto-resolve or histories with no common
+    // ancestor. Anything else — corrupt objects, IO, OOM — is operational, and
+    // reporting it as "your history diverged" sends the caller to debug the
+    // wrong thing. Same split `mergeWorkspaceIntoProject` already applies.
+    //
+    // `MergeNotSupportedError` alone doesn't say WHICH of those it is, so
+    // `missingMergeBase` is derived independently (via `isMissingMergeBase`)
+    // and carried on the error's context — `syncFromGitHub` uses it to decide
+    // whether deepening the shallow window is worth retrying, versus a hard
+    // conflict that more history can't fix.
+    if (isGitMergeConflict(mergeResult.error)) {
+      return err(
+        new AppError(
+          `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
+          "SYNC_DIVERGED",
+          409,
+          { missingMergeBase: false },
+        ),
+      );
+    }
+    if (matchesGitError(mergeResult.error, GitErrors.MergeNotSupportedError)) {
+      const missingMergeBase = await isMissingMergeBase(fs, dir, branch, sourceTip);
+      return err(
+        new AppError(
+          `Sync aborted: source history has diverged from the project repository and cannot be applied automatically (${cause}). The existing repository and its workspaces were left untouched.`,
+          "SYNC_DIVERGED",
+          409,
+          { missingMergeBase },
+        ),
+      );
+    }
+    return err(
+      new ExternalServiceError(
+        "Git",
+        `Failed to apply source update: ${cause}`,
+        mergeResult.error instanceof Error ? mergeResult.error : undefined,
+      ),
+    );
+  }
+
+  // git.merge omits `oid` in some no-op cases; fall back to the current head.
+  let commit = mergeResult.data.oid;
+  if (!commit) {
+    const headResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
+    if (!headResult.success) {
+      return err(
+        new ExternalServiceError("Git", `Failed to resolve ${branch} after sync`, headResult.error),
+      );
+    }
+    commit = headResult.data;
+  }
+
+  const status: SourceSyncResult["status"] = mergeResult.data.alreadyMerged
+    ? "up-to-date"
+    : mergeResult.data.fastForward
+      ? "fast-forwarded"
+      : "merged";
+  return ok({ status, commit });
+}
+
+/** A deepen callback fetches `depth` MORE commits (relative to the current
+ * shallow boundary) for one side of a sync. Returns void on success so the
+ * caller re-reads history off the shared `fs`/`dir` rather than a return
+ * value. */
+export type DeepenFetch = (depth: number) => Promise<Result<void, AppError>>;
+
+/**
+ * Apply `sourceTip` onto `main` in `fs`/`dir`, retrying with a progressively
+ * deepened fetch window when `applySourceUpdate` reports a missing-merge-base
+ * failure (never for a genuine conflict — more history can't fix that, see
+ * {@link isMissingMergeBase}). Each retry round doubles the window from
+ * `startDepth`, deepening whichever side(s) {@link isRefShallow} confirms are
+ * still shallow via `deepenProject`/`deepenSource`, up to `maxDepth`.
+ * `SYNC_DIVERGED` is returned once a real conflict surfaces, once the cap is
+ * reached, or once neither side has any more local history to reveal.
+ *
+ * Kept independent of the network specifics (the caller supplies the fetch
+ * callbacks) so the retry/doubling/cap logic is testable against a real,
+ * already-populated in-memory repo — see {@link syncFromGitHub} for the
+ * production wiring (`git.fetch` with `relative: true`).
+ */
+export async function applySourceUpdateWithDeepening(
+  fs: NodeFS,
+  dir: string,
+  sourceTip: string,
+  sourceRef: string,
+  startDepth: number,
+  maxDepth: number,
+  deepen: { project: DeepenFetch; source: DeepenFetch },
+  logger: Logger,
+  branch = "main",
+): Promise<Result<SourceSyncResult, AppError>> {
+  let applyResult = await applySourceUpdate(fs, dir, sourceTip, logger, SYSTEM_AUTHOR, branch);
+  // Floored at 1 because the window only ever advances by doubling: a
+  // `startDepth` of 0 would make `nextWindow` equal `window`, so `increment`
+  // would be 0, every round would deepen by nothing, the refs would stay
+  // shallow (so the both-sides-complete `break` never fires), and
+  // `window < maxDepth` would hold forever. A negative one diverges instead of
+  // converging. Both are unreachable from `syncFromGitHub`'s SYNC_FETCH_DEPTH
+  // default, but this function is exported and takes the depth from its caller,
+  // so termination should not rest on the caller passing something sane.
+  let window = Math.max(1, startDepth);
+
+  while (
+    !applyResult.success &&
+    applyResult.error.code === "SYNC_DIVERGED" &&
+    applyResult.error.context?.missingMergeBase === true &&
+    window < maxDepth
+  ) {
+    const nextWindow = Math.min(window * 2, maxDepth);
+    const increment = nextWindow - window;
+
+    const [projectShallow, sourceShallow] = await Promise.all([
+      isRefShallow(fs, dir, branch),
+      isRefShallow(fs, dir, sourceRef),
+    ]);
+    if (!projectShallow && !sourceShallow) {
+      // Neither side has more history to give — the merge base genuinely
+      // isn't there, no matter how much further we'd retry.
+      break;
+    }
+
+    logger.warn("Merge base not found within the shallow window — deepening and retrying", {
+      sourceRef,
+      window,
+      nextWindow,
+      projectShallow,
+      sourceShallow,
+    });
+
+    if (projectShallow) {
+      const deepened = await deepen.project(increment);
+      if (!deepened.success) return err(deepened.error);
+    }
+    if (sourceShallow) {
+      const deepened = await deepen.source(increment);
+      if (!deepened.success) return err(deepened.error);
+    }
+
+    window = nextWindow;
+    applyResult = await applySourceUpdate(fs, dir, sourceTip, logger, SYSTEM_AUTHOR, branch);
+  }
+
+  return applyResult;
+}
+
+/**
+ * Incremental sync of an EXISTING Artifacts project repo from its source git
+ * URL — the non-destructive replacement for re-running the GitHub import (#190).
+ *
+ * Clones the project's Artifacts repo (shallow), fetches `branch` from the
+ * public source URL into it, fast-forwards or merges it onto `main` via
+ * {@link applySourceUpdate}, and pushes the result back. The repo is NEVER
+ * deleted or recreated: workspace forks keep their ancestry and the project's
+ * remote stays stable. Diverged history fails with `SYNC_DIVERGED`; auth or
+ * network failures propagate as external-service errors.
+ *
+ * A shallow clone can hide the common ancestor, making isomorphic-git report a
+ * merge it cannot compute — which, from `MergeNotSupportedError` alone, is
+ * indistinguishable from real divergence. `applySourceUpdate` disambiguates the
+ * two independently (`git.findMergeBase`, see `isMissingMergeBase`); when it's
+ * a missing merge base — not a genuine conflict — the fetch window is deepened
+ * via `git.fetch`'s `relative: true`, extending whichever side(s) are actually
+ * shallow (`isRefShallow`) from their current boundary rather than re-fetching
+ * from the tip, and the merge is retried. Each round doubles the window up to
+ * {@link SYNC_MAX_FETCH_DEPTH}; `SYNC_DIVERGED` is only returned once a real
+ * conflict surfaces or the cap is reached with no merge base in sight. That
+ * bound is deliberate: without it, a genuinely diverged repo could drive
+ * unbounded fetch work on every scheduled sync.
+ */
+export async function syncFromGitHub(
+  artifacts: ArtifactsNamespace,
+  remote: string,
+  sourceUrl: string,
+  logger: Logger,
+  branch = "main",
+  depth = SYNC_FETCH_DEPTH,
+  maxDepth = SYNC_MAX_FETCH_DEPTH,
+): Promise<Result<SourceSyncResult, AppError>> {
+  // Normalised once, here, rather than at each use. `depth` reaches three
+  // places: this clone, the source fetch, and the deepening loop's starting
+  // window. The first two are forwarded by isomorphic-git into the upload-pack
+  // `deepen <n>` line, and a server is entitled to reject `deepen 0` or a
+  // negative — a protocol error from the remote, raised before the retry
+  // helper's own floor could ever apply. Flooring at the entry point keeps all
+  // three consistent and keeps a caller from turning a sync into a
+  // wire-level failure.
+  const startDepth = Math.max(1, depth);
+  logger.debug("Incrementally syncing from source", {
+    remote,
+    sourceUrl,
+    branch,
+    depth: startDepth,
+  });
+
+  // One write-scoped token covers the clone, every deepening fetch of the
+  // Artifacts side, and the push-back.
+  const tokenResult = await freshRepoToken(artifacts, remote, "write", logger);
+  if (!tokenResult.success) return err(tokenResult.error);
+  const token = tokenResult.data;
+
+  // Same depth as the source fetch below: the retry loop's starting window
+  // assumes both sides begin equally shallow.
+  const cloneResult = await cloneRepo(remote, token, logger, {
+    ref: branch,
+    fullHistory: false,
+    depth: startDepth,
+  });
+  if (!cloneResult.success) return err(cloneResult.error);
+  const { fs, dir } = cloneResult.data;
+
+  const addRemoteResult = await fromPromise(
+    git.addRemote({ fs, dir, remote: "source", url: sourceUrl }),
+  );
+  if (!addRemoteResult.success) {
+    logger.error("Failed to add source remote", addRemoteResult.error, { sourceUrl });
+    return err(
+      new ExternalServiceError("Git", "Failed to add source remote", addRemoteResult.error),
+    );
+  }
+
+  const fetchResult = await fromPromise(
+    git.fetch({
+      fs,
+      http,
+      dir,
+      remote: "source",
+      ref: branch,
+      singleBranch: true,
+      depth: startDepth,
+    }),
+  );
+  if (!fetchResult.success) {
+    const cause = fetchResult.error.message;
+    logger.error("Failed to fetch source branch", fetchResult.error, { sourceUrl, branch });
+    return err(
+      new ExternalServiceError(
+        "Git",
+        `Failed to fetch ${branch} from source: ${cause}`,
+        fetchResult.error,
+      ),
+    );
+  }
+
+  const tipResult = await resolveFetchedTip(
+    fs,
+    dir,
+    `refs/remotes/source/${branch}`,
+    logger,
+    "Failed to resolve fetched source ref",
+    { sourceUrl, branch },
+  );
+  if (!tipResult.success) return err(tipResult.error);
+  const sourceTip = tipResult.data;
+
+  /**
+   * Deepens the PROJECT side (the Artifacts clone at `origin`) by `increment`
+   * commits. Exists as a closure so {@link applySourceUpdateWithDeepening} can
+   * own the retry/doubling policy without knowing anything about this repo's
+   * remotes, auth, or transport. Re-fetches the already-added remote with
+   * `relative: true`, which extends the shallow boundary from wherever it
+   * currently sits instead of re-fetching from the tip; only invoked when
+   * {@link isRefShallow} confirms this side actually has more history to reveal.
+   */
+  const deepenProject: DeepenFetch = async (increment) => {
+    const result = await fromPromise(
+      git.fetch({
+        fs,
+        http,
+        dir,
+        remote: "origin",
+        // Follows the project's real default branch, not a hardcoded "main":
+        // the clone and push around it already do, and asking origin to deepen
+        // a ref the repo does not have would fail on any imported project whose
+        // default is master/trunk.
+        ref: branch,
+        singleBranch: true,
+        depth: increment,
+        relative: true,
+        onAuth: makeAuth(token),
+      }),
+    );
+    if (!result.success) {
+      logger.error("Failed to deepen Artifacts clone history", result.error, { remote, increment });
+      return err(
+        new ExternalServiceError("Git", "Failed to deepen Artifacts clone history", result.error),
+      );
+    }
+    return ok(undefined);
+  };
+  /**
+   * Deepens the SOURCE side (the upstream public repo at `source`) by
+   * `increment` commits. Separate from {@link deepenProject} because the two
+   * remotes differ in the ways that matter here: the source is anonymous (no
+   * `onAuth`) and its failures must name the source URL, not the Artifacts
+   * remote, so an operator reading the log can tell which fetch gave out.
+   */
+  const deepenSource: DeepenFetch = async (increment) => {
+    const result = await fromPromise(
+      git.fetch({
+        fs,
+        http,
+        dir,
+        remote: "source",
+        ref: branch,
+        singleBranch: true,
+        depth: increment,
+        relative: true,
+      }),
+    );
+    if (!result.success) {
+      logger.error("Failed to deepen source history", result.error, {
+        sourceUrl,
+        branch,
+        increment,
+      });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to deepen ${branch} history from source`,
+          result.error,
+        ),
+      );
+    }
+    return ok(undefined);
+  };
+
+  const applyResult = await applySourceUpdateWithDeepening(
+    fs,
+    dir,
+    sourceTip,
+    `refs/remotes/source/${branch}`,
+    startDepth,
+    maxDepth,
+    { project: deepenProject, source: deepenSource },
+    logger,
+    branch,
+  );
+
+  if (!applyResult.success) {
+    if (applyResult.error.code === "SYNC_DIVERGED") {
+      logger.error("Sync diverged: no merge base within the fetch window", applyResult.error, {
+        remote,
+        sourceUrl,
+        maxDepth,
+      });
+    }
+    return err(applyResult.error);
+  }
+  const applied = applyResult.data;
+
+  if (applied.status === "up-to-date") {
+    logger.info("Project already up to date with source", {
+      remote,
+      sourceUrl,
+      commit: applied.commit,
+    });
+    return ok(applied);
+  }
+
+  // Non-force push: a concurrent native merge racing this sync is rejected by
+  // the remote instead of being overwritten; the sync can simply be retried.
+  const pushResult = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http,
+      url: remote,
+      ref: branch,
+      remoteRef: branch,
+      onAuth: makeAuth(token),
+    }),
+  );
+  if (!pushResult.success) {
+    logger.error("Failed to push synced history", pushResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to push synced history", pushResult.error));
+  }
+
+  logger.info("Incremental sync complete", {
+    remote,
+    sourceUrl,
+    status: applied.status,
+    commit: applied.commit,
+  });
+  return ok(applied);
+}
+
 /**
  * Builds a git-style unified diff header + POSIX patch for a modified file.
  * `createPatch` computes a real line-level diff with proper @@ hunks.
@@ -2281,12 +3229,16 @@ function fileUnifiedDiff(path: string, oldContent: string, newContent: string): 
   // We strip the Index/=== preamble and replace the --- / +++ markers with git-style ones.
   const patch = createPatch(path, oldContent, newContent, "", "");
   const lines = patch.split("\n");
-  // Drop the first two lines ("Index: …" and "===…") then fix up --- / +++ paths.
+  // Drop the first two lines ("Index: …" and "===…"). The next two are the
+  // --- / +++ header pair; rewrite those *by position*, never by prefix. A
+  // deleted line whose text starts with "-- " (a SQL or Lua comment) arrives as
+  // "--- …" and an added line starting with "++ " as "+++ …", so a prefix test
+  // rewrites file content into a bogus header.
   const body = lines
     .slice(2)
-    .map((line) => {
-      if (line.startsWith("--- ")) return `--- a/${path}`;
-      if (line.startsWith("+++ ")) return `+++ b/${path}`;
+    .map((line, index) => {
+      if (index === 0 && line.startsWith("--- ")) return `--- a/${path}`;
+      if (index === 1 && line.startsWith("+++ ")) return `+++ b/${path}`;
       return line;
     })
     .join("\n");
@@ -2307,12 +3259,30 @@ function deletedFileDiff(path: string, content: string): string {
   return `diff --git a/${path} b/${path}\ndeleted file mode 100644\n--- a/${path}\n+++ /dev/null\n@@ -1,${lineCount} +0,0 @@\n${body}\n`;
 }
 
+/**
+ * Produce the change-gate's view of a workspace fork: the unified diff against
+ * its base project plus the exact workspace revision that diff was computed
+ * from.
+ *
+ * Both sides are cloned at the SAME `branch` -- an imported project keeps its
+ * source branch name (master/trunk/...), and its fork inherits it -- so a caller
+ * that passes the project's real default branch gets a diff of like against
+ * like. Every ref this function reads (the submodule scan, the tip resolution,
+ * the file listing) must use that same `branch`, or the work silently happens
+ * against a ref that does not exist on a non-`main` project.
+ *
+ * The returned tip and tree oids come from this one clone so a caller can pin
+ * evaluation to precisely the revision that was diffed, instead of re-resolving
+ * later and racing a concurrent push.
+ */
 export async function getDiffBetweenRepos(
   baseRemote: string,
   baseToken: string,
   workspaceRemote: string,
   workspaceToken: string,
   logger: Logger,
+  /** Default branch shared by the base repo and its workspace fork ("main" if omitted). */
+  branch = "main",
 ): Promise<
   Result<
     { diff: string; workspaceOid: string; workspaceTreeOid: string; workspaceSha: string },
@@ -2322,8 +3292,8 @@ export async function getDiffBetweenRepos(
   logger.debug("Getting diff between repos", { baseRemote, workspaceRemote });
 
   const [workspaceCloneResult, baseCloneResult] = await Promise.all([
-    cloneRepo(workspaceRemote, workspaceToken, logger),
-    cloneRepo(baseRemote, baseToken, logger),
+    cloneRepo(workspaceRemote, workspaceToken, logger, { ref: branch }),
+    cloneRepo(baseRemote, baseToken, logger, { ref: branch }),
   ]);
 
   if (!workspaceCloneResult.success) return err(workspaceCloneResult.error);
@@ -2331,6 +3301,23 @@ export async function getDiffBetweenRepos(
 
   const { fs: workspaceFs, dir: workspaceDir } = workspaceCloneResult.data;
   const { fs: baseFs } = baseCloneResult.data;
+
+  // Fail closed on submodule content (#258) before doing any further work: the
+  // base project is already vetted (import and every prior push go through this
+  // same gate), so only the incoming workspace tree needs the check. Scanning
+  // here -- ahead of the full file listing/content read below -- rejects with a
+  // clear, structured error instead of leaving a change record stuck on an
+  // opaque diff failure.
+  const submoduleScan = await scanForSubmoduleContent(workspaceFs, branch, logger);
+  if (!submoduleScan.success) return err(submoduleScan.error);
+  if (submoduleScan.data.gitlinkPaths.length > 0 || submoduleScan.data.hasGitmodules) {
+    logger.warn("Rejecting change: workspace contains unsupported submodule content", {
+      workspaceRemote,
+      gitlinkPaths: submoduleScan.data.gitlinkPaths,
+      hasGitmodules: submoduleScan.data.hasGitmodules,
+    });
+    return err(submoduleUnsupportedError(submoduleScan.data));
+  }
 
   // Resolve the workspace tip + its tree from the SAME clone the diff is computed
   // against, so callers can pin evaluation to this exact revision (#115 selects
@@ -2340,7 +3327,7 @@ export async function getDiffBetweenRepos(
   // against what was evaluated, closing the residual race between the pre-merge
   // tip check and the staged-tree read.
   const workspaceOidResult = await fromPromise(
-    git.resolveRef({ fs: workspaceFs, dir: workspaceDir, ref: "main" }),
+    git.resolveRef({ fs: workspaceFs, dir: workspaceDir, ref: branch }),
   );
   if (!workspaceOidResult.success) {
     return err(new AppError("Failed to resolve workspace tip for diff", "GIT_ERROR", 500));
@@ -2356,9 +3343,19 @@ export async function getDiffBetweenRepos(
   }
   const workspaceTreeOid = workspaceCommitResult.data.commit.tree;
 
+  // Resolve the base tip too: readFileAtCommit feeds git.readBlob, whose `oid`
+  // parameter does NOT resolve ref names (a ref string fails with NotFoundError,
+  // silently dropping the file from the diff) — so both sides read at their
+  // resolved tip commit, pinned to the same clone the file listing came from.
+  const baseOidResult = await fromPromise(git.resolveRef({ fs: baseFs, dir: DIR, ref: branch }));
+  if (!baseOidResult.success) {
+    return err(new AppError("Failed to resolve base tip for diff", "GIT_ERROR", 500));
+  }
+  const baseOid = baseOidResult.data;
+
   const [workspaceFilesResult, baseFilesResult] = await Promise.all([
-    listFilesAtCommit(workspaceFs, "main", logger),
-    listFilesAtCommit(baseFs, "main", logger),
+    listFilesAtCommit(workspaceFs, branch, logger),
+    listFilesAtCommit(baseFs, branch, logger),
   ]);
 
   if (!workspaceFilesResult.success) return err(workspaceFilesResult.error);
@@ -2372,13 +3369,13 @@ export async function getDiffBetweenRepos(
 
   await Promise.all([
     ...baseFiles.map(async ([path]) => {
-      const contentResult = await readFileAtCommit(baseFs, "main", path, logger);
+      const contentResult = await readFileAtCommit(baseFs, baseOid, path, logger);
       if (contentResult.success) {
         baseContent.set(path, contentResult.data);
       }
     }),
     ...workspaceFiles.map(async ([path]) => {
-      const contentResult = await readFileAtCommit(workspaceFs, "main", path, logger);
+      const contentResult = await readFileAtCommit(workspaceFs, workspaceOid, path, logger);
       if (contentResult.success) {
         workspaceContent.set(path, contentResult.data);
       }
@@ -2412,6 +3409,55 @@ export function buildUnifiedDiff(
   }
 
   return diffParts.join("\n");
+}
+
+/**
+ * Build a unified diff of what a manual conflict resolution would change
+ * relative to the project's current default-branch tip, without pushing
+ * anything. This lets the resolution's content be run through the same
+ * evaluator pipeline a normal Change goes through (buildEvaluators +
+ * runEvaluation in ../services/change-flow) BEFORE resolveConflict commits it.
+ *
+ * Only reads the resolution's own file paths from project HEAD, not the whole
+ * tree — every other path is untouched by a manual resolution and would
+ * appear nowhere in the diff, so there is nothing worth spending a full-repo
+ * read on. A resolution path absent from HEAD reads as a new-file addition.
+ *
+ * Returns the resolved base commit sha alongside the diff so callers can
+ * record what revision the evaluation ran against (provenance) — the same
+ * role `evaluatedSha` plays for a Change.
+ */
+export async function buildManualResolutionDiff(
+  projectRemote: string,
+  projectToken: string,
+  resolutions: Array<{ file: string; content: string }>,
+  branch: string,
+  logger: Logger,
+): Promise<Result<{ diff: string; baseSha: string }, AppError>> {
+  const cloneResult = await cloneRepo(projectRemote, projectToken, logger, { ref: branch });
+  if (!cloneResult.success) return err(cloneResult.error);
+  const { fs, dir } = cloneResult.data;
+
+  const baseOidResult = await fromPromise(git.resolveRef({ fs, dir, ref: branch }));
+  if (!baseOidResult.success) {
+    return err(
+      new AppError("Failed to resolve project HEAD for resolution diff", "GIT_ERROR", 500),
+    );
+  }
+  const baseOid = baseOidResult.data;
+
+  const baseContent = new Map<string, string>();
+  const resolvedContent = new Map<string, string>();
+  for (const { file, content } of resolutions) {
+    const readResult = await readFileAtCommit(fs, baseOid, file, logger);
+    // A read failure (most commonly: the file doesn't exist on HEAD yet) is
+    // treated as "no base content" so buildUnifiedDiff renders it as an
+    // addition, matching getDiffBetweenRepos' handling of the same case.
+    if (readResult.success) baseContent.set(file, readResult.data);
+    resolvedContent.set(file, content);
+  }
+
+  return ok({ diff: buildUnifiedDiff(baseContent, resolvedContent), baseSha: baseOid });
 }
 
 /** A tag as listed from a cloned repo (see `collectRepoTags`). */
@@ -2525,6 +3571,20 @@ export async function collectRepoTags(
   return entries;
 }
 
+/** Result of {@link listRepoTags}. */
+export interface ListRepoTagsResult {
+  /** The tags actually listed — capped at {@link MAX_TAGS} when the remote
+   * advertises more (see `truncated`). */
+  tags: RepoTagEntry[];
+  /** True when the remote advertised more than {@link MAX_TAGS} tags and the
+   * fetch was capped — reported explicitly, never silent, so callers/UI can
+   * show it rather than presenting a quietly-partial list as complete. */
+  truncated: boolean;
+  /** Total tags the remote advertised, independent of how many were fetched.
+   * Equal to `tags.length` unless `truncated` is true. */
+  totalTagCount: number;
+}
+
 /**
  * Lists the tags in a repository, including entries whose targets cannot be
  * resolved from the cloned history.
@@ -2535,16 +3595,21 @@ export async function collectRepoTags(
  * erroring would make the whole listing unavailable because of one old tag.
  * See `collectRepoTags`.
  *
+ * The underlying fetch is tags-only (per-tag `singleBranch` fetches, never a
+ * whole-branches pull) and capped at {@link MAX_TAGS}; a remote with more tags
+ * than that comes back with `truncated: true` rather than silently dropping
+ * the excess. See the `cloneRepo` `includeTags` option.
+ *
  * @param remote - The repository's remote URL
  * @param token - The authentication token for the remote
- * @returns The repository's tag entries
+ * @returns The repository's tag entries, plus truncation info
  */
 export async function listRepoTags(
   remote: string,
   token: string,
   logger: Logger,
   httpClient: HttpClient = http,
-): Promise<Result<RepoTagEntry[], AppError>> {
+): Promise<Result<ListRepoTagsResult, AppError>> {
   logger.debug("Listing repo tags", { remote });
 
   const cloneResult = await cloneRepo(remote, token, logger, { includeTags: true }, httpClient);
@@ -2558,6 +3623,20 @@ export async function listRepoTags(
     return err(new ExternalServiceError("Git", "Failed to list tags", collected.error));
   }
 
-  logger.info("Successfully listed repo tags", { remote, tagCount: collected.data.length });
-  return ok(collected.data);
+  const truncated = cloneResult.data.tagsTruncated ?? false;
+  const totalTagCount = cloneResult.data.totalTagCount ?? collected.data.length;
+  if (truncated) {
+    logger.warn("Tag listing truncated at MAX_TAGS", {
+      remote,
+      totalTagCount,
+      returnedTagCount: collected.data.length,
+    });
+  }
+
+  logger.info("Successfully listed repo tags", {
+    remote,
+    tagCount: collected.data.length,
+    truncated,
+  });
+  return ok({ tags: collected.data, truncated, totalTagCount });
 }

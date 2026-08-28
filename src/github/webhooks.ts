@@ -6,11 +6,12 @@
 import { Hono } from "hono";
 import { createChange, getChangeByGitHubBranch, updateChangeStatus } from "../storage/changes";
 import { getProjectByGitHubRepo } from "../storage/github-bridge";
-import { createImportJob } from "../storage/imports";
+import { createImportJob, getLatestImportDepth } from "../storage/imports";
 import { getWorkspace } from "../storage/state";
 import { getSyncStatus, setSyncInProgress } from "../storage/sync";
-import type { Env } from "../types";
+import { type Env, projectDefaultBranch } from "../types";
 import { type Logger, createLogger } from "../utils/logger";
+import { DEFAULT_CLONE_DEPTH } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -88,10 +89,18 @@ async function handlePush(
 
   const project = projectResult.data;
 
-  if (branch !== project.sourceDefaultBranch) {
+  // Resolve once, up front: the guard and the queued job must agree on which
+  // branch is "default". Comparing against the raw sourceDefaultBranch while
+  // queueing projectDefaultBranch(project) meant a project whose branch comes
+  // from githubDefaultBranch — an import that never set sourceDefaultBranch —
+  // had every push to its real default rejected here, so webhook-triggered
+  // sync never ran for it.
+  const sourceBranch = projectDefaultBranch(project);
+
+  if (branch !== sourceBranch) {
     logger.debug("Push to non-default branch, skipping sync", {
       branch,
-      defaultBranch: project.sourceDefaultBranch,
+      defaultBranch: sourceBranch,
     });
     return;
   }
@@ -115,8 +124,19 @@ async function handlePush(
   }
 
   const importId = crypto.randomUUID();
-  const sourceBranch = project.sourceDefaultBranch ?? "main";
   const sourceUrl = project.sourceUrl ?? project.remote;
+  // The depth the project was actually imported at, replacing a hardcoded 10.
+  // Read before the enqueue (and before the job below is created, which would
+  // otherwise become the "most recent" job this reads back).
+  //
+  // Reaches the FALLBACK FULL IMPORT only — the branch `syncOrImportProject`
+  // takes for a project with no parseable Artifacts remote. The incremental
+  // fetch every established project takes ignores this and uses its own
+  // SYNC_FETCH_DEPTH window. Still worth carrying: the fallback re-imports the
+  // whole project, so a wrong depth there is exactly where it is costly.
+  const syncDepth =
+    (await getLatestImportDepth(env.DB, project.namespace, project.slug, logger)) ??
+    DEFAULT_CLONE_DEPTH;
 
   // Enqueue FIRST — only write state flags after a successful send().
   const { queueSyncJob } = await import("../queue/import-queue");
@@ -127,7 +147,7 @@ async function handlePush(
     slug: project.slug,
     githubUrl: sourceUrl,
     branch: sourceBranch,
-    depth: 10,
+    depth: syncDepth,
     trigger: "webhook",
   });
 
@@ -142,6 +162,7 @@ async function handlePush(
       slug: project.slug,
       sourceUrl,
       branch: sourceBranch,
+      depth: syncDepth,
     },
     logger,
   );
@@ -218,10 +239,20 @@ export async function handlePullRequest(
         return;
       }
 
+      // Record the change author so the merge gate can exclude their own
+      // approval (SA-2). The acting identity is not in the webhook payload —
+      // GitHub names the PR author, who need not be a Stratum user — but the
+      // workspace this PR tracks was created in Stratum by someone, and
+      // WorkspaceEntry.createdByUserId is the same "user, or an agent's owner"
+      // principal the API path records. Without it these changes carry a NULL
+      // author, no approval is excluded, and the self-approval bypass this
+      // guard exists to close stays open on every webhook-created change.
+      const workspaceAuthor = workspaceResult.data.createdByUserId;
       const createResult = await createChange(env.DB, logger, {
         project: project.id,
         projectId: project.id,
         workspace: pr.head.ref,
+        ...(workspaceAuthor !== undefined ? { createdByUserId: workspaceAuthor } : {}),
       });
       if (!createResult.success) {
         logger.error("Failed to create Change from PR webhook", createResult.error, { prNumber });

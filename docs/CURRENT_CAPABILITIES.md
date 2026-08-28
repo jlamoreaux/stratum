@@ -1,7 +1,8 @@
 # Stratum Current Capabilities
 
-Last updated: 2026-06-11 — reflects completion of the master-plan feature roadmap
-(Phases 0–3 plus the code-level Phase 4 hardening items).
+Last updated: 2026-08-25 — reflects completion of the master-plan feature roadmap
+(Phases 0–3 plus the code-level Phase 4 hardening items), plus the Git LFS
+limitation recorded below.
 
 ## Core platform
 
@@ -80,3 +81,56 @@ Last updated: 2026-06-11 — reflects completion of the master-plan feature road
   along with the reachable history of a rotating slice of repos (coverage rotates
   across runs under a per-run cap), with a tested restore path
   (`docs/runbooks/backup-restore.md`).
+- Git submodules are not supported (#258). A gitlink tree entry (mode 160000)
+  at any depth, or a root-level `.gitmodules` file, is detected and rejected at
+  the three points repo content enters Stratum — GitHub import, a gated push,
+  and REST change creation (the last two share one scan, in the diff the change
+  gate computes). The rejection carries the `SUBMODULES_UNSUPPORTED` code
+  internally, but each entry point reports it in its own transport's terms: a
+  gated push answers 200 with a per-ref `ng` reason and a permanent
+  `push rejected` message, `POST /api/projects/{name}/changes` answers 400 with
+  the explanatory message, and an import records the queue job as `failed`
+  rather than answering any request at all. Change creation fails
+  closed unconditionally: submodule content is refused, and so is a change
+  whose scan could not run — that is the gate that keeps submodule content out
+  of a server-side merge, which would otherwise corrupt it silently
+  (isomorphic-git's checkout drops a gitlink from the materialized working
+  tree). The import guard is deliberately best-effort: if the imported tree
+  cannot be read at all — the read token cannot be minted, the clone fails, or
+  the scan itself errors — the import proceeds with a warning and is left
+  unscanned rather than failing a healthy repo on an infrastructure hiccup, so
+  a completed import is not on its own proof the repo is submodule-free.
+  Recursive submodule clone/browse is future work; see
+  `user-guide/importing.md#unsupported-content`.
+
+## Git LFS: not supported
+
+Git LFS is entirely absent from Stratum:
+
+- The git smart-HTTP router (`src/routes/git-http.ts`) exposes only
+  `info/refs`, `git-upload-pack`, and `git-receive-pack` for projects and
+  workspaces. There is **no `/info/lfs` route and no `objects/batch`
+  endpoint**, so an LFS-enabled clone or push fails when the `git lfs` client
+  calls the batch API — the request falls through to the app's 404 handler
+  (`{"error": "Not found"}`).
+- Nothing server-side understands LFS pointer files: browse and diff render a
+  pointer file as its small text content, and imports bring over pointers,
+  not the binaries behind them.
+- Git push request bodies are capped at **50 MB**
+  (`MAX_GIT_BODY_BYTES = 50 * 1024 * 1024` in `src/routes/git-http.ts`), so
+  committing large binaries directly instead of via LFS is also blocked
+  beyond that size.
+
+Together these mean large-binary workflows are not viable on Stratum today.
+Practical guidance:
+
+- Keep binaries out of Stratum-hosted repos (generated assets, models, media
+  belong in object storage referenced by URL).
+- Keep LFS-dependent repos on GitHub and use **layer mode** (bidirectional
+  sync) so agent work still flows through Stratum's gates.
+
+Supporting LFS would require, at minimum: implementing the LFS batch API
+(`POST <repo>.git/info/lfs/objects/batch`) plus the transfer endpoints, an R2
+object store for LFS content addressed by OID, and pointer-file awareness in
+the browse/diff surfaces so pointers resolve to their objects. This is
+tracked as future work in `REMAINING_WORK.md`.

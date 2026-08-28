@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import { type EventActor, emitEvent } from "../queue/events";
 import { createChangeWithEvaluation, createWorkspaceFork } from "../services/change-flow";
 import { getAgentByToken } from "../storage/agents";
+import { updateChangeStatus } from "../storage/changes";
 import { isTargetDeleting } from "../storage/deletion";
 import {
   artifactsRepoNameFromRemote,
@@ -9,11 +11,14 @@ import {
 } from "../storage/git-ops";
 import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
 import { getUser, getUserByToken } from "../storage/users";
-import type { Env, ProjectEntry } from "../types";
+import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
 import { getWaitUntil } from "../utils/execution-ctx";
 import {
+  ZERO_OID,
   buildReportStatus,
+  checkWorkspacePushPolicy,
   parseReceivePackRequest,
   parseReportStatus,
   wantsSideband,
@@ -35,10 +40,12 @@ import { createLogger } from "../utils/logger";
  *    tag pushes to the project remote are refused with tag-specific guidance
  *    (#182 — the change gate cannot represent a tag).
  *  - Workspace URL `/@ns/slug/workspaces/<ws>.git` — clone/fetch (read) AND
- *    `git push` (write), proxied verbatim to the workspace's Artifacts fork.
- *    The client clones the workspace, so ref/old-oid semantics line up and
- *    Artifacts' own report-status is the truthful outcome — no parsing or
- *    synthesis needed here.
+ *    `git push` (write), proxied to the workspace's Artifacts fork. The push's
+ *    command list is parsed first and held to a ref policy (S3, #130): only
+ *    the fork's working branch may be updated and ref deletion is refused;
+ *    a passing pack is then forwarded unmodified. The client clones the
+ *    workspace, so ref/old-oid semantics line up and Artifacts' own
+ *    report-status is the truthful outcome for forwarded pushes.
  *
  * The router authenticates with the existing API-key system over HTTP Basic,
  * authorizes the caller, mints a short-lived Cloudflare Artifacts token (read or
@@ -334,7 +341,7 @@ async function authorizeWorkspace(
   c: { req: { header(name: string): string | undefined; param(name: string): string }; env: Env },
   scope: "read" | "write",
   logger: ReturnType<typeof createLogger>,
-): Promise<{ remote: string } | Response> {
+): Promise<{ remote: string; workspace: WorkspaceEntry; project: ProjectEntry } | Response> {
   const namespace = c.req.param("namespace");
   const slug = normalizeSlug(c.req.param("slug"));
   const workspaceName = normalizeSlug(c.req.param("workspace"));
@@ -396,7 +403,7 @@ async function authorizeWorkspace(
     return gitUnavailable("workspace");
   }
 
-  return { remote: workspace.remote };
+  return { remote: workspace.remote, workspace, project };
 }
 
 /**
@@ -438,6 +445,117 @@ async function readCappedBody(
   return buffer.buffer;
 }
 
+// The command section of a receive-pack request is one small pkt-line per ref.
+// When the body arrives compressed, only this bounded prefix is inflated to
+// read the commands (the pack that follows is never inflated), so a
+// decompression bomb cannot balloon memory here.
+const MAX_COMMAND_SECTION_BYTES = 1024 * 1024;
+
+/**
+ * The formats DecompressionStream accepts here. Declared locally: the Workers
+ * type surface does not export a name for it.
+ */
+type DecompressFormat = "gzip" | "deflate" | "deflate-raw";
+
+/**
+ * The bytes the receive-pack command list is parsed from: the body itself when
+ * it is plain, or a bounded inflated prefix when the client sent
+ * `Content-Encoding: gzip|deflate` (git can compress request bodies; the proxy
+ * forwards them upstream still compressed). Returns `null` when the body
+ * cannot be inspected (unknown encoding, corrupt stream) — the caller MUST
+ * fail closed, because forwarding an uninspected body would let a compressed
+ * command list bypass the ref policy.
+ */
+async function commandSectionBytes(
+  body: ArrayBuffer,
+  contentEncoding: string | undefined,
+): Promise<Uint8Array | null> {
+  const encoding = contentEncoding?.trim().toLowerCase();
+  // Cap the uncompressed path too. The compressed branch below stops inflating
+  // at MAX_COMMAND_SECTION_BYTES, so returning the whole body here left the
+  // budget enforced for gzip/deflate senders and unenforced for everyone else.
+  // Truncation is safe for the same reason it is safe there: the command
+  // section ends at the flush-pkt, the parser reads no further, and the
+  // ORIGINAL bytes are what gets forwarded upstream — this view is inspection
+  // only.
+  if (!encoding || encoding === "identity") {
+    return new Uint8Array(body, 0, Math.min(body.byteLength, MAX_COMMAND_SECTION_BYTES));
+  }
+  if (encoding !== "gzip" && encoding !== "x-gzip" && encoding !== "deflate") return null;
+
+  // `Content-Encoding: deflate` is defined as zlib-wrapped (RFC 9110), but real
+  // clients also send RAW deflate under that name. DecompressionStream("deflate")
+  // rejects the raw form outright, and this helper fails closed, so a legitimate
+  // push from such a client was refused as unreadable. Try the wrapped format
+  // first (the spec-correct one), then the raw one.
+  const formats: DecompressFormat[] =
+    encoding === "deflate" ? ["deflate", "deflate-raw"] : ["gzip"];
+  for (const format of formats) {
+    const inflated = await inflateBounded(body, format);
+    if (inflated) return inflated;
+  }
+  return null;
+}
+
+/**
+ * Inflate at most `MAX_COMMAND_SECTION_BYTES` of `body` under one format, or
+ * `null` if the stream is not that format. Each attempt builds its own stream:
+ * a ReadableStream is single-use, so a retry cannot reuse the failed one.
+ */
+async function inflateBounded(
+  body: ArrayBuffer,
+  format: DecompressFormat,
+): Promise<Uint8Array | null> {
+  try {
+    // A ReadableStream over the existing buffer, not `new Blob([body]).stream()`
+    // — the Blob constructor COPIES, so inspecting a 50 MiB push cost a second
+    // 50 MiB. This route exists to bound request resource use; allocating a
+    // full duplicate to enforce that bound defeats the point.
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(body));
+        controller.close();
+      },
+    });
+    const stream = source.pipeThrough(new DecompressionStream(format));
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (total < MAX_COMMAND_SECTION_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+    // Stop inflating once the (generous) command-section budget is read; the
+    // parser only consumes up to the flush-pkt anyway.
+    await reader.cancel().catch(() => {});
+    const out = new Uint8Array(Math.min(total, MAX_COMMAND_SECTION_BYTES));
+    let offset = 0;
+    for (const chunk of chunks) {
+      if (offset >= out.byteLength) break;
+      // Advance by what was actually copied, not the chunk's full length. The
+      // two only differ on the final, truncated chunk — after which the loop
+      // exits — so the emitted bytes were already correct either way. Keeping
+      // `offset` equal to "bytes written" makes that an invariant rather than
+      // something that happens to hold because of the break.
+      const copied = Math.min(chunk.byteLength, out.byteLength - offset);
+      out.set(chunk.subarray(0, copied), offset);
+      offset += copied;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function malformedPush(message: string): Response {
+  return new Response(`${message}\n`, {
+    status: 400,
+    headers: { "Content-Type": "text/plain" },
+  });
+}
+
 export const gitHttpRouter = new Hono<{ Bindings: Env }>();
 
 // GET /@:namespace/:slug.git/info/refs?service=git-(upload|receive)-pack
@@ -473,8 +591,6 @@ gitHttpRouter.post("/:namespace/:slug/git-upload-pack", async (c) => {
   const upstreamUrl = `${result.project.remote}/${UPLOAD_PACK}`;
   return proxyUpstream(c, result.project.remote, "read", upstreamUrl, "POST", body, logger);
 });
-
-const ZERO_OID = "0".repeat(40);
 
 /** The report-status Content-Type git expects on the receive-pack reply. */
 function receivePackResult(body: Uint8Array): Response {
@@ -543,10 +659,12 @@ async function forwardPackToWorkspace(
 }
 
 /**
- * Best-effort teardown of the server-managed fork when a gated push dies
- * before its change exists: nothing references the workspace yet, so leaving
- * it would leak an Artifacts repo + KV entry per failed push. Failures are
- * logged with enough coordinates to find the orphan by hand.
+ * Best-effort teardown of the server-managed fork when a gated push ends
+ * without a change anyone can act on -- it died before the change existed, or
+ * the change gate rejected it permanently. Nothing owner-visible depends on
+ * the workspace in either case, so leaving it would leak an Artifacts repo +
+ * KV entry per failed push, once per retry. Failures are logged with enough
+ * coordinates to find the orphan by hand.
  */
 async function cleanupPushWorkspace(
   env: Env,
@@ -577,6 +695,55 @@ async function cleanupPushWorkspace(
   }
 }
 
+/**
+ * Close the change a gated push created after the change gate has rejected it
+ * for good.
+ *
+ * A deterministic rejection (submodule content, #258) is decided AFTER the
+ * change row exists, and no retry can make that change pass -- so leaving it
+ * `open` would put a change in the owner's queue that only ever wastes their
+ * time, and every retried push would add another. It is closed as `rejected`
+ * rather than deleted because the storage layer has no change-delete path and
+ * because the refusal is worth keeping in the audit trail; the accompanying
+ * `change.rejected` event keeps consumers that saw `change.created` from
+ * tracking it as open forever.
+ *
+ * Every failure here is logged and swallowed: the pusher must still get the
+ * protocol-level rejection, which is the part that actually protects them.
+ */
+async function closeRejectedChange(
+  env: Env,
+  logger: ReturnType<typeof createLogger>,
+  args: {
+    changeId: string;
+    projectId: string;
+    projectName: string;
+    reason: string;
+    actor: EventActor;
+  },
+): Promise<void> {
+  const updateResult = await updateChangeStatus(env.DB, logger, args.changeId, "rejected", {
+    evalPassed: false,
+    evalReason: args.reason,
+  });
+  if (!updateResult.success) {
+    logger.warn("Gated push cleanup: could not close the rejected change", {
+      changeId: args.changeId,
+      projectId: args.projectId,
+      error: updateResult.error.message,
+    });
+    return;
+  }
+  await emitEvent(
+    env.DB,
+    env.EVENTS_QUEUE,
+    { type: "change.rejected", project: args.projectName, changeId: args.changeId },
+    args.actor,
+    logger,
+    args.projectId,
+  );
+}
+
 // POST /@:namespace/:slug.git/git-receive-pack — push to the project ref.
 //
 // With GIT_PUSH_GATED_ENABLED, a single-ref push to the project's default
@@ -596,13 +763,15 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   const body = await readCappedBody(c, logger);
   if (body instanceof Response) return body;
 
-  const parsed = parseReceivePackRequest(new Uint8Array(body));
+  const section = await commandSectionBytes(body, c.req.header("Content-Encoding"));
+  if (section === null) {
+    logger.warn("Unreadable receive-pack request body (encoding)");
+    return malformedPush("unreadable git-receive-pack request body");
+  }
+  const parsed = parseReceivePackRequest(section);
   if (!parsed.success) {
     logger.warn("Malformed receive-pack request", { error: parsed.error.message });
-    return new Response(`${parsed.error.message}\n`, {
-      status: 400,
-      headers: { "Content-Type": "text/plain" },
-    });
+    return malformedPush(parsed.error.message);
   }
 
   const { commands, capabilities } = parsed.data;
@@ -647,7 +816,7 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   // Same default-branch resolution the merge/sync paths use — a repo imported
   // with a `master` or `trunk` default must gate pushes to THAT ref, not to a
   // literal refs/heads/main it doesn't have.
-  const defaultBranch = project.sourceDefaultBranch || project.githubDefaultBranch || "main";
+  const defaultBranch = projectDefaultBranch(project);
   const defaultRef = `refs/heads/${defaultBranch}`;
   const command = commands[0];
   const isGateablePush =
@@ -737,6 +906,31 @@ gitHttpRouter.post("/:namespace/:slug/git-receive-pack", async (c) => {
   });
   if (!outcome.success) {
     logger.error("Gated push change creation failed", outcome.error);
+    // Submodules (#258) fail closed deterministically -- re-evaluating never
+    // helps, unlike a transient diff/eval hiccup, so this gets its own
+    // permanent-rejection message instead of the generic "re-evaluate it"
+    // guidance below.
+    if (outcome.error.code === "SUBMODULES_UNSUPPORTED") {
+      // The change already exists by the time the scan runs (it is created
+      // before the diff), so refusing without releasing it would leave an open
+      // change, a workspace entry and an Artifacts fork behind on every retry.
+      const rejectedChangeId = outcome.error.context?.changeId;
+      if (typeof rejectedChangeId === "string") {
+        await closeRejectedChange(c.env, logger, {
+          changeId: rejectedChangeId,
+          projectId: project.id,
+          projectName: `${namespace}/${slug}`,
+          reason: outcome.error.message,
+          actor: identity?.agentId
+            ? { type: "agent", id: identity.agentId }
+            : { type: "user", ...(identity?.userId !== undefined ? { id: identity.userId } : {}) },
+        });
+      }
+      await cleanupPushWorkspace(c.env, project.id, forkedName, forkResult.data.remote, logger);
+      return refuseAll(`push rejected: ${outcome.error.message}`, [
+        "Git submodules are not supported. Remove submodules (or flatten them into the repo) and push again.",
+      ]);
+    }
     // Post-creation failures carry the open change's id in the error context;
     // naming it steers the user to re-evaluate rather than open a duplicate.
     const stuckChangeId = outcome.error.context?.changeId;
@@ -812,6 +1006,57 @@ gitHttpRouter.post("/:namespace/:slug/workspaces/:workspace/git-receive-pack", a
 
   const body = await readCappedBody(c, logger);
   if (body instanceof Response) return body;
+
+  // S3 (#130): inspect the client's ref-update commands BEFORE anything is
+  // forwarded — the proxy previously relayed the body verbatim, letting the
+  // fork's owner delete refs or push arbitrary refs/*. An empty body carries
+  // no commands (nothing to police) and is proxied as before; anything else
+  // must parse, pass the ref policy, or be refused without touching upstream.
+  if (body.byteLength > 0) {
+    const section = await commandSectionBytes(body, c.req.header("Content-Encoding"));
+    if (section === null) {
+      logger.warn("Unreadable workspace receive-pack body (encoding)");
+      return malformedPush("unreadable git-receive-pack request body");
+    }
+    const parsed = parseReceivePackRequest(section);
+    if (!parsed.success) {
+      logger.warn("Malformed workspace receive-pack request", { error: parsed.error.message });
+      return malformedPush(parsed.error.message);
+    }
+
+    const branch = result.workspace.branchName || result.workspace.name;
+    // The fork's working branch is the PROJECT's default, not necessarily
+    // `main` — an imported project keeps its source default (master/trunk/...).
+    const verdict = checkWorkspacePushPolicy(
+      parsed.data.commands,
+      branch,
+      projectDefaultBranch(result.project),
+    );
+    if (!verdict.allowed) {
+      logger.warn("Workspace push refused by ref policy", {
+        ref: verdict.ref,
+        reason: verdict.reason,
+      });
+      // In-protocol refusal (same shape as the gated project path): per-ref ng
+      // so `git push` fails legibly, and the pack is never forwarded.
+      return receivePackResult(
+        buildReportStatus({
+          unpack: "ok",
+          results: parsed.data.commands.map((cmd) => ({
+            ref: cmd.ref,
+            ok: false,
+            reason: verdict.reason,
+          })),
+          messages: [
+            `Refused: ${verdict.reason} (ref ${verdict.ref}).`,
+            "A workspace remote accepts updates to its working branch only.",
+          ],
+          sideband: wantsSideband(parsed.data.capabilities),
+        }),
+      );
+    }
+  }
+
   const upstreamUrl = `${result.remote}/${RECEIVE_PACK}`;
   return proxyUpstream(c, result.remote, "write", upstreamUrl, "POST", body, logger);
 });

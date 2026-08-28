@@ -9,6 +9,7 @@ import { consumeMagicLink, createMagicLink } from "../storage/magic-links";
 import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername } from "../storage/users";
 import type { Env } from "../types";
+import { hashToken } from "../utils/crypto";
 import { escapeHtml } from "../utils/html";
 import { type Logger, createLogger } from "../utils/logger";
 import { validateUsername } from "../utils/username-validation";
@@ -18,6 +19,9 @@ const app = new Hono<{ Bindings: Env }>();
 
 // Rate limiting constants
 const MAGIC_LINK_RATE_LIMIT = 5; // max 5 requests per hour per email
+// Per-IP cap so one client can't mail links to unlimited addresses (the
+// per-email limit alone leaves a mail-bombing / send-cost amplification vector).
+const MAGIC_LINK_IP_RATE_LIMIT = 20; // max 20 magic-link sends per hour per IP
 const MAGIC_LINK_RATE_WINDOW = 60 * 60; // 1 hour in seconds
 
 // Generate a secure random token (32 bytes = 64 hex chars)
@@ -27,11 +31,80 @@ function generateSecureToken(): string {
   return Array.from(array, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-// Get rate limit key for an email (uses hashed email for privacy)
-function getRateLimitKey(email: string): string {
+/**
+ * Rate-limit bucket key for an email address, in the current hour window.
+ *
+ * SHA-256 rather than hashEmail(): that helper is a 32-bit Java-style string
+ * hash, and collisions in it are constructible rather than merely possible —
+ * a collider for a chosen address turns up within a few thousand candidates
+ * ("cg1@acme.com" collides with "ceo@acme.com"). Sharing a bucket with an
+ * address the attacker picks is a targeted lockout: five POSTs to
+ * /auth/send-login naming the collider exhaust the victim's five sends for the
+ * hour. Those five requests cost nothing and send no mail, because the counter
+ * is committed even when no such user exists — deliberately, so the endpoint is
+ * not an account-enumeration oracle.
+ *
+ * The digest is unsalted, which makes it a collision-resistant bucket key and
+ * not a secret: anyone holding a candidate address can confirm whether it maps
+ * here. Salting would need a key that is always configured, and every secret on
+ * Env is optional today. hashEmail() stays for log lines, where a short opaque
+ * token is all that is wanted and a collision costs nothing.
+ *
+ * Changing the key shape resets in-flight hourly counters once, on deploy.
+ */
+async function getRateLimitKey(email: string): Promise<string> {
   const hour = Math.floor(Date.now() / 1000 / MAGIC_LINK_RATE_WINDOW);
-  const emailHash = hashEmail(email);
+  const emailHash = await hashToken(email);
   return `magic_link_rate:${emailHash}:${hour}`;
+}
+
+function getIpRateLimitKey(ip: string): string {
+  const hour = Math.floor(Date.now() / 1000 / MAGIC_LINK_RATE_WINDOW);
+  return `magic_link_ip_rate:${ip}:${hour}`;
+}
+
+/**
+ * Enforce both magic-link caps: per-email AND per-IP. The per-email limit alone
+ * lets a single client mail links to unlimited addresses (one per email), so we
+ * also bound sends per source IP. Reads fail open on a KV error (matching the
+ * historical behavior — an auth path must not lock users out on a KV blip); both
+ * caps re-apply on the next request once KV recovers. Returns `blocked`, plus a
+ * `commit()` the caller invokes once it decides to actually send, which bumps
+ * both counters together.
+ */
+async function checkMagicLinkRateLimits(
+  c: Context<{ Bindings: Env }>,
+  email: string,
+  logger: Logger,
+): Promise<{ blocked: boolean; commit: () => Promise<void> }> {
+  const emailKey = await getRateLimitKey(email);
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const ipKey = getIpRateLimitKey(ip);
+  let emailCount = 0;
+  let ipCount = 0;
+  try {
+    emailCount = Number.parseInt((await c.env.STATE.get(emailKey)) ?? "0");
+    ipCount = Number.parseInt((await c.env.STATE.get(ipKey)) ?? "0");
+  } catch (err) {
+    // Fail open means fail open for *both* caps. These are assigned in sequence,
+    // so a throw on the second read would otherwise leave a populated count from
+    // the first standing against a zero from the second — and an exhausted email
+    // bucket would block the request on a transient KV blip, which is precisely
+    // the lockout this contract exists to prevent. Reset both.
+    emailCount = 0;
+    ipCount = 0;
+    logger.warn("Failed to read magic-link rate limits, allowing request", { error: err });
+  }
+  const blocked = emailCount >= MAGIC_LINK_RATE_LIMIT || ipCount >= MAGIC_LINK_IP_RATE_LIMIT;
+  const commit = async () => {
+    await c.env.STATE.put(emailKey, String(emailCount + 1), {
+      expirationTtl: MAGIC_LINK_RATE_WINDOW,
+    });
+    await c.env.STATE.put(ipKey, String(ipCount + 1), {
+      expirationTtl: MAGIC_LINK_RATE_WINDOW,
+    });
+  };
+  return { blocked, commit };
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -161,25 +234,14 @@ app.post("/send-signup", async (c) => {
     return emailAuthRedirect(c, "error", "username_taken", "/auth/signup");
   }
 
-  // Check rate limit (fail open if KV fails)
-  const rateLimitKey = getRateLimitKey(email);
-  let currentCount = 0;
-  try {
-    currentCount = Number.parseInt((await c.env.STATE.get(rateLimitKey)) ?? "0");
-  } catch (err) {
-    logger.warn("Failed to check rate limit, allowing request", { emailHash, error: err });
-  }
-
-  if (currentCount >= MAGIC_LINK_RATE_LIMIT) {
+  const rateLimit = await checkMagicLinkRateLimits(c, email, logger);
+  if (rateLimit.blocked) {
     logger.warn("Magic link rate limit exceeded", { emailHash });
     return emailAuthRedirect(c, "error", "rate_limited", "/auth/signup");
   }
 
   try {
-    // Increment rate limit counter
-    await c.env.STATE.put(rateLimitKey, String(currentCount + 1), {
-      expirationTtl: MAGIC_LINK_RATE_WINDOW,
-    });
+    await rateLimit.commit();
 
     // Generate secure magic link token
     const token = generateSecureToken();
@@ -263,25 +325,14 @@ app.post("/send-login", async (c) => {
   // send-only-for-real-accounts branch isn't a cheap oracle.
   const existingUser = await getUserByEmail(c.env.DB, email, logger);
 
-  // Check rate limit (fail open if KV fails)
-  const rateLimitKey = getRateLimitKey(email);
-  let currentCount = 0;
-  try {
-    currentCount = Number.parseInt((await c.env.STATE.get(rateLimitKey)) ?? "0");
-  } catch (err) {
-    logger.warn("Failed to check rate limit, allowing request", { emailHash, error: err });
-  }
-
-  if (currentCount >= MAGIC_LINK_RATE_LIMIT) {
+  const rateLimit = await checkMagicLinkRateLimits(c, email, logger);
+  if (rateLimit.blocked) {
     logger.warn("Magic link rate limit exceeded", { emailHash });
     return emailAuthRedirect(c, "error", "rate_limited", "/auth/login");
   }
 
   try {
-    // Increment rate limit counter
-    await c.env.STATE.put(rateLimitKey, String(currentCount + 1), {
-      expirationTtl: MAGIC_LINK_RATE_WINDOW,
-    });
+    await rateLimit.commit();
 
     if (existingUser.success) {
       // Generate secure magic link token
@@ -363,25 +414,14 @@ app.post("/send", async (c) => {
     return emailAuthRedirect(c, "error", "auth_config_incomplete");
   }
 
-  // Check rate limit (fail open if KV fails)
-  const rateLimitKey = getRateLimitKey(email);
-  let currentCount = 0;
-  try {
-    currentCount = Number.parseInt((await c.env.STATE.get(rateLimitKey)) ?? "0");
-  } catch (err) {
-    logger.warn("Failed to check rate limit, allowing request", { emailHash, error: err });
-  }
-
-  if (currentCount >= MAGIC_LINK_RATE_LIMIT) {
+  const rateLimit = await checkMagicLinkRateLimits(c, email, logger);
+  if (rateLimit.blocked) {
     logger.warn("Magic link rate limit exceeded", { emailHash });
     return emailAuthRedirect(c, "error", "rate_limited");
   }
 
   try {
-    // Increment rate limit counter
-    await c.env.STATE.put(rateLimitKey, String(currentCount + 1), {
-      expirationTtl: MAGIC_LINK_RATE_WINDOW,
-    });
+    await rateLimit.commit();
 
     // Check if user exists to determine intent
     const existingUser = await getUserByEmail(c.env.DB, email, logger);

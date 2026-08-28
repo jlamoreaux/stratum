@@ -1,0 +1,13 @@
+-- Persist the clone depth an import job ran under (#279).
+--
+-- Without this column, retry, re-queue and both sync paths rebuild the job
+-- from the stored row and re-derive a hardcoded DEFAULT_CLONE_DEPTH, silently
+-- turning a deliberate full-history import into a shallow one at the first
+-- transient failure.
+--
+-- Nullable with no default, deliberately: 0 is a MEANINGFUL value meaning
+-- "full history", so NULL (never specified -> fall back to
+-- DEFAULT_CLONE_DEPTH) has to stay distinguishable from it. A
+-- `NOT NULL DEFAULT 0` column would read every pre-existing row as a
+-- full-history request.
+ALTER TABLE import_jobs ADD COLUMN depth INTEGER;

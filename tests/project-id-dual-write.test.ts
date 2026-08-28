@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createChange } from "../src/storage/changes";
+import { createChange, getChange, updateChangeStatus } from "../src/storage/changes";
 import { recordCosts } from "../src/storage/costs";
 import { insertEvent } from "../src/storage/events";
 import { createIssue } from "../src/storage/issues";
@@ -93,6 +93,69 @@ describe("project_id dual-write", () => {
     if (!result.success) return;
     expect(result.data.projectId).toBeUndefined();
     expect(boundValue(captures[0], "project_id")).toBeNull();
+  });
+
+  it("createChange persists created_by_user_id when provided and round-trips it (SA-2)", async () => {
+    const { db, captures } = makeCapturingD1();
+    const result = await createChange(db, mockLogger, {
+      project: "api",
+      workspace: "ws-1",
+      createdByUserId: "user_author",
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.createdByUserId).toBe("user_author");
+    expect(boundValue(captures[0], "created_by_user_id")).toBe("user_author");
+  });
+
+  it("createChange binds NULL created_by_user_id when omitted", async () => {
+    const { db, captures } = makeCapturingD1();
+    const result = await createChange(db, mockLogger, { project: "api", workspace: "ws-1" });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.createdByUserId).toBeUndefined();
+    expect(boundValue(captures[0], "created_by_user_id")).toBeNull();
+  });
+
+  it("getChange hydrates createdByUserId from the row (SA-2)", async () => {
+    const row = {
+      id: "chg_1",
+      project: "api",
+      project_id: null,
+      workspace: "ws-1",
+      status: "open",
+      agent_id: null,
+      eval_score: null,
+      eval_passed: null,
+      eval_reason: null,
+      base_sha: null,
+      evaluated_sha: null,
+      evaluated_tree_oid: null,
+      agent_model: null,
+      agent_prompt_hash: null,
+      workspace_head_sha: null,
+      created_by_user_id: "user_author",
+      created_at: "2026-01-01T00:00:00.000Z",
+      merged_at: null,
+      github_owner: null,
+      github_repo: null,
+      github_branch: null,
+      github_pr_number: null,
+      github_pr_url: null,
+      github_pr_state: null,
+      github_head_sha: null,
+      github_comment_id: null,
+      promoted_at: null,
+      promoted_by: null,
+    };
+    const db = {
+      prepare: () => ({ bind: () => ({ first: async () => row }) }),
+    } as unknown as D1Database;
+
+    const result = await getChange(db, mockLogger, "chg_1");
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.createdByUserId).toBe("user_author");
   });
 
   it("recordProvenance persists project_id and round-trips projectId", async () => {
@@ -208,5 +271,74 @@ describe("project_id dual-write", () => {
     expect(aliceProjectId).toBe("proj_alice");
     expect(bobProjectId).toBe("proj_bob");
     expect(aliceProjectId).not.toBe(bobProjectId);
+  });
+});
+
+describe("touches_protected_config storage (SA-3)", () => {
+  it("getChange hydrates touchesProtectedConfig from the row", async () => {
+    const row = {
+      id: "chg_1",
+      project: "api",
+      project_id: null,
+      workspace: "ws-1",
+      status: "accepted",
+      agent_id: null,
+      eval_score: null,
+      eval_passed: null,
+      eval_reason: null,
+      base_sha: null,
+      evaluated_sha: null,
+      evaluated_tree_oid: null,
+      agent_model: null,
+      agent_prompt_hash: null,
+      workspace_head_sha: null,
+      touches_protected_config: 1,
+      created_at: "2026-01-01T00:00:00.000Z",
+      merged_at: null,
+      github_owner: null,
+      github_repo: null,
+      github_branch: null,
+      github_pr_number: null,
+      github_pr_url: null,
+      github_pr_state: null,
+      github_head_sha: null,
+      github_comment_id: null,
+      promoted_at: null,
+      promoted_by: null,
+    };
+    const db = {
+      prepare: () => ({ bind: () => ({ first: async () => row }) }),
+    } as unknown as D1Database;
+
+    const result = await getChange(db, mockLogger, "chg_1");
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.touchesProtectedConfig).toBe(true);
+  });
+
+  it("updateChangeStatus writes touches_protected_config = 1 when set", async () => {
+    let updateSql = "";
+    let updateBindings: unknown[] = [];
+    const db = {
+      prepare: (sql: string) => ({
+        bind: (...args: unknown[]) => ({
+          first: async () => (/SELECT id FROM changes/.test(sql) ? { id: "chg_1" } : null),
+          run: async () => {
+            if (/UPDATE changes/.test(sql)) {
+              updateSql = sql;
+              updateBindings = args;
+            }
+            return { success: true, meta: {} };
+          },
+        }),
+      }),
+    } as unknown as D1Database;
+
+    const result = await updateChangeStatus(db, mockLogger, "chg_1", "accepted", {
+      touchesProtectedConfig: true,
+    });
+    expect(result.success).toBe(true);
+    expect(updateSql).toContain("touches_protected_config = ?");
+    expect(updateBindings).toContain(1);
   });
 });

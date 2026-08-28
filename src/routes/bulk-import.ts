@@ -4,16 +4,25 @@
  */
 
 import { Hono } from "hono";
-import { detectProvider, isValidRepoUrl, parseRepoUrl } from "../storage/git-providers";
+import {
+  detectProvider,
+  isValidRepoUrl,
+  parseRepoUrl,
+  resolveDefaultBranch,
+} from "../storage/git-providers";
 import { createImportJob, updateImportStatus } from "../storage/imports";
 import { getProjectByPath, setProject } from "../storage/state";
 import type { ArtifactsCreateResult, BulkImportJob, Env, ProjectEntry } from "../types";
 import { getArtifactsRepoName } from "../types";
 import { createLogger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
-import { isValidNamespace, isValidSlug } from "../utils/validation";
+import { isValidNamespace, isValidSlug, validateCloneDepth } from "../utils/validation";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// At most 50 repo entries (enforced below), each a handful of short strings.
+const MAX_BULK_IMPORT_BODY_BYTES = 1024 * 1024;
 
 // In-memory storage for bulk import jobs (should be moved to D1 in production)
 // Key: jobId, Value: BulkImportJob
@@ -29,8 +38,10 @@ interface RepoImportRequest {
   namespace?: string;
   /** Optional custom slug (defaults to repo name) */
   slug?: string;
-  /** Branch to import (defaults to default branch) */
+  /** Branch to import (defaults to the provider's default branch) */
   branch?: string;
+  /** Clone depth: integer 1..1000, or 0 / "full" for full history (default 10) */
+  depth?: number | string;
   /** Visibility setting */
   visibility?: "private" | "public";
 }
@@ -80,7 +91,6 @@ export async function processRepoImport(
   const { url } = request;
   const namespace = request.namespace || getUserNamespace(username);
   const slug = request.slug || extractSlugFromUrl(url) || `repo-${index}`;
-  const branch = request.branch || "main";
   const visibility = request.visibility || "private";
 
   // Update job progress
@@ -116,6 +126,14 @@ export async function processRepoImport(
       return { success: false, error: "Invalid slug", repo: url };
     }
 
+    // Validate clone depth
+    const depthResult = validateCloneDepth(request.depth);
+    if (!depthResult.valid) {
+      job && job.failedRepos++;
+      return { success: false, error: depthResult.error, repo: url };
+    }
+    const depth = depthResult.depth;
+
     // Check if project already exists
     const existingResult = await getProjectByPath(env.STATE, namespace, slug, logger);
     if (existingResult.success) {
@@ -123,6 +141,11 @@ export async function processRepoImport(
       job && job.successfulRepos++;
       return { success: true, repo: url };
     }
+
+    // Resolve the branch to import: an explicitly requested branch wins;
+    // otherwise ask the provider for the repository's real default branch
+    // (fail-open to "main" — see resolveDefaultBranch).
+    const branch = request.branch || (await resolveDefaultBranch(url, env, logger));
 
     // Generate IDs
     const projectId = generateProjectId();
@@ -204,7 +227,8 @@ export async function processRepoImport(
         slug,
         githubUrl: url,
         branch,
-        depth: 10,
+        depth,
+        initiatedBy: ownerId,
       });
     } catch (queueError) {
       const msg = queueError instanceof Error ? queueError.message : String(queueError);
@@ -252,7 +276,12 @@ app.post("/", async (c) => {
   const username = c.get("username");
   if (!userId || !username) return unauthorized("Authentication required");
 
-  const body = await c.req.json<{ repos?: RepoImportRequest[] }>();
+  const body = await readJsonWithLimit<{ repos?: RepoImportRequest[] }>(
+    c,
+    MAX_BULK_IMPORT_BODY_BYTES,
+    logger,
+  );
+  if (body instanceof Response) return body;
 
   if (!body.repos || !Array.isArray(body.repos)) {
     return badRequest("repos must be an array");

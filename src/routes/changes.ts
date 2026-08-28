@@ -1,6 +1,7 @@
 import { type Context, Hono } from "hono";
-import { loadPolicy } from "../evaluation";
+import { diffTouchesProtectedConfig, loadPolicy } from "../evaluation";
 import type { EvalPolicy } from "../evaluation/types";
+import { GitHubClient } from "../github/client";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { runPostMergeCheck } from "../merge/post-merge";
 import { checkMergeProtection } from "../merge/protection";
@@ -13,8 +14,8 @@ import {
   runEvaluation,
 } from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
-import { dismissApprovals } from "../storage/change-reviews";
 import {
+  dismissApprovalsAndUpdateStatus,
   getChange,
   getChangesByIds,
   listChanges,
@@ -37,17 +38,22 @@ import {
   mergeWorkspaceIntoProject,
   parseStagedTree,
   pushBranchToRemote,
+  resolveLocalTip,
+  stagedTreeKey,
+  stagedTreeShaKey,
 } from "../storage/git-ops";
 import { parseRepoUrl } from "../storage/git-providers";
 import { recordProvenance } from "../storage/provenance";
 import { getProject, getWorkspace } from "../storage/state";
 import { getProjectSourceUrl } from "../storage/sync";
 import type { Change, Env, ProjectEntry } from "../types";
+import { projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject } from "../utils/authz";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { newId } from "../utils/ids";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import {
   appError,
   badRequest,
@@ -60,6 +66,13 @@ import {
 } from "../utils/response";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Change-creation body is just a workspace name.
+const MAX_CHANGE_CREATE_BODY_BYTES = 1024 * 1024;
+// changeIds is a list of ids, capped post-parse by MAX_MERGE_BATCH.
+const MAX_MERGE_BATCH_BODY_BYTES = 1024 * 1024;
+// GitHub PR promotion body is a handful of short strings.
+const MAX_GITHUB_PR_BODY_BYTES = 1024 * 1024;
 
 // Merge-policy cache (ADR 004). Reading the policy clones the repo; under a swarm
 // of concurrent merges that per-request clone both throttles and de-coalesces the
@@ -110,7 +123,12 @@ async function loadMergePolicyCached(
       }
       const tok = await freshRepoToken(env.ARTIFACTS, project.remote, "read", logger);
       if (!tok.success) throw new Error(tok.error.message);
-      const loaded = await loadPolicy(project.remote, tok.data, logger);
+      const loaded = await loadPolicy(
+        project.remote,
+        tok.data,
+        logger,
+        projectDefaultBranch(project),
+      );
       if (cacheable) {
         policyCache.set(project.id, { policy: loaded, expires: Date.now() + POLICY_CACHE_TTL_MS });
         await env.STATE.put(policyKvKey(project.id), JSON.stringify(loaded), {
@@ -196,10 +214,11 @@ async function resolveWorkspaceTip(
   env: Env,
   workspaceRemote: string,
   logger: Logger,
+  branch = "main",
 ): Promise<string | null> {
   const readToken = await freshRepoToken(env.ARTIFACTS, workspaceRemote, "read", logger);
   if (!readToken.success) return null;
-  const logResult = await getCommitLog(workspaceRemote, readToken.data, logger, 1);
+  const logResult = await getCommitLog(workspaceRemote, readToken.data, logger, 1, branch);
   return logResult.success ? (logResult.data[0]?.sha ?? null) : null;
 }
 
@@ -238,7 +257,12 @@ app.post("/projects/:name/changes", async (c) => {
     return c.json({ error: "Project is being deleted", code: "TARGET_DELETING" }, 409);
   }
 
-  const body = await c.req.json<{ workspace?: unknown }>().catch(() => ({ workspace: undefined }));
+  const body = await readJsonWithLimit<{ workspace?: unknown }>(
+    c,
+    MAX_CHANGE_CREATE_BODY_BYTES,
+    logger,
+  ).catch(() => ({ workspace: undefined }));
+  if (body instanceof Response) return body;
   if (typeof body.workspace !== "string" || !body.workspace.trim()) {
     return badRequest("workspace is required");
   }
@@ -267,6 +291,7 @@ app.post("/projects/:name/changes", async (c) => {
     actor: {
       ...(userId !== undefined ? { userId } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
+      ...(agentOwnerId !== undefined ? { agentOwnerId } : {}),
     },
     waitUntil: getWaitUntil(c),
   });
@@ -453,6 +478,14 @@ app.post("/changes/:id/merge", async (c) => {
   if (force && !forceAllowed) {
     return badRequest("Force merge is disabled by this project's policy");
   }
+  // A change that edits the merge-protection config can never be force-merged,
+  // even where the policy allows force — force skips the approval gate that keeps
+  // a protection relaxation from landing with no human review (SA-3).
+  if (force && change.touchesProtectedConfig) {
+    return badRequest(
+      "This change modifies the merge-protection config and cannot be force-merged; it requires a human approval",
+    );
+  }
 
   if (!MERGEABLE_STATUSES.includes(change.status) && !force) {
     return badRequest("Change must be approved, accepted, or promoted before merging");
@@ -503,7 +536,12 @@ app.post("/changes/:id/merge", async (c) => {
     if (change.evaluatedSha !== undefined) {
       const workspaceResult = await getWorkspace(c.env.STATE, project.id, change.workspace, logger);
       const currentTip = workspaceResult.success
-        ? await resolveWorkspaceTip(c.env, workspaceResult.data.remote, logger)
+        ? await resolveWorkspaceTip(
+            c.env,
+            workspaceResult.data.remote,
+            logger,
+            projectDefaultBranch(project),
+          )
         : null;
       if (currentTip === null) {
         logger.warn("Could not verify workspace freshness for merge", {
@@ -670,6 +708,7 @@ app.post("/changes/:id/merge", async (c) => {
     logger,
     {
       strategy,
+      branch: projectDefaultBranch(project),
       // Merge the exact evaluated commit (#115) AND assert the tip hasn't moved
       // since evaluation (SEC-2, applies even under force). Both pin to the same
       // evaluated revision; legacy changes without these fields merge the live tip.
@@ -689,6 +728,12 @@ app.post("/changes/:id/merge", async (c) => {
           workspaceName: change.workspace,
           conflictingFiles: mergeResult.error.conflictingFiles,
           detectedAt: new Date().toISOString(),
+          // The Change whose merge attempt hit this conflict. A manual resolution
+          // is part of landing THIS change, not a change of its own — the
+          // resolve route uses it to check the review trail this change already
+          // has (SA-5 follow-up, #260) rather than demanding fresh approvals
+          // with no UI to grant them against resolved bytes.
+          changeId: id,
         }),
         { expirationTtl: 7 * 24 * 60 * 60 },
       );
@@ -840,9 +885,12 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
   if (!(await canWriteProject(c.env.DB, project, userId)))
     return forbidden("Project access denied");
 
-  const body = await c.req
-    .json<{ changeIds?: unknown; force?: unknown }>()
-    .catch(() => ({ changeIds: undefined, force: undefined }));
+  const body = await readJsonWithLimit<{ changeIds?: unknown; force?: unknown }>(
+    c,
+    MAX_MERGE_BATCH_BODY_BYTES,
+    logger,
+  ).catch(() => ({ changeIds: undefined, force: undefined }));
+  if (body instanceof Response) return body;
   if (!Array.isArray(body.changeIds) || body.changeIds.length === 0) {
     return badRequest("changeIds (non-empty array) is required");
   }
@@ -924,7 +972,12 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
       distinctWorkspaces.map(async (ws) => {
         const wsResult = await getWorkspace(c.env.STATE, project.id, ws, logger);
         const tip = wsResult.success
-          ? await resolveWorkspaceTip(c.env, wsResult.data.remote, logger)
+          ? await resolveWorkspaceTip(
+              c.env,
+              wsResult.data.remote,
+              logger,
+              projectDefaultBranch(project),
+            )
           : null;
         tipByWorkspace.set(ws, tip);
       }),
@@ -988,7 +1041,9 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
   const clonePromise = (async () => {
     const token = await freshRepoToken(c.env.ARTIFACTS, project.remote, "write", logger);
     if (!token.success) throw new Error(token.error.message);
-    const cloned = await cloneRepo(project.remote, token.data, logger);
+    const cloned = await cloneRepo(project.remote, token.data, logger, {
+      ref: projectDefaultBranch(project),
+    });
     if (!cloned.success) throw new Error(cloned.error.message);
     return { token: token.data, fs: cloned.data.fs, dir: cloned.data.dir };
   })();
@@ -1033,7 +1088,14 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
       skipped.push({ changeId: m.changeId, reason: "workspace changed since evaluation" });
       continue;
     }
-    items.push({ changeId: m.changeId, baseSha: m.baseSha, staged });
+    items.push({
+      changeId: m.changeId,
+      baseSha: m.baseSha,
+      staged,
+      // #124 defense in depth: re-validated inside batchMergeStagedTrees, right
+      // where the synthetic commit is built (O(1) string compare).
+      ...(evaluatedTreeOid !== undefined ? { expectedTreeOid: evaluatedTreeOid } : {}),
+    });
   }
   if (items.length === 0) {
     clonePromise.catch(() => {});
@@ -1053,6 +1115,7 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
     cloneData.token,
     items,
     logger,
+    projectDefaultBranch(project),
   );
   if (!mergeResult.success) return internalError(mergeResult.error.message);
   const batchMs = Date.now() - tBatch;
@@ -1072,8 +1135,15 @@ app.post("/projects/:name/changes/merge-batch", async (c) => {
     }
     const change = changeById.get(r.changeId);
     landed.push({ changeId: r.changeId, commit: r.commit, change });
-    gcKeys.push(`repos/${project.id}/ws/${change?.workspace}`);
-    if (change?.workspace) mergedWorkspaces.push(change.workspace);
+    if (change?.workspace) {
+      gcKeys.push(stagedTreeKey(project.id, change.workspace));
+      // #124: GC the merged commit's immutable sha-keyed staged-tree copy too.
+      const pinnedSha = change.workspaceHeadSha ?? change.evaluatedSha;
+      if (pinnedSha !== undefined) {
+        gcKeys.push(stagedTreeShaKey(project.id, change.workspace, pinnedSha));
+      }
+      mergedWorkspaces.push(change.workspace);
+    }
     merged.push(r.changeId);
   }
   const mergedAt = new Date().toISOString();
@@ -1275,7 +1345,8 @@ app.post("/changes/:id/evaluate", async (c) => {
   if (!projectReadToken.success) return internalError(projectReadToken.error.message);
   if (!workspaceReadToken.success) return internalError(workspaceReadToken.error.message);
 
-  const policy = await loadPolicy(project.remote, projectReadToken.data, logger);
+  const branch = projectDefaultBranch(project);
+  const policy = await loadPolicy(project.remote, projectReadToken.data, logger, branch);
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -1283,6 +1354,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     workspace.remote,
     workspaceReadToken.data,
     logger,
+    branch,
   );
   if (!diffResult.success) {
     logger.error("Failed to get diff between repos", diffResult.error);
@@ -1326,20 +1398,56 @@ app.post("/changes/:id/evaluate", async (c) => {
     evaluateCostSamples,
   );
 
+  const newStatus = evalResult.passed ? "accepted" : "needs_changes";
+  const statusOpts = {
+    evalScore: evalResult.score,
+    evalPassed: evalResult.passed,
+    evalReason: evalResult.reason,
+    evaluatedSha,
+    evaluatedTreeOid,
+    // Re-pin to the commit this re-evaluation actually ran against (#115).
+    ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
+    // Recompute the protected-config flag from the diff this run actually saw
+    // (SA-3). Re-evaluation re-pins evaluatedSha to the new tip, which is what
+    // the merge route's staleness check compares against — so leaving the flag
+    // at its creation-time value would let a change that was benign when opened
+    // acquire a policy edit, pass the staleness check, and merge without the
+    // approval the flag exists to force.
+    touchesProtectedConfig: diffTouchesProtectedConfig(diff),
+  };
+
   // Stale-approval dismissal (#193): a different evaluated sha means any prior
   // 'approve' verdicts were given for code the reviewer never saw — drop them
   // before re-pinning, so a re-push can't merge on approvals for the old
   // revision. request_changes verdicts survive, and a no-op re-evaluation of
   // the same sha (including legacy changes with no recorded sha) keeps
-  // approvals. Dismiss BEFORE the sha update: if the dismissal fails we bail
-  // with the old sha still pinned, never with stale approvals against a new one.
+  // approvals.
+  //
+  // The dismissal and the evaluatedSha/status re-pin run as ONE D1 batch
+  // (#238): dismissApprovals (DELETE on change_reviews) and updateChangeStatus
+  // (UPDATE on changes) used to be two separate writes, so a transient D1
+  // failure on the second one could land the dismissal without ever re-pinning
+  // the sha — losing the approvals for good while a retry against the old,
+  // still-pinned sha found none left to lose. Batching them makes the two
+  // writes all-or-nothing, and the review.approvals_dismissed audit entry is
+  // only recorded once the batch itself has actually succeeded.
   if (change.evaluatedSha !== undefined && change.evaluatedSha !== evaluatedSha) {
-    const dismissResult = await dismissApprovals(c.env.DB, logger, id);
-    if (!dismissResult.success) {
-      logger.error("Failed to dismiss stale approvals", dismissResult.error);
-      return internalError(dismissResult.error.message);
+    const batchResult = await dismissApprovalsAndUpdateStatus(
+      c.env.DB,
+      logger,
+      id,
+      newStatus,
+      statusOpts,
+    );
+    if (!batchResult.success) {
+      logger.error(
+        "Failed to atomically dismiss stale approvals and update change status",
+        batchResult.error,
+      );
+      return internalError(batchResult.error.message);
     }
-    if (dismissResult.data.length > 0) {
+    const { dismissedReviewerIds } = batchResult.data;
+    if (dismissedReviewerIds.length > 0) {
       const auditResult = await recordAudit(c.env.DB, logger, {
         action: "review.approvals_dismissed",
         actorType: "user",
@@ -1347,38 +1455,25 @@ app.post("/changes/:id/evaluate", async (c) => {
         subject: id,
         detail: {
           project: change.project,
-          dismissed: dismissResult.data.length,
-          dismissedReviewerIds: dismissResult.data,
+          dismissed: dismissedReviewerIds.length,
+          dismissedReviewerIds,
           previousEvaluatedSha: change.evaluatedSha,
           evaluatedSha,
         },
       });
       if (!auditResult.success) {
-        // The approvals are already dismissed; do not fail the request. Log
-        // the gap so a missing audit record for a real dismissal is detectable.
+        // The dismissal + re-pin already landed together; do not fail the
+        // request. Log the gap so a missing audit record for a real
+        // dismissal is detectable.
         logger.error("Failed to audit approval dismissal", auditResult.error, { changeId: id });
       }
     }
-  }
-
-  const updateResult = await updateChangeStatus(
-    c.env.DB,
-    logger,
-    id,
-    evalResult.passed ? "accepted" : "needs_changes",
-    {
-      evalScore: evalResult.score,
-      evalPassed: evalResult.passed,
-      evalReason: evalResult.reason,
-      evaluatedSha,
-      evaluatedTreeOid,
-      // Re-pin to the commit this re-evaluation actually ran against (#115).
-      ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
-    },
-  );
-  if (!updateResult.success) {
-    logger.error("Failed to update change status", updateResult.error);
-    return badRequest(updateResult.error.message);
+  } else {
+    const updateResult = await updateChangeStatus(c.env.DB, logger, id, newStatus, statusOpts);
+    if (!updateResult.success) {
+      logger.error("Failed to update change status", updateResult.error);
+      return badRequest(updateResult.error.message);
+    }
   }
 
   // Layer mode: report the verdict to the change's linked GitHub PR (comment
@@ -1408,13 +1503,6 @@ app.post("/changes/:id/evaluate", async (c) => {
   return okOrFormRedirect(c, id, { changeId: id, eval: evalResult, evalRuns: recordResult.data });
 });
 
-/**
- * Bound on every direct GitHub API call in the promotion flow below, so one
- * slow GitHub subrequest cannot consume the whole request lifetime and get the
- * worker killed by the platform's own limit instead of failing cleanly.
- */
-const GITHUB_API_TIMEOUT_MS = 15_000;
-
 /** The repository a promotion is targeting, as resolved from the project source. */
 type GithubRepoTarget = { owner: string; repo: string };
 
@@ -1422,22 +1510,6 @@ interface GithubPr {
   number: number;
   html_url: string;
   state: string;
-}
-
-/** One entry of GitHub's `errors` array, as far as this route relies on it. */
-interface GithubErrorDetail {
-  message?: string;
-  code?: string;
-  field?: string;
-}
-
-/** Narrows one element of an untrusted `errors` array before it is read. */
-function isGithubErrorDetail(value: unknown): value is GithubErrorDetail {
-  if (typeof value !== "object" || value === null) return false;
-  const detail = value as Record<string, unknown>;
-  return (["message", "code", "field"] as const).every(
-    (key) => detail[key] === undefined || typeof detail[key] === "string",
-  );
 }
 
 /**
@@ -1514,45 +1586,6 @@ function isUsableGithubUrl(raw: string, target: GithubRepoTarget, prNumber: numb
   );
 }
 
-/**
- * Finds an open GitHub pull request associated with a branch.
- *
- * GitHub 422s PR creation with "a pull request already exists" when the head
- * ref already has one open — either a concurrent promotion, or a retry after
- * `updateChangeStatus` failed post-creation. Looking the PR up and reusing it
- * turns that dead end into a successful, idempotent promotion.
- *
- * @param repo - The GitHub repository to search
- * @param branch - The head branch associated with the pull request
- * @returns The matching pull request, or `undefined` if none is found or the lookup fails.
- */
-async function findOpenPrForHead(
-  repo: GithubRepoTarget,
-  branch: string,
-  headers: Record<string, string>,
-  logger: Logger,
-): Promise<GithubPr | undefined> {
-  const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls?head=${repo.owner}:${branch}&state=open`;
-  let res: Response;
-  try {
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS) });
-  } catch (error) {
-    logger.error(
-      "Lookup of existing PR for duplicate head failed",
-      error instanceof Error ? error : undefined,
-      {
-        branch,
-      },
-    );
-    return undefined;
-  }
-  if (!res.ok) return undefined;
-  const body: unknown = await res.json().catch(() => undefined);
-  if (!Array.isArray(body)) return undefined;
-  const pr = body[0];
-  return isUsableGithubPr(pr, repo) ? pr : undefined;
-}
-
 app.post("/changes/:id/github-pr", async (c) => {
   const logger = createLogger({
     requestId: crypto.randomUUID(),
@@ -1607,16 +1640,35 @@ app.post("/changes/:id/github-pr", async (c) => {
   }
   const repo = { owner: parsedRepo.info.owner, repo: parsedRepo.info.repo };
 
-  const body = await c.req
-    .json<{ title?: string; body?: string; base?: string; draft?: boolean }>()
-    .catch(() => ({}) as { title?: string; body?: string; base?: string; draft?: boolean });
+  const body = await readJsonWithLimit<{ title?: string; body?: string; draft?: boolean }>(
+    c,
+    MAX_GITHUB_PR_BODY_BYTES,
+    logger,
+  ).catch(() => ({}) as { title?: string; body?: string; draft?: boolean });
+  if (body instanceof Response) return body;
 
-  // `base` comes straight from the request body — only a sane branch name may
-  // reach the GitHub API. Absent, fall back to the project's known default.
-  if (body.base !== undefined && (typeof body.base !== "string" || !isValidBaseRef(body.base))) {
-    return badRequest("Invalid base branch name");
+  // The PR base is the project's own recorded default branch, never a
+  // caller-supplied value (SA-6). This endpoint acts with the instance-wide
+  // GitHub token, so honouring a body-supplied base would let any caller aim
+  // that shared credential at a branch of its choosing on the linked repo — and
+  // validating the string does not change that, because the problem is
+  // authorization, not syntax. `base` is therefore no longer read from the body
+  // at all; the request type above omits it.
+  //
+  // Through projectDefaultBranch rather than an inline `??` chain: the helper
+  // uses `||`, so an empty-string sourceDefaultBranch falls through to the next
+  // candidate instead of reaching GitHub as a branch name. Still validated after
+  // that, because the record can carry a branch name that arrived through import
+  // and was never checked by this app.
+  const defaultBranch = projectDefaultBranch(project);
+  if (!isValidBaseRef(defaultBranch)) {
+    logger.error("Project default branch is not a valid git ref", undefined, {
+      projectId: project.id,
+      base: defaultBranch,
+    });
+    return badRequest("Project default branch is not a valid branch name");
   }
-  const base = body.base ?? project.sourceDefaultBranch ?? project.githubDefaultBranch ?? "main";
+  const base = defaultBranch;
 
   // GitHub PR creation needs a GitHub credential — the Artifacts repo token (now
   // never persisted) was never valid here. Use the app's configured GitHub token.
@@ -1642,10 +1694,57 @@ app.post("/changes/:id/github-pr", async (c) => {
   if (!repoTokenResult.success) return internalError(repoTokenResult.error.message);
   // GitHub shares no objects with the workspace repo, so a shallow clone's
   // history would be incomplete once pushed there — clone in full.
+  // `ref` is the project's default branch, which the workspace fork copies under
+  // the same name. Since SA-6 that is also exactly `base` — the caller can no
+  // longer supply one — but the two are kept distinct because they name
+  // different things: a ref in the fork versus a branch on GitHub.
   const cloneResult = await cloneRepo(workspaceRemote, repoTokenResult.data, logger, {
+    ref: defaultBranch,
     fullHistory: true,
   });
   if (!cloneResult.success) return appError(cloneResult.error);
+
+  // The evaluation gate is only meaningful if the code published to GitHub is
+  // the code that was evaluated. The clone above is a live read of the
+  // workspace right now, which can have advanced past `change.evaluatedSha`
+  // between evaluation and this request — same TOCTOU the merge path guards
+  // against a few hundred lines up (SEC-2) and #223 pinned on the R2/DO fast
+  // paths. Reject rather than push+promote against unevaluated content:
+  // fails closed, and is the smaller change than re-targeting the push at the
+  // pinned sha (that needs its own answer for what re-promotion then means).
+  // Legacy changes with no evaluatedSha (pre migration 024) skip the check,
+  // matching the merge path's behavior.
+  let publishedSha: string | undefined;
+  if (change.evaluatedSha !== undefined) {
+    // Resolved against `defaultBranch`, matching the clone above: that clone is
+    // singleBranch, so on a project whose default branch is not `main` it holds
+    // that branch and nothing else. Asking for any other ref here throws inside
+    // isomorphic-git and turns a valid promotion into a 502.
+    const tipResult = await resolveLocalTip(
+      cloneResult.data.fs,
+      cloneResult.data.dir,
+      defaultBranch,
+    );
+    if (!tipResult.success) return appError(tipResult.error);
+    publishedSha = tipResult.data;
+    if (publishedSha !== change.evaluatedSha) {
+      logger.warn("Workspace advanced past the evaluated revision; rejecting promotion", {
+        changeId: id,
+        evaluatedSha: change.evaluatedSha,
+        currentTip: publishedSha,
+      });
+      return c.json(
+        {
+          error:
+            "Workspace is stale: it advanced since this change was evaluated. Re-evaluate before promoting.",
+          code: "STALE_WORKSPACE",
+          evaluatedSha: change.evaluatedSha,
+          currentTip: publishedSha,
+        },
+        409,
+      );
+    }
+  }
 
   const pushResult = await pushBranchToRemote(
     cloneResult.data.fs,
@@ -1654,6 +1753,10 @@ app.post("/changes/:id/github-pr", async (c) => {
       url: `https://github.com/${repo.owner}/${repo.repo}.git`,
       remoteRef: `refs/heads/${branch}`,
       token: githubToken,
+      // Must match the clone ref above: the clone is singleBranch, so on a
+      // non-main-default project it holds only `defaultBranch` and a push of
+      // `main` fails locally before the request is even made.
+      localRef: defaultBranch,
       // The Stratum-owned ref: re-promotion must move it to the current tip.
       force: true,
     },
@@ -1700,6 +1803,31 @@ app.post("/changes/:id/github-pr", async (c) => {
       prNumber: storedPr.number,
       repo: `${repo.owner}/${repo.repo}`,
     });
+    // The force-push above moved the PR's head, so the stored `githubHeadSha`
+    // now describes the PREVIOUS revision. This path is every re-promotion, so
+    // without this write the recorded published revision is stale (or missing,
+    // on rows predating the column) for every change promoted more than once,
+    // and nothing surfaces the discrepancy. Undefined only for a legacy change
+    // with no `evaluatedSha`, where the gate above never ran and there is no
+    // confirmed revision to record — the same guard the create path uses.
+    if (publishedSha !== undefined) {
+      const headShaResult = await updateChangeStatus(c.env.DB, logger, id, "promoted", {
+        githubHeadSha: publishedSha,
+      });
+      if (!headShaResult.success) {
+        // Not fatal: the branch is pushed and the PR exists, so the promotion
+        // genuinely happened. Failing here would let a transient D1 error break
+        // a re-promotion that previously could not fail after the push, and the
+        // degraded outcome is exactly the stale sha this write is fixing.
+        // Contrast the create path below, where a failed write loses the PR
+        // number itself and the next promotion would re-create the PR.
+        logger.error(
+          "Re-promotion succeeded but the published revision was not recorded",
+          headShaResult.error,
+          { changeId: id, publishedSha },
+        );
+      }
+    }
     return okOrFormRedirect(c, id, {
       changeId: id,
       github: {
@@ -1724,120 +1852,99 @@ app.post("/changes/:id/github-pr", async (c) => {
   const prBody =
     `## Stratum review\n\n- Change: \`${change.id}\`\n- Workspace: \`${change.workspace}\`\n- Evaluation: ${change.evalPassed ? "passed" : "failed"}, score ${change.evalScore ?? "n/a"}\n\n${body.body ?? ""}`.trim();
 
-  const githubHeaders = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${githubToken}`,
-    "User-Agent": "stratum",
-  };
+  // Duplicate-head 422 → look up + reuse the open PR GitHub already has for
+  // this head lives in the client (createOrReusePR): a re-promotion race, or
+  // a retry after `updateChangeStatus` failed post-creation, both 422 here,
+  // and the PR the caller wanted already exists either way.
+  const client = new GitHubClient(githubToken, logger);
+  const result = await client.createOrReusePR(
+    {
+      owner: repo.owner,
+      repo: repo.repo,
+      title: body.title ?? `Stratum: ${change.id}`,
+      body: prBody,
+      head: branch,
+      base,
+      draft: body.draft ?? true,
+    },
+    // A duplicate-head lookup hit is only worth reusing if it's a PR this
+    // route would be willing to persist — otherwise the original create
+    // error is the more useful thing to report (see isUsableGithubPr above).
+    (candidate) => isUsableGithubPr(candidate, repo),
+  );
 
-  let ghRes: Response;
-  try {
-    ghRes = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/pulls`, {
-      method: "POST",
-      headers: githubHeaders,
-      body: JSON.stringify({
-        title: body.title ?? `Stratum: ${change.id}`,
-        body: prBody,
-        head: branch,
-        base,
-        draft: body.draft ?? true,
-      }),
-      // A slow GitHub response must not hold the request open until the
-      // platform's own subrequest limit kills it.
-      signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
-    });
-  } catch (error) {
-    logger.error("GitHub PR creation request failed", error instanceof Error ? error : undefined, {
-      changeId: id,
-    });
-    return c.json(
-      {
-        error: "GitHub PR creation failed: request timed out or network error",
-        code: "GITHUB_ERROR",
-      },
-      502,
-    );
-  }
-
-  let pr: GithubPr;
-
-  if (!ghRes.ok) {
-    // Surface GitHub's own status + message (never the token) instead of a
-    // generic 400 — a 422 "head invalid" vs. a 404 repo tells the caller
-    // exactly what to fix.
-    const detail = await ghRes.text().catch(() => "");
-    let githubMessage: string | undefined;
-    let errors: GithubErrorDetail[] = [];
-    try {
-      // The branch is already pushed by this point, so anything thrown while
-      // parsing an error body escapes as a bare 500 and loses the structured
-      // GITHUB_ERROR/502 the caller needs. GitHub is not guaranteed to send the
-      // documented shape on every failure, so validate rather than cast:
-      // `{"errors":{}}`, `{"errors":"invalid"}` and `{"errors":[null]}` all
-      // reach `.map()` otherwise.
-      const parsed: unknown = JSON.parse(detail);
-      const body = (typeof parsed === "object" && parsed !== null ? parsed : {}) as {
-        message?: unknown;
-        errors?: unknown;
-      };
-      errors = Array.isArray(body.errors) ? body.errors.filter(isGithubErrorDetail) : [];
-      githubMessage = [
-        typeof body.message === "string" ? body.message : undefined,
-        ...errors.map((e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code)),
-      ]
-        .filter(Boolean)
-        .join("; ");
-    } catch {
-      githubMessage = undefined;
-    }
-
-    // GitHub's duplicate-head 422 ("A pull request already exists for
-    // owner:branch") means the PR the caller wanted already exists — reuse it
-    // rather than failing (see findOpenPrForHead above).
-    const duplicateHead =
-      ghRes.status === 422 &&
-      errors.some((e) => e.message?.toLowerCase().includes("pull request already exists"));
-    const existingPr = duplicateHead
-      ? await findOpenPrForHead(repo, branch, githubHeaders, logger)
-      : undefined;
-
-    if (!existingPr) {
-      logger.error("GitHub PR creation failed", undefined, {
-        status: ghRes.status,
-        changeId: id,
-        githubMessage,
-      });
+  if (!result.success) {
+    if (result.networkError) {
+      logger.error("GitHub PR creation request failed", undefined, { changeId: id });
       return c.json(
         {
-          error: `GitHub PR creation failed (${ghRes.status})${githubMessage ? `: ${githubMessage}` : ""}`,
+          error: "GitHub PR creation failed: request timed out or network error",
           code: "GITHUB_ERROR",
-          githubStatus: ghRes.status,
         },
         502,
       );
     }
-    pr = existingPr;
-  } else {
-    // The branch is already pushed by this point, so a malformed success body
-    // must not escape as an unhandled rejection (a bare 500): map it to the
-    // same structured 502 every other GitHub failure uses.
-    const parsed: unknown = await ghRes.json().catch(() => undefined);
-    if (!isUsableGithubPr(parsed, repo)) {
-      logger.error("GitHub PR creation returned an unusable response body", undefined, {
-        status: ghRes.status,
+    // The branch is already pushed by this point. A 2xx status with a body
+    // the client couldn't parse as JSON is GitHub responding, just not
+    // usefully — the same "unreadable response" the shape-validation failure
+    // below reports for a 2xx body missing the expected fields, not a
+    // GitHub-reported error to relay.
+    if (result.status >= 200 && result.status < 300) {
+      logger.error("GitHub PR creation returned an unparseable response body", undefined, {
+        status: result.status,
         changeId: id,
       });
       return c.json(
         {
           error: "GitHub PR creation failed: unreadable response from GitHub",
           code: "GITHUB_ERROR",
-          githubStatus: ghRes.status,
+          githubStatus: result.status,
         },
         502,
       );
     }
-    pr = parsed;
+    // Surface GitHub's own status + message (never the token) instead of a
+    // generic 400 — a 422 "head invalid" vs. a 404 repo tells the caller
+    // exactly what to fix.
+    const githubMessage = [
+      result.githubMessage,
+      ...result.errors.map((e) => e.message ?? (e.field ? `${e.field} ${e.code}` : e.code)),
+    ]
+      .filter(Boolean)
+      .join("; ");
+    logger.error("GitHub PR creation failed", undefined, {
+      status: result.status,
+      changeId: id,
+      githubMessage,
+    });
+    return c.json(
+      {
+        error: `GitHub PR creation failed (${result.status})${githubMessage ? `: ${githubMessage}` : ""}`,
+        code: "GITHUB_ERROR",
+        githubStatus: result.status,
+      },
+      502,
+    );
   }
+
+  // The branch is already pushed by this point, so a malformed response body
+  // (created or reused) must not escape as an unhandled rejection (a bare
+  // 500): map it to the same structured 502 every other GitHub failure uses.
+  if (!isUsableGithubPr(result.pr, repo)) {
+    logger.error("GitHub PR creation returned an unusable response body", undefined, {
+      status: result.status,
+      changeId: id,
+    });
+    return c.json(
+      {
+        error: "GitHub PR creation failed: unreadable response from GitHub",
+        code: "GITHUB_ERROR",
+        githubStatus: result.status,
+      },
+      502,
+    );
+  }
+  const pr: GithubPr = result.pr;
 
   const promotedAt = new Date().toISOString();
 
@@ -1851,6 +1958,10 @@ app.post("/changes/:id/github-pr", async (c) => {
     githubPrNumber: pr.number,
     githubPrUrl: pr.html_url,
     githubPrState: pr.state,
+    // The revision actually force-pushed as this PR's head — only known
+    // precisely when the evaluatedSha gate above ran (legacy changes with no
+    // evaluatedSha have no pinned revision to record here).
+    ...(publishedSha !== undefined ? { githubHeadSha: publishedSha } : {}),
     promotedAt,
     promotedBy: userId,
   });

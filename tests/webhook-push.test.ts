@@ -93,10 +93,12 @@ vi.mock("../src/queue/import-queue", () => ({
 
 vi.mock("../src/storage/imports", () => ({
   createImportJob: vi.fn().mockResolvedValue({ success: true }),
+  getLatestImportDepth: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { queueSyncJob } from "../src/queue/import-queue";
 import { getProjectByGitHubRepo } from "../src/storage/github-bridge";
+import { createImportJob, getLatestImportDepth } from "../src/storage/imports";
 
 // ---------------------------------------------------------------------------
 // We test handlePush indirectly by calling the internal function via the
@@ -200,6 +202,137 @@ describe("Webhook push handler", () => {
 
     const { DB: _db } = makeEnv();
     // No project found — queueSyncJob must not be called
+    expect(queueSyncJob).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The guard above the enqueue and the branch the job carries must agree on
+ * what "default" means. The guard used to compare the pushed branch against
+ * the raw `sourceDefaultBranch` while the job was queued with
+ * `projectDefaultBranch(project)`, so a project whose default comes from
+ * `githubDefaultBranch` — an import that never set `sourceDefaultBranch` —
+ * had every push to its real default rejected, and webhook sync never ran.
+ *
+ * Unlike the cases above, this drives the real router with a signed payload,
+ * so it exercises handlePush rather than asserting the mocks exist.
+ */
+describe("Webhook push handler: default branch resolution", () => {
+  const SECRET = "test-webhook-secret";
+
+  async function sign(payload: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(SECRET),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+    const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return `sha256=${hex}`;
+  }
+
+  async function pushTo(branch: string, project: Record<string, unknown>) {
+    // mockReset, not mockResolvedValueOnce: the suites above queue `Once`
+    // values they never consume (they assert on mocks rather than driving the
+    // handler), so a queued value here would sit behind their leftovers.
+    vi.mocked(getProjectByGitHubRepo).mockReset();
+    vi.mocked(getProjectByGitHubRepo).mockResolvedValue({
+      success: true,
+      data: project,
+    } as unknown as Awaited<ReturnType<typeof getProjectByGitHubRepo>>);
+    vi.mocked(queueSyncJob).mockClear();
+    vi.mocked(createImportJob).mockClear();
+
+    const { DB, STATE, IMPORT_QUEUE } = makeEnv();
+    const { githubWebhookRouter } = await import("../src/github/webhooks");
+    const body = JSON.stringify({
+      repository: { owner: { login: "owner" }, name: "repo" },
+      ref: `refs/heads/${branch}`,
+      after: "abc1234",
+      pusher: { email: "user@example.com" },
+    });
+
+    const res = await githubWebhookRouter.request(
+      "/",
+      {
+        method: "POST",
+        headers: {
+          "x-hub-signature-256": await sign(body),
+          "x-github-event": "push",
+          "x-github-delivery": `delivery-${branch}-${Math.random()}`,
+          "content-type": "application/json",
+        },
+        body,
+      },
+      { DB, STATE, IMPORT_QUEUE, GITHUB_WEBHOOK_SECRET: SECRET },
+    );
+    expect(res.status).toBe(200);
+  }
+
+  it("syncs a push to a default branch that only githubDefaultBranch knows about", async () => {
+    await pushTo("master", {
+      ...PROJECT,
+      sourceDefaultBranch: undefined,
+      githubDefaultBranch: "master",
+    });
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ branch: "master" }),
+    );
+  });
+
+  it("treats an empty sourceDefaultBranch as unset rather than as a branch name", async () => {
+    await pushTo("master", { ...PROJECT, sourceDefaultBranch: "", githubDefaultBranch: "master" });
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ branch: "master" }),
+    );
+  });
+
+  // A webhook-driven sync used to re-derive `depth: 10`, so a project imported
+  // with full history was quietly shallowed by the next push to its default
+  // branch.
+  it("carries the project's recorded clone depth into a webhook sync", async () => {
+    vi.mocked(getLatestImportDepth).mockResolvedValue(250);
+    await pushTo("main", PROJECT);
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 250 }),
+    );
+    expect(createImportJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 250 }),
+      expect.anything(),
+    );
+  });
+
+  // The value that a `?? DEFAULT_CLONE_DEPTH` fallback is most likely to eat.
+  it("preserves a recorded depth of 0 (full history) rather than defaulting it", async () => {
+    vi.mocked(getLatestImportDepth).mockResolvedValue(0);
+    await pushTo("main", PROJECT);
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 0 }),
+    );
+  });
+
+  it("falls back to the default depth when no prior job recorded one", async () => {
+    vi.mocked(getLatestImportDepth).mockResolvedValue(undefined);
+    await pushTo("main", PROJECT);
+    expect(queueSyncJob).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ depth: 10 }),
+    );
+  });
+
+  it("still skips a push to a genuinely non-default branch", async () => {
+    await pushTo("feature/x", {
+      ...PROJECT,
+      sourceDefaultBranch: undefined,
+      githubDefaultBranch: "master",
+    });
     expect(queueSyncJob).not.toHaveBeenCalled();
   });
 });

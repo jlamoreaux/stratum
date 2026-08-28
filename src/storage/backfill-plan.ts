@@ -35,6 +35,20 @@ export interface BackfillPlan {
   };
 }
 
+export interface WebhookBackfillSkip {
+  webhookId: string;
+  project: string;
+  /** "ambiguous": name matches >1 project across namespaces. "unresolved": name matches none. */
+  reason: "ambiguous" | "unresolved";
+}
+
+export interface WebhookBackfillReport {
+  updated: number;
+  skipped: WebhookBackfillSkip[];
+  /** NULL project_id rows remaining in `webhooks` after this run — the step-2 verification. */
+  remainingNullRows: number;
+}
+
 /**
  * DRY-RUN diagnostic for the KV→D1 project_id backfill. Reads only: reports how
  * much legacy (NULL project_id) data exists per table and which project names
@@ -90,6 +104,116 @@ export async function computeBackfillPlan(
             { operation: "computeBackfillPlan" },
           );
     logger.error("Failed to compute backfill plan", appError);
+    return err(appError);
+  }
+}
+
+/**
+ * APPLY half of the KV→D1 project_id backfill, scoped to `webhooks` (see
+ * {@link computeBackfillPlan} for the read-only survey across all seven
+ * tables). For every `webhooks` row with a NULL `project_id`, resolves the
+ * row's free-form `project` name against the KV project directory and stamps
+ * `project_id` — but ONLY when the name resolves to exactly one project
+ * across ALL namespaces.
+ *
+ * A name shared by more than one project ("ambiguous") or matching none
+ * ("unresolved") is left NULL and reported rather than guessed: this is a
+ * tenant-isolation boundary, not a best-effort heuristic, since guessing here
+ * would silently attribute a legacy webhook (and its deliveries) to the wrong
+ * tenant's namespace-mate.
+ */
+export async function backfillWebhookProjectIds(
+  env: Pick<Env, "DB" | "STATE">,
+  logger: Logger,
+): Promise<Result<WebhookBackfillReport, AppError>> {
+  // Declared outside the try so a throw partway through the loop below can
+  // still report how far the run got: D1 auto-commits each UPDATE
+  // independently, so a failure on row N leaves rows 1..N-1 already committed
+  // with no way to unwind them. The caller needs those counts to audit what
+  // actually landed, not just that something failed.
+  const skipped: WebhookBackfillSkip[] = [];
+  let updated = 0;
+  try {
+    const projectsResult = await listProjects(env.STATE, logger);
+    if (!projectsResult.success) return err(projectsResult.error);
+
+    // Single-pass name -> id resolution. A name is only ever backfillable while
+    // it maps to exactly one id; the moment a second project claims the same
+    // name it moves to `ambiguousNames` and is evicted from `nameToId` for good.
+    const nameToId = new Map<string, string>();
+    const ambiguousNames = new Set<string>();
+    for (const project of projectsResult.data) {
+      if (ambiguousNames.has(project.name)) continue;
+      if (nameToId.has(project.name)) {
+        nameToId.delete(project.name);
+        ambiguousNames.add(project.name);
+        continue;
+      }
+      nameToId.set(project.name, project.id);
+    }
+
+    const rows = await env.DB.prepare(
+      "SELECT id, project FROM webhooks WHERE project_id IS NULL",
+    ).all<{ id: string; project: string }>();
+
+    for (const row of rows.results) {
+      const projectId = nameToId.get(row.project);
+      if (projectId === undefined) {
+        const reason = ambiguousNames.has(row.project) ? "ambiguous" : "unresolved";
+        skipped.push({ webhookId: row.id, project: row.project, reason });
+        continue;
+      }
+      // Re-assert `project_id IS NULL` at write time: cheap defense against a
+      // concurrent backfill run (or a delivery/update in between) re-stamping
+      // an already-resolved row. That guard means the UPDATE can legitimately
+      // match nothing, so count what it actually changed rather than how many
+      // times it ran -- `updated` is the step-2 verification number and must
+      // not report writes this run did not make.
+      const result = await env.DB.prepare(
+        "UPDATE webhooks SET project_id = ? WHERE id = ? AND project_id IS NULL",
+      )
+        .bind(projectId, row.id)
+        .run();
+      updated += result.meta.changes;
+    }
+
+    const remaining = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM webhooks WHERE project_id IS NULL",
+    ).first<{ n: number }>();
+
+    logger.info("Webhook project_id backfill applied", {
+      updated,
+      skipped: skipped.length,
+      remainingNullRows: remaining?.n ?? 0,
+    });
+
+    return ok({ updated, skipped, remainingNullRows: remaining?.n ?? 0 });
+  } catch (error) {
+    // D1 auto-commits each UPDATE independently, so a throw here can land
+    // after some rows were already stamped. Carry that partial progress out
+    // on the error's context rather than discarding it -- the route needs it
+    // to audit what actually happened, not just that the run failed. Message,
+    // code, and statusCode are preserved as-is so existing callers are
+    // unaffected; only `context` gains the partial counts.
+    const context = {
+      ...(error instanceof AppError ? error.context : undefined),
+      operation: "backfillWebhookProjectIds",
+      updated,
+      skipped: skipped.length,
+    };
+    const appError =
+      error instanceof AppError
+        ? new AppError(error.message, error.code, error.statusCode, context)
+        : new AppError(
+            error instanceof Error ? error.message : "Failed to backfill webhook project_id",
+            "DATABASE_ERROR",
+            500,
+            context,
+          );
+    logger.error("Failed to backfill webhook project_id", appError, {
+      updated,
+      skipped: skipped.length,
+    });
     return err(appError);
   }
 }

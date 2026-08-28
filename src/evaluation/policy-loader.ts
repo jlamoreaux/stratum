@@ -9,6 +9,20 @@ const DEFAULT_POLICY: EvalPolicy = {
   minScore: 0.7,
 };
 
+/**
+ * Repo files that define merge protection. A change that edits one of these is
+ * altering the gate itself, so the merge path treats it specially (SA-3): such a
+ * change requires a human approval and cannot be force-merged, so a writer can't
+ * silently relax protection for later changes.
+ */
+export const PROTECTED_CONFIG_FILES = [".stratum/policy.yaml", "stratum.config.json"] as const;
+
+/** Does a unified diff (git-style `diff --git a/… b/…` headers) modify a
+ *  protected merge-protection config file? */
+export function diffTouchesProtectedConfig(diff: string): boolean {
+  return PROTECTED_CONFIG_FILES.some((path) => diff.includes(`diff --git a/${path} b/${path}`));
+}
+
 type PolicyLoad =
   | { status: "ok"; policy: EvalPolicy }
   | { status: "absent" }
@@ -18,13 +32,28 @@ export async function loadPolicy(
   remote: string,
   token: string,
   logger: Logger,
+  branch = "main",
 ): Promise<EvalPolicy> {
-  const yaml = await readAndParsePolicy(remote, token, ".stratum/policy.yaml", "yaml", logger);
+  const yaml = await readAndParsePolicy(
+    remote,
+    token,
+    ".stratum/policy.yaml",
+    "yaml",
+    logger,
+    branch,
+  );
   if (yaml.status === "ok") return yaml.policy;
   if (yaml.status === "malformed")
     return malformedPolicy(".stratum/policy.yaml", yaml.reason, logger);
 
-  const json = await readAndParsePolicy(remote, token, "stratum.config.json", "json", logger);
+  const json = await readAndParsePolicy(
+    remote,
+    token,
+    "stratum.config.json",
+    "json",
+    logger,
+    branch,
+  );
   if (json.status === "ok") return json.policy;
   if (json.status === "malformed")
     return malformedPolicy("stratum.config.json", json.reason, logger);
@@ -50,9 +79,10 @@ async function readAndParsePolicy(
   path: string,
   format: "json" | "yaml",
   logger: Logger,
+  branch = "main",
 ): Promise<PolicyLoad> {
   try {
-    const contentResult = await readFileFromRepo(remote, token, path, logger);
+    const contentResult = await readFileFromRepo(remote, token, path, logger, branch);
     if (!contentResult.success) return { status: "absent" };
 
     const content = contentResult.data;

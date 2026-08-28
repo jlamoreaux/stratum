@@ -6,7 +6,16 @@ import { NotFoundError } from "../src/utils/errors";
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
-  getUser: vi.fn(async () => ({ success: false, error: new Error("nf") })),
+  getUser: vi.fn(async () => ({
+    success: true,
+    data: {
+      id: "usr_abc",
+      email: "test@example.com",
+      username: "test",
+      tokenHash: "hash",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  })),
 }));
 
 vi.mock("../src/storage/agents", () => ({

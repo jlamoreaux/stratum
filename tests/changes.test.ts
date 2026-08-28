@@ -10,6 +10,10 @@ vi.mock("../src/storage/changes", () => ({
   getChangesByIds: vi.fn(),
   listChanges: vi.fn(),
   updateChangeStatus: vi.fn(async () => ({ success: true, data: undefined })),
+  dismissApprovalsAndUpdateStatus: vi.fn(async () => ({
+    success: true,
+    data: { dismissedReviewerIds: [] },
+  })),
   // Default: this request won the transition, so the merge path emits + records.
   markChangeMerged: vi.fn(async () => ({ success: true, data: { transitioned: true } })),
   mergeTransitionOpts: (
@@ -34,6 +38,7 @@ vi.mock("../src/storage/git-ops", async (importActual) => {
     cloneRepo: vi.fn(async () => ({ success: true, data: { fs: {}, dir: "/" } })),
     batchMergeStagedTrees: vi.fn(),
     pushBranchToRemote: vi.fn(async () => ({ success: true, data: undefined })),
+    resolveLocalTip: vi.fn(),
   };
 });
 
@@ -52,6 +57,7 @@ vi.mock("../src/storage/deletion", () => ({
 
 vi.mock("../src/evaluation", () => ({
   loadPolicy: vi.fn(),
+  diffTouchesProtectedConfig: vi.fn(() => false),
   DiffEvaluator: vi.fn().mockImplementation(() => ({
     evaluate: vi.fn().mockResolvedValue({
       success: true,
@@ -129,7 +135,6 @@ vi.mock("../src/storage/provenance", () => ({
 }));
 
 vi.mock("../src/storage/change-reviews", () => ({
-  dismissApprovals: vi.fn(async () => ({ success: true, data: [] })),
   countApprovals: vi.fn(async () => ({ success: true, data: 0 })),
 }));
 
@@ -143,7 +148,19 @@ vi.mock("../src/queue/events", () => ({
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
-  getUser: vi.fn(async () => ({ success: false, error: new Error("nf") })),
+  // Agent auth resolves the agent's owner via getUser (fail-closed on the
+  // owner lookup); default to a live owner so agent-token tests authenticate
+  // as before unless a test overrides this to exercise the deleting/failed path.
+  getUser: vi.fn(async () => ({
+    success: true,
+    data: {
+      id: "usr_owner",
+      email: "owner@example.com",
+      username: "owner",
+      tokenHash: "hash",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  })),
 }));
 
 // Need to setup mocks in beforeEach instead
@@ -153,13 +170,19 @@ vi.mock("../src/storage/agents", () => ({
   getAgent: vi.fn(),
 }));
 
-import { CompositeEvaluator, SecretScanEvaluator, loadPolicy } from "../src/evaluation";
+import {
+  CompositeEvaluator,
+  SecretScanEvaluator,
+  diffTouchesProtectedConfig,
+  loadPolicy,
+} from "../src/evaluation";
+import { resetCircuitBreakersForTests } from "../src/github/client";
 import { emitEvent } from "../src/queue/events";
 import { getAgent, getAgentByToken } from "../src/storage/agents";
 import { recordAudit } from "../src/storage/audit";
-import { dismissApprovals } from "../src/storage/change-reviews";
 import {
   createChange,
+  dismissApprovalsAndUpdateStatus,
   getChange,
   getChangesByIds,
   listChanges,
@@ -178,6 +201,7 @@ import {
   getDiffBetweenRepos,
   mergeWorkspaceIntoProject,
   pushBranchToRemote,
+  resolveLocalTip,
 } from "../src/storage/git-ops";
 import { packObjects } from "../src/storage/object-loader";
 import { recordProvenance } from "../src/storage/provenance";
@@ -1000,7 +1024,7 @@ describe("POST /api/changes/:id/merge", () => {
       "https://artifacts.example.com/repos/fix-bug",
       "workspace-token",
       expect.any(Object),
-      { strategy: "merge" },
+      { strategy: "merge", branch: "main" },
     );
     expect(markChangeMerged).toHaveBeenCalledWith(
       env.DB,
@@ -1219,6 +1243,23 @@ describe("POST /api/changes/:id/merge", () => {
     expect(mergeWorkspaceIntoProject).toHaveBeenCalled();
   });
 
+  it("refuses to force-merge a change that edits the protection config, even with allowForce (SA-3)", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...mockChange, touchesProtectedConfig: true },
+    });
+    // Even where the policy permits force, a protection-config edit can't skip
+    // the approval gate.
+    vi.mocked(loadPolicy).mockResolvedValue({ ...mockPolicy, merge: { allowForce: true } });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/merge?force=true", undefined, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(mergeWorkspaceIntoProject).not.toHaveBeenCalled();
+  });
+
   it("passes explicit squash strategy to merge implementation", async () => {
     const approvedChange: Change = { ...mockChange, status: "accepted" };
     vi.mocked(getChange).mockResolvedValue({
@@ -1237,7 +1278,7 @@ describe("POST /api/changes/:id/merge", () => {
       "https://artifacts.example.com/repos/fix-bug",
       "workspace-token",
       expect.any(Object),
-      { strategy: "squash" },
+      { strategy: "squash", branch: "main" },
     );
   });
 
@@ -1964,9 +2005,63 @@ describe("POST /api/projects/:name/changes/merge-batch", () => {
     const body = (await res.json()) as { skipped: { changeId: string; reason: string }[] };
     const skippedB2 = body.skipped.find((s) => s.changeId === "chg_b2");
     expect(skippedB2?.reason).toBe("workspace changed since evaluation");
-    // Only chg_b1 reaches the merge.
-    const items = vi.mocked(batchMergeStagedTrees).mock.calls[0]?.[4] as { changeId: string }[];
+    // Only chg_b1 reaches the merge, carrying its evaluated tree oid so the
+    // merge layer re-validates right where the synthetic commit is built (#124).
+    const items = vi.mocked(batchMergeStagedTrees).mock.calls[0]?.[4] as {
+      changeId: string;
+      expectedTreeOid?: string;
+    }[];
     expect(items.map((i) => i.changeId)).toEqual(["chg_b1"]);
+    expect(items[0]?.expectedTreeOid).toBe("a".repeat(40));
+  });
+
+  it("#124: GCs both the latest and the sha-keyed staged-tree copies of a merged pinned change", async () => {
+    vi.mocked(getChangesByIds).mockResolvedValue({
+      success: true,
+      data: [
+        {
+          id: "chg_b1",
+          project: "my-project",
+          workspace: "fix-bug",
+          status: "approved",
+          baseSha: "base1",
+          workspaceHeadSha: "wshead1",
+          evaluatedSha: "wshead1",
+          evaluatedTreeOid: "a".repeat(40),
+        },
+      ],
+      // biome-ignore lint/suspicious/noExplicitAny: minimal Change stub
+    } as any);
+    vi.mocked(batchMergeStagedTrees).mockResolvedValue({
+      success: true,
+      data: [{ changeId: "chg_b1", merged: true, commit: "merge-1" }],
+      // biome-ignore lint/suspicious/noExplicitAny: minimal result stub
+    } as any);
+    const r2Deletes: string[] = [];
+    env.REPO_OBJECTS = {
+      delete: vi.fn(async (k: string) => {
+        r2Deletes.push(k);
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: minimal R2 stub
+    } as any;
+
+    const res = await app.fetch(
+      request(
+        "POST",
+        "/api/projects/my-project/changes/merge-batch",
+        { changeIds: ["chg_b1"], force: true },
+        USER_AUTH,
+      ),
+      env,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal ExecutionContext
+      exec() as any,
+    );
+    expect(res.status).toBe(200);
+    await Promise.all(waitUntils);
+    expect(r2Deletes.sort()).toEqual([
+      "repos/proj_test123/ws/fix-bug",
+      "repos/proj_test123/ws/fix-bug/sha/wshead1",
+    ]);
   });
 
   it("rejects a batch above the size cap", async () => {
@@ -2043,6 +2138,12 @@ describe("POST /api/changes/:id/github-pr", () => {
     env = makeEnv();
     env.GITHUB_TOKEN = "ghp_secret_token";
     vi.clearAllMocks();
+    // GitHubClient's circuit breaker is module-level state shared by every
+    // instance — this suite deliberately drives many consecutive GitHub
+    // failures against the same acme/widgets repo across test cases, which
+    // would otherwise trip the breaker and starve later, unrelated
+    // assertions with a spurious 503.
+    resetCircuitBreakersForTests();
     vi.mocked(getUserByToken).mockImplementation(async (_db, token) => {
       if (token === "stratum_user_testtoken00000000000000000") {
         return {
@@ -2098,9 +2199,14 @@ describe("POST /api/changes/:id/github-pr", () => {
       mockWorkspace.remote,
       "artifacts-token",
       expect.anything(),
-      { fullHistory: true },
+      // #181: the fork copies the parent's default branch under the same name,
+      // so a `develop`-default project has no `main` for the clone to find.
+      { ref: "develop", fullHistory: true },
     );
-    // …and its tip is pushed to the Stratum-owned head ref on GitHub.
+    // …and its tip is pushed to the Stratum-owned head ref on GitHub. The
+    // pushed LOCAL ref has to be the same branch the clone above asked for:
+    // that clone is singleBranch, so a `develop`-default project's clone holds
+    // no `main`, and pushing one fails locally before any request is made.
     expect(pushBranchToRemote).toHaveBeenCalledWith(
       {},
       "/",
@@ -2108,6 +2214,7 @@ describe("POST /api/changes/:id/github-pr", () => {
         url: "https://github.com/acme/widgets.git",
         remoteRef: "refs/heads/stratum/chg_abc123",
         token: "ghp_secret_token",
+        localRef: "develop",
         force: true,
       },
       expect.anything(),
@@ -2152,6 +2259,128 @@ describe("POST /api/changes/:id/github-pr", () => {
     );
   });
 
+  // #243: the evaluation gate is only meaningful if the code published to
+  // GitHub is the code that was evaluated. change.evaluatedSha is the pinned
+  // revision; the clone above is a live read of the workspace, which can have
+  // advanced since evaluation ran.
+  describe("evaluatedSha gate (#243)", () => {
+    it("pushes and promotes, recording the published sha, when the workspace tip matches evaluatedSha", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-evaluated" });
+
+      const res = await promote();
+      expect(res.status).toBe(200);
+      // The ref is the project's default branch (this suite's project defaults
+      // to `develop`), not a hard-coded `main` — see the dedicated case below.
+      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/", "develop");
+
+      // The gate runs strictly before the push (before anything is published).
+      const tipOrder = vi.mocked(resolveLocalTip).mock.invocationCallOrder[0] ?? -1;
+      const pushOrder = vi.mocked(pushBranchToRemote).mock.invocationCallOrder[0] ?? -1;
+      expect(tipOrder).toBeGreaterThan(0);
+      expect(tipOrder).toBeLessThan(pushOrder);
+
+      expect(updateChangeStatus).toHaveBeenCalledWith(
+        env.DB,
+        expect.anything(),
+        "chg_abc123",
+        "promoted",
+        expect.objectContaining({ githubHeadSha: "sha-evaluated" }),
+      );
+    });
+
+    it("rejects the promotion with a structured error when the workspace tip has moved past evaluatedSha", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-advanced" });
+
+      const res = await promote();
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as {
+        error: string;
+        code: string;
+        evaluatedSha: string;
+        currentTip: string;
+      };
+      expect(body.code).toBe("STALE_WORKSPACE");
+      expect(body.evaluatedSha).toBe("sha-evaluated");
+      expect(body.currentTip).toBe("sha-advanced");
+      // Fails closed BEFORE anything is published or persisted.
+      expect(pushBranchToRemote).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    });
+
+    it("502s without pushing when the local tip can't be resolved", async () => {
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({
+        success: false,
+        error: new AppError(
+          "Git error: Failed to resolve local tip",
+          "EXTERNAL_SERVICE_ERROR",
+          502,
+        ),
+      });
+
+      const res = await promote();
+      expect(res.status).toBe(502);
+      expect(pushBranchToRemote).not.toHaveBeenCalled();
+      expect(updateChangeStatus).not.toHaveBeenCalled();
+    });
+
+    // The gate resolves the tip of the branch that was actually cloned. The
+    // clone is singleBranch on the project's default branch, so a project whose
+    // default is not `main` has no `main` for isomorphic-git to resolve: a
+    // hard-coded ref here throws and 502s a promotion that should have passed
+    // the gate. Asserted through the ref the resolver is handed rather than the
+    // status alone, because the resolver is mocked in this suite and would
+    // happily answer for any ref.
+    it("resolves the tip of the project's default branch, not `main`", async () => {
+      vi.mocked(getProject).mockResolvedValue({
+        success: true,
+        data: { ...githubProject, githubDefaultBranch: "release-2026" },
+      });
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...acceptedChange, evaluatedSha: "sha-evaluated" },
+      });
+      vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-evaluated" });
+
+      const res = await promote();
+      expect(res.status).toBe(200);
+      // Same ref the clone asked for — the two must not drift apart.
+      expect(cloneRepo).toHaveBeenCalledWith(
+        mockWorkspace.remote,
+        "artifacts-token",
+        expect.anything(),
+        { ref: "release-2026", fullHistory: true },
+      );
+      expect(resolveLocalTip).toHaveBeenCalledWith({}, "/", "release-2026");
+    });
+
+    it("skips the gate (legacy live-tip behavior) when the change has no evaluatedSha", async () => {
+      // acceptedChange has no evaluatedSha.
+      const res = await promote();
+      expect(res.status).toBe(200);
+      expect(resolveLocalTip).not.toHaveBeenCalled();
+      expect(updateChangeStatus).toHaveBeenCalledWith(
+        env.DB,
+        expect.anything(),
+        "chg_abc123",
+        "promoted",
+        expect.not.objectContaining({ githubHeadSha: expect.anything() }),
+      );
+    });
+  });
+
   it("promotes a bulk-imported project that only has sourceUrl", async () => {
     vi.mocked(getProject).mockResolvedValue({
       success: true,
@@ -2167,7 +2396,10 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(pushBranchToRemote).toHaveBeenCalledWith(
       {},
       "/",
-      expect.objectContaining({ url: "https://github.com/imported/repo.git" }),
+      expect.objectContaining({
+        url: "https://github.com/imported/repo.git",
+        localRef: "trunk",
+      }),
       expect.anything(),
     );
     expect(fetchMock).toHaveBeenCalledWith(
@@ -2176,6 +2408,119 @@ describe("POST /api/changes/:id/github-pr", () => {
     );
     const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
     expect(prPayload.base).toBe("trunk"); // sourceDefaultBranch wins
+    // The same resolved branch reaches the workspace clone.
+    expect(cloneRepo).toHaveBeenCalledWith(
+      mockWorkspace.remote,
+      "artifacts-token",
+      expect.anything(),
+      { ref: "trunk", fullHistory: true },
+    );
+  });
+
+  // `base` is caller-supplied and may name a branch that exists on GitHub but
+  // not in the workspace fork. It must never be used as the clone ref — only
+  // the project's own default branch is guaranteed to exist there.
+  it("clones and pushes the project default branch, never a body-supplied base", async () => {
+    const res = await promote({ base: "release/2026-08" });
+    expect(res.status).toBe(200);
+
+    // Since SA-6 the base is the project's own default branch, so the body value
+    // reaches nothing. This case still earns its place alongside the SA-6 test
+    // below: it is the only one pinning the clone ref and push localRef, which
+    // must follow the fork's branch rather than the GitHub base.
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("develop");
+    expect(cloneRepo).toHaveBeenCalledWith(
+      mockWorkspace.remote,
+      "artifacts-token",
+      expect.anything(),
+      { ref: "develop", fullHistory: true },
+    );
+    // `release/2026-08` is not in the fork, and neither is `main`.
+    expect(pushBranchToRemote).toHaveBeenCalledWith(
+      {},
+      "/",
+      expect.objectContaining({ localRef: "develop" }),
+      expect.anything(),
+    );
+  });
+
+  // SA-6: this endpoint acts with the instance-wide GitHub token, so a
+  // caller-supplied base would aim that shared credential at a branch of the
+  // caller's choosing. `base` is not read from the body at all.
+  it("ignores a caller-supplied base and targets the project's own default branch", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        sourceUrl: "https://github.com/imported/repo.git",
+        sourceDefaultBranch: "trunk",
+      },
+    });
+
+    const res = await promote({ base: "attacker-controlled" });
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk");
+    expect(prPayload.base).not.toBe("attacker-controlled");
+  });
+
+  // Precedence, pinned because nothing else does: every other case sets at most
+  // one of the two recorded defaults, so none of them would notice the order
+  // being reversed.
+  it("prefers sourceDefaultBranch over githubDefaultBranch when both are recorded", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...githubProject,
+        sourceDefaultBranch: "trunk",
+        githubDefaultBranch: "develop",
+      },
+    } as Awaited<ReturnType<typeof getProject>>);
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk");
+    expect(prPayload.base).not.toBe("develop");
+  });
+
+  // The reason projectDefaultBranch uses `||` rather than `??`: an import can
+  // record an empty string, and `??` would forward that to GitHub as a branch
+  // name. It must fall through to the next candidate instead.
+  it("falls through an empty sourceDefaultBranch to githubDefaultBranch", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...githubProject,
+        sourceDefaultBranch: "",
+        githubDefaultBranch: "develop",
+      },
+    } as Awaited<ReturnType<typeof getProject>>);
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("develop");
+  });
+
+  it("rejects promotion when the project's own default branch is not a valid ref", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        sourceUrl: "https://github.com/imported/repo.git",
+        sourceDefaultBranch: "bad..branch",
+      },
+    });
+
+    const res = await promote();
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   // A shape-only URL check (github.com suffix + non-empty path) accepts real
@@ -2259,20 +2604,29 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(JSON.stringify(fetchMock.mock.calls)).not.toContain("stale/old-repo");
   });
 
-  it("passes a valid caller-supplied base through to GitHub", async () => {
-    const res = await promote({ base: "release/1.2" });
-    expect(res.status).toBe(200);
-    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
-    expect(prPayload.base).toBe("release/1.2");
-  });
+  // The base-validation matrix moved off the request body and onto the project's
+  // own recorded default branch. `base` is no longer accepted from callers at
+  // all (SA-6), but the project record can still carry a branch name that
+  // arrived through import and was never checked, so the same rules apply — the
+  // input is just a different one.
+  const withDefaultBranch = (sourceDefaultBranch: string) =>
+    vi.mocked(getProject).mockResolvedValue({
+      success: true,
+      data: {
+        ...mockProject,
+        sourceUrl: "https://github.com/imported/repo.git",
+        sourceDefaultBranch,
+      },
+    });
 
-  it.each(["feature/@/thing", "feature/@-fix", "v1.0.0", "a.b.c/d.e"])(
-    "accepts the legal base %j (@ inside a longer name is unambiguous)",
-    async (base) => {
-      const res = await promote({ base });
+  it.each(["release/1.2", "feature/@/thing", "feature/@-fix", "v1.0.0", "a.b.c/d.e"])(
+    "promotes against the legal project default branch %j (@ inside a longer name is unambiguous)",
+    async (branch) => {
+      withDefaultBranch(branch);
+      const res = await promote();
       expect(res.status).toBe(200);
       const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
-      expect(prPayload.base).toBe(base);
+      expect(prPayload.base).toBe(branch);
     },
   );
 
@@ -2292,7 +2646,6 @@ describe("POST /api/changes/:id/github-pr", () => {
     "quest?ion",
     "ctrl\u0007bell",
     "a".repeat(201),
-    "",
     // git applies its per-component rules to every slash-separated component,
     // not just the whole ref, so these are invalid despite the full string
     // neither starting with "." nor ending with "." / ".lock".
@@ -2304,18 +2657,20 @@ describe("POST /api/changes/:id/github-pr", () => {
     // git will create refs/heads/@, but "@" is git's shorthand for HEAD, so the
     // name is ambiguous everywhere it is used. Rejected deliberately.
     "@",
-  ])("rejects garbage base %j without touching GitHub", async (base) => {
-    const res = await promote({ base });
+  ])("refuses to promote against the garbage project default branch %j", async (branch) => {
+    withDefaultBranch(branch);
+    const res = await promote();
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("Invalid base branch name");
     expect(pushBranchToRemote).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a non-string base", async () => {
-    const res = await promote({ base: 42 });
-    expect(res.status).toBe(400);
-    expect(pushBranchToRemote).not.toHaveBeenCalled();
+  it("ignores a base in the request body even when it is a legal branch name", async () => {
+    withDefaultBranch("trunk");
+    const res = await promote({ base: "release/1.2" });
+    expect(res.status).toBe(200);
+    const prPayload = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(prPayload.base).toBe("trunk");
   });
 
   it("400s when the project has neither githubUrl nor sourceUrl", async () => {
@@ -2598,19 +2953,20 @@ describe("POST /api/changes/:id/github-pr", () => {
     expect(updateChangeStatus).not.toHaveBeenCalled();
   });
 
+  const reusableStoredPr = {
+    status: "promoted" as const,
+    githubOwner: "acme",
+    githubRepo: "widgets",
+    githubBranch: "stratum/chg_abc123",
+    githubPrNumber: 7,
+    githubPrUrl: "https://github.com/acme/widgets/pull/7",
+    githubPrState: "open",
+  };
+
   it("re-promotion re-pushes the branch and reuses the existing PR", async () => {
     vi.mocked(getChange).mockResolvedValue({
       success: true,
-      data: {
-        ...acceptedChange,
-        status: "promoted",
-        githubOwner: "acme",
-        githubRepo: "widgets",
-        githubBranch: "stratum/chg_abc123",
-        githubPrNumber: 7,
-        githubPrUrl: "https://github.com/acme/widgets/pull/7",
-        githubPrState: "open",
-      },
+      data: { ...acceptedChange, ...reusableStoredPr },
     });
     const res = await promote();
     expect(res.status).toBe(200);
@@ -2623,7 +2979,77 @@ describe("POST /api/changes/:id/github-pr", () => {
         pullRequestUrl: "https://github.com/acme/widgets/pull/7",
       }),
     );
+  });
+
+  // The reuse path returns before the create path's updateChangeStatus, so the
+  // revision it just force-pushed has to be recorded here or not at all. This
+  // is every re-promotion, so a miss leaves github_head_sha describing the
+  // PREVIOUS head while the branch on GitHub has moved.
+  it("re-promotion records the revision it just published, not the one it replaced", async () => {
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: {
+        ...acceptedChange,
+        ...reusableStoredPr,
+        evaluatedSha: "sha-second",
+        githubHeadSha: "sha-first",
+      },
+    });
+    vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-second" });
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      "promoted",
+      { githubHeadSha: "sha-second" },
+    );
+    // Only the sha: re-promotion is not treated as a fresh promotion event, so
+    // promoted_at/promoted_by are deliberately left alone.
+    expect(updateChangeStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      "promoted",
+      expect.not.objectContaining({ promotedAt: expect.anything() }),
+    );
+  });
+
+  it("re-promotion of a legacy change with no evaluatedSha records no sha", async () => {
+    // No evaluatedSha means the staleness gate never ran, so there is no
+    // confirmed published revision to record — writing one would be inventing it.
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...acceptedChange, ...reusableStoredPr, evaluatedSha: undefined },
+    });
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    expect(resolveLocalTip).not.toHaveBeenCalled();
     expect(updateChangeStatus).not.toHaveBeenCalled();
+  });
+
+  it("re-promotion still succeeds when recording the published revision fails", async () => {
+    // The branch is pushed and the PR exists, so the promotion genuinely
+    // happened; a D1 blip must not turn it into an error.
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...acceptedChange, ...reusableStoredPr, evaluatedSha: "sha-second" },
+    });
+    vi.mocked(resolveLocalTip).mockResolvedValue({ success: true, data: "sha-second" });
+    vi.mocked(updateChangeStatus).mockResolvedValue({
+      success: false,
+      error: new AppError("d1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await promote();
+
+    expect(res.status).toBe(200);
+    expect(updateChangeStatus).toHaveBeenCalled();
   });
 
   // Rows written before this route validated GitHub responses can hold
@@ -2906,7 +3332,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
     });
     vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(recordEvalRuns).mockResolvedValue({ success: true, data: [] });
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
+      success: true,
+      data: { dismissedReviewerIds: ["user_1"] },
+    });
     vi.mocked(recordAudit).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(CompositeEvaluator).mockImplementation(
       () =>
@@ -2916,31 +3345,31 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
     );
   });
 
-  it("dismisses stale approvals when re-evaluation lands a new sha", async () => {
+  it("atomically dismisses stale approvals and re-pins the sha in one batch call (#238)", async () => {
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
       env,
     );
     expect(res.status).toBe(200);
 
-    expect(dismissApprovals).toHaveBeenCalledWith(env.DB, expect.any(Object), "chg_abc123");
-    // Fail-closed ordering: approvals are dropped before the new sha is pinned.
-    const dismissOrder = vi.mocked(dismissApprovals).mock.invocationCallOrder[0] ?? 0;
-    const updateOrder = vi.mocked(updateChangeStatus).mock.invocationCallOrder[0] ?? 0;
-    expect(dismissOrder).toBeLessThan(updateOrder);
-    expect(updateChangeStatus).toHaveBeenCalledWith(
+    // The dismissal and the status/sha re-pin are ONE call now, not two
+    // separate writes — see storage/changes.ts dismissApprovalsAndUpdateStatus.
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
       env.DB,
       expect.any(Object),
       "chg_abc123",
       "accepted",
       expect.objectContaining({ evaluatedSha: "new_sha" }),
     );
+    // The plain, non-atomic updateChangeStatus must not also run for this path
+    // — that would reintroduce the two-write race #238 removes.
+    expect(updateChangeStatus).not.toHaveBeenCalled();
   });
 
   it("records an audit entry for the dismissal", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
       success: true,
-      data: ["user_1", "user_2"],
+      data: { dismissedReviewerIds: ["user_1", "user_2"] },
     });
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
@@ -2961,10 +3390,17 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
         evaluatedSha: "new_sha",
       },
     });
+    // The audit entry is only recorded once the batch itself has succeeded.
+    const batchOrder = vi.mocked(dismissApprovalsAndUpdateStatus).mock.invocationCallOrder[0] ?? 0;
+    const auditOrder = vi.mocked(recordAudit).mock.invocationCallOrder[0] ?? 0;
+    expect(batchOrder).toBeLessThan(auditOrder);
   });
 
   it("logs but does not fail the request when auditing the dismissal fails", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: ["user_1"] });
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
+      success: true,
+      data: { dismissedReviewerIds: ["user_1"] },
+    });
     vi.mocked(recordAudit).mockResolvedValue({
       success: false,
       error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
@@ -2975,9 +3411,72 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
 
-    // The dismissal already happened; a failed audit write must not fail the request.
+    // The dismissal + re-pin batch already landed; a failed audit write must
+    // not fail the request.
     expect(res.status).toBe(200);
-    expect(updateChangeStatus).toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalled();
+  });
+
+  it("recomputes the protected-config flag from the re-evaluated diff", async () => {
+    // A change that was benign when opened can acquire a policy edit before
+    // re-evaluation. Re-evaluation re-pins evaluatedSha to the new tip, which is
+    // what the merge route's staleness check compares against — so if the flag
+    // kept its creation-time value, the relaxation would merge without the
+    // approval SA-3 requires.
+    const policyDiff =
+      "diff --git a/.stratum/policy.yaml b/.stratum/policy.yaml\n+requiredApprovals: 0";
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: {
+        diff: policyDiff,
+        workspaceOid: "new_sha",
+        workspaceTreeOid: "new_tree",
+        workspaceSha: "new_sha",
+      },
+    });
+    vi.mocked(diffTouchesProtectedConfig).mockReturnValue(true);
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // Detection must run against the diff this re-evaluation actually saw, not
+    // the one the change was opened with.
+    expect(diffTouchesProtectedConfig).toHaveBeenCalledWith(policyDiff);
+    // The evaluated sha changes here (old_sha -> new_sha), so the re-pin goes
+    // through the atomic dismiss+update batch (#238), not the plain
+    // updateChangeStatus path.
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ touchesProtectedConfig: true }),
+    );
+  });
+
+  it("clears the protected-config flag when the re-evaluated diff no longer touches it", async () => {
+    // The recomputation must be symmetric: dropping the policy edit before
+    // re-evaluation must clear the flag, not leave the change permanently gated.
+    vi.mocked(diffTouchesProtectedConfig).mockReturnValue(false);
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // The default beforeEach setup re-pins a new evaluated sha, so this also
+    // goes through the atomic dismiss+update batch (#238).
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ touchesProtectedConfig: false }),
+    );
   });
 
   it("keeps approvals when the re-evaluated sha is unchanged", async () => {
@@ -2996,8 +3495,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
     expect(res.status).toBe(200);
-    expect(dismissApprovals).not.toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
+    // No approvals at risk here, so the plain single-write path is used.
+    expect(updateChangeStatus).toHaveBeenCalled();
   });
 
   it("keeps approvals on a legacy change with no recorded evaluated sha", async () => {
@@ -3011,22 +3512,25 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
     expect(res.status).toBe(200);
-    expect(dismissApprovals).not.toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).not.toHaveBeenCalled();
   });
 
   it("skips the audit entry when there were no approvals to dismiss", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({ success: true, data: [] });
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
+      success: true,
+      data: { dismissedReviewerIds: [] },
+    });
     const res = await app.fetch(
       request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
       env,
     );
     expect(res.status).toBe(200);
-    expect(dismissApprovals).toHaveBeenCalled();
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
   });
 
-  it("fails closed without re-pinning the sha when dismissal fails", async () => {
-    vi.mocked(dismissApprovals).mockResolvedValue({
+  it("fails closed — without re-pinning the sha or losing approvals — when the atomic batch fails (#238)", async () => {
+    vi.mocked(dismissApprovalsAndUpdateStatus).mockResolvedValue({
       success: false,
       error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
     });
@@ -3036,7 +3540,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       env,
     );
     expect(res.status).toBe(500);
-    // The old evaluated sha stays pinned: stale approvals never coexist with a new sha.
+    // Neither write is applied outside the failed batch: no separate
+    // updateChangeStatus fallback, and no audit entry for a dismissal that
+    // never actually landed.
     expect(updateChangeStatus).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 });

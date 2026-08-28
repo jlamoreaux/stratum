@@ -5,10 +5,16 @@ import { createDeletionJob } from "../storage/deletion-jobs";
 import { getUser, getUserByUsername, markUserDeleting, rotateUserToken } from "../storage/users";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
+import { readJsonWithLimit } from "../utils/request-body";
 import { badRequest, internalError, ok } from "../utils/response";
 import { validateUsername } from "../utils/username-validation";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// A backstop against an unbounded read, not a real limit: this route reads back
+// only a short confirmation value, so 1 MiB is already far more headroom than
+// any request matching the route's contract could use.
+const MAX_ACCOUNT_DELETE_BODY_BYTES = 1024 * 1024;
 
 // NOTE: user creation has no API route. Accounts are bootstrapped only through
 // verified flows (`/auth/github`, `/auth/google`, `/auth/email` magic link, and
@@ -102,9 +108,12 @@ async function handleAccountDelete(c: Context<{ Bindings: Env }>): Promise<Respo
   const isJson = c.req.header("content-type")?.includes("application/json") ?? false;
   let confirm: unknown;
   if (isJson) {
-    const body = await c.req
-      .json<{ confirm?: unknown }>()
-      .catch(() => ({}) as { confirm?: unknown });
+    const body = await readJsonWithLimit<{ confirm?: unknown }>(
+      c,
+      MAX_ACCOUNT_DELETE_BODY_BYTES,
+      logger,
+    ).catch(() => ({}) as { confirm?: unknown });
+    if (body instanceof Response) return body;
     confirm = body.confirm;
   } else {
     const form = await c.req.parseBody();

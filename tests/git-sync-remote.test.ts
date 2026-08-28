@@ -1,0 +1,495 @@
+import git, { Errors as GitErrors } from "isomorphic-git";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { syncFromGitHub } from "../src/storage/git-ops";
+import type { ArtifactsNamespace } from "../src/types";
+import type { Logger } from "../src/utils/logger";
+
+// Mock the git plumbing so the network-facing wrapper can be exercised without
+// a live Artifacts/GitHub remote. The pure-git decision logic is covered with
+// REAL isomorphic-git in tests/git-sync.test.ts.
+// `Errors` must come from the real module: applySourceUpdate classifies merge
+// failures against the actual isomorphic-git error classes, so a mock without
+// them makes the classification throw instead of discriminating.
+vi.mock("isomorphic-git", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("isomorphic-git")>();
+  return {
+    ...actual,
+    Errors: actual.Errors,
+    default: {
+      clone: vi.fn(),
+      addRemote: vi.fn(),
+      fetch: vi.fn(),
+      resolveRef: vi.fn(),
+      merge: vi.fn(),
+      push: vi.fn(),
+      findMergeBase: vi.fn(),
+      log: vi.fn(),
+    },
+  };
+});
+
+const logger = {
+  trace: vi.fn(),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  fatal: vi.fn(),
+  child: vi.fn(() => logger),
+} as unknown as Logger;
+
+const REMOTE = "https://acct.artifacts.cloudflare.net/git/stratum-prod/owner__repo.git";
+const SOURCE_URL = "https://github.com/owner/repo";
+
+/** Just enough of the real (mocked-away) `fs` shape to seed `.git/shallow`
+ * directly in the deepening wiring test below. */
+interface FsWithWrite {
+  promises: { writeFile: (path: string, data: string) => Promise<void> };
+}
+
+function makeArtifacts() {
+  const createToken = vi.fn().mockResolvedValue({ plaintext: "tok_secret?expires=123" });
+  const del = vi.fn();
+  const importFn = vi.fn();
+  const get = vi.fn().mockResolvedValue({ createToken });
+  const artifacts = {
+    get,
+    delete: del,
+    import: importFn,
+  } as unknown as ArtifactsNamespace;
+  return { artifacts, del, importFn, createToken, get };
+}
+
+beforeEach(() => {
+  vi.mocked(git.clone).mockReset().mockResolvedValue(undefined);
+  vi.mocked(git.addRemote).mockReset().mockResolvedValue(undefined);
+  vi.mocked(git.fetch)
+    .mockReset()
+    .mockResolvedValue({} as never);
+  vi.mocked(git.resolveRef)
+    .mockReset()
+    .mockImplementation(async ({ ref }) => {
+      if (ref === "FETCH_HEAD") return "srctip";
+      if (ref === "main") return "headsha";
+      throw new Error(`unexpected ref ${ref}`);
+    });
+  vi.mocked(git.merge)
+    .mockReset()
+    .mockResolvedValue({ oid: "srctip", fastForward: true } as never);
+  vi.mocked(git.push)
+    .mockReset()
+    .mockResolvedValue({ ok: true } as never);
+  vi.mocked(git.findMergeBase)
+    .mockReset()
+    .mockResolvedValue([] as never);
+  vi.mocked(git.log)
+    .mockReset()
+    .mockResolvedValue([] as never);
+});
+
+describe("syncFromGitHub (incremental sync wrapper)", () => {
+  it("fast-forwards and pushes new source commits into the EXISTING repo", async () => {
+    const { artifacts, del, importFn, createToken } = makeArtifacts();
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "main");
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({ status: "fast-forwarded", commit: "srctip" });
+
+    // Clones the existing Artifacts repo with a write-scoped fresh token.
+    expect(createToken).toHaveBeenCalledWith("write", 3600);
+    expect(git.clone).toHaveBeenCalledWith(expect.objectContaining({ url: REMOTE, ref: "main" }));
+    // Fetches the source branch (shallow) from the public URL.
+    expect(git.addRemote).toHaveBeenCalledWith(
+      expect.objectContaining({ remote: "source", url: SOURCE_URL }),
+    );
+    expect(git.fetch).toHaveBeenCalledWith(
+      expect.objectContaining({ remote: "source", ref: "main", singleBranch: true, depth: 50 }),
+    );
+    // Pushes main back to the same remote — the repo is updated, not replaced.
+    expect(git.push).toHaveBeenCalledWith(
+      expect.objectContaining({ url: REMOTE, ref: "main", remoteRef: "main" }),
+    );
+    // Non-force is the invariant that makes a concurrent Stratum-native merge
+    // lose the race rather than get silently overwritten. objectContaining
+    // ignores unlisted keys, so `force: true` would slip past the assertion
+    // above — assert its absence explicitly.
+    expect(vi.mocked(git.push).mock.calls[0]?.[0]).not.toHaveProperty("force", true);
+    // The destructive delete/re-import cycle must never run.
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  // #240: the deepening loop's starting window assumes the project clone and the
+  // source fetch begin at the SAME depth. cloneRepo used to pin itself to 50
+  // while the fetch honoured the caller's `depth`, so a caller asking for more
+  // got a project side shallower than the loop believed -- and with
+  // depth === maxDepth the loop starts at its cap, so it returns SYNC_DIVERGED
+  // without ever deepening the project, even though the source already has the
+  // base. Today both default to DEFAULT_SHALLOW_DEPTH, so the bug is invisible
+  // until someone passes a depth or retunes the constant.
+  it("clones the project at the same depth it fetches the source", async () => {
+    const { artifacts } = makeArtifacts();
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "main", 100);
+
+    expect(result.success).toBe(true);
+    expect(git.clone).toHaveBeenCalledWith(expect.objectContaining({ url: REMOTE, depth: 100 }));
+    expect(git.fetch).toHaveBeenCalledWith(
+      expect.objectContaining({ remote: "source", depth: 100 }),
+    );
+  });
+
+  // #240: `depth` reaches three places -- the clone, the source fetch, and the
+  // deepening loop's starting window. The first two are forwarded by
+  // isomorphic-git into the upload-pack `deepen <n>` line, so a non-positive
+  // value from a caller becomes a protocol error from the remote rather than
+  // anything the retry helper's own floor could catch. Flooring inside the
+  // helper was therefore not enough; it has to happen at this entry point.
+  it("floors a non-positive caller depth before it reaches the wire", async () => {
+    const { artifacts } = makeArtifacts();
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "main", 0);
+
+    expect(result.success).toBe(true);
+    expect(git.clone).toHaveBeenCalledWith(expect.objectContaining({ url: REMOTE, depth: 1 }));
+    expect(git.fetch).toHaveBeenCalledWith(expect.objectContaining({ remote: "source", depth: 1 }));
+  });
+
+  // #181: an imported repo keeps its SOURCE default branch name. Every leg of
+  // the sync — clone, merge base, head fallback, and push — has to follow it,
+  // or the sync fails at the clone (the remote has no `main`) or, worse,
+  // advances a branch nobody reads.
+  it("threads a non-main default branch through clone, merge, resolve, and push", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    vi.mocked(git.resolveRef)
+      .mockReset()
+      .mockImplementation(async ({ ref }) => {
+        if (ref === "FETCH_HEAD") return "srctip";
+        if (ref === "master") return "headsha";
+        throw new Error(`unexpected ref ${ref}`);
+      });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "master");
+
+    expect(result.success).toBe(true);
+    expect(git.clone).toHaveBeenCalledWith(expect.objectContaining({ url: REMOTE, ref: "master" }));
+    expect(git.fetch).toHaveBeenCalledWith(
+      expect.objectContaining({ remote: "source", ref: "master" }),
+    );
+    expect(git.merge).toHaveBeenCalledWith(expect.objectContaining({ ours: "master" }));
+    expect(git.push).toHaveBeenCalledWith(
+      expect.objectContaining({ url: REMOTE, ref: "master", remoteRef: "master" }),
+    );
+    // Never the hardcoded main, on any leg.
+    for (const call of vi.mocked(git.clone).mock.calls) {
+      expect(call[0]).not.toHaveProperty("ref", "main");
+    }
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  // The head fallback runs only when git.merge returns no oid; on a non-main
+  // repo it must resolve that repo's branch, not `main`.
+  it("resolves the non-main head when git.merge reports no oid", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.merge).mockResolvedValue({} as never);
+    vi.mocked(git.resolveRef)
+      .mockReset()
+      .mockImplementation(async ({ ref }) => {
+        if (ref === "FETCH_HEAD") return "srctip";
+        if (ref === "trunk") return "trunkhead";
+        throw new Error(`unexpected ref ${ref}`);
+      });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "trunk");
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.commit).toBe("trunkhead");
+    expect(git.resolveRef).toHaveBeenCalledWith(expect.objectContaining({ ref: "trunk" }));
+  });
+
+  it("is a no-op (no push) when already up to date", async () => {
+    const { artifacts, del } = makeArtifacts();
+    vi.mocked(git.merge).mockResolvedValue({ oid: "headsha", alreadyMerged: true } as never);
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({ status: "up-to-date", commit: "headsha" });
+    expect(git.push).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("pushes a merge commit when native and source histories both advanced", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.merge).mockResolvedValue({ oid: "mergesha", mergeCommit: true } as never);
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({ status: "merged", commit: "mergesha" });
+    expect(git.push).toHaveBeenCalledOnce();
+  });
+
+  it("resolves the head when git.merge reports no oid", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.merge).mockResolvedValue({ mergeCommit: true } as never);
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({ status: "merged", commit: "headsha" });
+  });
+
+  it("fails when git.merge reports no oid and main cannot be resolved", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.merge).mockResolvedValue({ mergeCommit: true } as never);
+    vi.mocked(git.resolveRef).mockImplementation(async ({ ref }) => {
+      if (ref === "FETCH_HEAD") return "srctip";
+      throw new Error("corrupt head");
+    });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain("Failed to resolve main after sync");
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it("fails with SYNC_DIVERGED on a genuine conflict without retrying", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    // A REAL conflict error: only these earn the 409. A merge base WAS found
+    // (isomorphic-git only reaches this error shape after that), so more
+    // history cannot fix it — the sync must not retry at all.
+    vi.mocked(git.merge).mockRejectedValue(
+      new GitErrors.MergeConflictError(["file.txt"], ["file.txt"], [], []),
+    );
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.code).toBe("SYNC_DIVERGED");
+    expect(result.error.statusCode).toBe(409);
+    expect(result.error.message).toContain("left untouched");
+    expect(git.push).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+    // A genuine conflict is not a missing-merge-base case, so no deepening
+    // retry is attempted — one clone, one merge attempt.
+    expect(git.clone).toHaveBeenCalledTimes(1);
+    expect(git.merge).toHaveBeenCalledTimes(1);
+    expect(git.findMergeBase).not.toHaveBeenCalled();
+  });
+
+  it("does not deepen when local state shows neither side is actually shallow", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    // MergeNotSupportedError with no merge base found looks like a missing-
+    // merge-base case, but the (mocked, untouched) local repo has no
+    // `.git/shallow` boundary — i.e. nothing further to reveal by fetching
+    // more. The sync must not waste a fetch round trying anyway.
+    vi.mocked(git.merge).mockRejectedValue(new GitErrors.MergeNotSupportedError());
+    vi.mocked(git.findMergeBase).mockResolvedValue([] as never);
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.code).toBe("SYNC_DIVERGED");
+    expect(git.clone).toHaveBeenCalledTimes(1);
+    expect(git.merge).toHaveBeenCalledTimes(1);
+    // findMergeBase WAS consulted to classify the failure...
+    expect(git.findMergeBase).toHaveBeenCalledTimes(1);
+    // ...but no deepening fetch followed the initial one.
+    expect(git.fetch).toHaveBeenCalledTimes(1);
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("deepens both sides with relative fetches and retries when a shallow clone hid the common ancestor", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    const boundaryOid = "1111111111111111111111111111111111111a";
+
+    // The mocked clone/fetch leave a real `.git/shallow` boundary in the
+    // (otherwise real, in-memory) fs, so `isRefShallow` reports both the
+    // project and source refs as genuinely shallow.
+    vi.mocked(git.clone).mockImplementation((async (args: { fs: FsWithWrite; dir: string }) => {
+      const { fs, dir } = args;
+      const gitdir = `${dir === "/" ? "" : dir}/.git`;
+      await fs.promises.writeFile(`${gitdir}/shallow`, `${boundaryOid}\n`);
+    }) as never);
+    vi.mocked(git.log).mockResolvedValue([{ oid: boundaryOid }] as never);
+    vi.mocked(git.findMergeBase).mockResolvedValue([] as never);
+    // Shallow depth hides the branch point on the first attempt; once both
+    // sides are deepened the same merge succeeds — the histories were
+    // related all along.
+    vi.mocked(git.merge)
+      .mockRejectedValueOnce(new GitErrors.MergeNotSupportedError())
+      .mockResolvedValueOnce({ oid: "merged1", fastForward: false, alreadyMerged: false });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.status).toBe("merged");
+
+    // No re-clone: the SAME clone is deepened in place.
+    expect(git.clone).toHaveBeenCalledTimes(1);
+    expect(git.merge).toHaveBeenCalledTimes(2);
+
+    // One deepening fetch per side, each doubling the 50-commit window by
+    // +50 via `relative: true` rather than jumping to full history.
+    const fetchCalls = vi.mocked(git.fetch).mock.calls.map((c) => c[0] as Record<string, unknown>);
+    const projectDeepen = fetchCalls.find((c) => c.remote === "origin");
+    expect(projectDeepen).toMatchObject({ ref: "main", depth: 50, relative: true });
+    const sourceFetches = fetchCalls.filter((c) => c.remote === "source");
+    expect(sourceFetches).toHaveLength(2);
+    expect(sourceFetches[1]).toMatchObject({ ref: "main", depth: 50, relative: true });
+
+    // Still non-destructive on the way through.
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("does not retry an operational merge failure", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.merge).mockRejectedValue(new Error("ENOSPC: no space left on device"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.code).not.toBe("SYNC_DIVERGED");
+    // A full clone would just fail the same way, more expensively.
+    expect(git.clone).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a generic merge rejection as operational, not divergence", async () => {
+    const { artifacts, del, importFn } = makeArtifacts();
+    vi.mocked(git.merge).mockRejectedValue(new Error("ENOSPC: no space left on device"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    // Telling an operator their history diverged when the disk filled up sends
+    // them to reconcile history that is perfectly fine.
+    expect(result.error.code).not.toBe("SYNC_DIVERGED");
+    expect(result.error.statusCode).not.toBe(409);
+    expect(result.error.message).toContain("no space left on device");
+    // Still non-destructive, whatever the classification.
+    expect(git.push).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+    expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("propagates source fetch failures (auth/network)", async () => {
+    const { artifacts, del } = makeArtifacts();
+    vi.mocked(git.fetch).mockRejectedValue(new Error("HTTP Error: 401 Unauthorized"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "develop");
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.code).toBe("EXTERNAL_SERVICE_ERROR");
+    expect(result.error.message).toContain("Failed to fetch develop from source");
+    expect(result.error.message).toContain("401 Unauthorized");
+    expect(git.merge).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it("propagates clone failures without fetching", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.clone).mockRejectedValue(new Error("network down"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    expect(git.fetch).not.toHaveBeenCalled();
+  });
+
+  it("fails when adding the source remote fails", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.addRemote).mockRejectedValue(new Error("bad remote"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain("Failed to add source remote");
+    expect(git.fetch).not.toHaveBeenCalled();
+  });
+
+  it("fails when token minting fails, before any git operation", async () => {
+    const { artifacts, get } = makeArtifacts();
+    get.mockRejectedValue(new Error("artifacts down"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    expect(git.clone).not.toHaveBeenCalled();
+  });
+
+  it("fails for a remote that is not an Artifacts repo", async () => {
+    const { artifacts } = makeArtifacts();
+
+    const result = await syncFromGitHub(
+      artifacts,
+      "https://github.com/owner/repo.git",
+      SOURCE_URL,
+      logger,
+    );
+
+    expect(result.success).toBe(false);
+    expect(artifacts.get).not.toHaveBeenCalled();
+    expect(git.clone).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the fetched remote ref when FETCH_HEAD is unavailable", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.resolveRef).mockImplementation(async ({ ref }) => {
+      if (ref === "FETCH_HEAD") throw new Error("no FETCH_HEAD");
+      if (ref === "refs/remotes/source/develop") return "srctip";
+      throw new Error(`unexpected ref ${ref}`);
+    });
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger, "develop");
+
+    expect(result.success).toBe(true);
+    expect(git.resolveRef).toHaveBeenCalledWith(
+      expect.objectContaining({ ref: "refs/remotes/source/develop" }),
+    );
+    expect(git.merge).toHaveBeenCalledWith(expect.objectContaining({ theirs: "srctip" }));
+  });
+
+  it("fails when neither FETCH_HEAD nor the remote ref resolves", async () => {
+    const { artifacts } = makeArtifacts();
+    vi.mocked(git.resolveRef).mockRejectedValue(new Error("not found"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain("Failed to resolve fetched source ref");
+    expect(git.merge).not.toHaveBeenCalled();
+  });
+
+  it("fails when the push back to Artifacts is rejected", async () => {
+    const { artifacts, del } = makeArtifacts();
+    vi.mocked(git.push).mockRejectedValue(new Error("non-fast-forward"));
+
+    const result = await syncFromGitHub(artifacts, REMOTE, SOURCE_URL, logger);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain("Failed to push synced history");
+    expect(del).not.toHaveBeenCalled();
+  });
+});

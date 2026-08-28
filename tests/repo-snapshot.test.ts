@@ -1,5 +1,5 @@
 import git from "isomorphic-git";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildSnapshot, walkRepoObjects } from "../src/backup/repo-snapshot";
 import type { NodeFS } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
@@ -49,6 +49,13 @@ const project: ProjectEntry = {
 };
 
 describe("repo snapshot capture", () => {
+  // The logger mock is module-scoped, so without this each test would see the
+  // previous test's calls and the call-count assertions below would pass or
+  // fail on declaration order rather than on behaviour.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("walks the full reachable object set and preserves the tip sha", async () => {
     const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }, { "b.txt": "two" }]);
     const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
@@ -84,5 +91,64 @@ describe("repo snapshot capture", () => {
     expect(walk.success).toBe(true);
     if (!walk.success) return;
     expect("empty" in walk.data).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  // #251: a repo with no branch ref (unborn HEAD) but a tag pointing at a
+  // commit is reported empty and its tag-reachable objects are skipped. The
+  // full fix is a backup-format migration (tracked separately); this is the
+  // interim "loud, explicit skip" — the drop must be logged, not silent.
+  it("logs a loud warning naming the dropped tags for a tag-only repo (unborn HEAD)", async () => {
+    const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }]);
+    await git.tag({ fs, dir: DIR, ref: "v1", object: tipSha });
+    // Remove the only branch ref directly (not via git.deleteBranch, which
+    // detaches HEAD onto the sha instead of leaving it unborn) so HEAD stays
+    // an unresolvable symref, mirroring a remote whose sole ref is a tag: the
+    // tagged commit stays reachable only via refs/tags/v1.
+    await fs.promises.unlink(`${DIR}/.git/refs/heads/main`);
+
+    const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
+    expect(walk.success).toBe(true);
+    if (!walk.success) return;
+    expect("empty" in walk.data).toBe(true);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const [message, meta] = (logger.warn as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(message).toMatch(/dropping/i);
+    expect(message).toMatch(/tag/i);
+    expect(meta.tags).toEqual(["v1"]);
+    expect(meta.tagCount).toBe(1);
+    expect(meta.tagsTruncated).toBeUndefined();
+  });
+
+  it("caps the named tags but still reports the true count", async () => {
+    // The warning's job is to make the loss visible. An unbounded name list
+    // on a repo with a large tag set would push the entry past the log
+    // pipeline's size limit and drop it entirely -- silence, which is exactly
+    // what this warning exists to prevent. The sample is bounded; the count
+    // is not.
+    const { fs, tipSha } = await buildRepo([{ "a.txt": "one" }]);
+    for (let i = 0; i < 60; i++) {
+      await git.tag({ fs, dir: DIR, ref: `v${String(i).padStart(3, "0")}`, object: tipSha });
+    }
+    await fs.promises.unlink(`${DIR}/.git/refs/heads/main`);
+
+    const walk = await walkRepoObjects(fs, DIR, 1_000_000, logger);
+    expect(walk.success).toBe(true);
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const [, meta] = (logger.warn as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(meta.tagCount).toBe(60);
+    expect((meta.tags as string[]).length).toBe(50);
+    expect(meta.tagsTruncated).toBe(true);
+    // Sorted, so the sample is the first 50 by name rather than arbitrary.
+    expect((meta.tags as string[])[0]).toBe("v000");
+    expect((meta.tags as string[])[49]).toBe("v049");
   });
 });
