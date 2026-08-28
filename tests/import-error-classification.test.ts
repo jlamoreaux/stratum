@@ -172,6 +172,40 @@ describe("classifyError — a repository's name must not decide its error messag
     expect(info.title).toBe("Network Error");
   });
 
+  // A ref name is not inside a URL, so stripping remotes cannot save it — only
+  // the marker shape can. Both of these were still misclassified after the
+  // first cut of this fix, because two single-token markers had been excepted
+  // from the space rule.
+  it.each([
+    [
+      "ref named ...unauthorized...",
+      "couldn't find remote ref refs/heads/fix-unauthorized-redirect (404)",
+    ],
+    ["ref named ...enotfound...", "couldn't find remote ref refs/heads/enotfound-handling (404)"],
+    ["ref named ...econnreset...", "couldn't find remote ref refs/heads/econnreset-retry (404)"],
+    ["ref named ...timed-out...", "couldn't find remote ref refs/heads/retry-timed-out (404)"],
+  ])("reports a missing ref as NOT_FOUND despite its name (%s)", (_label, message) => {
+    const info = classifyError(message);
+    expect(info.type).toBe("NOT_FOUND");
+  });
+
+  // The counterpart: Node emits its transport codes upper-case, which is what
+  // separates a real DNS/socket failure from a lower-case ref name above.
+  it.each([
+    ["dns", "request to https://github.com/acme/x.git failed, reason: getaddrinfo ENOTFOUND"],
+    ["refused", "connect ECONNREFUSED 140.82.121.4:443"],
+    ["reset", "read ECONNRESET"],
+    ["timeout code", "connect ETIMEDOUT 140.82.121.4:443"],
+  ])("still reports an upper-case Node transport code as NETWORK_ERROR (%s)", (_label, message) => {
+    const info = classifyError(message);
+    expect(info.type).toBe("NETWORK_ERROR");
+  });
+
+  // The word alone no longer classifies; the status beside it does.
+  it("still reports a 401 Unauthorized as AUTH_ERROR", () => {
+    expect(classifyError("HTTP Error: 401 Unauthorized").type).toBe("AUTH_ERROR");
+  });
+
   // A URL path that happens to contain three digits is not an HTTP status.
   it("does not read digits inside a repository path as a status code", () => {
     const info = classifyError(

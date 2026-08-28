@@ -264,7 +264,17 @@ describe("CSP nonce sweep — components", () => {
       <ImportProgressCard
         {...importProgressBase}
         status="failed"
-        errors={[{ file: "repo", error: "unauthorized", timestamp: "2024-01-01T00:00:00Z" }]}
+        // A realistic auth failure rather than the bare word "unauthorized":
+        // classifyError deliberately no longer treats that token alone as an
+        // auth error (it collided with ref names — see #278), and this case
+        // needs a classification that renders the action button it asserts on.
+        errors={[
+          {
+            file: "repo",
+            error: "HTTP Error: 401 Unauthorized",
+            timestamp: "2024-01-01T00:00:00Z",
+          },
+        ]}
         nonce={NONCE}
       />,
     );

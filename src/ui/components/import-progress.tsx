@@ -93,7 +93,7 @@ const LFS_BATCH_RESPONSE_MARKERS = ["batch response", "/info/lfs/objects/batch"]
  * repository called `oauth-server` or `fetch-utils` cannot decide how its
  * failure is described.
  */
-const REMOTE_SPAN = /\b[a-z][a-z0-9+.-]*:\/\/\S+|\b[\w.-]+@[\w.-]+:\S+/g;
+const REMOTE_SPAN = /\b[a-z][a-z0-9+.-]*:\/\/\S+|\b[\w.-]+@[\w.-]+:\S+/gi;
 
 /**
  * Markers of a real authentication failure, as git and the GitHub API phrase
@@ -122,9 +122,9 @@ const AUTH_MARKERS = [
 /**
  * Markers of a real transport failure.
  *
- * Same rule as {@link AUTH_MARKERS}, with one deliberate exception: Node's
- * transport codes are single tokens, and no repository is plausibly named
- * `econnrefused`.
+ * Same space-carrying rule as {@link AUTH_MARKERS}. Node's transport codes
+ * cannot follow it — they are single tokens — so they are matched separately
+ * by {@link hasTransportCode} rather than excepted from the rule here.
  */
 const NETWORK_MARKERS = [
   "connection refused",
@@ -139,11 +139,24 @@ const NETWORK_MARKERS = [
   "failed to fetch",
   "fetch failed",
   "socket hang up",
-  "econnrefused",
-  "econnreset",
-  "etimedout",
-  "enotfound",
 ];
+
+/**
+ * Node's transport codes, which no phrase can express.
+ *
+ * Matched against the message with its ORIGINAL case, because Node always
+ * emits them upper-case (`getaddrinfo ENOTFOUND`, `connect ECONNREFUSED`)
+ * while a ref name is conventionally lower-case. That is what separates a
+ * real DNS failure from a branch called `enotfound-handling` — treating them
+ * as case-insensitive single tokens reintroduced exactly the name collision
+ * this function exists to remove.
+ */
+const TRANSPORT_CODES = ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EHOSTUNREACH"];
+
+/** Whether `rawText` carries a Node transport code as a standalone upper-case token. */
+function hasTransportCode(rawText: string): boolean {
+  return TRANSPORT_CODES.some((code) => new RegExp(`(?<![A-Z])${code}(?![A-Z])`).test(rawText));
+}
 
 /** Whether `text` carries `code` as a standalone HTTP status, not as digits inside a path. */
 function hasStatus(text: string, code: string): boolean {
@@ -157,14 +170,17 @@ export function classifyError(errorMessage: string): ErrorInfo {
   // path `/info/lfs/objects/batch`, which legitimately arrives inside a URL,
   // so stripping there would undo the LFS detection #218 added.
   const prose = msg.replace(REMOTE_SPAN, " ");
+  // The same text with its original case kept, for the transport codes above.
+  const proseRaw = errorMessage.replace(REMOTE_SPAN, " ");
 
   // Authentication errors
-  // 401/403 and a bare "unauthorized" are kept from the original predicate:
-  // read from `prose` they can no longer come from a repository's URL, and
-  // dropping them would trade this bug for a false negative on a real refusal.
+  // 401/403 carry the refusal on their own, so the original predicate's bare
+  // "unauthorized" token is gone: it is redundant beside them (every real
+  // message carrying the word carries the status too — `HTTP Error: 401
+  // Unauthorized`) and it broke the space rule, classifying a 404 for a ref
+  // named `fix-unauthorized-redirect` as an auth failure.
   if (
     AUTH_MARKERS.some((marker) => prose.includes(marker)) ||
-    prose.includes("unauthorized") ||
     hasStatus(prose, "401") ||
     hasStatus(prose, "403")
   ) {
@@ -186,7 +202,7 @@ export function classifyError(errorMessage: string): ErrorInfo {
   }
 
   // Network errors
-  if (NETWORK_MARKERS.some((marker) => prose.includes(marker))) {
+  if (NETWORK_MARKERS.some((marker) => prose.includes(marker)) || hasTransportCode(proseRaw)) {
     return {
       type: "NETWORK_ERROR",
       title: "Network Error",
