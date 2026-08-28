@@ -41,7 +41,9 @@ vi.mock("../src/storage/users", () => ({
   getUser: vi.fn(),
 }));
 
-vi.mock("../src/storage/agents", () => ({ getAgentByToken: vi.fn(async () => ({ success: false, error: {} })) }));
+vi.mock("../src/storage/agents", () => ({
+  getAgentByToken: vi.fn(async () => ({ success: false, error: {} })),
+}));
 vi.mock("../src/storage/sessions", () => ({ getSession: vi.fn(), deleteSession: vi.fn() }));
 
 import { authMiddleware } from "../src/middleware/auth";
@@ -57,8 +59,9 @@ function makeApp() {
   return app;
 }
 
-function call(method: string, token: string): Promise<Response> {
-  return makeApp().fetch(
+async function call(method: string, token: string): Promise<Response> {
+  // `app.fetch` is typed `Response | Promise<Response>`; awaiting normalises it.
+  return await makeApp().fetch(
     new Request("http://localhost/probe", {
       method,
       headers: { Authorization: `Bearer ${token}` },

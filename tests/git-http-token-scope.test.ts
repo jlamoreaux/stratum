@@ -99,7 +99,7 @@ async function seed(env: Env): Promise<void> {
     createdAt: new Date().toISOString(),
     visibility: "private",
   };
-  await env.STATE.put(`project:@owner:repo`, JSON.stringify(project));
+  await env.STATE.put("project:@owner:repo", JSON.stringify(project));
   await env.STATE.put(
     "workspace:proj_1:myws",
     JSON.stringify({
@@ -212,16 +212,23 @@ describe("read-only token over git smart-HTTP", () => {
 });
 
 describe("write-capable credentials are unaffected", () => {
-  it.each(WRITE_ENTRY_POINTS)("a read_write token is not refused at the $label", async ({ path, method }) => {
-    const env = makeEnv();
-    await seed(env);
-    const res = await app.fetch(
-      req(path, { method, headers: basic(WRITE_TOKEN), ...(method === "POST" ? { body: "" } : {}) }),
-      env,
-    );
-    // Whatever the outcome of the push itself, it is not the scope refusal.
-    expect(res.status).not.toBe(404);
-  });
+  it.each(WRITE_ENTRY_POINTS)(
+    "a read_write token is not refused at the $label",
+    async ({ path, method }) => {
+      const env = makeEnv();
+      await seed(env);
+      const res = await app.fetch(
+        req(path, {
+          method,
+          headers: basic(WRITE_TOKEN),
+          ...(method === "POST" ? { body: "" } : {}),
+        }),
+        env,
+      );
+      // Whatever the outcome of the push itself, it is not the scope refusal.
+      expect(res.status).not.toBe(404);
+    },
+  );
 
   it("the legacy users.token_hash credential keeps full write access", async () => {
     const env = makeEnv();

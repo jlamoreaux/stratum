@@ -91,7 +91,6 @@ app.post("/me/rotate-token", async (c) => {
   return ok({ token: result.data });
 });
 
-
 /** A token body is two short strings; anything larger is a client bug. */
 const MAX_TOKEN_BODY_BYTES = 4 * 1024;
 
@@ -207,10 +206,13 @@ app.post("/me/tokens", async (c) => {
 
   // The plaintext exists nowhere else after this response, so it must not be
   // cached anywhere on the way back.
-  return new Response(JSON.stringify({ token: result.data.token, plaintext: result.data.plaintext }), {
-    status: 201,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
-  });
+  return new Response(
+    JSON.stringify({ token: result.data.token, plaintext: result.data.plaintext }),
+    {
+      status: 201,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    },
+  );
 });
 
 // DELETE /api/users/me/tokens/:id — revoke one of the caller's own tokens.

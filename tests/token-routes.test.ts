@@ -33,7 +33,10 @@ import { recordAudit } from "../src/storage/audit";
 import { disableLegacyToken } from "../src/storage/users";
 
 const env = { DB: {} } as unknown as Env;
-const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+const ctx = {
+  waitUntil: () => {},
+  passThroughOnException: () => {},
+} as unknown as ExecutionContext;
 
 /** Mounts the router with an injected identity, so each test controls how the
  * caller authenticated without standing up real auth. */
@@ -207,11 +210,7 @@ describe("GET and DELETE", () => {
 
   it("revokes and audits", async () => {
     vi.mocked(revokeApiToken).mockResolvedValue({ success: true, data: undefined } as never);
-    const res = await makeApp(SESSION).fetch(
-      req("DELETE", "/api/users/me/tokens/tok_1"),
-      env,
-      ctx,
-    );
+    const res = await makeApp(SESSION).fetch(req("DELETE", "/api/users/me/tokens/tok_1"), env, ctx);
     expect(res.status).toBe(200);
     expect(recordAudit).toHaveBeenCalledWith(
       env.DB,

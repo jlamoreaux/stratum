@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { type EventActor, emitEvent } from "../queue/events";
 import { createChangeWithEvaluation, createWorkspaceFork } from "../services/change-flow";
 import { getAgentByToken } from "../storage/agents";
+import { resolveApiToken } from "../storage/api-tokens";
 import { updateChangeStatus } from "../storage/changes";
 import { isTargetDeleting } from "../storage/deletion";
 import {
@@ -10,7 +11,6 @@ import {
   freshRepoToken,
 } from "../storage/git-ops";
 import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
-import { resolveApiToken } from "../storage/api-tokens";
 import { getUser, getUserByToken } from "../storage/users";
 import type { ApiTokenScope, Env, ProjectEntry, WorkspaceEntry } from "../types";
 import { projectDefaultBranch } from "../types";
