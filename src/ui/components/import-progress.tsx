@@ -181,6 +181,20 @@ function hasStatus(text: string, code: string): boolean {
   return new RegExp(`(?<![\\d/])${code}(?!\\d)`).test(text);
 }
 
+/**
+ * Turns an import failure into guidance a person can act on.
+ *
+ * The message is the only input, and it carries the repository remote and the
+ * ref alongside git's own words — both named by whoever pushed them. So one
+ * rule governs every branch below: a marker must be something git says, not a
+ * word a name can contain. Two spans are removed before matching for what the
+ * rule cannot express, and the remaining markers are phrases, because neither
+ * a URL nor a ref name can hold a space.
+ *
+ * Branch order is load-bearing and separately covered by the LFS suite in
+ * #218; the earliest match wins, so a widened predicate here is answered on
+ * far more failures than the one it was widened for.
+ */
 export function classifyError(errorMessage: string): ErrorInfo {
   const msg = errorMessage.toLowerCase();
   // Matched against by every branch EXCEPT LFS and not-found below. Those two
