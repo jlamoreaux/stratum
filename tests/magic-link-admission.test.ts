@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { MagicLinkRateLimiter } from "../src/queue/magic-link-limiter";
-import { emailAuthRouter } from "../src/routes/email-auth";
+import {
+  MAGIC_LINK_IP_RATE_LIMIT,
+  MAGIC_LINK_RATE_LIMIT,
+  emailAuthRouter,
+} from "../src/routes/email-auth";
 import type { Env } from "../src/types";
 import { NotFoundError } from "../src/utils/errors";
-import { makeFakeDurableObjects } from "./helpers/fake-durable-object";
+import { makeMagicLinkLimiters } from "./helpers/magic-link-limiter";
 
 vi.mock("../src/storage/magic-links", () => ({
   createMagicLink: vi.fn(async () => ({ success: true, data: undefined })),
@@ -20,11 +23,13 @@ vi.mock("../src/storage/users", () => ({
   linkGitHub: vi.fn(),
 }));
 
-const EMAIL_LIMIT = 5;
-const IP_LIMIT = 20;
+// The production constants, not copies: a cap changed in one place and not the
+// other would otherwise leave these tests asserting a limit nothing enforces.
+const EMAIL_LIMIT = MAGIC_LINK_RATE_LIMIT;
+const IP_LIMIT = MAGIC_LINK_IP_RATE_LIMIT;
 
 function makeHarness(opts: { namespace?: DurableObjectNamespace } = {}) {
-  const limiters = makeFakeDurableObjects((ctx) => new MagicLinkRateLimiter(ctx, {} as Env));
+  const limiters = makeMagicLinkLimiters();
   const send = vi.fn().mockResolvedValue({ messageId: "m" });
   const env = {
     ARTIFACTS: {} as Env["ARTIFACTS"],

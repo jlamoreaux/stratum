@@ -1,32 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { MagicLinkRateLimiter } from "../src/queue/magic-link-limiter";
+import type { MagicLinkRateLimiter } from "../src/queue/magic-link-limiter";
 import type { Env } from "../src/types";
-import { makeFakeDurableObjects } from "./helpers/fake-durable-object";
+import { makeMagicLinkLimiters } from "./helpers/magic-link-limiter";
 
 const WINDOW = 60 * 60;
 const HOUR_MS = WINDOW * 1000;
 
-function makeLimiters(opts: { gated?: boolean } = {}) {
-  return makeFakeDurableObjects((ctx) => new MagicLinkRateLimiter(ctx, {} as Env), opts);
-}
+/**
+ * The limiter's RPC surface, derived from the class rather than restated, so a
+ * signature change there fails this suite instead of being absorbed by a
+ * hand-written interface that has quietly gone out of date.
+ */
+type LimiterStub = Pick<MagicLinkRateLimiter, "reserve" | "refund">;
 
-/** RPC surface of the limiter, as the route sees it through a stub. */
-interface LimiterStub {
-  reserve(
-    limit: number,
-    windowSeconds: number,
-    nowMs: number,
-  ): Promise<{ admitted: boolean; count: number }>;
-  refund(windowSeconds: number, nowMs: number): Promise<void>;
-}
-
-function stubFor(namespace: DurableObjectNamespace, name: string): LimiterStub {
-  return namespace.get(namespace.idFromName(name)) as unknown as LimiterStub;
+function stubFor(namespace: NonNullable<Env["MAGIC_LINK_LIMITER"]>, name: string): LimiterStub {
+  return namespace.get(namespace.idFromName(name));
 }
 
 describe("MagicLinkRateLimiter", () => {
   it("admits up to the limit and then refuses", async () => {
-    const { namespace } = makeLimiters();
+    const { namespace } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "email:a");
     const now = Date.now();
 
@@ -38,7 +31,7 @@ describe("MagicLinkRateLimiter", () => {
   });
 
   it("resets the counter when the window rolls", async () => {
-    const { namespace } = makeLimiters();
+    const { namespace } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "email:a");
     const now = Date.now();
 
@@ -49,7 +42,7 @@ describe("MagicLinkRateLimiter", () => {
   });
 
   it("gives a reservation back on refund", async () => {
-    const { namespace } = makeLimiters();
+    const { namespace } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "email:a");
     const now = Date.now();
 
@@ -63,7 +56,7 @@ describe("MagicLinkRateLimiter", () => {
   });
 
   it("ignores a refund whose window has already rolled", async () => {
-    const { namespace } = makeLimiters();
+    const { namespace } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "email:a");
     const now = Date.now();
 
@@ -77,7 +70,7 @@ describe("MagicLinkRateLimiter", () => {
   });
 
   it("does not drive a counter below zero", async () => {
-    const { namespace } = makeLimiters();
+    const { namespace } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "email:a");
     const now = Date.now();
 
@@ -89,7 +82,7 @@ describe("MagicLinkRateLimiter", () => {
   });
 
   it("refuses rather than throws on a malformed limit or window", async () => {
-    const { namespace } = makeLimiters();
+    const { namespace } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "email:a");
     const now = Date.now();
 
@@ -103,7 +96,7 @@ describe("MagicLinkRateLimiter", () => {
   });
 
   it("arms an alarm past the end of the live window and erases on it", async () => {
-    const { namespace, instances, storages } = makeLimiters();
+    const { namespace, instances, storages } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "email:a");
     const now = Date.now();
 
@@ -123,9 +116,43 @@ describe("MagicLinkRateLimiter", () => {
   });
 });
 
+describe("fake Durable Object harness", () => {
+  // The harness decides whether every test above means anything, so its two
+  // fidelity properties are pinned rather than assumed.
+
+  it("does not present a stub as a thenable", async () => {
+    const { namespace } = makeMagicLinkLimiters();
+    const stub = namespace.get(namespace.idFromName("email:a"));
+
+    // A Proxy that returns a function for `.then` is a thenable: awaiting it
+    // calls that as a continuation, so the await never settles to the stub.
+    expect((stub as unknown as { then?: unknown }).then).toBeUndefined();
+    await expect(Promise.resolve(stub)).resolves.toBe(stub);
+  });
+
+  it("isolates stored state from the caller's references", async () => {
+    const { namespace, storages } = makeMagicLinkLimiters();
+    const stub = namespace.get(namespace.idFromName("email:a"));
+    const now = Date.now();
+
+    await stub.reserve(5, WINDOW, now);
+    const storage = storages.get("email:a");
+    if (!storage) throw new Error("storage not created");
+
+    // Real DO storage serializes, so a handle a caller kept cannot reach back
+    // into the bucket. A Map of live objects would let this mutation stick and
+    // let a test pass against behaviour production does not have.
+    const read = await storage.get<{ window: number; count: number }>("bucket");
+    if (!read) throw new Error("bucket not written");
+    read.count = 999;
+
+    expect((await stub.reserve(5, WINDOW, now)).count).toBe(2);
+  });
+});
+
 describe("MagicLinkRateLimiter concurrency", () => {
   it("holds the cap when 50 reservations run concurrently", async () => {
-    const { namespace } = makeLimiters();
+    const { namespace } = makeMagicLinkLimiters();
     const stub = stubFor(namespace, "ip:203.0.113.7");
     const now = Date.now();
 
@@ -148,7 +175,7 @@ describe("MagicLinkRateLimiter concurrency", () => {
     // Workers KV failure mode the Durable Object replaces. If this ever stops
     // over-admitting, the harness has stopped modelling concurrency and the
     // test above no longer proves anything.
-    const { namespace } = makeLimiters({ gated: false });
+    const { namespace } = makeMagicLinkLimiters({ gated: false });
     const stub = stubFor(namespace, "ip:203.0.113.7");
     const now = Date.now();
 

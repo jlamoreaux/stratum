@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MagicLinkRateLimiter } from "../src/queue/magic-link-limiter";
 import { emailAuthRouter } from "../src/routes/email-auth";
 import type { Env } from "../src/types";
 import { NotFoundError } from "../src/utils/errors";
-import { makeFakeDurableObjects } from "./helpers/fake-durable-object";
+import { makeMagicLinkLimiters } from "./helpers/magic-link-limiter";
 
 // Magic links now live in D1 with atomic consume; model that with an in-memory
 // store shared across the router's create/consume calls (single-use enforced by
@@ -62,8 +61,7 @@ function makeEnv(): Env {
   return {
     ARTIFACTS: {} as Env["ARTIFACTS"],
     STATE: makeKV(),
-    MAGIC_LINK_LIMITER: makeFakeDurableObjects((ctx) => new MagicLinkRateLimiter(ctx, {} as Env))
-      .namespace,
+    MAGIC_LINK_LIMITER: makeMagicLinkLimiters().namespace,
     DB: {} as D1Database,
     EMAIL: {
       send: vi.fn().mockResolvedValue({ messageId: "test-message-id" }),

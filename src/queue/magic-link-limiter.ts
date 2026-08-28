@@ -1,7 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../types";
 
-/** The single storage key holding this bucket's window id and its count. */
+/**
+ * One key holds both the window id and the count, rather than a key per window.
+ * That is what makes a rollover free: the next reserve overwrites the record
+ * instead of accumulating a row per hour that something would then have to
+ * sweep.
+ */
 const BUCKET_KEY = "bucket";
 
 /**

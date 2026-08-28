@@ -41,9 +41,17 @@ function makeStorage(): FakeDurableObjectStorage {
     // Every accessor is async so awaiting one yields the microtask queue —
     // without that, an ungated read-modify-write would never interleave here
     // and the harness self-check below could not fail.
-    get: async <T>(key: string) => values.get(key) as T | undefined,
+    //
+    // Both directions clone. Real DO storage serializes, so a caller cannot
+    // reach back into stored state through a reference it still holds; a Map of
+    // live objects would let a test mutate a bucket in place and pass where
+    // production would not.
+    get: async <T>(key: string) => {
+      const value = values.get(key);
+      return (value === undefined ? undefined : structuredClone(value)) as T | undefined;
+    },
     put: async <T>(key: string, value: T) => {
-      values.set(key, value);
+      values.set(key, structuredClone(value));
     },
     delete: async (key: string) => values.delete(key),
     deleteAll: async () => {
@@ -92,7 +100,13 @@ export function makeFakeDurableObjects<T extends object>(
       return new Proxy(
         {},
         {
-          get: (_target, method: string) => {
+          get: (_target, method) => {
+            // A Proxy that answers `.then` is a thenable: awaiting a stub (or
+            // resolving one inside a promise chain) would call it as a
+            // continuation and hang or resolve to the wrong thing. Symbols get
+            // the same treatment — Symbol.toPrimitive, util.inspect and friends
+            // are probes, not RPC.
+            if (typeof method !== "string" || method === "then") return undefined;
             return async (...args: unknown[]) => {
               calls.push(`${name}.${method}`);
               const instance = instanceFor(name) as unknown as Record<

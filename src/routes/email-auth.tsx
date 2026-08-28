@@ -4,7 +4,6 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { admitUser, betaGateEnabled, validateInviteCode } from "../beta/gate";
 import { getInviteCodesEmail, getMagicLinkEmail } from "../email/templates";
 import { enforceSameOrigin } from "../middleware/csrf";
-import type { ReserveOutcome } from "../queue/magic-link-limiter";
 import { recordAudit } from "../storage/audit";
 import { consumeMagicLink, createMagicLink } from "../storage/magic-links";
 import { createSession } from "../storage/sessions";
@@ -19,10 +18,10 @@ import { validateEmail } from "../utils/validation";
 const app = new Hono<{ Bindings: Env }>();
 
 // Rate limiting constants
-const MAGIC_LINK_RATE_LIMIT = 5; // max 5 requests per hour per email
+export const MAGIC_LINK_RATE_LIMIT = 5; // max 5 requests per hour per email
 // Per-IP cap so one client can't mail links to unlimited addresses (the
 // per-email limit alone leaves a mail-bombing / send-cost amplification vector).
-const MAGIC_LINK_IP_RATE_LIMIT = 20; // max 20 magic-link sends per hour per IP
+export const MAGIC_LINK_IP_RATE_LIMIT = 20; // max 20 magic-link sends per hour per IP
 const MAGIC_LINK_RATE_WINDOW = 60 * 60; // 1 hour in seconds
 
 // Generate a secure random token (32 bytes = 64 hex chars)
@@ -81,7 +80,7 @@ type ReserveResult = "admitted" | "blocked" | "unavailable";
  * @returns Whether the reservation was taken, refused, or could not be attempted
  */
 async function reserveSend(
-  namespace: DurableObjectNamespace | undefined,
+  namespace: Env["MAGIC_LINK_LIMITER"],
   name: string,
   limit: number,
   nowMs: number,
@@ -94,9 +93,7 @@ async function reserveSend(
     return "unavailable";
   }
   try {
-    const stub = namespace.get(namespace.idFromName(name)) as DurableObjectStub & {
-      reserve(limit: number, windowSeconds: number, nowMs: number): Promise<ReserveOutcome>;
-    };
+    const stub = namespace.get(namespace.idFromName(name));
     const outcome = await stub.reserve(limit, MAGIC_LINK_RATE_WINDOW, nowMs);
     return outcome.admitted ? "admitted" : "blocked";
   } catch (err) {
@@ -117,16 +114,14 @@ async function reserveSend(
  * @param logger - Request logger
  */
 async function refundSend(
-  namespace: DurableObjectNamespace | undefined,
+  namespace: Env["MAGIC_LINK_LIMITER"],
   name: string,
   nowMs: number,
   logger: Logger,
 ): Promise<void> {
   if (!namespace) return;
   try {
-    const stub = namespace.get(namespace.idFromName(name)) as DurableObjectStub & {
-      refund(windowSeconds: number, nowMs: number): Promise<void>;
-    };
+    const stub = namespace.get(namespace.idFromName(name));
     await stub.refund(MAGIC_LINK_RATE_WINDOW, nowMs);
   } catch (err) {
     logger.warn("Magic-link rate limit refund failed", { error: err });

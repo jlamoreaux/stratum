@@ -1,12 +1,11 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MagicLinkRateLimiter } from "../src/queue/magic-link-limiter";
 import { authRouter } from "../src/routes/auth";
 import { emailAuthRouter } from "../src/routes/email-auth";
 import type { Env, User } from "../src/types";
 import { NotFoundError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
-import { makeFakeDurableObjects } from "./helpers/fake-durable-object";
+import { makeMagicLinkLimiters } from "./helpers/magic-link-limiter";
 
 // ============================================================================
 // Mocks
@@ -204,8 +203,8 @@ function makeKV(): KVNamespace {
  * A fresh limiter namespace per env, so each test starts from empty counters
  * the way a fresh KV store used to.
  */
-function makeLimiterNamespace(): DurableObjectNamespace {
-  return makeFakeDurableObjects((ctx) => new MagicLinkRateLimiter(ctx, {} as Env)).namespace;
+function makeLimiterNamespace(): NonNullable<Env["MAGIC_LINK_LIMITER"]> {
+  return makeMagicLinkLimiters().namespace;
 }
 
 function makeEnv(overrides?: Partial<Env>): Env {
@@ -708,7 +707,7 @@ describe("Auth Signup/Login Integration Tests", () => {
 
         for (const { faulty, email, ip } of cases) {
           const env = makeEnv();
-          const healthy = env.MAGIC_LINK_LIMITER as DurableObjectNamespace;
+          const healthy = makeLimiterNamespace();
           env.MAGIC_LINK_LIMITER = {
             idFromName: (name: string) => healthy.idFromName(name),
             get: (id: { toString(): string }) =>
@@ -718,7 +717,7 @@ describe("Auth Signup/Login Integration Tests", () => {
                     refund: () => Promise.reject(new Error("storage unavailable")),
                   }
                 : healthy.get(id as DurableObjectId),
-          } as unknown as DurableObjectNamespace;
+          } as unknown as NonNullable<Env["MAGIC_LINK_LIMITER"]>;
 
           // Well past both caps: nothing may refuse while a counter is faulty.
           for (let i = 0; i < 25; i++) {
