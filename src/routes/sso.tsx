@@ -2,9 +2,10 @@ import { type Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { readBodyCapped } from "../services/oidc-discovery";
+import { deriveUsernameBase, findAvailableUsername, randomHex } from "../services/sso-usernames";
 import { recordAudit } from "../storage/audit";
 import { getIdentityByIssuerSubject, upsertIdentity } from "../storage/identities";
-import { ensureOrgMember, getOrg, getOrgBySlug } from "../storage/orgs";
+import { ensureOrgMember, getOrg } from "../storage/orgs";
 import { createSession } from "../storage/sessions";
 import {
   OIDC_STATE_TTL_SECONDS,
@@ -18,12 +19,11 @@ import {
   getSsoConnectionByVerifiedDomain,
   purgeExpiredOidcStates,
 } from "../storage/sso";
-import { createUser, getUser, getUserByEmail, getUserByUsername } from "../storage/users";
-import { type Env, MAX_NAMESPACE_LENGTH, type User } from "../types";
+import { createUser, getUser, getUserByEmail } from "../storage/users";
+import type { Env, User } from "../types";
 import { SSO_SECRET_SALT, constantTimeEqual, decryptToken } from "../utils/crypto";
 import { NotFoundError } from "../utils/errors";
 import { type Logger, createLogger } from "../utils/logger";
-import { validateUsername } from "../utils/username-validation";
 
 /**
  * OIDC single sign-on login flow (#253 Task 5), mounted at /auth/sso.
@@ -48,9 +48,6 @@ const SESSION_COOKIE_MAX_AGE_SECONDS = 2592000;
 // (shared) client secret forge id_tokens.
 const ID_TOKEN_ALGORITHMS = ["RS256", "ES256"];
 const ID_TOKEN_CLOCK_TOLERANCE_SECONDS = 60;
-// JIT usernames: bounded probe for a free numeric-suffixed name before
-// falling back to a random one.
-const MAX_USERNAME_SUFFIX_ATTEMPTS = 10;
 
 // Codes the /callback redirects back to the picker page with. Raw IdP error
 // strings are never reflected — they map to the generic idp_error.
@@ -87,14 +84,6 @@ function ssoUnconfigured(c: SsoContext): Response | null {
     return c.json({ error: "SSO is not configured on this server" }, 501);
   }
   return null;
-}
-
-function randomHex(byteLength: number): string {
-  const bytes = new Uint8Array(byteLength);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -637,51 +626,6 @@ async function exchangeCodeForIdToken(
     logger.warn("OIDC token response is not valid JSON", { connectionId: connection.id });
     return null;
   }
-}
-
-/**
- * Derive a JIT username from the email local part via the exact pipeline
- * signup uses (see createUser), falling back to a random name when the local
- * part cannot produce a valid one.
- */
-function deriveUsernameBase(email: string): string {
-  const candidate = (email.split("@")[0] ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^[-0-9]+/, "")
-    .replace(/-+$/, "")
-    // Truncate long local parts to the username cap (re-trimming so the cut
-    // cannot leave a trailing hyphen) rather than failing max-length
-    // validation and falling to the random fallback.
-    .slice(0, MAX_NAMESPACE_LENGTH)
-    .replace(/-+$/, "");
-  const validation = validateUsername(candidate);
-  return validation.success ? validation.data : `sso-${randomHex(3)}`;
-}
-
-/**
- * Find a free username: the base, then numeric suffixes, then a random
- * fallback. Usernames and org slugs share one namespace (user and org pages
- * live under the same URL prefix), so a name is taken when EITHER exists.
- */
-async function findAvailableUsername(
-  db: D1Database,
-  logger: Logger,
-  base: string,
-): Promise<string> {
-  for (let attempt = 0; attempt < MAX_USERNAME_SUFFIX_ATTEMPTS; attempt++) {
-    const suffix = attempt === 0 ? "" : `-${attempt + 1}`;
-    // Keep base + suffix within the username cap; re-trim so a truncation
-    // can't leave a trailing hyphen.
-    const truncated = base.slice(0, MAX_NAMESPACE_LENGTH - suffix.length).replace(/-+$/, "");
-    const candidate = `${truncated}${suffix}`;
-    const userTaken = (await getUserByUsername(db, candidate, logger)).success;
-    if (userTaken) continue;
-    const slugTaken = (await getOrgBySlug(db, logger, candidate)).success;
-    if (!slugTaken) return candidate;
-  }
-  return `sso-${randomHex(4)}`;
 }
 
 type ResolutionFailure =

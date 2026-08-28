@@ -28,7 +28,11 @@ export type AuditAction =
   | "sso.connection.updated"
   | "sso.connection.deleted"
   | "sso.domain.verified"
-  | "sso.scim_token.rotated";
+  | "sso.scim_token.rotated"
+  | "scim.user.provisioned"
+  | "scim.user.updated"
+  | "scim.user.deactivated"
+  | "scim.user.reactivated";
 
 export interface AuditEntry {
   id: string;

@@ -29,6 +29,7 @@ import { orgsRouter } from "./routes/orgs";
 import { projectsRouter } from "./routes/projects";
 import { restoreRouter } from "./routes/restore";
 import { reviewsRouter } from "./routes/reviews";
+import { scimRouter } from "./routes/scim";
 import { sessionRouter } from "./routes/sessions";
 import { signupRouter } from "./routes/signup";
 import { ssoRouter } from "./routes/sso";
@@ -194,6 +195,9 @@ app.route("/api/orgs", orgSsoRouter);
 app.route("/api", syncRouter);
 app.route("/api", syncManagementRouter);
 app.route("/api/bulk-import", bulkImportRouter);
+// SCIM 2.0 Users (#253) — stratum_scim_* bearer only; every handler fails
+// closed unless authMiddleware resolved a SCIM connection.
+app.route("/scim/v2", scimRouter);
 app.route("/api/webhooks/github", githubWebhookRouter);
 // Git smart-HTTP proxy (clone/fetch). Mount before the UI catch-all so its
 // /@ns/slug/{info/refs,git-upload-pack,git-receive-pack} paths resolve here.

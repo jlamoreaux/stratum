@@ -3,8 +3,10 @@ import { getCookie } from "hono/cookie";
 import { isGitHttpPath } from "../routes/git-http";
 import { getAgentByToken } from "../storage/agents";
 import { deleteSession, getSession } from "../storage/sessions";
+import { getSsoConnectionByScimTokenHash } from "../storage/sso";
 import { getUser, getUserByToken } from "../storage/users";
 import type { Env } from "../types";
+import { hashToken } from "../utils/crypto";
 import { type Logger, createLogger } from "../utils/logger";
 
 declare module "hono" {
@@ -13,6 +15,13 @@ declare module "hono" {
     username: string;
     agentId?: string;
     agentOwnerId?: string;
+    /**
+     * Set ONLY for a valid `stratum_scim_*` bearer (an enabled,
+     * domain-verified connection). A SCIM caller is the org's IdP, not a
+     * user — userId is never set alongside this. The SCIM router re-loads
+     * the connection row per request, so only the id is carried here.
+     */
+    scimConnectionId?: string;
     /** How the caller authenticated — CSRF checks apply to "session" only. */
     authVia?: "token" | "session";
     logger: Logger;
@@ -132,6 +141,32 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       logger.debug("Auth success - agent", {
         agentId: agentResult.data.id,
         ownerId: agentResult.data.ownerId,
+      });
+      await next();
+      return;
+    }
+
+    if (token.startsWith("stratum_scim_")) {
+      // Only the token's hash is stored; the lookup itself enforces
+      // enabled=1 AND verified domains, so a rotated, disabled, or
+      // unverified connection's token 401s exactly like any invalid token.
+      const connectionResult = await getSsoConnectionByScimTokenHash(
+        c.env.DB,
+        logger,
+        await hashToken(token),
+      );
+      if (!connectionResult.success) {
+        logger.warn("Auth failed - invalid SCIM token", {
+          path: c.req.path,
+          tokenHint: sanitizeToken(token),
+        });
+        return c.json({ error: "Invalid token" }, 401);
+      }
+      c.set("scimConnectionId", connectionResult.data.id);
+      c.set("authVia", "token");
+      logger.debug("Auth success - SCIM connection", {
+        connectionId: connectionResult.data.id,
+        orgId: connectionResult.data.orgId,
       });
       await next();
       return;

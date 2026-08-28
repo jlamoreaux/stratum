@@ -3,6 +3,10 @@ import { AppError, ConflictError, NotFoundError, ValidationError } from "../util
 import { newId } from "../utils/ids";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
+import { listAgents } from "./agents";
+import { recordAudit } from "./audit";
+import { deleteAllUserSessions } from "./sessions";
+import { disableUser, enableUser } from "./users";
 
 /**
  * Org SSO connections (migration 041 + 042): one OIDC connection per org.
@@ -554,6 +558,38 @@ export async function rotateScimToken(
 }
 
 /**
+ * Resolve the connection a SCIM bearer token belongs to. Only ENABLED
+ * connections with VERIFIED domains authenticate: a disabled connection's
+ * token must stop working immediately, and an unverified one must never
+ * manage accounts (verification is the trust anchor for the whole SCIM
+ * surface). Callers pass the token's SHA-256 hash — the plaintext never
+ * reaches storage.
+ */
+export async function getSsoConnectionByScimTokenHash(
+  db: D1Database,
+  logger: Logger,
+  tokenHash: string,
+): Promise<Result<SsoConnection, NotFoundError | AppError>> {
+  try {
+    const row = await db
+      .prepare(
+        `SELECT * FROM org_sso_connections
+         WHERE scim_token_hash = ? AND enabled = 1 AND domains_verified_at IS NOT NULL`,
+      )
+      .bind(tokenHash)
+      .first<SsoConnectionRow>();
+    if (!row) return err(new NotFoundError("SSO connection", "by-scim-token"));
+    return ok(rowToConnection(row));
+  } catch (error) {
+    logger.error(
+      "Failed to resolve SSO connection by SCIM token",
+      error instanceof Error ? error : undefined,
+    );
+    return err(new AppError("Failed to resolve SSO connection", "STORAGE_ERROR", 500));
+  }
+}
+
+/**
  * Mark a user managed by a connection (idempotent). Used at OIDC login when an
  * existing account is adopted or JIT-created; SCIM later updates the same row.
  * INSERT OR IGNORE so a re-login never resets `active` or `scim_external_id`
@@ -774,4 +810,320 @@ export async function deleteSsoConnection(
     });
     return err(new AppError("Failed to delete SSO connection", "STORAGE_ERROR", 500));
   }
+}
+
+// ---------------------------------------------------------------------------
+// SCIM Users scope + lifecycle (#253 Task 6)
+// ---------------------------------------------------------------------------
+
+/** A connection's SCIM member row (or its absence — visible-for-adoption). */
+export interface ScimMember {
+  externalId: string | null;
+  active: boolean;
+}
+
+/**
+ * One user as this connection's SCIM surface sees them. `managed` is whether a
+ * scim_members row exists; `scimActive` is that row's flag (null when
+ * unmanaged). `active` in the SCIM resource is derived from `disabledAt` —
+ * the enforced truth — not from `scimActive`.
+ */
+export interface ScimScopedUser {
+  userId: string;
+  email: string;
+  username: string;
+  createdAt: string;
+  disabledAt: string | null;
+  externalId: string | null;
+  managed: boolean;
+  scimActive: boolean | null;
+}
+
+interface ScimScopedUserRow {
+  id: string;
+  email: string;
+  username: string;
+  created_at: string;
+  disabled_at: string | null;
+  scim_external_id: string | null;
+  scim_active: number | null;
+}
+
+function rowToScimScopedUser(row: ScimScopedUserRow): ScimScopedUser {
+  return {
+    userId: row.id,
+    email: row.email,
+    username: row.username,
+    createdAt: row.created_at,
+    disabledAt: row.disabled_at,
+    externalId: row.scim_external_id,
+    managed: row.scim_active !== null,
+    scimActive: row.scim_active === null ? null : row.scim_active === 1,
+  };
+}
+
+function inScimScope(connection: SsoConnection, user: ScimScopedUser): boolean {
+  if (user.managed) return true;
+  const domain = user.email.split("@").pop() ?? "";
+  return connection.emailDomains.includes(domain);
+}
+
+/**
+ * Candidate rows for the connection's SCIM scope: every user with a
+ * scim_members row for this connection, plus every member of the connection's
+ * org (the JS-side domain filter narrows those to the verified email domains —
+ * "visible for adoption"). Soft-deleting users are excluded outright: deletion
+ * dominates disable, and a mid-erasure account must not resurface to the IdP
+ * or accept a reactivation.
+ */
+async function queryScimScope(
+  db: D1Database,
+  connection: SsoConnection,
+  userId?: string,
+): Promise<ScimScopedUser[]> {
+  const userClause = userId === undefined ? "" : "AND u.id = ?";
+  const stmt = db.prepare(
+    `SELECT u.id, u.email, u.username, u.created_at, u.disabled_at,
+            sm.scim_external_id, sm.active AS scim_active
+     FROM users u
+     LEFT JOIN scim_members sm ON sm.user_id = u.id AND sm.connection_id = ?
+     WHERE u.deleting_at IS NULL ${userClause}
+       AND (sm.user_id IS NOT NULL
+            OR EXISTS (SELECT 1 FROM org_members om WHERE om.org_id = ? AND om.user_id = u.id))
+     ORDER BY u.created_at, u.id`,
+  );
+  // Positional binds follow the placeholders' textual order: join, optional
+  // user pin, org membership probe.
+  const bound =
+    userId === undefined
+      ? stmt.bind(connection.id, connection.orgId)
+      : stmt.bind(connection.id, userId, connection.orgId);
+  const { results } = await bound.all<ScimScopedUserRow>();
+  return results.map(rowToScimScopedUser).filter((user) => inScimScope(connection, user));
+}
+
+export async function listScimScopedUsers(
+  db: D1Database,
+  logger: Logger,
+  connection: SsoConnection,
+): Promise<Result<ScimScopedUser[], AppError>> {
+  try {
+    return ok(await queryScimScope(db, connection));
+  } catch (error) {
+    logger.error("Failed to list SCIM-scoped users", error instanceof Error ? error : undefined, {
+      connectionId: connection.id,
+    });
+    return err(new AppError("Failed to list SCIM users", "STORAGE_ERROR", 500));
+  }
+}
+
+export async function getScimScopedUser(
+  db: D1Database,
+  logger: Logger,
+  connection: SsoConnection,
+  userId: string,
+): Promise<Result<ScimScopedUser, NotFoundError | AppError>> {
+  try {
+    const users = await queryScimScope(db, connection, userId);
+    const user = users[0];
+    if (!user) return err(new NotFoundError("User", userId));
+    return ok(user);
+  } catch (error) {
+    logger.error("Failed to get SCIM-scoped user", error instanceof Error ? error : undefined, {
+      connectionId: connection.id,
+      userId,
+    });
+    return err(new AppError("Failed to get SCIM user", "STORAGE_ERROR", 500));
+  }
+}
+
+/** The connection's scim_members row for a user, or null when unmanaged. */
+export async function getScimMember(
+  db: D1Database,
+  logger: Logger,
+  connectionId: string,
+  userId: string,
+): Promise<Result<ScimMember | null, AppError>> {
+  try {
+    const row = await db
+      .prepare(
+        "SELECT scim_external_id, active FROM scim_members WHERE connection_id = ? AND user_id = ?",
+      )
+      .bind(connectionId, userId)
+      .first<{ scim_external_id: string | null; active: number }>();
+    if (!row) return ok(null);
+    return ok({ externalId: row.scim_external_id, active: row.active === 1 });
+  } catch (error) {
+    logger.error("Failed to get scim_members row", error instanceof Error ? error : undefined, {
+      connectionId,
+      userId,
+    });
+    return err(new AppError("Failed to get managed membership", "STORAGE_ERROR", 500));
+  }
+}
+
+/**
+ * Set (or clear, with null) the IdP's externalId on the connection's
+ * membership row. The row must already exist — callers ensureScimMember first.
+ * An externalId already assigned to ANOTHER user on the same connection
+ * violates the migration-043 unique index and returns a ConflictError.
+ */
+export async function setScimMemberExternalId(
+  db: D1Database,
+  logger: Logger,
+  connectionId: string,
+  userId: string,
+  externalId: string | null,
+): Promise<Result<void, ConflictError | AppError>> {
+  try {
+    await db
+      .prepare(
+        "UPDATE scim_members SET scim_external_id = ? WHERE connection_id = ? AND user_id = ?",
+      )
+      .bind(externalId, connectionId, userId)
+      .run();
+    return ok(undefined);
+  } catch (error) {
+    if (error instanceof Error && /UNIQUE constraint failed/i.test(error.message)) {
+      logger.warn("SCIM externalId already assigned on this connection", { connectionId, userId });
+      return err(new ConflictError("externalId is already assigned to another user"));
+    }
+    logger.error("Failed to set SCIM externalId", error instanceof Error ? error : undefined, {
+      connectionId,
+      userId,
+    });
+    return err(new AppError("Failed to set SCIM externalId", "STORAGE_ERROR", 500));
+  }
+}
+
+/** Upsert the connection's membership row with the given active flag. */
+async function upsertScimMemberActive(
+  db: D1Database,
+  connectionId: string,
+  userId: string,
+  active: boolean,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO scim_members (connection_id, user_id, active, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (connection_id, user_id) DO UPDATE SET active = excluded.active`,
+    )
+    .bind(connectionId, userId, active ? 1 : 0, new Date().toISOString())
+    .run();
+}
+
+/**
+ * SCIM deactivation: record who disabled whom (scim_members.active = 0), set
+ * the enforced flag (users.disabled_at), then purge sessions. Any storage
+ * failure fails the whole request — deprovision must never report success
+ * while sessions survive — but the ordering guarantees the enforced flag
+ * holds even when the session purge fails (the middleware then rejects the
+ * surviving sessions anyway). Idempotent: rerunning changes nothing. Audits
+ * are best-effort per the recordAudit contract; agentIds enumerate the
+ * credentials made inert by the flag.
+ */
+export async function deprovisionUser(
+  db: D1Database,
+  logger: Logger,
+  connectionId: string,
+  userId: string,
+): Promise<Result<{ disabledAt: string }, AppError>> {
+  try {
+    await upsertScimMemberActive(db, connectionId, userId, false);
+  } catch (error) {
+    logger.error("Failed to record SCIM deactivation", error instanceof Error ? error : undefined, {
+      connectionId,
+      userId,
+    });
+    return err(new AppError("Failed to record SCIM deactivation", "STORAGE_ERROR", 500));
+  }
+
+  const disableResult = await disableUser(db, userId, logger);
+  if (!disableResult.success) return err(disableResult.error);
+
+  const purgeResult = await deleteAllUserSessions(db, userId, logger);
+  if (!purgeResult.success) return err(purgeResult.error);
+
+  // Audit detail only — a lookup failure must not fail a completed deprovision.
+  const agentsResult = await listAgents(db, userId, logger);
+  const agentIds = agentsResult.success ? agentsResult.data.map((agent) => agent.id) : [];
+  const detail = { via: "scim", connectionId, agentIds };
+  await recordAudit(db, logger, {
+    action: "scim.user.deactivated",
+    actorType: "system",
+    subject: userId,
+    detail,
+  });
+  await recordAudit(db, logger, {
+    action: "user.disabled",
+    actorType: "system",
+    subject: userId,
+    detail,
+  });
+
+  logger.info("SCIM user deprovisioned", { connectionId, userId });
+  return ok({ disabledAt: disableResult.data });
+}
+
+/**
+ * SCIM reactivation: mark this connection's membership active again, and clear
+ * users.disabled_at only when NO other connection still holds an active
+ * deactivation for the user — one IdP unsuspending an account must not undo
+ * another IdP's suspension. Idempotent. A failed guard read fails CLOSED (the
+ * account stays disabled) rather than enabling on unknown state.
+ */
+export async function reactivateUser(
+  db: D1Database,
+  logger: Logger,
+  connectionId: string,
+  userId: string,
+): Promise<Result<{ enabled: boolean }, AppError>> {
+  try {
+    await upsertScimMemberActive(db, connectionId, userId, true);
+  } catch (error) {
+    logger.error("Failed to record SCIM reactivation", error instanceof Error ? error : undefined, {
+      connectionId,
+      userId,
+    });
+    return err(new AppError("Failed to record SCIM reactivation", "STORAGE_ERROR", 500));
+  }
+
+  let blocked: boolean;
+  try {
+    const row = await db
+      .prepare("SELECT COUNT(*) AS n FROM scim_members WHERE user_id = ? AND active = 0")
+      .bind(userId)
+      .first<{ n: number }>();
+    blocked = (row?.n ?? 0) > 0;
+  } catch (error) {
+    logger.error("Failed to check reactivation guard", error instanceof Error ? error : undefined, {
+      connectionId,
+      userId,
+    });
+    return err(new AppError("Failed to check reactivation guard", "STORAGE_ERROR", 500));
+  }
+
+  if (!blocked) {
+    const enableResult = await enableUser(db, userId, logger);
+    if (!enableResult.success) return err(enableResult.error);
+  }
+
+  const detail = { via: "scim", connectionId };
+  await recordAudit(db, logger, {
+    action: "scim.user.reactivated",
+    actorType: "system",
+    subject: userId,
+    detail,
+  });
+  if (!blocked) {
+    await recordAudit(db, logger, {
+      action: "user.enabled",
+      actorType: "system",
+      subject: userId,
+      detail,
+    });
+  }
+
+  logger.info("SCIM user reactivated", { connectionId, userId, enabled: !blocked });
+  return ok({ enabled: !blocked });
 }
