@@ -600,7 +600,7 @@ button.nav-auth-link {
   margin-top: 1rem;
 }
 .btn-disabled { opacity: 0.4; cursor: default; }
-.issues-filter { display: flex; gap: 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
+.issues-filter { display: flex; gap: 1rem; margin-bottom: 1rem; font-size: 0.9rem; flex-wrap: wrap; }
 .issues-filter a { color: var(--text-muted); text-decoration: none; }
 .issues-filter a:hover { color: var(--text-body); }
 .issues-filter-active { color: var(--text-primary) !important; font-weight: 600; }

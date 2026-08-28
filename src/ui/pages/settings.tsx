@@ -24,10 +24,25 @@ const COPY_TOKEN_SCRIPT = `
   var token = document.getElementById('fresh-token');
   if (!btn || !token) return;
   btn.addEventListener('click', function () {
+    // Clipboard API can be missing (insecure context) or blocked by policy;
+    // fall back to selecting the value so a manual Ctrl/Cmd+C still works.
+    var fallback = function () {
+      var range = document.createRange();
+      range.selectNodeContents(token);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      btn.textContent = 'Press Ctrl/Cmd+C';
+      setTimeout(function () { btn.textContent = 'Copy'; }, 3000);
+    };
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      fallback();
+      return;
+    }
     navigator.clipboard.writeText(token.textContent).then(function () {
       btn.textContent = 'Copied';
       setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
-    });
+    }, fallback);
   });
 })();
 `;
