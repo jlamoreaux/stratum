@@ -24,6 +24,7 @@ import { healthRouter } from "./routes/health";
 import { issuesRouter } from "./routes/issues";
 import { loginRouter } from "./routes/login";
 import { metricsRouter } from "./routes/metrics";
+import { orgSsoRouter } from "./routes/org-sso";
 import { orgsRouter } from "./routes/orgs";
 import { projectsRouter } from "./routes/projects";
 import { restoreRouter } from "./routes/restore";
@@ -184,6 +185,8 @@ app.route("/api/agents", agentsRouter);
 app.route("/api", changesRouter);
 app.route("/api", reviewsRouter);
 app.route("/api/orgs", orgsRouter);
+// Org SSO admin API (/api/orgs/:slug/sso) — same authMiddleware chain as /api/orgs.
+app.route("/api/orgs", orgSsoRouter);
 app.route("/api", syncRouter);
 app.route("/api", syncManagementRouter);
 app.route("/api/bulk-import", bulkImportRouter);

@@ -131,6 +131,10 @@ export interface Env {
   BETA_GATE?: string;
   REFERRAL_SERVICE_URL?: string;
   REFERRAL_SERVICE_SECRET?: string;
+  /** Encrypts org SSO client secrets at rest (PBKDF2 + AES-GCM, SSO-specific
+   * salt). Unset → the whole SSO surface (admin API, login) returns 501. Kept
+   * separate from the GitHub token secret for blast-radius isolation. */
+  SSO_ENCRYPTION_SECRET?: string;
   ANALYTICS?: AnalyticsEngineDataset;
   SANDBOX?: SandboxBinding;
   AI?: AiBinding;

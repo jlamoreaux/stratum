@@ -77,10 +77,10 @@ function seedIdentity(
     .run(id, userId, subject, `${userId}@example.com`, connectionId ?? null);
 }
 
-function seedScimMember(raw: Raw, connectionId: string, userId: string): void {
+function seedScimMember(raw: Raw, connectionId: string, userId: string, active = 1): void {
   raw
-    .prepare("INSERT INTO scim_members (connection_id, user_id) VALUES (?, ?)")
-    .run(connectionId, userId);
+    .prepare("INSERT INTO scim_members (connection_id, user_id, active) VALUES (?, ?, ?)")
+    .run(connectionId, userId, active);
 }
 
 function countWhere(raw: Raw, table: string, column: string, value: string): number {
@@ -157,6 +157,34 @@ describe("deleteAccountCascade — SSO/SCIM tables", () => {
       .prepare("SELECT connection_id FROM identities WHERE id = 'idn_2'")
       .get() as { connection_id: string | null };
     expect(survivor.connection_id).toBeNull();
+  });
+
+  it("re-enables SCIM-disabled users before deleting the empty org's connection", async () => {
+    const { db, raw } = makeSqliteD1();
+    seedUser(raw, "usr_1");
+    // usr_2 is not an org member: the connection deactivated them via SCIM and
+    // disabled their account. Org erasure must give the account back, not
+    // strand it disabled with the connection gone.
+    seedUser(raw, "usr_2");
+    raw
+      .prepare("UPDATE users SET disabled_at = ? WHERE id = 'usr_2'")
+      .run("2026-02-01T00:00:00.000Z");
+    seedOrg(raw, "org_1", "usr_1", [["usr_1", "admin"]]);
+    seedConnection(raw, "conn_1", "org_1");
+    seedScimMember(raw, "conn_1", "usr_2", 0);
+
+    const result = await deleteAccountCascade(makeEnv(db), "usr_1", mockLogger);
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.residuals).toEqual([]);
+
+    // usr_2 still exists and is re-enabled; the mapping and connection are gone.
+    expect(countWhere(raw, "users", "id", "usr_2")).toBe(1);
+    const survivor = raw.prepare("SELECT disabled_at FROM users WHERE id = 'usr_2'").get() as {
+      disabled_at: string | null;
+    };
+    expect(survivor.disabled_at).toBeNull();
+    expect(countWhere(raw, "scim_members", "connection_id", "conn_1")).toBe(0);
+    expect(countWhere(raw, "org_sso_connections", "org_id", "org_1")).toBe(0);
   });
 
   it("keeps the connection when the org survives via successor promotion", async () => {

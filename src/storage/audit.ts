@@ -23,7 +23,12 @@ export type AuditAction =
   | "deletion.redrive"
   | "webhook.project_id_backfilled"
   | "user.disabled"
-  | "user.enabled";
+  | "user.enabled"
+  | "sso.connection.created"
+  | "sso.connection.updated"
+  | "sso.connection.deleted"
+  | "sso.domain.verified"
+  | "sso.scim_token.rotated";
 
 export interface AuditEntry {
   id: string;

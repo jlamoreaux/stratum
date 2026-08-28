@@ -2,11 +2,13 @@ import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
 import { type AppError, toAppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
+import { recordAudit } from "./audit";
 import { findActiveJobForTarget } from "./deletion-jobs";
 import { artifactsRepoNameFromRemote } from "./git-ops";
 import { deleteIdentitiesForUser } from "./identities";
 import { deleteAllUserSessions } from "./sessions";
 import { listProjects } from "./state";
+import { enableUser } from "./users";
 
 /**
  * Shared tombstone for anonymized cross-project contributions. A single
@@ -747,6 +749,31 @@ async function resolveOrgOwnership(
     )
     .bind(org.id)
     .run();
+  // Removing a connection is a clean rollback, never a permanent lockout:
+  // users its SCIM deactivated (possibly no longer org members) get their
+  // accounts back before the mapping rows vanish — mirrors the re-enable pass
+  // in DELETE /api/orgs/:slug/sso (src/routes/org-sso.ts). The erased user is
+  // excluded: their account is being deleted anyway.
+  const deactivated = await db
+    .prepare(
+      "SELECT user_id, connection_id FROM scim_members WHERE active = 0 AND user_id != ? " +
+        "AND connection_id IN (SELECT id FROM org_sso_connections WHERE org_id = ?)",
+    )
+    .bind(userId, org.id)
+    .all<{ user_id: string; connection_id: string }>();
+  for (const row of deactivated.results) {
+    const enabled = await enableUser(db, row.user_id, logger);
+    if (!enabled.success) {
+      residuals.push(`org:${org.id}:scim-reenable:${row.user_id}`);
+      continue;
+    }
+    await recordAudit(db, logger, {
+      action: "user.enabled",
+      actorType: "system",
+      subject: row.user_id,
+      detail: { via: "org.deleted", orgId: org.id, connectionId: row.connection_id },
+    });
+  }
   await db
     .prepare(
       "DELETE FROM scim_members WHERE connection_id IN (SELECT id FROM org_sso_connections WHERE org_id = ?)",
