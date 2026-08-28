@@ -44,6 +44,7 @@ import { notFoundResponse, serverErrorResponse } from "./ui/pages/error";
 import { CSS } from "./ui/styles";
 import { createLogger } from "./utils/logger";
 export { MergeQueue } from "./queue/merge-queue";
+export { MagicLinkRateLimiter } from "./queue/magic-link-limiter";
 export { RepoDO } from "./queue/repo-do";
 
 const app = new Hono<{ Bindings: Env }>();

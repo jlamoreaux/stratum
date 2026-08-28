@@ -1,3 +1,4 @@
+import type { MagicLinkRateLimiter } from "./queue/magic-link-limiter";
 import type { LoggerContext } from "./utils/logger";
 export type { LoggerContext };
 
@@ -135,6 +136,15 @@ export interface Env {
   AI?: AiBinding;
   MERGE_QUEUE?: DurableObjectNamespace;
   REPO_DO?: DurableObjectNamespace;
+  /** Serialized magic-link send counters (issue #283). Optional only so tests
+   * can omit it; every deploy from this repo's wrangler.toml binds it.
+   *
+   * Parameterised by the class so `.get()` returns a typed stub: the route then
+   * calls `reserve`/`refund` directly, and a signature change here becomes a
+   * compile error instead of surviving behind a hand-written cast. The import
+   * is type-only, so the cycle with magic-link-limiter.ts (which imports `Env`
+   * from here) is erased. */
+  MAGIC_LINK_LIMITER?: DurableObjectNamespace<MagicLinkRateLimiter>;
   /** Content-addressed git object plane (ADR 004 Phase 2). */
   REPO_OBJECTS?: R2Bucket;
   /** Durable backup store (D1 dumps, KV identity, repo packs). Optional: when

@@ -29,6 +29,13 @@ new_classes = ["MergeQueue"]
 tag = "v2"
 new_sqlite_classes = ["RepoDO"]
 
+# MagicLinkRateLimiter: serialized magic-link send counters (issue #283). One
+# instance per subject (email digest / source IP); replaces the KV counters,
+# whose read-modify-write could not hold the cap under concurrency.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["MagicLinkRateLimiter"]
+
 # Observability - Workers Logs and Traces
 [observability]
 enabled = true
@@ -76,6 +83,11 @@ script_name = "stratum"
 [[durable_objects.bindings]]
 name = "REPO_DO"
 class_name = "RepoDO"
+script_name = "stratum"
+
+[[durable_objects.bindings]]
+name = "MAGIC_LINK_LIMITER"
+class_name = "MagicLinkRateLimiter"
 script_name = "stratum"
 
 [[queues.producers]]
@@ -200,6 +212,11 @@ name = "REPO_DO"
 class_name = "RepoDO"
 script_name = "stratum"
 
+[[env.production.durable_objects.bindings]]
+name = "MAGIC_LINK_LIMITER"
+class_name = "MagicLinkRateLimiter"
+script_name = "stratum"
+
 [[env.production.queues.producers]]
 binding = "EVENTS_QUEUE"
 queue = "stratum-events"
@@ -309,6 +326,11 @@ script_name = "stratum-staging"
 [[env.staging.durable_objects.bindings]]
 name = "REPO_DO"
 class_name = "RepoDO"
+script_name = "stratum-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "MAGIC_LINK_LIMITER"
+class_name = "MagicLinkRateLimiter"
 script_name = "stratum-staging"
 
 [[env.staging.r2_buckets]]

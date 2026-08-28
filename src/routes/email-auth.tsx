@@ -18,10 +18,10 @@ import { validateEmail } from "../utils/validation";
 const app = new Hono<{ Bindings: Env }>();
 
 // Rate limiting constants
-const MAGIC_LINK_RATE_LIMIT = 5; // max 5 requests per hour per email
+export const MAGIC_LINK_RATE_LIMIT = 5; // max 5 requests per hour per email
 // Per-IP cap so one client can't mail links to unlimited addresses (the
 // per-email limit alone leaves a mail-bombing / send-cost amplification vector).
-const MAGIC_LINK_IP_RATE_LIMIT = 20; // max 20 magic-link sends per hour per IP
+export const MAGIC_LINK_IP_RATE_LIMIT = 20; // max 20 magic-link sends per hour per IP
 const MAGIC_LINK_RATE_WINDOW = 60 * 60; // 1 hour in seconds
 
 // Generate a secure random token (32 bytes = 64 hex chars)
@@ -32,7 +32,7 @@ function generateSecureToken(): string {
 }
 
 /**
- * Rate-limit bucket key for an email address, in the current hour window.
+ * Durable Object name for an email address's send counter.
  *
  * SHA-256 rather than hashEmail(): that helper is a 32-bit Java-style string
  * hash, and collisions in it are constructible rather than merely possible —
@@ -50,61 +50,139 @@ function generateSecureToken(): string {
  * Env is optional today. hashEmail() stays for log lines, where a short opaque
  * token is all that is wanted and a collision costs nothing.
  *
- * Changing the key shape resets in-flight hourly counters once, on deploy.
+ * The hour is no longer part of the name — the window now lives inside the
+ * object, which is what lets it erase itself on an alarm. Changing the name
+ * shape resets in-flight hourly counters once, on deploy.
  */
-async function getRateLimitKey(email: string): Promise<string> {
-  const hour = Math.floor(Date.now() / 1000 / MAGIC_LINK_RATE_WINDOW);
-  const emailHash = await hashToken(email);
-  return `magic_link_rate:${emailHash}:${hour}`;
+async function emailLimiterName(email: string): Promise<string> {
+  return `email:${await hashToken(email)}`;
 }
 
-function getIpRateLimitKey(ip: string): string {
-  const hour = Math.floor(Date.now() / 1000 / MAGIC_LINK_RATE_WINDOW);
-  return `magic_link_ip_rate:${ip}:${hour}`;
+/**
+ * Distinct prefix from the email buckets, so an IP literal can never be made to
+ * name an address's counter (or the reverse).
+ */
+function ipLimiterName(ip: string): string {
+  return `ip:${ip}`;
+}
+
+/** `unavailable` is a storage/binding failure, which is treated as an admission. */
+type ReserveResult = "admitted" | "blocked" | "unavailable";
+
+/**
+ * Takes one reservation from a subject's counter.
+ *
+ * @param namespace - The MagicLinkRateLimiter binding, absent in a deploy that predates it
+ * @param name - Subject name, from emailLimiterName/ipLimiterName
+ * @param limit - Cap for this subject, per window
+ * @param nowMs - One clock reading per request, so both counters land in the same window
+ * @param logger - Request logger
+ * @returns Whether the reservation was taken, refused, or could not be attempted
+ */
+async function reserveSend(
+  namespace: Env["MAGIC_LINK_LIMITER"],
+  name: string,
+  limit: number,
+  nowMs: number,
+  logger: Logger,
+): Promise<ReserveResult> {
+  if (!namespace) {
+    // Only reachable on a deploy whose wrangler.toml predates the binding. Loud,
+    // because it means this endpoint is running with no cap at all.
+    logger.error("MAGIC_LINK_LIMITER is not bound; magic-link rate limiting is disabled");
+    return "unavailable";
+  }
+  try {
+    const stub = namespace.get(namespace.idFromName(name));
+    const outcome = await stub.reserve(limit, MAGIC_LINK_RATE_WINDOW, nowMs);
+    return outcome.admitted ? "admitted" : "blocked";
+  } catch (err) {
+    logger.warn("Magic-link rate limit reservation failed, allowing request", { error: err });
+    return "unavailable";
+  }
+}
+
+/**
+ * Gives back a reservation taken from a subject that then failed the other cap.
+ *
+ * Best-effort: a failure here leaks one count against the window, which
+ * over-counts the subject and can only refuse sends, never admit extra ones.
+ *
+ * @param namespace - The MagicLinkRateLimiter binding
+ * @param name - Subject name whose reservation is being returned
+ * @param nowMs - The same clock reading the reservation used
+ * @param logger - Request logger
+ */
+async function refundSend(
+  namespace: Env["MAGIC_LINK_LIMITER"],
+  name: string,
+  nowMs: number,
+  logger: Logger,
+): Promise<void> {
+  if (!namespace) return;
+  try {
+    const stub = namespace.get(namespace.idFromName(name));
+    await stub.refund(MAGIC_LINK_RATE_WINDOW, nowMs);
+  } catch (err) {
+    logger.warn("Magic-link rate limit refund failed", { error: err });
+  }
 }
 
 /**
  * Enforce both magic-link caps: per-email AND per-IP. The per-email limit alone
  * lets a single client mail links to unlimited addresses (one per email), so we
- * also bound sends per source IP. Reads fail open on a KV error (matching the
- * historical behavior — an auth path must not lock users out on a KV blip); both
- * caps re-apply on the next request once KV recovers. Returns `blocked`, plus a
- * `commit()` the caller invokes once it decides to actually send, which bumps
- * both counters together.
+ * also bound sends per source IP.
+ *
+ * This both decides *and* commits: a reservation is taken as part of the
+ * decision, so there is no window between "am I under the cap" and "count me".
+ * That is the whole point of issue #283 — the Workers KV counters this replaces
+ * read and wrote from the Worker, so N concurrent sends all read the same value
+ * and the cap only ever bound sequential traffic. Every call site already
+ * committed as its first statement after an unblocked check, so collapsing the
+ * two loses no caller flexibility.
+ *
+ * The two caps live in separate objects (one per email digest, one per IP),
+ * because a shared instance would serialize every magic-link send on the
+ * planet behind one thread. They are therefore reserved in sequence, and an
+ * email reservation is refunded when the IP cap then refuses. A concurrent
+ * request can observe the un-refunded count and be turned away; over-refusing
+ * for a few milliseconds is the safe direction, and neither cap is ever
+ * exceeded.
+ *
+ * **Storage-error policy: fail open, deliberately.** A reservation that cannot
+ * be attempted — the binding is missing, or the object throws — admits the
+ * request and logs. Failing closed would turn a transient storage fault into a
+ * total login outage, which is a worse failure than the bounded over-sending a
+ * fault-window bypass allows; both caps re-apply on the next request once
+ * storage recovers. This is the same policy the KV implementation had, restated
+ * here rather than changed silently.
+ *
+ * @param c - Request context, for the binding and the client IP
+ * @param email - The address a link would be sent to
+ * @param logger - Request logger
+ * @returns Whether the send is refused; when it is not, the send is already counted
  */
 async function checkMagicLinkRateLimits(
   c: Context<{ Bindings: Env }>,
   email: string,
   logger: Logger,
-): Promise<{ blocked: boolean; commit: () => Promise<void> }> {
-  const emailKey = await getRateLimitKey(email);
-  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
-  const ipKey = getIpRateLimitKey(ip);
-  let emailCount = 0;
-  let ipCount = 0;
-  try {
-    emailCount = Number.parseInt((await c.env.STATE.get(emailKey)) ?? "0");
-    ipCount = Number.parseInt((await c.env.STATE.get(ipKey)) ?? "0");
-  } catch (err) {
-    // Fail open means fail open for *both* caps. These are assigned in sequence,
-    // so a throw on the second read would otherwise leave a populated count from
-    // the first standing against a zero from the second — and an exhausted email
-    // bucket would block the request on a transient KV blip, which is precisely
-    // the lockout this contract exists to prevent. Reset both.
-    emailCount = 0;
-    ipCount = 0;
-    logger.warn("Failed to read magic-link rate limits, allowing request", { error: err });
+): Promise<{ blocked: boolean }> {
+  const namespace = c.env.MAGIC_LINK_LIMITER;
+  // One reading for both counters, so a request that straddles an hour boundary
+  // cannot land its two reservations in different windows.
+  const nowMs = Date.now();
+  const emailName = await emailLimiterName(email);
+  const ipName = ipLimiterName(c.req.header("CF-Connecting-IP") ?? "unknown");
+
+  const emailResult = await reserveSend(namespace, emailName, MAGIC_LINK_RATE_LIMIT, nowMs, logger);
+  if (emailResult === "blocked") return { blocked: true };
+
+  const ipResult = await reserveSend(namespace, ipName, MAGIC_LINK_IP_RATE_LIMIT, nowMs, logger);
+  if (ipResult === "blocked") {
+    if (emailResult === "admitted") await refundSend(namespace, emailName, nowMs, logger);
+    return { blocked: true };
   }
-  const blocked = emailCount >= MAGIC_LINK_RATE_LIMIT || ipCount >= MAGIC_LINK_IP_RATE_LIMIT;
-  const commit = async () => {
-    await c.env.STATE.put(emailKey, String(emailCount + 1), {
-      expirationTtl: MAGIC_LINK_RATE_WINDOW,
-    });
-    await c.env.STATE.put(ipKey, String(ipCount + 1), {
-      expirationTtl: MAGIC_LINK_RATE_WINDOW,
-    });
-  };
-  return { blocked, commit };
+  return { blocked: false };
 }
 
 function emailAuthRedirect(
@@ -215,8 +293,6 @@ app.post("/send-signup", async (c) => {
   }
 
   try {
-    await rateLimit.commit();
-
     // Generate secure magic link token
     const token = generateSecureToken();
     // Store token in D1 (atomic single-use at verify time) with signup intent.
@@ -306,8 +382,6 @@ app.post("/send-login", async (c) => {
   }
 
   try {
-    await rateLimit.commit();
-
     if (existingUser.success) {
       // Generate secure magic link token
       const token = generateSecureToken();
@@ -395,8 +469,6 @@ app.post("/send", async (c) => {
   }
 
   try {
-    await rateLimit.commit();
-
     // Check if user exists to determine intent
     const existingUser = await getUserByEmail(c.env.DB, email, logger);
     const intent = existingUser.success ? "login" : "signup";
