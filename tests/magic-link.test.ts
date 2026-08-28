@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MagicLinkRateLimiter } from "../src/queue/magic-link-limiter";
 import { emailAuthRouter } from "../src/routes/email-auth";
 import type { Env } from "../src/types";
 import { NotFoundError } from "../src/utils/errors";
+import { makeFakeDurableObjects } from "./helpers/fake-durable-object";
 
 // Magic links now live in D1 with atomic consume; model that with an in-memory
 // store shared across the router's create/consume calls (single-use enforced by
@@ -60,6 +62,8 @@ function makeEnv(): Env {
   return {
     ARTIFACTS: {} as Env["ARTIFACTS"],
     STATE: makeKV(),
+    MAGIC_LINK_LIMITER: makeFakeDurableObjects((ctx) => new MagicLinkRateLimiter(ctx, {} as Env))
+      .namespace,
     DB: {} as D1Database,
     EMAIL: {
       send: vi.fn().mockResolvedValue({ messageId: "test-message-id" }),
@@ -189,16 +193,6 @@ describe("Magic Link Authentication", () => {
     });
 
     it("should enforce rate limiting", async () => {
-      const kvStore = new Map<string, string>();
-      env.STATE = {
-        get: vi.fn((key: string) => Promise.resolve(kvStore.get(key) ?? null)),
-        put: vi.fn((key: string, value: string) => {
-          kvStore.set(key, value);
-          return Promise.resolve();
-        }),
-        delete: vi.fn(),
-      } as unknown as KVNamespace;
-
       // Make 5 requests (the limit)
       for (let i = 0; i < 5; i++) {
         const formData = new FormData();

@@ -177,7 +177,6 @@ CREATE TABLE github_pr_mappings (
 
 ```text
 session:{sessionId} → { userId, expiresAt }
-rate_limit:magic_link:{emailHash} → { count, resetAt }
 sync_status:{namespace}:{slug} → { lastCheckedAt, hasUpdates, commitsBehind }
 eval_cache:{workspaceId}:{evaluatorId} → { result, cachedAt }
 ```
@@ -426,6 +425,35 @@ async function reportEvaluationToGitHub(env, change, project, evaluation): Promi
 _Evaluation performed by [Stratum](https://stratum.dev)_
 ```
 
+## Magic-Link Rate Limiter
+
+Durable Object holding one fixed-window send counter per subject — an
+address digest (`email:<sha256>`, 5 sends/hour) or a source IP
+(`ip:<addr>`, 20 sends/hour). A send is admitted only when it clears both.
+
+The counters lived in Workers KV until issue #283. That was a
+read-modify-write from the Worker, so concurrent sends read the same value
+and each wrote back `value + 1` — the caps bounded sequential traffic only.
+Inside a Durable Object the runtime's input gate holds other events while a
+storage operation is in flight, so the read and the write cannot interleave.
+
+Two subjects mean two objects, so the pair is reserved in sequence and the
+email reservation is refunded when the IP cap then refuses. A concurrent
+request can see the un-refunded count and be turned away; over-refusing
+briefly is the safe direction, and neither cap is ever exceeded. A single
+shared object would make the pair atomic but serialize every magic-link send
+on the platform behind one thread.
+
+**Storage errors fail open, deliberately.** A reservation that cannot be
+attempted — the binding is missing, or the object throws — admits the request
+and logs it. Failing closed would turn a transient storage fault into a total
+login outage, which is worse than the bounded over-sending a fault window
+allows. A reservation that *succeeds* and reports the cap still refuses: that
+is an answer, not a fault.
+
+Each object arms an alarm past the end of its window and erases itself on it,
+which is what `expirationTtl` did for the KV keys.
+
 ## Merge Queue
 
 Durable Object that serializes merge operations per repository.
@@ -501,7 +529,9 @@ Producer (API route) → Queue → Consumer Worker
 ```text
 POST /auth/email
   ↓
-Generate token → Store in KV (15 min TTL)
+Reserve against the per-email and per-IP caps (Durable Object)
+  ↓
+Generate token → Store in D1 (15 min TTL, single-use at verify)
   ↓
 Send email via Cloudflare Email
   ↓

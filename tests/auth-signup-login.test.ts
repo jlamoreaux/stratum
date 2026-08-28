@@ -1,10 +1,12 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MagicLinkRateLimiter } from "../src/queue/magic-link-limiter";
 import { authRouter } from "../src/routes/auth";
 import { emailAuthRouter } from "../src/routes/email-auth";
 import type { Env, User } from "../src/types";
 import { NotFoundError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
+import { makeFakeDurableObjects } from "./helpers/fake-durable-object";
 
 // ============================================================================
 // Mocks
@@ -198,10 +200,19 @@ function makeKV(): KVNamespace {
   } as unknown as KVNamespace;
 }
 
+/**
+ * A fresh limiter namespace per env, so each test starts from empty counters
+ * the way a fresh KV store used to.
+ */
+function makeLimiterNamespace(): DurableObjectNamespace {
+  return makeFakeDurableObjects((ctx) => new MagicLinkRateLimiter(ctx, {} as Env)).namespace;
+}
+
 function makeEnv(overrides?: Partial<Env>): Env {
   return {
     ARTIFACTS: {} as Env["ARTIFACTS"],
     STATE: makeKV(),
+    MAGIC_LINK_LIMITER: makeLimiterNamespace(),
     DB: {} as D1Database,
     EMAIL: {
       send: vi.fn().mockResolvedValue({ messageId: "test-message-id" }),
@@ -669,43 +680,60 @@ describe("Auth Signup/Login Integration Tests", () => {
       });
 
       /**
-       * The two reads are assigned in sequence, so a throw on the second one
-       * used to leave the first count standing. With the email bucket already
-       * exhausted that computed `blocked === true` — locking a user out of
-       * their own login on a transient KV blip, which is the exact failure the
-       * fail-open contract exists to prevent.
+       * Fail-open is the documented storage-error policy: a reservation that
+       * cannot be *attempted* admits the request, because failing closed would
+       * turn a transient storage fault into a total login outage.
+       *
+       * Note what this does not cover. A reservation that succeeds and reports
+       * the cap is a real answer, so an exhausted bucket still blocks — the KV
+       * counters this replaces admitted there too, but only because a throw on
+       * the second read reset the first read's count as well.
        */
-      it("fails open when the per-IP read throws after the email bucket is full", async () => {
-        const email = "failopen@example.com";
-        const env = makeEnv();
-        const realGet = env.STATE.get.bind(env.STATE);
-        // Exhaust the per-email bucket through the real path first.
-        for (let i = 0; i < 5; i++) {
-          await app.fetch(
-            request("/auth/email/send-signup", {
-              method: "POST",
-              body: createFormData({ email, username: `failopen${i}` }),
-            }),
-            env,
-          );
+      it("fails open when either counter's storage throws", async () => {
+        // Each case varies the OTHER dimension, so the healthy counter can
+        // never be the one that refuses and the assertion is about the faulty
+        // one alone.
+        const cases = [
+          {
+            faulty: "email:",
+            email: () => "failopen@example.com",
+            ip: (i: number) => `203.0.113.${i}`,
+          },
+          {
+            faulty: "ip:",
+            email: (i: number) => `failopen${i}@example.com`,
+            ip: () => "203.0.113.40",
+          },
+        ];
+
+        for (const { faulty, email, ip } of cases) {
+          const env = makeEnv();
+          const healthy = env.MAGIC_LINK_LIMITER as DurableObjectNamespace;
+          env.MAGIC_LINK_LIMITER = {
+            idFromName: (name: string) => healthy.idFromName(name),
+            get: (id: { toString(): string }) =>
+              id.toString().startsWith(faulty)
+                ? {
+                    reserve: () => Promise.reject(new Error("storage unavailable")),
+                    refund: () => Promise.reject(new Error("storage unavailable")),
+                  }
+                : healthy.get(id as DurableObjectId),
+          } as unknown as DurableObjectNamespace;
+
+          // Well past both caps: nothing may refuse while a counter is faulty.
+          for (let i = 0; i < 25; i++) {
+            const res = await app.fetch(
+              request("/auth/email/send-signup", {
+                method: "POST",
+                headers: { "CF-Connecting-IP": ip(i) },
+                body: createFormData({ email: email(i), username: `failopen${i}` }),
+              }),
+              env,
+            );
+            expect(res.status).toBe(302);
+            expect(res.headers.get("location")).not.toContain("error=rate_limited");
+          }
         }
-
-        // Now let the email read succeed and make only the per-IP read throw.
-        env.STATE.get = (async (key: string) => {
-          if (key.startsWith("magic_link_ip_rate:")) throw new Error("KV unavailable");
-          return realGet(key);
-        }) as typeof env.STATE.get;
-
-        const res = await app.fetch(
-          request("/auth/email/send-signup", {
-            method: "POST",
-            body: createFormData({ email, username: "failopen9" }),
-          }),
-          env,
-        );
-
-        expect(res.status).toBe(302);
-        expect(res.headers.get("location")).not.toContain("error=rate_limited");
       });
 
       // The per-email bucket keys on a digest of the address. It has to be

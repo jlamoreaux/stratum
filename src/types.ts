@@ -135,6 +135,9 @@ export interface Env {
   AI?: AiBinding;
   MERGE_QUEUE?: DurableObjectNamespace;
   REPO_DO?: DurableObjectNamespace;
+  /** Serialized magic-link send counters (issue #283). Optional only so tests
+   * can omit it; every deploy from this repo's wrangler.toml binds it. */
+  MAGIC_LINK_LIMITER?: DurableObjectNamespace;
   /** Content-addressed git object plane (ADR 004 Phase 2). */
   REPO_OBJECTS?: R2Bucket;
   /** Durable backup store (D1 dumps, KV identity, repo packs). Optional: when
