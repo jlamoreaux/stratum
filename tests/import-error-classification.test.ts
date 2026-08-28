@@ -189,6 +189,47 @@ describe("classifyError — a repository's name must not decide its error messag
     expect(info.type).toBe("NOT_FOUND");
   });
 
+  // Marker shape alone could not reach these: a ref named for a status code is
+  // digits, and a ref named for a bare noun ("git", "repository", "already
+  // exists") collides with branches that have no phrase-shaped alternative.
+  // Removing the whole `refs/...` span is what answers both — the ref's own
+  // name is never evidence about the failure.
+  it.each([
+    ["ref named 401", "couldn't find remote ref refs/heads/401 (404)"],
+    ["ref named 403", "couldn't find remote ref refs/heads/403 (404)"],
+    ["ref named 429", "couldn't find remote ref refs/heads/429-backoff (404)"],
+    ["tag named for a status", "couldn't find remote ref refs/tags/v1-403-fix (404)"],
+    [
+      "ref named for a status inside a path",
+      "couldn't find remote ref refs/heads/api/v1/403/spec (404)",
+    ],
+  ])("does not read a ref's own name as an HTTP status (%s)", (_label, message) => {
+    const info = classifyError(message);
+    expect(info.type).toBe("NOT_FOUND");
+  });
+
+  // git states a missing ref without ever emitting "404" or "not found", so
+  // these reach the branches whose markers are still bare nouns and are
+  // answered confidently wrong — `disk-cleanup` as a full disk, `429-backoff`
+  // as a rate limit. Removing the ref span takes that false evidence away;
+  // recognising git's own "couldn't find remote ref" supplies the true
+  // evidence, without which the strip would leave these as UNKNOWN_ERROR.
+  it.each([
+    ["storage noun", "fatal: couldn't find remote ref refs/heads/disk-cleanup"],
+    ["rate-limit noun", "fatal: couldn't find remote ref refs/heads/429-backoff"],
+    ["git noun", "fatal: couldn't find remote ref refs/heads/git-cleanup"],
+    ["repository noun", "fatal: could not find remote ref refs/heads/repository-rename"],
+  ])("does not read a ref's own name as the failure it names (%s)", (_label, message) => {
+    const info = classifyError(message);
+    expect(info.type).toBe("NOT_FOUND");
+  });
+
+  // The counterpart to the phrase above: a real disk failure still reaches the
+  // storage branch, which the strip must not have starved of its noun.
+  it("still reports a real storage failure as STORAGE_ERROR", () => {
+    expect(classifyError("fatal: write error: No space left on device").type).toBe("STORAGE_ERROR");
+  });
+
   // The counterpart: Node emits its transport codes upper-case, which is what
   // separates a real DNS/socket failure from a lower-case ref name above.
   it.each([
@@ -204,6 +245,15 @@ describe("classifyError — a repository's name must not decide its error messag
   // The word alone no longer classifies; the status beside it does.
   it("still reports a 401 Unauthorized as AUTH_ERROR", () => {
     expect(classifyError("HTTP Error: 401 Unauthorized").type).toBe("AUTH_ERROR");
+  });
+
+  // The strip removes the ref, not the message around it: a real refusal that
+  // happens to name a branch must keep classifying on the refusal.
+  it("still reports a 403 that also names a ref as AUTH_ERROR", () => {
+    const info = classifyError(
+      "remote: HTTP 403 while accessing refs/heads/main on https://github.com/acme/x.git",
+    );
+    expect(info.type).toBe("AUTH_ERROR");
   });
 
   // A URL path that happens to contain three digits is not an HTTP status.

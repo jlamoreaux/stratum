@@ -96,6 +96,20 @@ const LFS_BATCH_RESPONSE_MARKERS = ["batch response", "/info/lfs/objects/batch"]
 const REMOTE_SPAN = /\b[a-z][a-z0-9+.-]*:\/\/\S+|\b[\w.-]+@[\w.-]+:\S+/gi;
 
 /**
+ * Fully-qualified ref spans, removed for the same reason as {@link REMOTE_SPAN}:
+ * a ref is named by whoever pushed it, so `refs/heads/401` must not be read as
+ * an HTTP status and `refs/heads/disk-cleanup` must not be read as a storage
+ * failure. A ref name is not inside a URL, so remote-stripping alone never
+ * reached these.
+ *
+ * Only the `refs/...` form is removed. A message naming a bare branch (`couldn't
+ * find remote ref my-branch`) is not structurally distinguishable from prose, so
+ * the marker shape has to carry that case — which is why every marker below is a
+ * phrase git emits rather than a word a name can contain.
+ */
+const REF_SPAN = /\brefs\/(?:heads|tags|remotes)\/\S+/gi;
+
+/**
  * Markers of a real authentication failure, as git and the GitHub API phrase
  * them.
  *
@@ -158,9 +172,13 @@ function hasTransportCode(rawText: string): boolean {
   return TRANSPORT_CODES.some((code) => new RegExp(`(?<![A-Z])${code}(?![A-Z])`).test(rawText));
 }
 
-/** Whether `text` carries `code` as a standalone HTTP status, not as digits inside a path. */
+/**
+ * Keeps digits that belong to a repository or ref path from being read as an
+ * HTTP status. `1403` is not a 403, and neither is `/v1/403/spec` — a real
+ * status is preceded by a space, a bracket, or nothing at all.
+ */
 function hasStatus(text: string, code: string): boolean {
-  return new RegExp(`(?<!\\d)${code}(?!\\d)`).test(text);
+  return new RegExp(`(?<![\\d/])${code}(?!\\d)`).test(text);
 }
 
 export function classifyError(errorMessage: string): ErrorInfo {
@@ -169,9 +187,9 @@ export function classifyError(errorMessage: string): ErrorInfo {
   // read the full message on purpose: LFS_BATCH_RESPONSE_MARKERS requires the
   // path `/info/lfs/objects/batch`, which legitimately arrives inside a URL,
   // so stripping there would undo the LFS detection #218 added.
-  const prose = msg.replace(REMOTE_SPAN, " ");
+  const prose = msg.replace(REMOTE_SPAN, " ").replace(REF_SPAN, " ");
   // The same text with its original case kept, for the transport codes above.
-  const proseRaw = errorMessage.replace(REMOTE_SPAN, " ");
+  const proseRaw = errorMessage.replace(REMOTE_SPAN, " ").replace(REF_SPAN, " ");
 
   // Authentication errors
   // 401/403 carry the refusal on their own, so the original predicate's bare
@@ -246,11 +264,19 @@ export function classifyError(errorMessage: string): ErrorInfo {
   }
 
   // Not found errors
+  //
+  // "couldn't find remote ref" is git's own wording for a ref that is absent
+  // from the remote, and it earns its place here: without it the message
+  // carries no not-found token at all, so once {@link REF_SPAN} removes the
+  // ref name the failure falls through to UNKNOWN_ERROR — a message that says
+  // precisely what went wrong, answered with "an unexpected error occurred".
   if (
     msg.includes("not found") ||
     msg.includes("404") ||
     msg.includes("doesn't exist") ||
-    msg.includes("does not exist")
+    msg.includes("does not exist") ||
+    msg.includes("couldn't find remote ref") ||
+    msg.includes("could not find remote ref")
   ) {
     return {
       type: "NOT_FOUND",
