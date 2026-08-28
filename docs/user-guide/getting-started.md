@@ -24,8 +24,11 @@ Sign in with any of:
 - **GitHub OAuth** at `/auth/github` — required later if you want bidirectional
   GitHub sync.
 - **Google OAuth** at `/auth/google`.
+- **Single sign-on (SSO)** at `/auth/sso` — if your organization has
+  configured OIDC SSO, enter your org's slug or your work email.
 
-All three resolve to the same email-identity account, so you can mix methods.
+All of these resolve to the same account (matched by verified email), so you
+can mix methods.
 
 ### Self-hosting
 
