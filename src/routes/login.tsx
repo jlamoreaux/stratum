@@ -470,6 +470,10 @@ app.get("/", (c) => {
                   Continue with Google
                 </a>
 
+                <a href="/auth/sso" class="btn btn-github" style={{ marginTop: "0.5rem" }}>
+                  Single sign-on (SSO)
+                </a>
+
                 <div class="auth-footer">
                   <p class="auth-footer-text">
                     Don't have an account? <a href="/auth/signup">Sign up</a>

@@ -99,7 +99,12 @@ export function validateIssuer(issuer: string): ValidationError | null {
   return null;
 }
 
-async function readBodyCapped(res: Response, maxBytes: number): Promise<string | null> {
+/**
+ * Read a response body up to `maxBytes`; null when the cap is exceeded. Shared
+ * by discovery and the OIDC login token exchange — both fetch org-admin-
+ * supplied endpoints, so an unbounded body must never be buffered.
+ */
+export async function readBodyCapped(res: Response, maxBytes: number): Promise<string | null> {
   const reader = res.body?.getReader();
   if (!reader) {
     const text = await res.text();

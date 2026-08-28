@@ -3,6 +3,7 @@ import { sweepDeletionJobs } from "./queue/deletion-runner";
 import { sweepStaleEvents } from "./queue/event-consumer";
 import { runTtlSweep } from "./queue/ttl-sweep";
 import { syncAllProjects } from "./routes/sync";
+import { purgeExpiredOidcStates } from "./storage/sso";
 import type { Env } from "./types";
 import type { Logger } from "./utils/logger";
 
@@ -11,7 +12,8 @@ export type ScheduledJob =
   | "deletion-sweep"
   | "backup"
   | "ttl-sweep"
-  | "project-sync";
+  | "project-sync"
+  | "oidc-state-purge";
 
 /**
  * Cron → jobs routing. Backup runs on its OWN trigger (`0 4 * * *`), isolated
@@ -27,7 +29,7 @@ export function jobsForCron(cron: string): ScheduledJob[] {
     case "0 4 * * *":
       return ["backup"];
     case "0 6 * * *":
-      return ["ttl-sweep", "project-sync"];
+      return ["ttl-sweep", "project-sync", "oidc-state-purge"];
     default:
       return [];
   }
@@ -41,6 +43,7 @@ const JOB_RUNNERS: JobRunners = {
   backup: (env, logger) => runBackup(env, logger, new Date().toISOString()),
   "ttl-sweep": (env, logger) => runTtlSweep(env, logger),
   "project-sync": (env) => syncAllProjects(env),
+  "oidc-state-purge": (env, logger) => purgeExpiredOidcStates(env.DB, logger),
 };
 
 /**

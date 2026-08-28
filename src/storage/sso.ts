@@ -554,6 +554,178 @@ export async function rotateScimToken(
 }
 
 /**
+ * Mark a user managed by a connection (idempotent). Used at OIDC login when an
+ * existing account is adopted or JIT-created; SCIM later updates the same row.
+ * INSERT OR IGNORE so a re-login never resets `active` or `scim_external_id`
+ * that SCIM has since written.
+ */
+export async function ensureScimMember(
+  db: D1Database,
+  logger: Logger,
+  connectionId: string,
+  userId: string,
+): Promise<Result<void, AppError>> {
+  try {
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO scim_members (connection_id, user_id, active, created_at) VALUES (?, ?, 1, ?)",
+      )
+      .bind(connectionId, userId, new Date().toISOString())
+      .run();
+    return ok(undefined);
+  } catch (error) {
+    logger.error("Failed to ensure scim_members row", error instanceof Error ? error : undefined, {
+      connectionId,
+      userId,
+    });
+    return err(new AppError("Failed to record managed membership", "STORAGE_ERROR", 500));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OIDC login states (migration 041): short-lived per-login rows whose atomic
+// consumption is the replay guard for the authorization-code callback.
+// ---------------------------------------------------------------------------
+
+/**
+ * Single source of truth for the login-state lifetime: the row expiry written
+ * here AND the browser-binding cookie's maxAge in routes/sso.tsx must agree,
+ * so the route imports this rather than declaring its own copy.
+ */
+export const OIDC_STATE_TTL_SECONDS = 600;
+
+export interface OidcLoginState {
+  state: string;
+  connectionId: string;
+  nonce: string;
+  codeVerifier: string;
+  redirectTo: string | null;
+}
+
+interface OidcLoginStateRow {
+  state: string;
+  connection_id: string;
+  nonce: string;
+  code_verifier: string;
+  redirect_to: string | null;
+}
+
+export interface CreateOidcLoginStateInput {
+  connectionId: string;
+  nonce: string;
+  codeVerifier: string;
+  redirectTo: string | null;
+}
+
+function randomHex32Bytes(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Persist a login state row (10-minute TTL); returns the generated `state`. */
+export async function createOidcLoginState(
+  db: D1Database,
+  logger: Logger,
+  input: CreateOidcLoginStateInput,
+): Promise<Result<string, AppError>> {
+  try {
+    const state = randomHex32Bytes();
+    const now = Math.floor(Date.now() / 1000);
+    await db
+      .prepare(
+        `INSERT INTO oidc_login_states (state, connection_id, nonce, code_verifier, redirect_to, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        state,
+        input.connectionId,
+        input.nonce,
+        input.codeVerifier,
+        input.redirectTo,
+        new Date().toISOString(),
+        now + OIDC_STATE_TTL_SECONDS,
+      )
+      .run();
+    return ok(state);
+  } catch (error) {
+    logger.error("Failed to create OIDC login state", error instanceof Error ? error : undefined, {
+      connectionId: input.connectionId,
+    });
+    return err(new AppError("Failed to create OIDC login state", "STORAGE_ERROR", 500));
+  }
+}
+
+/**
+ * Atomically consume a login state: exactly ONE caller succeeds even under
+ * concurrent callbacks, because the guard is a single conditional UPDATE
+ * (`consumed_at IS NULL AND not expired`) whose affected-row count is the
+ * winner signal — the same pattern as consumeMagicLink. Returns null when the
+ * state is unknown, already consumed, or expired.
+ */
+export async function consumeOidcLoginState(
+  db: D1Database,
+  logger: Logger,
+  state: string,
+): Promise<Result<OidcLoginState | null, AppError>> {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const update = await db
+      .prepare(
+        "UPDATE oidc_login_states SET consumed_at = ? WHERE state = ? AND consumed_at IS NULL AND expires_at > ?",
+      )
+      .bind(new Date().toISOString(), state, now)
+      .run();
+    if (update.meta.changes !== 1) return ok(null);
+
+    const row = await db
+      .prepare(
+        "SELECT state, connection_id, nonce, code_verifier, redirect_to FROM oidc_login_states WHERE state = ?",
+      )
+      .bind(state)
+      .first<OidcLoginStateRow>();
+    if (!row) return ok(null);
+
+    return ok({
+      state: row.state,
+      connectionId: row.connection_id,
+      nonce: row.nonce,
+      codeVerifier: row.code_verifier,
+      redirectTo: row.redirect_to,
+    });
+  } catch (error) {
+    logger.error("Failed to consume OIDC login state", error instanceof Error ? error : undefined);
+    return err(new AppError("Failed to consume OIDC login state", "STORAGE_ERROR", 500));
+  }
+}
+
+/**
+ * Delete expired state rows. Called opportunistically from the start route and
+ * from the daily cron; consumed-but-unexpired rows keep their tombstone until
+ * expiry so a replayed state stays distinguishable from an unknown one.
+ */
+export async function purgeExpiredOidcStates(
+  db: D1Database,
+  logger: Logger,
+): Promise<Result<number, AppError>> {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const result = await db
+      .prepare("DELETE FROM oidc_login_states WHERE expires_at < ?")
+      .bind(now)
+      .run();
+    const purged = result.meta?.changes ?? 0;
+    if (purged > 0) logger.debug("Purged expired OIDC login states", { purged });
+    return ok(purged);
+  } catch (error) {
+    logger.error("Failed to purge OIDC login states", error instanceof Error ? error : undefined);
+    return err(new AppError("Failed to purge OIDC login states", "STORAGE_ERROR", 500));
+  }
+}
+
+/**
  * Users this connection deactivated via SCIM (`scim_members.active = 0`) —
  * the set connection deletion must re-enable so removing a connection is a
  * clean rollback, never a permanent lockout.

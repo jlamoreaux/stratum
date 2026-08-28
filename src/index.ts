@@ -31,6 +31,7 @@ import { restoreRouter } from "./routes/restore";
 import { reviewsRouter } from "./routes/reviews";
 import { sessionRouter } from "./routes/sessions";
 import { signupRouter } from "./routes/signup";
+import { ssoRouter } from "./routes/sso";
 import { syncRouter } from "./routes/sync";
 import { syncManagementRouter } from "./routes/sync-management";
 import { uiRouter } from "./routes/ui";
@@ -172,6 +173,9 @@ app.get("/ui/changes/:id", (c) => {
 });
 
 app.route("/auth", authRouter);
+// OIDC SSO login flow (picker, /:slug/start, /callback) — same global
+// middleware chain as the other auth routes.
+app.route("/auth/sso", ssoRouter);
 app.route("/auth/email", emailAuthRouter);
 app.route("/auth/login", loginRouter);
 app.route("/auth/signup", signupRouter);
