@@ -20,6 +20,10 @@ const ERROR_MESSAGES: Record<string, string> = {
 
 const SUCCESS_MESSAGES: Record<string, string> = {
   email_sent: "Check your email. We sent a magic link that expires in 15 minutes.",
+  // Enumeration-safe wording from /auth/email/send-login: identical whether or
+  // not the address has an account.
+  login_link_sent:
+    "If an account exists for that email, we've sent a magic link (it expires in 15 minutes).",
 };
 
 // GET /auth/login - Show login form

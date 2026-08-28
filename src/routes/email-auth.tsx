@@ -107,32 +107,6 @@ async function checkMagicLinkRateLimits(
   return { blocked, commit };
 }
 
-const ERROR_MESSAGES: Record<string, string> = {
-  invalid_email: "Please enter a valid email address.",
-  invalid_username:
-    "Please enter a valid username (2-39 characters, lowercase alphanumeric with hyphens).",
-  username_taken: "This username is already taken. Please choose another.",
-  email_exists: "An account with this email already exists. Please sign in instead.",
-  email_not_found: "No account found with this email. Please sign up first.",
-  auth_config_missing: "Email authentication is not configured. Please contact the administrator.",
-  auth_config_incomplete:
-    "Email authentication is not fully configured. Please contact the administrator.",
-  send_failed: "Failed to send email. Please try again later.",
-  invalid_link: "Invalid or expired link.",
-  link_expired: "This link has expired or already been used.",
-  verify_failed: "Failed to sign in. Please try again.",
-  signup_failed: "Failed to create account. Please try again.",
-  rate_limited: "Too many requests. Please try again in an hour.",
-};
-
-const SUCCESS_MESSAGES: Record<string, string> = {
-  email_sent: "Check your email. We sent a magic link that expires in 15 minutes.",
-  // Enumeration-safe: identical whether or not the email has an account, so the
-  // login endpoint can't be probed to discover which emails are registered.
-  login_link_sent:
-    "If an account exists for that email, we've sent a magic link (it expires in 15 minutes).",
-};
-
 function emailAuthRedirect(
   c: { redirect(path: string): Response },
   kind: "error" | "success",
