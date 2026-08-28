@@ -19,6 +19,7 @@ vi.mock("../src/storage/audit", () => ({
   recordAudit: vi.fn().mockResolvedValue({ success: true, data: undefined }),
 }));
 
+import { recordAudit } from "../src/storage/audit";
 import { createSession } from "../src/storage/sessions";
 import { createUser, getUserByEmail } from "../src/storage/users";
 
@@ -190,6 +191,45 @@ describe("Google OAuth", () => {
     );
     expect(res.status).toBe(302);
     expect(createUser).toHaveBeenCalledWith(env.DB, "new@example.com", expect.any(Object));
+  });
+
+  it("refuses a disabled account before minting a session (no session.created audit)", async () => {
+    const app = makeApp();
+    const env = makeEnv({ STATE: makeKv({ "oauth_state:goodstate": "1" }) });
+
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("https://oauth2.googleapis.com/token")) {
+        return new Response(JSON.stringify({ access_token: "google-token" }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({ sub: "g-123", email: "disabled@example.com", email_verified: true }),
+        { status: 200 },
+      );
+    });
+
+    vi.mocked(getUserByEmail).mockResolvedValue({
+      success: true,
+      data: {
+        id: "usr_disabled",
+        email: "disabled@example.com",
+        username: "disabled",
+        tokenHash: "h",
+        createdAt: "",
+        disabledAt: "2026-08-01T00:00:00.000Z",
+      },
+    });
+
+    const res = await app.fetch(
+      new Request("http://localhost/auth/google/callback?code=ok&state=goodstate", {
+        headers: { Cookie: "stratum_oauth_state=goodstate" },
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/auth/login?error=account_disabled");
+    expect(res.headers.get("Set-Cookie") ?? "").not.toContain("stratum_session");
+    expect(createSession).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 
   it("rejects unverified Google emails", async () => {

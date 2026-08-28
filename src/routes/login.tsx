@@ -16,6 +16,10 @@ const ERROR_MESSAGES: Record<string, string> = {
     "Email authentication is not fully configured. Please contact the administrator.",
   send_failed: "Failed to send email. Please try again later.",
   rate_limited: "Too many requests. Please try again in an hour.",
+  // Every login flow (magic link, GitHub, Google) refuses a disabled account
+  // with this code before minting a session.
+  account_disabled:
+    "This account has been disabled. Contact your organization's administrator to restore access.",
 };
 
 const SUCCESS_MESSAGES: Record<string, string> = {

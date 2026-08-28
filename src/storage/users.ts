@@ -22,6 +22,9 @@ interface UserRow {
   // Added in migration 026; NULL on live accounts. `SELECT *` already fetches
   // it, so the auth hot path gets `deletingAt` without a second round-trip.
   deleting_at: string | null;
+  // Added in migration 041; NULL on enabled accounts. Rides on the same row as
+  // deleting_at so the auth hot path sees it for free.
+  disabled_at: string | null;
 }
 
 function rowToUser(row: UserRow): User {
@@ -34,8 +37,10 @@ function rowToUser(row: UserRow): User {
   };
   if (row.github_id !== null) user.githubId = row.github_id;
   if (row.github_username !== null) user.githubUsername = row.github_username;
-  // `deleting_at` may be absent when a stub/legacy read omits the column.
+  // `deleting_at`/`disabled_at` may be absent when a stub/legacy read omits
+  // the columns.
   if (row.deleting_at != null) user.deletingAt = row.deleting_at;
+  if (row.disabled_at != null) user.disabledAt = row.disabled_at;
   return user;
 }
 
@@ -183,6 +188,70 @@ export async function markUserDeleting(
       userId,
     });
     return err(new AppError("Failed to mark user deleting", "STORAGE_ERROR", 500, { userId }));
+  }
+}
+
+/**
+ * Reversibly disable an account (sets users.disabled_at = now). Every
+ * credential path — auth middleware, git smart-HTTP, and the login flows —
+ * rejects while the flag is set; `enableUser` restores the same credentials.
+ * Idempotent: re-disabling keeps the earliest timestamp, so repeated SCIM
+ * deprovision requests don't rewrite when the account was actually disabled.
+ */
+export async function disableUser(
+  db: D1Database,
+  userId: string,
+  logger: Logger,
+): Promise<Result<string, AppError>> {
+  const now = new Date().toISOString();
+  try {
+    // RETURNING so the caller gets the STORED timestamp: on an idempotent
+    // re-disable, COALESCE keeps the earlier one, and an audit/SCIM response
+    // built from this value must not misreport when disablement happened.
+    const row = await db
+      .prepare(
+        "UPDATE users SET disabled_at = COALESCE(disabled_at, ?) WHERE id = ? RETURNING disabled_at",
+      )
+      .bind(now, userId)
+      .first<{ disabled_at: string }>();
+    if (!row) {
+      return err(new AppError(`User '${userId}' not found`, "NOT_FOUND", 404, { userId }));
+    }
+    logger.info("User disabled", { userId });
+    return ok(row.disabled_at);
+  } catch (error) {
+    logger.error("Failed to disable user", error instanceof Error ? error : undefined, {
+      userId,
+    });
+    return err(new AppError("Failed to disable user", "STORAGE_ERROR", 500, { userId }));
+  }
+}
+
+/**
+ * Re-enable a disabled account (clears users.disabled_at). The user's existing
+ * credentials — tokens, agents, sessions that survived — work again. Idempotent
+ * on an already-enabled account.
+ */
+export async function enableUser(
+  db: D1Database,
+  userId: string,
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  try {
+    const result = await db
+      .prepare("UPDATE users SET disabled_at = NULL WHERE id = ?")
+      .bind(userId)
+      .run();
+    if ((result.meta?.changes ?? 0) === 0) {
+      return err(new AppError(`User '${userId}' not found`, "NOT_FOUND", 404, { userId }));
+    }
+    logger.info("User enabled", { userId });
+    return ok(undefined);
+  } catch (error) {
+    logger.error("Failed to enable user", error instanceof Error ? error : undefined, {
+      userId,
+    });
+    return err(new AppError("Failed to enable user", "STORAGE_ERROR", 500, { userId }));
   }
 }
 

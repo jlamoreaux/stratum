@@ -392,6 +392,13 @@ export interface User {
    * Absent/null on live accounts. See PRD "Grace window".
    */
   deletingAt?: string;
+  /**
+   * When set (ISO timestamp), the account is disabled — reversibly, unlike the
+   * destructive `deletingAt`. All credentials are inert while set (auth,
+   * git smart-HTTP, and every login flow reject); `enableUser` clears it and
+   * the same credentials work again. Set by SCIM deprovisioning.
+   */
+  disabledAt?: string;
 }
 
 export interface Session {

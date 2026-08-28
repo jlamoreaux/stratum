@@ -87,6 +87,12 @@ app.get("/dev-login", async (c) => {
       userId = createResult.data.user.id;
       logger.info("Dev login: Created new user", { userId });
     } else {
+      // Parity with the real login flows: no session mint for a disabled or
+      // deleting account, even behind the localhost dev gate.
+      if (userResult.data.disabledAt || userResult.data.deletingAt) {
+        logger.warn("Dev login refused — account disabled", { userId: userResult.data.id });
+        return c.json({ error: "Account is disabled" }, 403);
+      }
       userId = userResult.data.id;
       logger.info("Dev login: Using existing user", { userId });
     }

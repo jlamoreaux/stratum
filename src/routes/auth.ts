@@ -193,20 +193,42 @@ app.get("/github/callback", async (c) => {
   const emailPrefix = primaryEmail.split("@")[0];
   logger.info("Upserting GitHub user", { githubId: githubUser.id, emailPrefix });
 
+  const byGithub = await getUserByGitHubId(c.env.DB, String(githubUser.id), logger);
+  const byPrimaryEmail = await getUserByEmail(c.env.DB, primaryEmail, logger);
+
   // Closed beta: OAuth is login-only. A brand-new account (no match by GitHub id
   // or email) must be created through the invite-gated magic-link flow first.
   if (betaGateEnabled(c.env)) {
-    const byGithub = await getUserByGitHubId(c.env.DB, String(githubUser.id), logger);
     // Match an existing account only by a *verified* email — never the unverified
     // fallback used for primaryEmail, which could be attacker-controlled and let
     // someone slip past the gate by claiming a beta user's address.
     const verifiedEmail =
       emails.find((e) => e.primary && e.verified)?.email ?? emails.find((e) => e.verified)?.email;
-    const byEmail = verifiedEmail ? await getUserByEmail(c.env.DB, verifiedEmail, logger) : null;
+    const byEmail =
+      verifiedEmail === primaryEmail
+        ? byPrimaryEmail
+        : verifiedEmail
+          ? await getUserByEmail(c.env.DB, verifiedEmail, logger)
+          : null;
     if (!byGithub.success && !byEmail?.success) {
       logger.warn("Blocked GitHub signup — closed beta", { githubId: githubUser.id });
       return c.redirect("/auth/signup?error=invite_required");
     }
+  }
+
+  // A disabled (or deleting) account must not sign in — and the refusal must
+  // come BEFORE upsertGitHubUser, which would otherwise link github_id onto
+  // the frozen row and hand it a working login credential at re-enable time.
+  // Check the same account upsertGitHubUser would match: by GitHub id, else by
+  // primaryEmail.
+  const existingAccount = byGithub.success
+    ? byGithub.data
+    : byPrimaryEmail.success
+      ? byPrimaryEmail.data
+      : null;
+  if (existingAccount && (existingAccount.disabledAt || existingAccount.deletingAt)) {
+    logger.warn("Blocked GitHub sign-in — account disabled", { userId: existingAccount.id });
+    return c.redirect("/auth/login?error=account_disabled");
   }
 
   const userResult = await upsertGitHubUser(
@@ -225,6 +247,7 @@ app.get("/github/callback", async (c) => {
   }
 
   const user = userResult.data;
+
   const sessionLogger = logger.child({ userId: user.id });
 
   const sessionResult = await createSession(c.env.DB, user.id, sessionLogger);
@@ -375,6 +398,13 @@ app.get("/google/callback", async (c) => {
   const existing = await getUserByEmail(c.env.DB, googleUser.email, logger);
   let userId: string;
   if (existing.success) {
+    // A disabled (or deleting) account must not sign in: refuse BEFORE minting
+    // a session, so no stratum_session cookie and no session.created audit row
+    // exist for it.
+    if (existing.data.disabledAt || existing.data.deletingAt) {
+      logger.warn("Blocked Google sign-in — account disabled", { userId: existing.data.id });
+      return c.redirect("/auth/login?error=account_disabled");
+    }
     userId = existing.data.id;
   } else {
     // Closed beta: OAuth is login-only — new accounts require an invite code.

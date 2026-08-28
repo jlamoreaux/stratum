@@ -21,7 +21,9 @@ export type AuditAction =
   | "deletion.completed"
   | "deletion.incomplete"
   | "deletion.redrive"
-  | "webhook.project_id_backfilled";
+  | "webhook.project_id_backfilled"
+  | "user.disabled"
+  | "user.enabled";
 
 export interface AuditEntry {
   id: string;

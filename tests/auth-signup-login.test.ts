@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authRouter } from "../src/routes/auth";
 import { emailAuthRouter } from "../src/routes/email-auth";
+import { recordAudit } from "../src/storage/audit";
 import type { Env, User } from "../src/types";
 import { NotFoundError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
@@ -88,6 +89,16 @@ vi.mock("../src/storage/users", () => {
       return { success: true, data: user };
     }),
 
+    getUserByGitHubId: vi.fn(async (_db, githubId: string) => {
+      const users = getMockUsers();
+      for (const user of users.values()) {
+        if (user.githubId === githubId) {
+          return { success: true, data: user };
+        }
+      }
+      return { success: false, error: new NotFoundError("User", githubId) };
+    }),
+
     getUserByUsername: vi.fn(async (_db, username: string) => {
       const users = getMockUsers();
       const user = users.get(`username:${username.toLowerCase()}`);
@@ -171,6 +182,12 @@ vi.mock("../src/storage/sessions", () => ({
   getUserSessions: vi.fn(),
   deleteAllUserSessions: vi.fn(),
   refreshSession: vi.fn(),
+}));
+
+// Audit is mocked so the disabled-account tests can assert that a refused
+// login records NO session.created row.
+vi.mock("../src/storage/audit", () => ({
+  recordAudit: vi.fn(async () => ({ success: true, data: undefined })),
 }));
 
 // ============================================================================
@@ -1590,6 +1607,202 @@ describe("Auth Signup/Login Integration Tests", () => {
 
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toContain("error=rate_limited");
+    });
+  });
+
+  // ============================================================================
+  // Disabled account enforcement (disabled_at) — no session mint, no mail,
+  // no session.created audit row on any refused login.
+  // ============================================================================
+
+  describe("Disabled account enforcement", () => {
+    const DISABLED_AT = "2026-08-01T00:00:00.000Z";
+
+    async function seedDisabledUser(email: string, username: string): Promise<User> {
+      const { createUser } = await import("../src/storage/users");
+      await createUser(env.DB, email, {} as unknown as Logger, username);
+      const user = mockUsers.get(`email:${email}`);
+      if (!user) throw new Error(`Failed to seed user ${email}`);
+      user.disabledAt = DISABLED_AT;
+      return user;
+    }
+
+    it("send-login answers with the enumeration-safe success but sends no mail", async () => {
+      await seedDisabledUser("disabled@example.com", "disableduser");
+
+      const res = await app.fetch(
+        request("/auth/email/send-login", {
+          method: "POST",
+          body: createFormData({ email: "disabled@example.com" }),
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(302);
+      // Same response as an unknown address — disabled accounts are not an
+      // enumeration oracle.
+      expect(res.headers.get("location")).toContain("success=login_link_sent");
+      expect(env.EMAIL?.send).not.toHaveBeenCalled();
+      expect(await extractMagicLinkToken(env)).toBeNull();
+    });
+
+    it("legacy send answers with the uniform success but sends no mail", async () => {
+      await seedDisabledUser("disabled-legacy@example.com", "disabledlegacy");
+
+      const res = await app.fetch(
+        request("/auth/email/send", {
+          method: "POST",
+          body: createFormData({ email: "disabled-legacy@example.com" }),
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("success=email_sent");
+      expect(env.EMAIL?.send).not.toHaveBeenCalled();
+      expect(await extractMagicLinkToken(env)).toBeNull();
+    });
+
+    it("verify hard-rejects a login link for a disabled account with no session or audit row", async () => {
+      await seedDisabledUser("disabled-verify@example.com", "disabledverify");
+      // A link minted BEFORE the account was disabled must still be refused.
+      magicStore.set("pre-disable-token", {
+        email: "disabled-verify@example.com",
+        intent: "login",
+        createdAt: Date.now(),
+        rememberMe: true,
+      });
+
+      const res = await app.fetch(verifyReq("pre-disable-token"), env);
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("error=account_disabled");
+      expect(res.headers.get("set-cookie")).toBeNull();
+      const { createSession } = await import("../src/storage/sessions");
+      expect(createSession).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it("verify refuses the signup-collides-with-existing-account fallback for a disabled account", async () => {
+      await seedDisabledUser("disabled-signup@example.com", "disabledsignup");
+      magicStore.set("signup-collision-token", {
+        email: "disabled-signup@example.com",
+        username: "someoneelse",
+        intent: "signup",
+        createdAt: Date.now(),
+        rememberMe: true,
+      });
+
+      const res = await app.fetch(verifyReq("signup-collision-token"), env);
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("error=account_disabled");
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it("GitHub callback refuses a disabled account before minting a session", async () => {
+      const user = await seedDisabledUser("disabled-github@example.com", "disabledgithub");
+      user.githubId = "99999";
+
+      globalThis.fetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ access_token: "gh_token_disabled" }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 99999, login: "disabledgithub" }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => [
+            { email: "disabled-github@example.com", primary: true, verified: true },
+          ],
+        });
+
+      const state = "disabled-github-state";
+      await env.STATE.put(`oauth_state:${state}`, "1", { expirationTtl: 600 });
+
+      const res = await app.fetch(
+        request(`/auth/github/callback?code=test-code&state=${state}`, {
+          headers: { Cookie: `stratum_oauth_state=${state}` },
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth/login?error=account_disabled");
+      expect(res.headers.get("set-cookie") ?? "").not.toContain("stratum_session");
+      const { createSession } = await import("../src/storage/sessions");
+      expect(createSession).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+
+      vi.restoreAllMocks();
+    });
+
+    it("GitHub callback refuses a disabled account matched by email WITHOUT linking github_id", async () => {
+      // The refusal must come before upsertGitHubUser: linking a GitHub id
+      // onto the frozen row would hand it a working credential at re-enable.
+      const user = await seedDisabledUser("disabled-nolink@example.com", "disablednolink");
+      expect(user.githubId).toBeUndefined();
+
+      globalThis.fetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ access_token: "gh_token_nolink" }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: 88888, login: "disablednolink" }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => [
+            { email: "disabled-nolink@example.com", primary: true, verified: true },
+          ],
+        });
+
+      const state = "disabled-nolink-state";
+      await env.STATE.put(`oauth_state:${state}`, "1", { expirationTtl: 600 });
+
+      const res = await app.fetch(
+        request(`/auth/github/callback?code=test-code&state=${state}`, {
+          headers: { Cookie: `stratum_oauth_state=${state}` },
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth/login?error=account_disabled");
+      const { upsertGitHubUser } = await import("../src/storage/users");
+      expect(upsertGitHubUser).not.toHaveBeenCalled();
+      expect(user.githubId).toBeUndefined();
+
+      vi.restoreAllMocks();
+    });
+
+    it("verify hard-rejects a soft-deleting account the same as a disabled one", async () => {
+      const { createUser } = await import("../src/storage/users");
+      await createUser(env.DB, "deleting@example.com", {} as unknown as Logger, "deletinguser");
+      const user = mockUsers.get("email:deleting@example.com");
+      if (!user) throw new Error("seed failed");
+      user.deletingAt = "2026-08-01T00:00:00.000Z";
+      magicStore.set("deleting-user-token", {
+        email: "deleting@example.com",
+        intent: "login",
+        createdAt: Date.now(),
+        rememberMe: true,
+      });
+
+      const res = await app.fetch(verifyReq("deleting-user-token"), env);
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("error=account_disabled");
+      expect(res.headers.get("set-cookie") ?? "").not.toContain("stratum_session");
+      expect(recordAudit).not.toHaveBeenCalled();
     });
   });
 });
