@@ -51,6 +51,9 @@ export const CSS = `
   --error-border: rgba(248, 113, 113, 0.3);
   --danger-surface: #3d1a1a;
   --danger-border: #6e2a2a;
+  --success-surface: #1a3d2b;
+  --warning-surface: #3e3a1a;
+  --merged-surface: #2d1a5e;
 
   /* Long-form prose (READMEs) reads better in a text face; UI stays mono. */
   --font-prose: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -200,19 +203,19 @@ button.nav-auth-link {
   background: var(--bg-raised);
   color: var(--text-muted);
 }
-.badge-open     { background: #1a3a6e; color: #7ca9f7; }
-.badge-approved { background: #1a3d2b; color: #4ade80; }
-.badge-merged   { background: #2d1a5e; color: #c084fc; }
-.badge-rejected { background: #3d1a1a; color: #f87171; }
-.badge-public   { background: #1a3a1e; color: #4ade80; margin-left: 0.5rem; font-size: 0.75rem; }
+.badge-open     { background: var(--accent); color: var(--accent-text); }
+.badge-approved { background: var(--success-surface); color: var(--success-text); }
+.badge-merged   { background: var(--merged-surface); color: var(--merged-text); }
+.badge-rejected { background: var(--danger-surface); color: var(--error-text); }
+.badge-public   { background: var(--success-surface); color: var(--success-text); margin-left: 0.5rem; font-size: 0.75rem; }
 
 /* Status badges (sync + import cards) */
-.badge-info     { background: #1a3a6e; color: #7ca9f7; }
-.badge-success  { background: #1a3e1a; color: #4ade80; }
-.badge-warning  { background: #3e3a1a; color: #f7c97c; }
-.badge-error    { background: #3d1a1a; color: #f87171; }
-.badge-resolved { background: #1a3e1a; color: #4ade80; }
-.badge-conflict { background: #3e3a1a; color: #f7c97c; }
+.badge-info     { background: var(--accent); color: var(--accent-text); }
+.badge-success  { background: var(--success-surface); color: var(--success-text); }
+.badge-warning  { background: var(--warning-surface); color: var(--warning-text); }
+.badge-error    { background: var(--danger-surface); color: var(--error-text); }
+.badge-resolved { background: var(--success-surface); color: var(--success-text); }
+.badge-conflict { background: var(--warning-surface); color: var(--warning-text); }
 
 /* README styling */
 .readme-card {
@@ -327,11 +330,11 @@ button.nav-auth-link {
 .icon-conflict { margin-right: 0.35rem; }
 
 .badge-queued { background: var(--bg-raised); color: var(--text-muted); }
-.badge-cloning { background: #1a3a6e; color: #7ca9f7; }
-.badge-processing { background: #3e3a1a; color: #f7c97c; }
-.badge-completed { background: #1a3e1a; color: #4ade80; }
-.badge-failed { background: #3d1a1a; color: #f87171; }
-.badge-cancelled { background: #2a2a2a; color: #9aa4ad; }
+.badge-cloning { background: var(--accent); color: var(--accent-text); }
+.badge-processing { background: var(--warning-surface); color: var(--warning-text); }
+.badge-completed { background: var(--success-surface); color: var(--success-text); }
+.badge-failed { background: var(--danger-surface); color: var(--error-text); }
+.badge-cancelled { background: var(--bg-raised); color: var(--text-muted); }
 
 .import-source {
   margin-bottom: 1rem;
@@ -904,7 +907,7 @@ button.nav-auth-link {
 .readme-content details { margin: 0.5rem 0; }
 .readme-content summary { cursor: pointer; color: var(--text-muted); }
 
-/* Copyable CLI commands inside empty states */
+/* user-select: all lets one click grab the whole command — no copy button, no JS. */
 .cli-hint {
   display: inline-block; text-align: left; margin: 0.75rem auto 0.25rem;
   padding: 0.7rem 1rem; background: var(--bg-panel);
@@ -913,7 +916,6 @@ button.nav-auth-link {
   user-select: all; overflow-x: auto; max-width: 100%; white-space: pre;
 }
 
-/* Webhook event subscription checkboxes */
 .webhook-events { border: none; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
 .webhook-events legend { font-size: 0.85rem; color: var(--text-body); padding: 0; margin-bottom: 0.35rem; }
 .webhook-events-grid {
@@ -922,7 +924,6 @@ button.nav-auth-link {
 }
 .webhook-events .checkbox-label { font-size: 0.82rem; }
 
-/* Reveal-once credential + copy control */
 .token-reveal-row { display: flex; gap: 0.5rem; align-items: stretch; flex-wrap: wrap; }
 .token-reveal-row .settings-token { flex: 1; min-width: 240px; }
 
@@ -966,7 +967,6 @@ button.nav-auth-link {
 .new-project-form:has(input[name="mode"][value="import"]:checked) .submit-label-blank { display: none; }
 .new-project-form:has(input[name="mode"][value="import"]:checked) .submit-label-import { display: inline; }
 
-/* Project header: identity crumb + tab navigation */
 .project-header { margin-bottom: 1.5rem; }
 .project-header-row {
   display: flex; align-items: center; justify-content: space-between;
@@ -992,10 +992,6 @@ button.nav-auth-link {
 .project-tab:hover { color: var(--text-body); text-decoration: none; }
 .project-tab-active { color: var(--text-primary); border-bottom-color: var(--accent-text); }
 
-/* Project settings */
-.settings-links { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-
-/* Error pages (400/404/500) */
 .error-page { max-width: 480px; margin: 4rem auto; text-align: center; }
 .error-page-code {
   font-size: 3.5rem; font-weight: 700; color: var(--text-faint);

@@ -235,7 +235,7 @@ app.post("/settings/agents", async (c) => {
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
-  if (!name) return c.html(issuePageError(400, user), 400);
+  if (!name) return c.html(errorPage(400, "Agent name is required.", user), 400);
   const model =
     typeof form.model === "string" && form.model.trim()
       ? form.model.trim().slice(0, 100)

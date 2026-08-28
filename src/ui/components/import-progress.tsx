@@ -399,7 +399,7 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
         />
       )}
 
-      {isActive && (
+      {(isActive || isCancelling) && (
         <script
           nonce={nonce}
           dangerouslySetInnerHTML={{
@@ -472,7 +472,9 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
                 const res = await fetch('/api/projects/${safeNamespace}/${safeSlug}/import/status');
                 if (res.ok) {
                   const data = await res.json();
-                  if (data.status === 'completed') {
+                  // Reload on every terminal status so a pending cancellation
+                  // doesn't leave the page stuck on "Cancelling…".
+                  if (['completed', 'failed', 'cancelled'].includes(data.status)) {
                     window.location.reload();
                   }
                 }

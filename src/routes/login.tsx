@@ -6,6 +6,11 @@ const app = new Hono<{ Bindings: Env }>();
 const ERROR_MESSAGES: Record<string, string> = {
   invalid_email: "Please enter a valid email address.",
   email_not_found: "No account found with this email.",
+  // Magic-link verification failures land here via the retired /auth/email
+  // chooser's redirect — mirror src/routes/email-auth.tsx's messages.
+  invalid_link: "Invalid or expired link.",
+  link_expired: "This link has expired or already been used.",
+  verify_failed: "Failed to sign in. Please try again.",
   auth_config_missing: "Email authentication is not configured. Please contact the administrator.",
   auth_config_incomplete:
     "Email authentication is not fully configured. Please contact the administrator.",

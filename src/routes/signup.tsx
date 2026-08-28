@@ -590,6 +590,9 @@ const SIGNUP_SCRIPT = `
 	function checkUsernameAvailability(username) {
 		if (username === lastCheckedUsername) return;
 		lastCheckedUsername = username;
+		// A new check starts from a clean slate — a stale "taken" verdict for a
+		// previous username must not block submitting this one.
+		usernameTaken = false;
 
 		updateUsernameStatus('checking');
 		setUsernameInputState('');
@@ -625,6 +628,7 @@ const SIGNUP_SCRIPT = `
 				if (requestId !== activeRequestId) return;
 				// If API fails, allow submission anyway (server will validate)
 				isUsernameAvailable = true;
+				usernameTaken = false;
 				updateUsernameStatus('available', 'Looks good!');
 				setUsernameInputState('success');
 			}
