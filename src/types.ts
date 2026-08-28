@@ -378,6 +378,18 @@ export interface ApiError {
   code?: string;
 }
 
+/**
+ * What an API token is allowed to do (#254).
+ *
+ * `read` permits GET/HEAD over the API and `git clone`/`fetch`; every other HTTP
+ * method and every git write is refused. `read_write` is the full account power
+ * a token has always had, and is what the legacy `users.token_hash` resolves to.
+ *
+ * Deliberately coarse: per-project and per-org narrowing is a separate change,
+ * and this is a TEXT column so that vocabulary can grow without a migration.
+ */
+export type ApiTokenScope = "read" | "read_write";
+
 export interface User {
   id: string;
   email: string;

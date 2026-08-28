@@ -799,8 +799,16 @@ export async function deleteAccountCascade(
     const anonymized = await anonymizeUserContributions(db, userId, logger);
     if (!anonymized.success) residuals.push(`account:anonymize:${anonymized.error.code}`);
 
-    // 3) Agents, sessions, memberships.
+    // 3) Agents, API tokens, sessions, memberships.
+    //
+    // `api_tokens.user_id` REFERENCES users(id), so leaving these behind makes
+    // the final `DELETE FROM users` below throw — the cascade would record a
+    // failure, retain the user row, and erasure would never complete for any
+    // account that had ever minted a token (#254). They are credentials, so
+    // they must go regardless: a row named "jane's macbook" outliving an
+    // erasure request is itself a retention bug.
     await db.prepare("DELETE FROM agents WHERE owner_id = ?").bind(userId).run();
+    await db.prepare("DELETE FROM api_tokens WHERE user_id = ?").bind(userId).run();
     const sessions = await deleteAllUserSessions(db, userId, logger);
     if (!sessions.success) residuals.push(`account:sessions:${sessions.error.code}`);
     await db.prepare("DELETE FROM org_members WHERE user_id = ?").bind(userId).run();

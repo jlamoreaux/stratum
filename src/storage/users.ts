@@ -362,3 +362,35 @@ export async function upsertGitHubUser(
   }
   return ok(linked.data);
 }
+
+/**
+ * Makes the legacy `users.token_hash` credential unusable.
+ *
+ * The column is NOT NULL and uniquely indexed, so it cannot simply be cleared —
+ * it is instead rotated to a fresh random value that is never returned to
+ * anyone, which is the same thing from the outside. Without this, every account
+ * that existed before scoped tokens would permanently keep one un-revocable,
+ * un-expiring, unnamed full-power credential alongside its scoped ones.
+ */
+export async function disableLegacyToken(
+  db: D1Database,
+  userId: string,
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  try {
+    const unknowable = await generateApiKey("stratum_user_disabled");
+    await db
+      .prepare("UPDATE users SET token_hash = ? WHERE id = ?")
+      .bind(await hashToken(unknowable), userId)
+      .run();
+    logger.info("Legacy token disabled", { userId });
+    return ok(undefined);
+  } catch (error) {
+    const appError =
+      error instanceof AppError
+        ? error
+        : new AppError("Failed to disable legacy token", "DATABASE_ERROR", 500);
+    logger.error("Failed to disable legacy token", appError, { userId });
+    return err(appError);
+  }
+}
