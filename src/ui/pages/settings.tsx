@@ -13,9 +13,41 @@ interface SettingsPageProps {
   agents: AgentSummary[];
   /** Freshly created credential, shown exactly once after a rotate/create POST. */
   freshToken?: { kind: "api-key" | "agent"; value: string; agentName?: string };
+  /** Per-request CSP nonce for the copy-button script (only rendered with a fresh token). */
+  nonce?: string;
 }
 
-export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }) => {
+/** Clipboard needs script; the value is read from the DOM, never re-serialized. */
+const COPY_TOKEN_SCRIPT = `
+(function () {
+  var btn = document.getElementById('copy-fresh-token');
+  var token = document.getElementById('fresh-token');
+  if (!btn || !token) return;
+  btn.addEventListener('click', function () {
+    // Clipboard API can be missing (insecure context) or blocked by policy;
+    // fall back to selecting the value so a manual Ctrl/Cmd+C still works.
+    var fallback = function () {
+      var range = document.createRange();
+      range.selectNodeContents(token);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      btn.textContent = 'Press Ctrl/Cmd+C';
+      setTimeout(function () { btn.textContent = 'Copy'; }, 3000);
+    };
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      fallback();
+      return;
+    }
+    navigator.clipboard.writeText(token.textContent).then(function () {
+      btn.textContent = 'Copied';
+      setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+    }, fallback);
+  });
+})();
+`;
+
+export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken, nonce }) => {
   return (
     <Layout title="Settings" user={user}>
       <div class="page-header">
@@ -33,7 +65,17 @@ export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }
             Copy it now — it is shown only once.{" "}
             {freshToken.kind === "api-key" ? "Your previous key no longer works." : ""}
           </p>
-          <code class="settings-token">{freshToken.value}</code>
+          <div class="token-reveal-row">
+            <code class="settings-token" id="fresh-token">
+              {freshToken.value}
+            </code>
+            <button type="button" class="btn btn-small" id="copy-fresh-token">
+              Copy
+            </button>
+          </div>
+          {nonce !== undefined && (
+            <script nonce={nonce} dangerouslySetInnerHTML={{ __html: COPY_TOKEN_SCRIPT }} />
+          )}
         </div>
       )}
 
@@ -111,8 +153,8 @@ export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }
         </form>
       </div>
 
-      <div class="card danger-zone" style={{ borderColor: "#f87171" }}>
-        <h3 style={{ marginTop: 0, color: "#f87171" }}>Danger Zone</h3>
+      <div class="card danger-zone">
+        <h3 style={{ marginTop: 0 }}>Danger Zone</h3>
         <p class="settings-help">
           Permanently delete your account. All your projects and personal data are erased and your
           tokens stop working immediately. Contributions you left in other people's projects are
@@ -126,7 +168,6 @@ export const SettingsPage: FC<SettingsPageProps> = ({ user, agents, freshToken }
             required
             autocomplete="off"
             placeholder={user.username}
-            style={{ marginRight: "0.5rem" }}
           />
           <button type="submit" class="btn btn-danger">
             Delete account

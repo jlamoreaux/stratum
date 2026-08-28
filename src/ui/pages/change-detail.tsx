@@ -2,6 +2,7 @@ import type { FC } from "hono/jsx";
 import type { ChangeComment, ChangeReview } from "../../storage/change-reviews";
 import type { CostSummaryEntry } from "../../storage/costs";
 import { type DiffFile, DiffView, LineCommentThreads } from "../components/diff-view";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface ChangeDetailProps {
@@ -40,6 +41,8 @@ interface ChangeDetailProps {
   diff?: DiffFile[] | null;
   /** Whether the current user may submit review verdicts. */
   canReview?: boolean;
+  /** Namespaced project ref for the header; legacy changes may lack one. */
+  projectRef?: { name: string; namespace: string; slug: string; visibility?: string } | null;
   user?: { id: string; email: string; username: string } | null;
 }
 
@@ -96,6 +99,7 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({
   costs = [],
   diff = null,
   canReview = false,
+  projectRef = null,
   user,
 }) => {
   // Line-anchored comments (and their replies) render as threads beneath the
@@ -114,14 +118,17 @@ export const ChangeDetailPage: FC<ChangeDetailProps> = ({
       user={user}
       {...(change.status === "open" ? { refreshSeconds: 10 } : {})}
     >
+      {projectRef && <ProjectHeader project={projectRef} active="changes" canWrite={canReview} />}
       <div class="page-header">
         <h1>
           <span class="mono">{change.id}</span>{" "}
           <span class={statusBadgeClass(change.status)}>{change.status}</span>
         </h1>
-        <a class="btn" href={`/p/${change.project}/changes`}>
-          Back to changes
-        </a>
+        {!projectRef && (
+          <a class="btn" href={`/p/${change.project}/changes`}>
+            Back to changes
+          </a>
+        )}
       </div>
 
       {hasActions && (

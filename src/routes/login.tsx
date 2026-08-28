@@ -6,6 +6,11 @@ const app = new Hono<{ Bindings: Env }>();
 const ERROR_MESSAGES: Record<string, string> = {
   invalid_email: "Please enter a valid email address.",
   email_not_found: "No account found with this email.",
+  // Magic-link verification failures land here via the retired /auth/email
+  // chooser's redirect — mirror src/routes/email-auth.tsx's messages.
+  invalid_link: "Invalid or expired link.",
+  link_expired: "This link has expired or already been used.",
+  verify_failed: "Failed to sign in. Please try again.",
   auth_config_missing: "Email authentication is not configured. Please contact the administrator.",
   auth_config_incomplete:
     "Email authentication is not fully configured. Please contact the administrator.",
@@ -15,6 +20,10 @@ const ERROR_MESSAGES: Record<string, string> = {
 
 const SUCCESS_MESSAGES: Record<string, string> = {
   email_sent: "Check your email. We sent a magic link that expires in 15 minutes.",
+  // Enumeration-safe wording from /auth/email/send-login: identical whether or
+  // not the address has an account.
+  login_link_sent:
+    "If an account exists for that email, we've sent a magic link (it expires in 15 minutes).",
 };
 
 // GET /auth/login - Show login form
@@ -38,26 +47,7 @@ app.get("/", (c) => {
         />
         <link rel="stylesheet" href="/ui.css" />
         <style>{`
-          :root {
-            --bg-primary: #0a0a0a;
-            --bg-secondary: #111;
-            --bg-tertiary: #1a1a1a;
-            --text-primary: #f0f0f0;
-            --text-secondary: #888;
-            --text-tertiary: #666;
-            --border: #1e1e1e;
-            --border-hover: #333;
-            --accent: #1a3a6e;
-            --accent-hover: #1f4a8e;
-            --accent-text: #7ca9f7;
-            --accent-text-hover: #a8c8f8;
-            --error-bg: rgba(248, 113, 113, 0.1);
-            --error-border: rgba(248, 113, 113, 0.3);
-            --error-text: #f87171;
-            --success-bg: rgba(74, 222, 128, 0.1);
-            --success-border: rgba(74, 222, 128, 0.3);
-            --success-text: #4ade80;
-          }
+          /* Color tokens come from the shared stylesheet (/ui.css). */
 
           .auth-page {
             min-height: 100vh;
@@ -298,14 +288,6 @@ app.get("/", (c) => {
             line-height: 1.5;
           }
 
-          .auth-help-icon {
-            display: inline-block;
-            width: 16px;
-            height: 16px;
-            margin-right: 0.25rem;
-            vertical-align: middle;
-          }
-
           .magic-link-note {
             margin-top: 1.5rem;
             padding: 1rem;
@@ -433,7 +415,7 @@ app.get("/", (c) => {
                       id="rememberMe"
                       name="rememberMe"
                       value="true"
-                      defaultChecked
+                      checked
                     />
                     <label class="form-checkbox-label" for="rememberMe">
                       Keep me signed in for 30 days
@@ -446,7 +428,6 @@ app.get("/", (c) => {
                 </form>
 
                 <div class="auth-help">
-                  <span class="auth-help-icon">🔐</span>
                   <strong>No password needed.</strong> We use secure magic links that expire in 15
                   minutes. Check your spam folder if you don't see the email.
                 </div>

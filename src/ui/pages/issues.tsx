@@ -1,12 +1,14 @@
 import type { FC } from "hono/jsx";
 import type { IssueComment } from "../../storage/issue-comments";
 import type { Issue } from "../../storage/issues";
+import { ProjectHeader } from "../components/project-header";
 import { Layout } from "../layout";
 
 interface ProjectRef {
   name: string;
   namespace: string;
   slug: string;
+  visibility?: string;
 }
 
 interface IssuesPageProps {
@@ -137,19 +139,13 @@ export const IssuesPage: FC<IssuesPageProps> = ({
   };
   return (
     <Layout title={`Issues — ${project.name}`} user={user}>
-      <div class="page-header">
-        <h1>Issues</h1>
-        <div class="page-header-actions">
-          {canWrite && (
-            <a class="btn btn-primary" href={`${base}/new`}>
-              New issue
-            </a>
-          )}
-          <a class="btn" href={`/${project.namespace}/${project.slug}`}>
-            Back to repo
+      <ProjectHeader project={project} active="issues" canWrite={canWrite}>
+        {canWrite && (
+          <a class="btn btn-primary" href={`${base}/new`}>
+            New issue
           </a>
-        </div>
-      </div>
+        )}
+      </ProjectHeader>
 
       <div class="issues-filter">
         <a href={tab()} class={filter === "open" ? "issues-filter-active" : ""}>
@@ -247,13 +243,11 @@ export const IssueDetailPage: FC<IssueDetailPageProps> = ({
   const apiBase = `/api/projects/${project.namespace}/${project.slug}/issues`;
   return (
     <Layout title={`#${issue.number} ${issue.title} — ${project.name}`} user={user}>
+      <ProjectHeader project={project} active="issues" canWrite={canWrite} />
       <div class="page-header">
         <h1>
           #{issue.number} {issue.title}
         </h1>
-        <a class="btn" href={base}>
-          Back to issues
-        </a>
       </div>
 
       <div class="issue-status-row">
@@ -339,11 +333,13 @@ export const NewIssuePage: FC<NewIssuePageProps> = ({ project, user }) => {
   const apiBase = `/api/projects/${project.namespace}/${project.slug}/issues`;
   return (
     <Layout title={`New issue — ${project.name}`} user={user}>
-      <div class="page-header">
-        <h1>New issue</h1>
+      <ProjectHeader project={project} active="issues" canWrite={true}>
         <a class="btn" href={`/${project.namespace}/${project.slug}/issues`}>
           Cancel
         </a>
+      </ProjectHeader>
+      <div class="page-header">
+        <h1>New issue</h1>
       </div>
 
       <div class="card">

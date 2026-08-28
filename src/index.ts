@@ -40,6 +40,7 @@ import { runScheduledJobs } from "./scheduled";
 import { createSession } from "./storage/sessions";
 import { createUser, getUserByEmail } from "./storage/users";
 import type { Env, ImportJobMessage, MessageBatch, SyncJobMessage } from "./types";
+import { notFoundResponse, serverErrorResponse } from "./ui/pages/error";
 import { CSS } from "./ui/styles";
 import { createLogger } from "./utils/logger";
 export { MergeQueue } from "./queue/merge-queue";
@@ -119,6 +120,16 @@ app.get("/ui.css", (c) => {
   return c.text(CSS, 200, { "Content-Type": "text/css; charset=UTF-8" });
 });
 
+// Browsers request /favicon.ico on pages with no <link rel="icon"> (raw JSON
+// responses, redirects); serve the same S-mark the layout inlines.
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0d0d0d"/><text x="16" y="23" font-family="monospace" font-size="20" font-weight="700" fill="#7ca9f7" text-anchor="middle">S</text></svg>`;
+app.get("/favicon.ico", (c) =>
+  c.body(FAVICON_SVG, 200, {
+    "Content-Type": "image/svg+xml",
+    "Cache-Control": "public, max-age=86400",
+  }),
+);
+
 // Health check endpoint
 app.route("/api/health", healthRouter);
 
@@ -178,7 +189,8 @@ app.route("/", gitHttpRouter);
 // shadow two-segment API paths like GET /api/projects.
 app.route("/", uiRouter);
 
-app.notFound((c) => c.json({ error: "Not found" }, 404));
+// Browsers get a real 404 page; API paths and non-HTML clients keep the JSON contract.
+app.notFound((c) => notFoundResponse(c));
 app.onError((err, c) => {
   const logger = c.get("logger") || createLogger({ path: c.req.path, method: c.req.method });
   logger.error(`Unhandled error: ${err.message}`, err instanceof Error ? err : undefined, {
@@ -189,7 +201,7 @@ app.onError((err, c) => {
   // error boundary builds a fresh response, so re-assert the full set here via the
   // shared helper (keeps the 500's CSP identical to the middleware's).
   setHtmlSecurityHeaders(c);
-  return c.json({ error: "Internal server error" }, 500);
+  return serverErrorResponse(c);
 });
 
 export default {

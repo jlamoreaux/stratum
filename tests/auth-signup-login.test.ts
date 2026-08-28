@@ -1449,8 +1449,14 @@ describe("Auth Signup/Login Integration Tests", () => {
       expect(body.error).toContain("Missing code");
     });
 
-    it("handles logout", async () => {
-      const res = await app.fetch(request("/auth/logout"), env);
+    it("handles logout via POST (state-changing, CSRF-guarded)", async () => {
+      const res = await app.fetch(
+        request("/auth/logout", {
+          method: "POST",
+          headers: { Origin: "http://localhost" },
+        }),
+        env,
+      );
 
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toBe("/");
@@ -1458,6 +1464,14 @@ describe("Auth Signup/Login Integration Tests", () => {
       // Verify cookie is deleted
       const setCookieHeader = res.headers.get("set-cookie");
       expect(setCookieHeader).toContain("stratum_session");
+    });
+
+    it("does not end the session on GET (bookmarks/prefetchers just go home)", async () => {
+      const res = await app.fetch(request("/auth/logout"), env);
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/");
+      expect(res.headers.get("set-cookie")).toBeNull();
     });
   });
 

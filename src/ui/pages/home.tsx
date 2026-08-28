@@ -41,7 +41,7 @@ export const HomePage: FC<HomeProps> = ({ projects, user }) => {
             <>
               <p>Sign in to view your projects.</p>
               <a
-                href="/auth/email"
+                href="/auth/login"
                 class="btn btn-primary"
                 style={{ marginTop: "1rem", display: "inline-block" }}
               >
@@ -65,7 +65,9 @@ export const HomePage: FC<HomeProps> = ({ projects, user }) => {
               <div class="card-meta">
                 {project.namespace}/{project.slug}
               </div>
-              <div class="card-meta">{new Date(project.createdAt).toLocaleDateString()}</div>
+              <div class="card-meta">
+                Created {new Date(project.createdAt).toLocaleDateString()}
+              </div>
             </a>
           ))}
         </div>
