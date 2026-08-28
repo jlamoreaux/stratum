@@ -325,16 +325,68 @@ describe("added lines whose own text starts with ++", () => {
     }
   });
 
+  it("scans an added line rendered as +++ text, where a trailing space is not enough", async () => {
+    // The one-character tightening ("+++ " with the space) closes the case
+    // above but not this one: a source line of `++ const k = "…"` renders as
+    // `+++ const k = "…"`, which still looks exactly like a header to any
+    // prefix test. Position is what tells them apart.
+    const diff = makeDiff([`++ const k = "${AWS_KEY}";`]);
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.join("\n")).toContain("AWS Access Key");
+    }
+  });
+
   it("still skips the real +++ b/path file header", async () => {
     // The header carries the path only; a path that happens to contain a
-    // secret-shaped substring must not be reported as content.
+    // secret-shaped substring must not be reported as content. Git always
+    // emits the `--- `/`+++ ` pair adjacently, which is what marks this one as
+    // a header rather than content.
     const result = await evaluator.evaluate(
-      `+++ b/${AWS_KEY}.ts\n+const ok = 1;`,
+      `diff --git a/${AWS_KEY}.ts b/${AWS_KEY}.ts\n--- a/${AWS_KEY}.ts\n+++ b/${AWS_KEY}.ts\n@@ -0,0 +1 @@\n+const ok = 1;`,
       policy,
       mockLogger,
     );
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.passed).toBe(true);
+  });
+
+  it("scans an unpaired +++ line, erring toward detection when it cannot be a header", async () => {
+    // A `+++ ` line with no `--- ` before it is not where git puts a header,
+    // so it is treated as content. That direction is deliberate for a blocking
+    // security gate: a false positive is a blocked change with a stated
+    // reason, a false negative is a leaked credential. A real diff always
+    // carries the pair, so a genuine header is never caught by this.
+    const result = await evaluator.evaluate(`+++ const k = "${AWS_KEY}";`, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.passed).toBe(false);
+  });
+
+  it("does not carry header state across files in a multi-file diff", async () => {
+    const clean = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -0,0 +1 @@\n+const a = 1;";
+    // Second file: the added line's own text starts with "++ ", so it renders
+    // as "+++ …" inside the hunk body — content, not a header.
+    const sneaky = `diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -0,0 +1 @@\n+++ const k = "${AWS_KEY}";`;
+    const result = await evaluator.evaluate(`${clean}\n${sneaky}`, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.join("\n")).toContain("AWS Access Key");
+    }
+  });
+
+  it("does not mistake a removed line starting with -- for a file header", async () => {
+    // A deleted SQL/Lua comment renders as "--- …" inside a hunk. It must not
+    // set up header state that then swallows the next added line.
+    const diff = `diff --git a/q.sql b/q.sql\n--- a/q.sql\n+++ b/q.sql\n@@ -1 +1 @@\n--- legacy comment\n+++ const k = "${AWS_KEY}";`;
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.join("\n")).toContain("AWS Access Key");
+    }
   });
 });
 
