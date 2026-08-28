@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authRouter } from "../src/routes/auth";
 import { emailAuthRouter } from "../src/routes/email-auth";
 import { recordAudit } from "../src/storage/audit";
+import type { UpsertIdentityInput } from "../src/storage/identities";
+import { upsertIdentity } from "../src/storage/identities";
 import type { Env, User } from "../src/types";
 import { NotFoundError } from "../src/utils/errors";
 import type { Logger } from "../src/utils/logger";
@@ -188,6 +190,26 @@ vi.mock("../src/storage/sessions", () => ({
 // login records NO session.created row.
 vi.mock("../src/storage/audit", () => ({
   recordAudit: vi.fn(async () => ({ success: true, data: undefined })),
+}));
+
+// Identities are forward-provisioning for SSO: default to "nothing linked yet"
+// with successful persistence; tests assert on the upsert calls.
+vi.mock("../src/storage/identities", () => ({
+  upsertIdentity: vi.fn(async (_db: unknown, _logger: unknown, input: UpsertIdentityInput) => ({
+    success: true,
+    data: {
+      id: "idn_test",
+      createdAt: new Date().toISOString(),
+      ...input,
+      connectionId: input.connectionId ?? null,
+    },
+  })),
+  getIdentityByIssuerSubject: vi.fn(
+    async (_db: unknown, _logger: unknown, issuer: string, subject: string) => ({
+      success: false,
+      error: new NotFoundError("Identity", `${issuer}#${subject}`),
+    }),
+  ),
 }));
 
 // ============================================================================
@@ -1437,6 +1459,219 @@ describe("Auth Signup/Login Integration Tests", () => {
       expect(res.status).toBe(302);
 
       // Restore fetch
+      vi.restoreAllMocks();
+    });
+
+    function mockGitHubFetch(
+      user: { id: number; login: string },
+      emails: { email: string; primary: boolean; verified: boolean }[],
+    ) {
+      globalThis.fetch = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ access_token: "gh_token" }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => user,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => emails,
+        });
+    }
+
+    async function githubCallback(state: string, extraQuery = ""): Promise<Response> {
+      await env.STATE.put(`oauth_state:${state}`, "1", { expirationTtl: 600 });
+      return app.fetch(
+        request(`/auth/github/callback?code=test-code&state=${state}${extraQuery}`, {
+          headers: { Cookie: `stratum_oauth_state=${state}` },
+        }),
+        env,
+      );
+    }
+
+    it("refuses to link or create an account from unverified GitHub emails", async () => {
+      mockGitHubFetch({ id: 55555, login: "unverifieduser" }, [
+        { email: "unverified@example.com", primary: true, verified: false },
+      ]);
+
+      const res = await githubCallback("unverified-email-state");
+
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("No verified email");
+      const { upsertGitHubUser } = await import("../src/storage/users");
+      expect(upsertGitHubUser).not.toHaveBeenCalled();
+      const { createSession } = await import("../src/storage/sessions");
+      expect(createSession).not.toHaveBeenCalled();
+      expect(res.headers.get("set-cookie") ?? "").not.toContain("stratum_session");
+
+      vi.restoreAllMocks();
+    });
+
+    it("signs in an existing github_id-matched user whose emails are all unverified", async () => {
+      const { createUser } = await import("../src/storage/users");
+      await createUser(env.DB, "linked@example.com", {} as unknown as Logger, "linkeduser");
+      const user = mockUsers.get("email:linked@example.com");
+      if (!user) throw new Error("seed failed");
+      user.githubId = "77777";
+
+      mockGitHubFetch({ id: 77777, login: "linkeduser" }, [
+        { email: "unverified@example.com", primary: true, verified: false },
+      ]);
+
+      const res = await githubCallback("linked-unverified-state");
+
+      // The GitHub account id — not an email — is the credential here, so the
+      // returning user is not locked out by unverified addresses.
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/");
+      expect(res.headers.get("set-cookie")).toContain("stratum_session");
+      // The identity row records the account's own email, never the unverified one.
+      expect(upsertIdentity).toHaveBeenCalledWith(env.DB, expect.anything(), {
+        userId: user.id,
+        provider: "github",
+        issuer: "https://github.com",
+        subject: "77777",
+        email: "linked@example.com",
+      });
+
+      vi.restoreAllMocks();
+    });
+
+    it("persists an identities row on a verified GitHub sign-in", async () => {
+      mockGitHubFetch({ id: 12345, login: "testuser" }, [
+        { email: "github@example.com", primary: true, verified: true },
+      ]);
+
+      const res = await githubCallback("identity-row-state");
+
+      expect(res.status).toBe(302);
+      const created = mockUsers.get("email:github@example.com");
+      if (!created) throw new Error("expected the callback to create an account");
+      expect(upsertIdentity).toHaveBeenCalledWith(env.DB, expect.anything(), {
+        userId: created.id,
+        provider: "github",
+        issuer: "https://github.com",
+        subject: "12345",
+        email: "github@example.com",
+      });
+
+      vi.restoreAllMocks();
+    });
+
+    it("links with a verified email when the primary email is unverified", async () => {
+      mockGitHubFetch({ id: 66666, login: "mixeduser" }, [
+        { email: "unverified-primary@example.com", primary: true, verified: false },
+        { email: "verified@example.com", primary: false, verified: true },
+      ]);
+
+      const res = await githubCallback("mixed-emails-state");
+
+      expect(res.status).toBe(302);
+      const { upsertGitHubUser } = await import("../src/storage/users");
+      expect(upsertGitHubUser).toHaveBeenCalledWith(
+        env.DB,
+        expect.objectContaining({ email: "verified@example.com" }),
+        expect.anything(),
+      );
+
+      vi.restoreAllMocks();
+    });
+
+    it("lowercases a mixed-case verified GitHub email so it matches the stored account", async () => {
+      const { createUser } = await import("../src/storage/users");
+      await createUser(env.DB, "cased@example.com", {} as unknown as Logger, "caseduser");
+
+      mockGitHubFetch({ id: 44444, login: "caseduser" }, [
+        { email: "Cased@Example.com", primary: true, verified: true },
+      ]);
+
+      const res = await githubCallback("cased-email-state");
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/");
+      const { upsertGitHubUser } = await import("../src/storage/users");
+      expect(upsertGitHubUser).toHaveBeenCalledWith(
+        env.DB,
+        expect.objectContaining({ email: "cased@example.com" }),
+        expect.anything(),
+      );
+
+      vi.restoreAllMocks();
+    });
+
+    it("beta gate: a returning github_id-matched user with unverified emails still signs in", async () => {
+      const gateEnv = makeEnv({
+        ...env,
+        BETA_GATE: "1",
+        REFERRAL_SERVICE_URL: "http://referral.test",
+      });
+      const { createUser } = await import("../src/storage/users");
+      await createUser(gateEnv.DB, "gated@example.com", {} as unknown as Logger, "gateduser");
+      const user = mockUsers.get("email:gated@example.com");
+      if (!user) throw new Error("seed failed");
+      user.githubId = "66677";
+
+      mockGitHubFetch({ id: 66677, login: "gateduser" }, [
+        { email: "unverified@example.com", primary: true, verified: false },
+      ]);
+      const state = "gate-linked-state";
+      await gateEnv.STATE.put(`oauth_state:${state}`, "1", { expirationTtl: 600 });
+
+      const res = await app.fetch(
+        request(`/auth/github/callback?code=test-code&state=${state}`, {
+          headers: { Cookie: `stratum_oauth_state=${state}` },
+        }),
+        gateEnv,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/");
+      expect(res.headers.get("set-cookie")).toContain("stratum_session");
+
+      vi.restoreAllMocks();
+    });
+
+    it("beta gate: an unmatched user with a verified email is redirected to invite_required", async () => {
+      const gateEnv = makeEnv({
+        ...env,
+        BETA_GATE: "1",
+        REFERRAL_SERVICE_URL: "http://referral.test",
+      });
+      mockGitHubFetch({ id: 88811, login: "newgated" }, [
+        { email: "brandnew@example.com", primary: true, verified: true },
+      ]);
+      const state = "gate-new-state";
+      await gateEnv.STATE.put(`oauth_state:${state}`, "1", { expirationTtl: 600 });
+
+      const res = await app.fetch(
+        request(`/auth/github/callback?code=test-code&state=${state}`, {
+          headers: { Cookie: `stratum_oauth_state=${state}` },
+        }),
+        gateEnv,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth/signup?error=invite_required");
+      const { upsertGitHubUser } = await import("../src/storage/users");
+      expect(upsertGitHubUser).not.toHaveBeenCalled();
+
+      vi.restoreAllMocks();
+    });
+
+    it("ignores a next query param on the callback (always redirects home)", async () => {
+      mockGitHubFetch({ id: 12345, login: "testuser" }, [
+        { email: "github@example.com", primary: true, verified: true },
+      ]);
+
+      const res = await githubCallback("next-param-state", "&next=%2Fdashboard");
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/");
+
       vi.restoreAllMocks();
     });
 
