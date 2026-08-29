@@ -9,7 +9,7 @@ The Stratum project uses a PR-based workflow with per-PR preview environments, i
 Each PR gets its own isolated preview Worker. The shared staging and production
 environments are deployed only from `main`, after the PR merges.
 
-```
+```text
 ┌─────────────┐    ┌──────────────┐    ┌─────────────┐
 │   Create    │───▶│    Push      │───▶│   PR        │   per-PR, isolated
 │    PR       │    │   Commits    │    │   Preview   │   (torn down on close)
@@ -24,16 +24,10 @@ environments are deployed only from `main`, after the PR merges.
                                        merge to main
                                               │
                                               ▼
-                   ┌─────────────┐    ┌──────────────┐
-                   │   Staging   │───▶│  Production  │
-                   │   Deploy    │    │   Deploy     │
-                   └─────────────┘    └──────────────┘
-                                              │
-                                              ▼
-                                       ┌──────────────┐
-                                       │   Manual     │
-                                       │  Approval    │
-                                       └──────────────┘
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐
+│   Staging   │───▶│    Manual    │───▶│  Production  │
+│   Deploy    │    │   Approval   │    │    Deploy    │
+└─────────────┘    └──────────────┘    └──────────────┘
 ```
 
 ## Creating a Pull Request
@@ -112,7 +106,7 @@ Every push to your PR branch will:
 
 Once your PR is open, you can access your changes at:
 
-```
+```text
 https://pr-<number>.staging.app.usestratum.dev
 ```
 
@@ -140,7 +134,7 @@ migration left staging one tag ahead of `main`. Wrangler could not find that tag
 in `main`'s `wrangler.toml`, assumed it had been deleted, and replayed the whole
 chain from `v1` — which fails on the already-populated `MergeQueue` class:
 
-```
+```text
 Cannot apply new-class migration to class 'MergeQueue' that is already
 depended on by existing Durable Objects [code: 10074]
 ```

@@ -115,6 +115,10 @@ jobs:
           # migrations. The default shallow fetch has no origin/main, and the
           # guard fails rather than skips in CI, so fetch the full history.
           fetch-depth: 0
+          # The guard only reads local objects (git show, git rev-parse) and
+          # nothing else here talks to a remote, so the job needs no token in
+          # .git/config — and this job uploads an artifact.
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

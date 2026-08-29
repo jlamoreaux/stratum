@@ -64,6 +64,12 @@ function stripComment(line: string): string {
   return line;
 }
 
+function countChar(text: string, char: string): number {
+  let count = 0;
+  for (const candidate of text) if (candidate === char) count++;
+  return count;
+}
+
 /** Collapse whitespace runs so reformatting alone cannot trip the guard. */
 function normalize(line: string): string {
   return line.trim().replace(/\s+/g, " ");
@@ -96,6 +102,14 @@ function parseMigrations(toml: string): MigrationEntry[] {
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim();
     const value = line.slice(separator + 1).trim();
+    // A value whose brackets don't balance on this line continues onto the
+    // next, where the parser would drop it — and a silently dropped field makes
+    // the comparison below pass for the wrong reason. Refuse to guess.
+    if (countChar(value, "[") !== countChar(value, "]")) {
+      throw new Error(
+        `[[migrations]] value for \`${key}\` spans multiple lines, which this guard cannot read. Keep migration values on one line so the append-only check can compare them.`,
+      );
+    }
     if (key === "tag") {
       current.tag = value.replace(/^["']|["']$/g, "");
     } else {
@@ -129,8 +143,9 @@ function findChainViolation(base: MigrationEntry[], head: MigrationEntry[]): str
   }
 
   if (head.length < base.length) {
+    const headTags = new Set(head.map((entry) => entry.tag));
     const dropped = base
-      .slice(head.length)
+      .filter((entry) => !headTags.has(entry.tag))
       .map((entry) => `"${entry.tag}"`)
       .join(", ");
     return `This branch removes migration(s) ${dropped} that are already on main. Those tags are recorded on the deployed staging and production scripts; dropping them makes wrangler replay the chain from the start and every deploy of those environments fails with error 10074. Add a follow-up migration instead of removing this one.`;
@@ -231,6 +246,21 @@ tag = "not-a-migration"
   it("returns nothing for a config with no migrations", () => {
     expect(parseMigrations('name = "stratum"\n')).toEqual([]);
   });
+
+  // A multi-line array used to be stored truncated as `new_sqlite_classes = [`,
+  // dropping the class names — so a rewritten class list compared equal to the
+  // original and the append-only check below passed for the wrong reason.
+  it("refuses a value that spans multiple lines rather than truncating it", () => {
+    expect(() =>
+      parseMigrations('[[migrations]]\ntag = "v2"\nnew_sqlite_classes = [\n  "RepoDO",\n]\n'),
+    ).toThrow(/spans multiple lines/);
+  });
+
+  it("accepts a single-line array containing brackets in a string", () => {
+    expect(parseMigrations('[[migrations]]\ntag = "v1"\nnew_classes = ["A[]"]\n')).toEqual([
+      { tag: "v1", fields: ['new_classes = ["A[]"]'] },
+    ]);
+  });
 });
 
 describe("findChainViolation", () => {
@@ -260,6 +290,14 @@ describe("findChainViolation", () => {
 
   it("rejects removing a deployed migration", () => {
     expect(findChainViolation([v1, v2, v3], [v1, v2])).toMatch(/removes migration\(s\) "v3"/);
+  });
+
+  // Naming the trailing entries of main rather than the missing ones accused
+  // "v3" here, which is still present.
+  it("names the migration that actually went missing, not the last one", () => {
+    const message = findChainViolation([v1, v2, v3], [v2, v3]);
+    expect(message).toMatch(/removes migration\(s\) "v1"/);
+    expect(message).not.toMatch(/"v3"/);
   });
 
   it("rejects renaming a deployed tag", () => {

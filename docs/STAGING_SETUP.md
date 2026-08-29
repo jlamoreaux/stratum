@@ -81,16 +81,22 @@ Pull requests get their own isolated `stratum-pr-<number>` Worker instead
 (`.github/workflows/pr-preview.yml`). They deliberately do not publish over this
 shared Worker — see [Why PRs don't deploy here](#why-prs-dont-deploy-here).
 
-### Manual Deployment
+### Manual Deployment — emergency recovery only
 
-To deploy to staging manually:
+Deploying to this Worker by hand is **not** a normal workflow. It publishes
+whatever is in your working tree over the environment the whole team shares, and
+if that tree carries a Durable Object migration `main` does not have, it leaves
+staging a tag ahead and blocks the `main` pipeline — see
+[Why PRs don't deploy here](#why-prs-dont-deploy-here). Route changes through
+`main` and let `ci.yml` deploy them.
+
+When you genuinely need to recover the environment out of band, deploy from a
+clean checkout of `main` so the configuration you publish matches what CI would
+publish:
 
 ```bash
-# Deploy current branch to staging
+git fetch origin main && git checkout origin/main
 npx wrangler deploy --env=staging
-
-# Deploy with specific vars
-npx wrangler deploy --env=staging --var KEY=value
 ```
 
 ### Local Development with Staging Services
@@ -337,7 +343,7 @@ shared Worker. Cloudflare records the last-applied Durable Object migration tag
 left staging one tag ahead of `main`. Wrangler could not find that tag in `main`'s
 config, assumed it had been deleted, and replayed the entire chain from `v1`:
 
-```
+```text
 ▲ [WARNING] The published script stratum-staging has a migration tag "v3",
   which was not found in your wrangler.toml file. [...] Applying all available
   migrations to the script...
