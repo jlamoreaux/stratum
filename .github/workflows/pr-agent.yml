@@ -1,0 +1,120 @@
+# AI code review via PR-Agent (https://github.com/qodo-ai/pr-agent), routed entirely
+# through Cloudflare AI Gateway's OpenAI-compatible endpoint with unified billing —
+# one Cloudflare token, one Cloudflare bill, no third-party model accounts.
+#
+# Model chain (fallbacks fire on API errors/context overflow, not quality):
+#   workers-ai/@cf/zai-org/glm-5.3  ($1.40/$4.40 per MTok, Cloudflare-hosted)
+#   -> workers-ai/@cf/zai-org/glm-5.3-flash
+#   -> openai/gpt-5.6-terra          (via unified billing, Cloudflare-managed credentials)
+#
+# Required repository secrets (see docs/runbooks/ai-review.md for setup):
+#   AI_GATEWAY_COMPAT_BASE - https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/compat
+#   CLOUDFLARE_AI_TOKEN    - Cloudflare API token with AI Gateway Run permission
+#
+# Auto-review runs on PR lifecycle events. Collaborators can also comment
+# /review, /describe, /improve, /ask <question> on any PR (including fork PRs).
+name: PR-Agent review
+
+# Auto-review runs once per PR (open/reopen/ready). Pushes do NOT re-review —
+# comment /review (full) or /review -i (incremental, commits since last review)
+# when a fresh look is wanted. Biggest spend lever + progressive-review semantics.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+# One run at a time per PR. PR lifecycle events may cancel a stale in-flight
+# run; a comment-triggered run must not kill an in-flight review (reviews take
+# minutes), so comment runs queue instead.
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pr_agent:
+    # Trust gates:
+    # - runs only in the canonical repo — forks of stratum skip the job silently
+    #   instead of failing for lack of secrets
+    # - bot senders skipped (prevents self-trigger loops)
+    # - drafts and fork PRs skipped for auto-review (secrets absent on forks anyway)
+    # - comment commands restricted to owner/member/collaborator, so drive-by
+    #   accounts on a public repo cannot trigger paid LLM calls
+    if: >
+      github.repository == 'stratum-eng/stratum' &&
+      github.event.sender.type != 'Bot' &&
+      (github.event_name != 'pull_request' ||
+        (github.event.pull_request.draft == false &&
+         github.event.pull_request.head.repo.full_name == github.repository)) &&
+      (github.event_name != 'issue_comment' ||
+        (github.event.issue.pull_request &&
+         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+                  github.event.comment.author_association) &&
+         startsWith(github.event.comment.body, '/')))
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: read
+      actions: read # the cap step lists this workflow's runs; implicit on public repos, required once private
+    steps:
+      # Best-effort daily spend bound (check-then-act: concurrent runs can
+      # overshoot by the number in flight — the Cloudflare gateway spend cap is
+      # the hard limit). Past the cap the review step is skipped (job stays
+      # green), and cap-skipped runs count as successful so the counter cannot
+      # be outrun.
+      - name: Daily review cap
+        id: cap
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DAILY_REVIEW_CAP: "50"
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          # Fail open on API errors: a transient GitHub 5xx must not red-X the
+          # PR — the cap is best-effort and the gateway spend cap backstops it.
+          count=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/pr-agent.yml/runs?created=%3E%3D${today}&status=success&per_page=1" --jq '.total_count' || echo 0)
+          count=${count:-0}
+          echo "Successful pr-agent runs today: $count (cap: $DAILY_REVIEW_CAP)"
+          if [ "$count" -ge "$DAILY_REVIEW_CAP" ]; then
+            echo "::warning::Daily AI-review cap reached ($count/$DAILY_REVIEW_CAP); skipping review."
+            echo "under_cap=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "under_cap=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: PR-Agent
+        if: steps.cap.outputs.under_cap == 'true'
+        # 0.41.0-github_action, pinned by immutable digest (tag alone is mutable).
+        uses: docker://pragent/pr-agent@sha256:3121a7b8e3ab497b4df09dea6a444da8f01a474496c8c2f722828512c52fd266
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # AI Gateway's /compat endpoint speaks the OpenAI chat-completions schema for
+          # every provider it fronts, so PR-Agent talks to it as an "OpenAI" endpoint;
+          # the real provider is chosen per-request by the model prefix in the body.
+          openai.key: ${{ secrets.CLOUDFLARE_AI_TOKEN }}
+          openai.api_base: ${{ secrets.AI_GATEWAY_COMPAT_BASE }}
+          # GLM-5.3 won the same-PR head-to-head vs flash (depth + calibration).
+          config.model: "openai/workers-ai/@cf/zai-org/glm-5.3"
+          config.fallback_models: '["openai/workers-ai/@cf/zai-org/glm-5.3-flash","openai/openai/gpt-5.6-terra"]'
+          # Gateway models are absent from LiteLLM's token registry; cap explicitly.
+          config.custom_model_max_tokens: "131072"
+          # GLM-5.3 is a reasoning model; a full review takes minutes. The default
+          # 120s timeout kills it mid-generation and retries forever.
+          config.ai_timeout: "600"
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
+          # Strictness dials (CodeRabbit-ish): inline code suggestions on, more findings.
+          pr_reviewer.num_max_findings: "8"
+          # Packaging ("safe preset"): quality-score row, walkthrough + changes
+          # diagram posted as a comment (never edits the author's description).
+          # Committable ```suggestion blocks stay OFF by documented security
+          # decision — suggestions render in a table only.
+          pr_reviewer.require_score_review: "true"
+          pr_description.publish_description_as_comment: "true"
+          # The walkthrough comment sits under the description — don't echo it back,
+          # and keep it lean: no PR-type row, no mermaid diagram.
+          pr_description.add_original_user_description: "false"
+          pr_description.enable_pr_type: "false"
+          pr_description.enable_pr_diagram: "false"
+          github_action_config.auto_review: "true"
+          github_action_config.auto_describe: "true"
+          github_action_config.auto_improve: "true"
