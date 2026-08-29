@@ -44,7 +44,9 @@ pass-through. Verify actuals in AI Gateway analytics after the first week.
 
 ## Usage
 
-- Auto-review posts on PR open and on new commits.
+- Auto-review posts once, when a PR is opened (or reopened / marked ready). After pushing new
+  commits, comment `/review -i` for an incremental review of just the new commits, or
+  `/review` for a fresh full pass.
 - Comment commands — restricted to owner/member/collaborator, and the comment must start with
   `/` (ordinary discussion comments never start a run): `/review`, `/describe`, `/improve`,
   `/ask <question>`. `/review` also works on fork PRs (comment events run with base-repo
@@ -62,11 +64,11 @@ Who can spend money, from broadest to narrowest:
 
 - **Strangers: nobody.** Fork PRs and non-collaborator comments skip the job before a runner
   starts — a flood of drive-by PRs produces skipped jobs, not LLM calls.
-- **Collaborators: bounded (best-effort).** Per-PR concurrency cancels the in-flight review
-  when a new push supersedes it (push events only — comment-triggered runs never cancel a
-  review in flight), and a daily cap (50 successful runs, checked against the Actions API
-  before the review step) bounds routine spend. The cap is check-then-act, so concurrent
-  runs can overshoot it by the number in flight — it is a soft bound.
+- **Collaborators: bounded (best-effort).** Auto-review runs once per PR (open/reopen/ready)
+  — pushes never re-review, so cost scales with PR count, not push count. A daily cap
+  (50 successful runs, checked against the Actions API before the review step) bounds
+  routine spend; it is check-then-act, so concurrent runs can overshoot slightly — a soft
+  bound. Per-PR concurrency serializes runs (comment-triggered runs queue, never cancel).
 - **Hard limit:** gateway-level spend caps / rate limits on the Cloudflare side (unified
   billing credits are prepaid, so the Terra fallback cannot overspend structurally), plus
   billing notifications on the account.

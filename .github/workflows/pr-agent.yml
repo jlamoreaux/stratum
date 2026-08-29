@@ -15,15 +15,18 @@
 # /review, /describe, /improve, /ask <question> on any PR (including fork PRs).
 name: PR-Agent review
 
+# Auto-review runs once per PR (open/reopen/ready). Pushes do NOT re-review —
+# comment /review (full) or /review -i (incremental, commits since last review)
+# when a fresh look is wanted. Biggest spend lever + progressive-review semantics.
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, synchronize]
+    types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
 
-# One review at a time per PR; a new push cancels the in-flight review of the
-# now-stale commit instead of paying for both. Only push events cancel — a
-# comment-triggered run must not kill an in-flight review (reviews take minutes).
+# One run at a time per PR. PR lifecycle events may cancel a stale in-flight
+# run; a comment-triggered run must not kill an in-flight review (reviews take
+# minutes), so comment runs queue instead.
 concurrency:
   group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -98,8 +101,7 @@ jobs:
           # GLM-5.3 is a reasoning model; a full review takes minutes. The default
           # 120s timeout kills it mid-generation and retries forever.
           config.ai_timeout: "600"
-          # Default pr_actions excludes synchronize; opt in so pushes re-review.
-          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "synchronize"]'
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
           # Strictness dials (CodeRabbit-ish): inline code suggestions on, more findings.
           pr_reviewer.num_max_findings: "8"
           # Packaging ("safe preset"): quality-score row, walkthrough + changes
