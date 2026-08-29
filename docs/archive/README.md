@@ -10,5 +10,5 @@ This directory contains historical documents preserved for reference. These docu
 ## Note
 
 For current documentation, see:
-- [TODO.md](../../TODO.md) - Current priorities
+- [ROADMAP.md](../../ROADMAP.md) - Open work and priorities
 - [docs/developer/architecture.md](../developer/architecture.md) - System architecture

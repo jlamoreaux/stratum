@@ -7,7 +7,9 @@ Stratum treats agents as first-class contributors — this file is the contract.
 
 Stratum is a code-collaboration platform for the AI engineering era, built on Cloudflare
 Workers (Hono), Durable Objects (SQLite), D1, KV, R2, Queues, and Cloudflare Artifacts for
-serverless Git. The web UI is server-rendered JSX with **no client-side JavaScript**.
+serverless Git. The web UI is **server-rendered JSX**: every page must work with JavaScript
+disabled. A few inline scripts exist purely as progressive enhancement — never add a
+client-side framework or a build step.
 
 ## Repository layout
 

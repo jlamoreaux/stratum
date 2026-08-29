@@ -136,10 +136,11 @@ SSH transport is not supported (Workers have no raw TCP listener).
 
 ## What do I need to self-host?
 
-Node.js 20+ and your own Cloudflare account with Workers, **Artifacts (which is
-in beta — you need access to it)**, D1, KV, and Queues. Optional: AI Gateway for
-the LLM evaluator, Sandboxes for the sandbox evaluator (without the binding that
-evaluator fails closed), R2 for backups, and Cloudflare Email for magic links.
+Node.js 22.13+ and your own Cloudflare account with Workers, **Artifacts (which
+is in beta — you need access to it)**, D1, KV, Queues, and Durable Objects.
+Optional: the Workers AI binding for the LLM evaluator, Sandboxes for the
+sandbox evaluator (without the binding that evaluator fails closed), R2 for
+backups, and Cloudflare Email for magic links.
 The [README Quick Start](https://github.com/stratum-eng/stratum#quick-start)
 covers secrets, migrations, and deployment; keep production and staging in
 separate Artifacts namespaces.

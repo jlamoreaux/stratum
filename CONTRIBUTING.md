@@ -14,7 +14,8 @@ to uphold it. Report unacceptable behavior per the contact in that file.
 
 ## Getting started
 
-**Prerequisites:** Node.js 20+ and a Cloudflare account (for full local dev against bindings).
+**Prerequisites:** Node.js 22.13+ (the test suite uses `node:sqlite`) and a Cloudflare account
+(for full local dev against bindings).
 
 ```bash
 git clone https://github.com/stratum-eng/stratum.git
@@ -50,7 +51,9 @@ For a deeper walkthrough see [`docs/developer/local-setup.md`](docs/developer/lo
   Run `npm run lint:fix` rather than hand-formatting.
 - **Comments explain *why*, not *what*.** Reserve them for non-obvious constraints, invariants,
   or workarounds. JSDoc on public APIs is welcome.
-- **The web UI is server-rendered JSX with no client-side JavaScript.** Keep it that way.
+- **The web UI is server-rendered JSX.** Pages must work with JavaScript disabled. A handful of
+  inline scripts exist for progressive enhancement (file tree, clipboard, import progress); do not
+  add a client-side framework, a build step, or behaviour that only works with JS on.
 
 ## Testing
 

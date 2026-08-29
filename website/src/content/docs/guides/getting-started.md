@@ -33,8 +33,9 @@ All three resolve to the same email-identity account, so you can mix methods.
 ### Self-hosting
 
 Stratum is MIT-licensed and self-hostable on your own Cloudflare account. You
-need Node.js 20+ and a Cloudflare account with Workers, **Artifacts (beta)**, D1,
-KV, and Queues; AI Gateway is optional and only needed for the LLM evaluator,
+need Node.js 22.13+ and a Cloudflare account with Workers, **Artifacts (beta)**,
+D1, KV, Queues, Durable Objects, and R2; the Workers AI binding is optional and
+only needed for the LLM evaluator,
 and Sandboxes only for the sandbox evaluator. Follow the
 [Quick Start in the README](https://github.com/stratum-eng/stratum#quick-start) —
 everywhere this guide says `app.usestratum.dev`, substitute your own
@@ -153,10 +154,10 @@ downgrade your governance.
   code. Requires the Sandboxes binding on self-hosted instances; when the
   binding is absent this evaluator **fails closed** rather than silently
   passing.
-- **`llm`** — sends the diff to an LLM (via AI Gateway) for review against your
-  criteria. `model` picks the reviewer, `threshold` is the minimum passing score
-  (0.0–1.0), and `maxDiffChars` bounds how much diff is sent. Token usage is
-  recorded on the change as a cost record.
+- **`llm`** — sends the diff to an LLM (via the Workers AI binding) for review
+  against your criteria. `model` picks the reviewer, `threshold` is the minimum
+  passing score (0.0–1.0), and `maxDiffChars` bounds how much diff is sent.
+  Token usage is recorded on the change as a cost record.
 
 ### The merge protections
 
