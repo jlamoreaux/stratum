@@ -149,6 +149,17 @@ function commandPrepare(args: string[]): void {
     fail("Fix CHANGELOG.md before cutting a release (npm run release:check)");
   }
 
+  // The next version is computed from package.json, but the changelog is the
+  // record. If they have drifted, cutting from the manifest would write a
+  // section out of order with the history above it.
+  const latest = latestRelease(changelog);
+  if (latest && latest !== pkg.version) {
+    fail(
+      `package.json is ${pkg.version} but the newest CHANGELOG release is ${latest}. ` +
+        "Reconcile them before cutting (npm run release:check).",
+    );
+  }
+
   const unreleased = parseChangelog(changelog).sections.find((s) => s.version === UNRELEASED);
   const resolved = resolveBump(pkg.version, bump, unreleased?.body ?? "");
   if (!resolved.success) fail(resolved.error);

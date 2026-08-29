@@ -36,7 +36,8 @@ const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const NUMERIC_RE = /^\d+$/;
 
 interface ParsedVersion {
-  core: [number, number, number];
+  /** Major, minor, patch, kept as canonical decimal strings — see `compareNumeric`. */
+  core: [string, string, string];
   /** Dot-separated prerelease identifiers; empty for a final release. */
   prerelease: string[];
 }
@@ -46,9 +47,23 @@ function parseVersion(version: string): ParsedVersion | null {
   const match = SEMVER_RE.exec(version);
   if (!match?.[1] || !match[2] || !match[3]) return null;
   return {
-    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    core: [match[1], match[2], match[3]],
     prerelease: match[4] ? match[4].split(".") : [],
   };
+}
+
+/**
+ * Order two SemVer numeric identifiers without going through `Number`, which
+ * silently collapses anything past 2^53 — `9007199254740993` and
+ * `9007199254740992` compare equal as floats, which would make
+ * `validateChangelog` reject a correctly ordered history. Canonical SemVer
+ * forbids leading zeros, so a longer digit run is always the larger number and
+ * equal-length runs compare lexically.
+ */
+function compareNumeric(a: string, b: string): number {
+  if (a.length !== b.length) return a.length - b.length;
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
 }
 
 /**
@@ -363,7 +378,7 @@ export function compareVersions(a: string, b: string): number {
   if (!left || !right) return 0;
 
   for (let i = 0; i < 3; i++) {
-    const diff = (left.core[i] ?? 0) - (right.core[i] ?? 0);
+    const diff = compareNumeric(left.core[i] ?? "0", right.core[i] ?? "0");
     if (diff !== 0) return diff;
   }
   return comparePrerelease(left.prerelease, right.prerelease);
@@ -385,7 +400,7 @@ function comparePrerelease(left: string[], right: string[]): number {
 
     const aNumeric = NUMERIC_RE.test(a);
     const bNumeric = NUMERIC_RE.test(b);
-    if (aNumeric && bNumeric) return Number(a) - Number(b);
+    if (aNumeric && bNumeric) return compareNumeric(a, b);
     // Numeric identifiers always rank below alphanumeric ones.
     if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
     return a < b ? -1 : 1;

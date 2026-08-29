@@ -219,6 +219,24 @@ describe("compareVersions / latestRelease", () => {
     }
   });
 
+  it("orders numeric identifiers beyond 2^53, where Number would collapse them", () => {
+    // Number("9007199254740993") === Number("9007199254740992"), so a float
+    // comparison would call these equal and flag a valid history as misordered.
+    expect(compareVersions("9007199254740993.0.0", "9007199254740992.0.0")).toBeGreaterThan(0);
+    expect(
+      compareVersions("1.0.0-beta.9007199254740993", "1.0.0-beta.9007199254740992"),
+    ).toBeGreaterThan(0);
+    expect(compareVersions("9007199254740992.0.0", "9007199254740992.0.0")).toBe(0);
+  });
+
+  it("orders long numeric identifiers by magnitude, not string length alone", () => {
+    expect(compareVersions("10.0.0", "9.0.0")).toBeGreaterThan(0);
+    expect(compareVersions("1.0.0-alpha.10", "1.0.0-alpha.9")).toBeGreaterThan(0);
+    expect(
+      compareVersions("123456789012345678901.0.0", "99999999999999999999.0.0"),
+    ).toBeGreaterThan(0);
+  });
+
   it("ignores build metadata, as the spec requires", () => {
     expect(compareVersions("1.0.0+build.1", "1.0.0+build.2")).toBe(0);
   });
@@ -384,6 +402,11 @@ describe("validateChangelog", () => {
   it("flags an undated release", () => {
     const text = FIXTURE.replace("## [0.1.0] - 2026-06-11", "## [0.1.0]");
     expect(validateChangelog(text)).toContain("`0.1.0` has no release date");
+  });
+
+  it("does not flag a correctly ordered history of very large versions", () => {
+    const text = `# Changelog\n\n## [Unreleased]\n\n## [9007199254740993.0.0] - 2026-08-29\n\n### Added\n- x\n\n## [9007199254740992.0.0] - 2026-08-28\n\n### Added\n- y\n\n[Unreleased]: u\n[9007199254740993.0.0]: a\n[9007199254740992.0.0]: b\n`;
+    expect(validateChangelog(text)).toEqual([]);
   });
 
   it("flags releases listed out of order", () => {
