@@ -22,10 +22,11 @@ on:
     types: [created]
 
 # One review at a time per PR; a new push cancels the in-flight review of the
-# now-stale commit instead of paying for both.
+# now-stale commit instead of paying for both. Only push events cancel — a
+# comment-triggered run must not kill an in-flight review (reviews take minutes).
 concurrency:
   group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pr_agent:
@@ -43,17 +44,21 @@ jobs:
         (github.event.pull_request.draft == false &&
          github.event.pull_request.head.repo.full_name == github.repository)) &&
       (github.event_name != 'issue_comment' ||
-        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
-                 github.event.comment.author_association))
+        (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+                  github.event.comment.author_association) &&
+         startsWith(github.event.comment.body, '/')))
     runs-on: ubuntu-latest
     permissions:
       issues: write
       pull-requests: write
       contents: read
+      actions: read # the cap step lists this workflow's runs; implicit on public repos, required once private
     steps:
-      # Hard daily spend bound, independent of any Cloudflare-side control:
-      # past the cap the review step is skipped (job stays green). Cap-skipped
-      # runs also count as successful, so the counter cannot be outrun.
+      # Best-effort daily spend bound (check-then-act: concurrent runs can
+      # overshoot by the number in flight — the Cloudflare gateway spend cap is
+      # the hard limit). Past the cap the review step is skipped (job stays
+      # green), and cap-skipped runs count as successful so the counter cannot
+      # be outrun.
       - name: Daily review cap
         id: cap
         env:
@@ -81,8 +86,9 @@ jobs:
           # the real provider is chosen per-request by the model prefix in the body.
           openai.key: ${{ secrets.CLOUDFLARE_AI_TOKEN }}
           openai.api_base: ${{ secrets.AI_GATEWAY_COMPAT_BASE }}
-          config.model: "openai/workers-ai/@cf/zai-org/glm-5.3-flash"
-          config.fallback_models: '["openai/workers-ai/@cf/zai-org/glm-5.3","openai/openai/gpt-5.6-terra"]'
+          # GLM-5.3 won the same-PR head-to-head vs flash (depth + calibration).
+          config.model: "openai/workers-ai/@cf/zai-org/glm-5.3"
+          config.fallback_models: '["openai/workers-ai/@cf/zai-org/glm-5.3-flash","openai/openai/gpt-5.6-terra"]'
           # Gateway models are absent from LiteLLM's token registry; cap explicitly.
           config.custom_model_max_tokens: "131072"
           # GLM-5.3 is a reasoning model; a full review takes minutes. The default
@@ -90,6 +96,8 @@ jobs:
           config.ai_timeout: "600"
           # Default pr_actions excludes synchronize; opt in so pushes re-review.
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "synchronize"]'
+          # Strictness dials (CodeRabbit-ish): inline code suggestions on, more findings.
+          pr_reviewer.num_max_findings: "8"
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "false"
-          github_action_config.auto_improve: "false"
+          github_action_config.auto_improve: "true"

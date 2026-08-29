@@ -45,9 +45,13 @@ pass-through. Verify actuals in AI Gateway analytics after the first week.
 ## Usage
 
 - Auto-review posts on PR open and on new commits.
-- Comment commands — restricted to owner/member/collaborator in the workflow gate: `/review`,
-  `/describe`, `/improve`, `/ask <question>`. `/review` also works on fork PRs (comment events
-  run with base-repo secrets).
+- Comment commands — restricted to owner/member/collaborator, and the comment must start with
+  `/` (ordinary discussion comments never start a run): `/review`, `/describe`, `/improve`,
+  `/ask <question>`. `/review` also works on fork PRs (comment events run with base-repo
+  secrets).
+- Every auto-review also posts inline code suggestions (`auto_improve`); the reviewer guide
+  lists up to 8 findings (`pr_reviewer.num_max_findings`). Turn these dials down if the bot
+  gets noisy.
 - To change models, edit the workflow env — one line per model; no code involved.
 
 ## Security posture & abuse bounds
@@ -56,11 +60,14 @@ Who can spend money, from broadest to narrowest:
 
 - **Strangers: nobody.** Fork PRs and non-collaborator comments skip the job before a runner
   starts — a flood of drive-by PRs produces skipped jobs, not LLM calls.
-- **Collaborators: bounded.** Per-PR concurrency cancels the in-flight review when a new push
-  supersedes it, and a daily cap (50 successful runs, checked against the Actions API before
-  the review step) bounds total spend even for a compromised collaborator account.
-- **Backstop:** gateway-level rate limits / spend caps on the Cloudflare side, plus billing
-  notifications on the account. These should never be the first line of defense.
+- **Collaborators: bounded (best-effort).** Per-PR concurrency cancels the in-flight review
+  when a new push supersedes it (push events only — comment-triggered runs never cancel a
+  review in flight), and a daily cap (50 successful runs, checked against the Actions API
+  before the review step) bounds routine spend. The cap is check-then-act, so concurrent
+  runs can overshoot it by the number in flight — it is a soft bound.
+- **Hard limit:** gateway-level spend caps / rate limits on the Cloudflare side (unified
+  billing credits are prepaid, so the Terra fallback cannot overspend structurally), plus
+  billing notifications on the account.
 
 Other hardening:
 
@@ -83,5 +90,6 @@ rate limits / spend caps on the Cloudflare gateway are the backstop.
 - Fallback chain is availability-based, not quality-based; if GLM-5.3 errors persistently you
   are silently reviewed by flash-tier — check gateway logs when reviews look shallow.
 - Draft PRs are skipped until marked ready for review.
-- The full build-your-own alternative (Cloudflare Worker reviewer) was specced and shelved; see
-  `~/projects/indy/.claude/ship/PRD.md` for the requirements analysis behind choosing PR-Agent.
+- A build-your-own alternative (a Cloudflare Worker reviewer with a custom rubric) was specced
+  and shelved in favor of PR-Agent; revisit as a Stratum-native feature once the project
+  self-hosts off GitHub.
