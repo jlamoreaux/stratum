@@ -3,10 +3,12 @@
  *
  * Run with: node --experimental-strip-types scripts/release.ts <command>
  *
- *   check              Validate CHANGELOG.md and that package.json agrees with it
- *   latest             Print the most recently released version (no `v` prefix)
- *   notes [version]    Print one release's changelog entries (default: latest)
- *   prepare [options]  Move `Unreleased` into a dated section and bump package.json
+ *   check                  Validate CHANGELOG.md and that package.json agrees with it
+ *   latest                 Print the most recently released version (no `v` prefix)
+ *   previous [version]     Print the release listed below `version` (default: latest);
+ *                          prints nothing when there is none
+ *   notes [version]        Print one release's changelog entries (default: latest)
+ *   prepare [options]      Move `Unreleased` into a dated section and bump package.json
  *
  * `prepare` options:
  *   --bump auto|major|minor|patch   Default: auto (derived from the `Unreleased` groups)
@@ -29,6 +31,7 @@ import {
   latestRelease,
   nextVersion,
   parseChangelog,
+  previousRelease,
   releaseNotes,
   resolveBump,
   validateChangelog,
@@ -100,6 +103,16 @@ function commandLatest(): void {
   console.log(latest);
 }
 
+function commandPrevious(args: string[]): void {
+  const changelog = readChangelog();
+  const requested = args[0]?.replace(/^v/, "") ?? latestRelease(changelog);
+  if (!requested) fail("CHANGELOG.md has no released version yet");
+
+  // Empty output is a valid answer — the oldest release has no predecessor — so
+  // callers distinguish "none" from "failed" by the exit code, not the output.
+  console.log(previousRelease(changelog, requested) ?? "");
+}
+
 function commandNotes(args: string[]): void {
   const changelog = readChangelog();
   const requested = args[0]?.replace(/^v/, "") ?? latestRelease(changelog);
@@ -157,6 +170,9 @@ function main(argv: string[]): void {
     case "latest":
       commandLatest();
       break;
+    case "previous":
+      commandPrevious(args);
+      break;
     case "notes":
       commandNotes(args);
       break;
@@ -164,7 +180,9 @@ function main(argv: string[]): void {
       commandPrepare(args);
       break;
     default:
-      fail(`Unknown command: ${command ?? "(none)"}. Expected check, latest, notes, or prepare.`);
+      fail(
+        `Unknown command: ${command ?? "(none)"}. Expected check, latest, previous, notes, or prepare.`,
+      );
   }
 }
 

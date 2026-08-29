@@ -43,9 +43,12 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.repository.default_branch }}
-          # The tag step needs history and push credentials; the default token
-          # is enough given `contents: write` above.
-          fetch-depth: 0
+          # This job holds `contents: write`, and the `npm ci` below runs
+          # dependency lifecycle scripts. Persisting the token in .git/config
+          # would leave a repository-write credential within reach of any
+          # postinstall script, so git never gets it: the tag is created through
+          # the API, which needs no local credential.
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -64,9 +67,13 @@ jobs:
           else
             VERSION="$(npm run --silent release:latest)"
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Releasing v$VERSION"
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "previous=$(npm run --silent release:previous -- "$VERSION")"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing v$VERSION from $(git rev-parse --short HEAD)"
 
       - name: Check the changelog
         run: npm run --silent release:check
@@ -104,20 +111,56 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: npm run test:coverage
 
+      # This version's changelog link is `compare/v<previous>...v<version>`, so
+      # publishing before the predecessor is tagged would ship a release whose
+      # history link 404s — exactly the breakage this whole process exists to
+      # prevent. Fail loudly instead, naming the tag to backfill.
+      - name: Verify the predecessor tag exists
+        if: steps.version.outputs.previous != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          PREVIOUS_TAG: v${{ steps.version.outputs.previous }}
+        with:
+          script: |
+            const tag = process.env.PREVIOUS_TAG;
+            const { owner, repo } = context.repo;
+            try {
+              await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              core.setFailed(
+                `${tag} is not tagged yet, and this release's changelog compare link points at it. ` +
+                  `Backfill it first: git tag -a ${tag} <commit> -m "${tag}" && git push origin ${tag}`,
+              );
+            }
+
       - name: Create the tag
         if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "::notice::$TAG already exists on origin; refreshing its release notes only."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "$TAG"
-          git push origin "refs/tags/$TAG"
+          SHA: ${{ steps.version.outputs.sha }}
+        with:
+          script: |
+            const tag = process.env.TAG;
+            const sha = process.env.SHA;
+            const { owner, repo } = context.repo;
+
+            try {
+              const { data: existing } = await github.rest.git.getRef({
+                owner, repo, ref: `tags/${tag}`,
+              });
+              core.notice(`${tag} already exists at ${existing.object.sha}; publishing its notes only.`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            const { data: object } = await github.rest.git.createTag({
+              owner, repo, tag, message: tag, object: sha, type: "commit",
+            });
+            await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha: object.sha });
+            core.notice(`Tagged ${tag} at ${sha}`);
 
       - name: Publish the GitHub release
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
@@ -157,7 +200,7 @@ jobs:
           {
             echo "### Dry run — nothing tagged or published"
             echo
-            echo "Would release \`${{ steps.version.outputs.tag }}\` with these notes:"
+            echo "Would release \`${{ steps.version.outputs.tag }}\` at \`${{ steps.version.outputs.sha }}\` with these notes:"
             echo
             cat release-notes.md
           } >> "$GITHUB_STEP_SUMMARY"

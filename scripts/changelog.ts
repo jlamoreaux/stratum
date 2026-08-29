@@ -28,8 +28,46 @@ const FEATURE_GROUPS = new Set(["added"]);
 const HEADING_RE = /^## \[([^\]]+)\](?:\s+-\s+(\S+))?\s*$/;
 const GROUP_RE = /^### (.+?)\s*$/;
 const LINK_RE = /^\[([^\]]+)\]:\s*(\S+)\s*$/;
-const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Canonical SemVer 2.0.0 (semver.org): no leading zeros in the core or in a
+// numeric prerelease identifier, so `01.2.3` and `1.2.3-01` are rejected.
+const SEMVER_RE =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const NUMERIC_RE = /^\d+$/;
+
+interface ParsedVersion {
+  core: [number, number, number];
+  /** Dot-separated prerelease identifiers; empty for a final release. */
+  prerelease: string[];
+}
+
+function parseVersion(version: string): ParsedVersion | null {
+  const match = SEMVER_RE.exec(version);
+  if (!match?.[1] || !match[2] || !match[3]) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ? match[4].split(".") : [],
+  };
+}
+
+/**
+ * A real UTC calendar date, not just the `YYYY-MM-DD` shape: `2026-02-30` and
+ * `2026-00-00` match the pattern but are not dates, and a changelog carrying one
+ * would publish a release with impossible metadata.
+ */
+export function isCalendarDate(value: string): boolean {
+  const match = DATE_RE.exec(value);
+  if (!match?.[1] || !match[2] || !match[3]) return false;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
 
 export interface ChangelogSection {
   /** `Unreleased`, or a semver string such as `0.1.0`. */
@@ -214,7 +252,7 @@ export interface CutOptions {
 export function cutRelease(text: string, options: CutOptions): Result<string> {
   const { version, date, repoUrl } = options;
   if (!isSemver(version)) return { success: false, error: `Not a semver version: ${version}` };
-  if (!DATE_RE.test(date)) return { success: false, error: `Not a YYYY-MM-DD date: ${date}` };
+  if (!isCalendarDate(date)) return { success: false, error: `Not a YYYY-MM-DD date: ${date}` };
 
   const parsed = parseChangelog(text);
   const unreleased = parsed.sections.find((section) => section.version === UNRELEASED);
@@ -285,8 +323,8 @@ export function validateChangelog(text: string): string[] {
     else releases.push(section.version);
 
     if (!section.date) problems.push(`\`${section.version}\` has no release date`);
-    else if (!DATE_RE.test(section.date))
-      problems.push(`\`${section.version}\` date is not YYYY-MM-DD`);
+    else if (!isCalendarDate(section.date))
+      problems.push(`\`${section.version}\` date is not a real YYYY-MM-DD date`);
 
     if (section.body.trim() === "") problems.push(`\`${section.version}\` has no entries`);
   }
@@ -309,14 +347,59 @@ export function validateChangelog(text: string): string[] {
   return problems;
 }
 
-/** Compare two semver cores; prerelease identifiers are ignored. */
+/**
+ * SemVer 2.0.0 precedence (§11), including prerelease ordering: a final release
+ * outranks any of its prereleases, numeric identifiers compare numerically and
+ * rank below alphanumeric ones, and a shorter identifier set loses to a longer
+ * one that shares its prefix. Build metadata is ignored, as the spec requires.
+ * Returns 0 for input that is not canonical SemVer.
+ */
 export function compareVersions(a: string, b: string): number {
-  const left = SEMVER_RE.exec(a);
-  const right = SEMVER_RE.exec(b);
+  const left = parseVersion(a);
+  const right = parseVersion(b);
   if (!left || !right) return 0;
-  for (let i = 1; i <= 3; i++) {
-    const diff = Number(left[i]) - Number(right[i]);
+
+  for (let i = 0; i < 3; i++) {
+    const diff = (left.core[i] ?? 0) - (right.core[i] ?? 0);
     if (diff !== 0) return diff;
   }
+  return comparePrerelease(left.prerelease, right.prerelease);
+}
+
+function comparePrerelease(left: string[], right: string[]): number {
+  // A version without a prerelease has higher precedence than one with it.
+  if (left.length === 0) return right.length === 0 ? 0 : 1;
+  if (right.length === 0) return -1;
+
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const a = left[i];
+    const b = right[i];
+    // The set that runs out first has lower precedence.
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    if (a === b) continue;
+
+    const aNumeric = NUMERIC_RE.test(a);
+    const bNumeric = NUMERIC_RE.test(b);
+    if (aNumeric && bNumeric) return Number(a) - Number(b);
+    // Numeric identifiers always rank below alphanumeric ones.
+    if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+    return a < b ? -1 : 1;
+  }
   return 0;
+}
+
+/**
+ * The release listed immediately below `version` — the predecessor its compare
+ * link points at, and therefore the tag that must already exist before this
+ * version's release is published. Null when `version` is the oldest release or
+ * is not listed at all.
+ */
+export function previousRelease(text: string, version: string): string | null {
+  const released = parseChangelog(text)
+    .sections.filter((section) => section.version !== UNRELEASED)
+    .map((section) => section.version);
+  const index = released.indexOf(version);
+  if (index === -1) return null;
+  return released[index + 1] ?? null;
 }

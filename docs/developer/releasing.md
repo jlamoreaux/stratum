@@ -5,9 +5,15 @@ what the current version is and what shipped in it. The tooling reads that file 
 nothing derives a version from commit messages, and nobody edits a version number by
 hand.
 
-Every released version has a `vX.Y.Z` git tag and a GitHub release whose notes are
-that version's changelog section, so `.../releases/tag/vX.Y.Z` and the `compare`
-links in `CHANGELOG.md` always resolve.
+Every version released through this process gets a `vX.Y.Z` git tag and a GitHub
+release whose notes are that version's changelog section, so
+`.../releases/tag/vX.Y.Z` and the `compare` links in `CHANGELOG.md` resolve.
+
+Versions that shipped before this process need their tags backfilled — see
+[Publishing a tag pushed by hand](#publishing-a-tag-pushed-by-hand). Until
+`v0.1.0` is backfilled its links still 404, and the Release workflow refuses to
+publish a version whose predecessor tag is missing rather than ship a release
+whose history link is dead.
 
 ## The habit
 
@@ -48,8 +54,13 @@ the changelog text *is* the release notes.
 
 **3. Publish.** Run the **Release** workflow (Actions → Release → Run workflow). It
 reads the version from `CHANGELOG.md`, checks `package.json` agrees, re-runs
-lint → typecheck → test:coverage against the tree it is about to tag, pushes the
-annotated `vX.Y.Z` tag, and creates the GitHub release from the changelog section.
+lint → typecheck → test:coverage against the tree it is about to tag, verifies the
+predecessor version is already tagged, then creates the annotated `vX.Y.Z` tag and
+the GitHub release from the changelog section.
+
+The tag is created through the GitHub API rather than `git push`, so the checkout
+never persists a repository-write credential that a dependency's install script
+could reach.
 
 Tick **dry run** to see the resolved version and the exact release body in the job
 summary without tagging or publishing anything.
@@ -80,6 +91,7 @@ npm run release:check                # structure + package.json agreement
 npm run release:notes                # print the newest release's notes
 npm run release:notes -- 0.1.0       # …or a specific version's
 npm run release:latest               # print the newest released version
+npm run release:previous             # print the version below it (empty if none)
 ```
 
 `release:check` catches exactly the failure this process exists to prevent: a version
@@ -100,6 +112,6 @@ independently; `release:prepare` does not touch them.
 |---|---|
 | `CHANGELOG.md` | Source of truth: versions, dates, notes, links |
 | `scripts/changelog.ts` | Pure parsing, bump inference, and rewriting |
-| `scripts/release.ts` | The `check` / `latest` / `notes` / `prepare` CLI |
+| `scripts/release.ts` | The `check` / `latest` / `previous` / `notes` / `prepare` CLI |
 | `tests/changelog.test.ts` | Unit tests, plus validation of the real changelog |
 | `.github/workflows/release.yml` | Tags and publishes the GitHub release |

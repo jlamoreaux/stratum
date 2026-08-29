@@ -9,10 +9,12 @@ import {
   cutRelease,
   groupsIn,
   inferBump,
+  isCalendarDate,
   isSemver,
   latestRelease,
   nextVersion,
   parseChangelog,
+  previousRelease,
   releaseNotes,
   resolveBump,
   validateChangelog,
@@ -131,17 +133,94 @@ describe("nextVersion", () => {
   });
 });
 
-describe("isSemver / compareVersions / latestRelease", () => {
+describe("isSemver", () => {
   it("accepts semver and rejects tag-shaped input", () => {
     expect(isSemver("0.2.0")).toBe(true);
     expect(isSemver("1.0.0-rc.1")).toBe(true);
+    expect(isSemver("1.0.0+build.5")).toBe(true);
     expect(isSemver("v0.2.0")).toBe(false);
     expect(isSemver("0.2")).toBe(false);
   });
 
+  it("rejects noncanonical versions with leading zeros", () => {
+    expect(isSemver("01.2.3")).toBe(false);
+    expect(isSemver("1.02.3")).toBe(false);
+    expect(isSemver("1.2.03")).toBe(false);
+    expect(isSemver("1.2.3-01")).toBe(false);
+  });
+
+  it("still accepts a prerelease identifier that only looks numeric", () => {
+    expect(isSemver("1.2.3-0")).toBe(true);
+    expect(isSemver("1.2.3-0a")).toBe(true);
+    expect(isSemver("1.2.3-rc.0")).toBe(true);
+  });
+});
+
+describe("isCalendarDate", () => {
+  it("accepts real dates, including a leap day", () => {
+    expect(isCalendarDate("2026-08-29")).toBe(true);
+    expect(isCalendarDate("2024-02-29")).toBe(true);
+  });
+
+  it("rejects a date that is only the right shape", () => {
+    expect(isCalendarDate("2026-02-30")).toBe(false);
+    expect(isCalendarDate("2026-00-00")).toBe(false);
+    expect(isCalendarDate("2026-13-01")).toBe(false);
+    expect(isCalendarDate("2025-02-29")).toBe(false);
+  });
+
+  it("rejects anything that is not YYYY-MM-DD", () => {
+    expect(isCalendarDate("29 Aug 2026")).toBe(false);
+    expect(isCalendarDate("2026-8-29")).toBe(false);
+  });
+});
+
+describe("compareVersions / latestRelease", () => {
   it("orders versions numerically, not lexically", () => {
     expect(compareVersions("0.10.0", "0.9.0")).toBeGreaterThan(0);
     expect(compareVersions("0.1.0", "0.1.0")).toBe(0);
+  });
+
+  it("ranks a final release above its own prereleases", () => {
+    expect(compareVersions("1.0.0", "1.0.0-rc.1")).toBeGreaterThan(0);
+    expect(compareVersions("1.0.0-rc.1", "1.0.0")).toBeLessThan(0);
+  });
+
+  it("compares numeric prerelease identifiers numerically", () => {
+    expect(compareVersions("1.0.0-beta.11", "1.0.0-beta.2")).toBeGreaterThan(0);
+  });
+
+  it("ranks numeric identifiers below alphanumeric ones", () => {
+    expect(compareVersions("1.0.0-1", "1.0.0-alpha")).toBeLessThan(0);
+  });
+
+  it("orders differing prerelease labels lexically", () => {
+    expect(compareVersions("1.0.0-beta", "1.0.0-alpha")).toBeGreaterThan(0);
+  });
+
+  it("ranks a shorter identifier set below a longer one sharing its prefix", () => {
+    expect(compareVersions("1.0.0-alpha", "1.0.0-alpha.1")).toBeLessThan(0);
+  });
+
+  it("walks the SemVer spec's own precedence chain", () => {
+    const ordered = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+    ];
+    for (let i = 1; i < ordered.length; i++) {
+      const [lower, higher] = [ordered[i - 1] as string, ordered[i] as string];
+      expect(compareVersions(higher, lower)).toBeGreaterThan(0);
+    }
+  });
+
+  it("ignores build metadata, as the spec requires", () => {
+    expect(compareVersions("1.0.0+build.1", "1.0.0+build.2")).toBe(0);
   });
 
   it("reports the newest released version, skipping Unreleased", () => {
@@ -289,6 +368,19 @@ describe("validateChangelog", () => {
     expect(validateChangelog(text)).toContain("Link definition `0.9.0` has no matching section");
   });
 
+  it("flags a date that is only the right shape", () => {
+    const text = FIXTURE.replace("2026-06-11", "2026-02-30");
+    expect(validateChangelog(text)).toContain("`0.1.0` date is not a real YYYY-MM-DD date");
+  });
+
+  it("does not flag a final release listed above its own prerelease", () => {
+    const text = FIXTURE.replace(
+      "## [0.1.0] - 2026-06-11",
+      "## [1.0.0] - 2026-07-01\n\n### Added\n- Final.\n\n## [1.0.0-rc.1] - 2026-06-20\n\n### Added\n- Candidate.\n\n## [0.1.0] - 2026-06-11",
+    ).replace(`[0.1.0]: ${REPO}`, `[1.0.0]: ${REPO}/x\n[1.0.0-rc.1]: ${REPO}/y\n[0.1.0]: ${REPO}`);
+    expect(validateChangelog(text)).toEqual([]);
+  });
+
   it("flags an undated release", () => {
     const text = FIXTURE.replace("## [0.1.0] - 2026-06-11", "## [0.1.0]");
     expect(validateChangelog(text)).toContain("`0.1.0` has no release date");
@@ -300,6 +392,25 @@ describe("validateChangelog", () => {
       "## [0.1.0] - 2026-06-11\n\n### Added\n- x\n\n## [0.2.0] - 2026-07-01",
     ).replace(`[0.1.0]: ${REPO}`, `[0.2.0]: ${REPO}/x\n[0.1.0]: ${REPO}`);
     expect(validateChangelog(text).join("\n")).toContain("out of order");
+  });
+});
+
+describe("previousRelease", () => {
+  it("returns the release listed below the given one", () => {
+    const cut = cutRelease(FIXTURE, { version: "0.2.0", date: "2026-08-29", repoUrl: REPO });
+    expect(cut.success && previousRelease(cut.data, "0.2.0")).toBe("0.1.0");
+  });
+
+  it("returns null for the oldest release", () => {
+    expect(previousRelease(FIXTURE, "0.1.0")).toBeNull();
+  });
+
+  it("returns null for a version that is not listed", () => {
+    expect(previousRelease(FIXTURE, "9.9.9")).toBeNull();
+  });
+
+  it("never returns Unreleased", () => {
+    expect(previousRelease(FIXTURE, "Unreleased")).toBeNull();
   });
 });
 
