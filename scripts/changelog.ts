@@ -85,6 +85,38 @@ export function isCalendarDate(value: string): boolean {
   );
 }
 
+/**
+ * Set the root `version` in a package manifest, editing the text surgically so
+ * the rest of the file keeps its formatting — re-serialising would expand the
+ * hand-written one-line objects in this repo's manifest and bury the change.
+ *
+ * The pattern matches the first line-anchored `"version"` at any nesting depth,
+ * so the result is verified structurally: a nested hit would otherwise rewrite
+ * the wrong field, leave the root version stale, and still look like a success.
+ */
+export function setPackageVersion(raw: string, version: string): Result<string> {
+  const updated = raw.replace(/^(\s*"version"\s*:\s*)"[^"]*"/m, `$1"${version}"`);
+  if (updated === raw) {
+    return { success: false, error: 'No `"version"` field found in the manifest' };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(updated);
+  } catch (error) {
+    return { success: false, error: `Rewriting the version produced invalid JSON: ${error}` };
+  }
+
+  const root = (parsed as { version?: unknown }).version;
+  if (root !== version) {
+    return {
+      success: false,
+      error: `Rewrote a nested \`"version"\` rather than the root one — the root is still ${JSON.stringify(root)}`,
+    };
+  }
+  return { success: true, data: updated };
+}
+
 export interface ChangelogSection {
   /** `Unreleased`, or a semver string such as `0.1.0`. */
   version: string;

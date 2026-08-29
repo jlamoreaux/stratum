@@ -34,6 +34,7 @@ import {
   previousRelease,
   releaseNotes,
   resolveBump,
+  setPackageVersion,
   validateChangelog,
 } from "./changelog.ts";
 
@@ -62,17 +63,6 @@ function readPackage(): { raw: string; version: string; repoUrl: string } {
   if (typeof parsed.version !== "string") fail("package.json has no version");
   if (typeof url !== "string") fail("package.json has no repository.url");
   return { raw, version: parsed.version, repoUrl: url.replace(/\.git$/, "").replace(/\/$/, "") };
-}
-
-/**
- * Rewrite only the top-level `"version"` field, textually. Re-serialising the
- * parsed object would reformat the whole file and fight with the repo's
- * hand-maintained key order and comment keys.
- */
-function withVersion(raw: string, version: string): string {
-  const updated = raw.replace(/^(\s*"version"\s*:\s*)"[^"]*"/m, `$1"${version}"`);
-  if (updated === raw) fail('Could not find a top-level "version" field in package.json');
-  return updated;
 }
 
 /** The value following `flag`, or undefined when it is absent; exits if the value is missing. */
@@ -170,13 +160,18 @@ function commandPrepare(args: string[]): void {
   const cut = cutRelease(changelog, { version: next.data, date, repoUrl: pkg.repoUrl });
   if (!cut.success) fail(cut.error);
 
+  // Resolve both files before writing either: a manifest failure after the
+  // changelog was already rewritten would leave the release half-cut.
+  const bumped = setPackageVersion(pkg.raw, next.data);
+  if (!bumped.success) fail(`package.json: ${bumped.error}`);
+
   if (dryRun) {
     console.log(`${pkg.version} → ${next.data} (${resolved.data}, dry run — nothing written)`);
     return;
   }
 
   writeFileSync(CHANGELOG_PATH, cut.data);
-  writeFileSync(PACKAGE_PATH, withVersion(pkg.raw, next.data));
+  writeFileSync(PACKAGE_PATH, bumped.data);
   console.log(`✓ Prepared v${next.data} (${resolved.data} from ${pkg.version}), dated ${date}`);
   console.log("  Review the diff, open a PR, and merge it; then run the Release workflow.");
 }

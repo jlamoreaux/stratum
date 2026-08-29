@@ -17,6 +17,7 @@ import {
   previousRelease,
   releaseNotes,
   resolveBump,
+  setPackageVersion,
   validateChangelog,
 } from "../scripts/changelog";
 
@@ -418,6 +419,57 @@ describe("validateChangelog", () => {
       "## [0.1.0] - 2026-06-11\n\n### Added\n- x\n\n## [0.2.0] - 2026-07-01",
     ).replace(`[0.1.0]: ${REPO}`, `[0.2.0]: ${REPO}/x\n[0.1.0]: ${REPO}`);
     expect(validateChangelog(text).join("\n")).toContain("out of order");
+  });
+});
+
+describe("setPackageVersion", () => {
+  const MANIFEST = [
+    "{",
+    '  "name": "stratum",',
+    '  "version": "0.2.0",',
+    '  "repository": { "type": "git", "url": "https://github.com/stratum-eng/stratum.git" }',
+    "}",
+    "",
+  ].join("\n");
+
+  it("updates the root version and leaves the rest of the file byte-identical", () => {
+    const result = setPackageVersion(MANIFEST, "0.3.0");
+    expect(result).toEqual({ success: true, data: MANIFEST.replace('"0.2.0"', '"0.3.0"') });
+  });
+
+  it("does not reformat hand-written one-line objects", () => {
+    const result = setPackageVersion(MANIFEST, "0.3.0");
+    expect(result.success && result.data).toContain(
+      '"repository": { "type": "git", "url": "https://github.com/stratum-eng/stratum.git" }',
+    );
+  });
+
+  // The pattern is line-anchored but depth-blind, so a nested `"version"` on its
+  // own line above the root one is the case that would silently rewrite the
+  // wrong field and still look like it worked.
+  it("refuses when a nested version precedes the root one", () => {
+    const nested = [
+      "{",
+      '  "name": "stratum",',
+      '  "volta": {',
+      '    "version": "22.13.0"',
+      "  },",
+      '  "version": "0.2.0"',
+      "}",
+      "",
+    ].join("\n");
+
+    const result = setPackageVersion(nested, "0.3.0");
+    expect(result.success).toBe(false);
+    expect(result.success === false && result.error).toContain("nested");
+  });
+
+  it("refuses a manifest with no version field", () => {
+    expect(setPackageVersion('{\n  "name": "stratum"\n}\n', "0.3.0").success).toBe(false);
+  });
+
+  it("refuses when the rewrite would produce invalid JSON", () => {
+    expect(setPackageVersion('{\n  "version": "0.2.0"', "0.3.0").success).toBe(false);
   });
 });
 
