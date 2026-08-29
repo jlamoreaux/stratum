@@ -1,436 +1,438 @@
 # Stratum
 
-[![CI Status](https://github.com/stratum-eng/stratum/actions/workflows/ci.yml/badge.svg)](https://github.com/stratum-eng/stratum/actions)
+[![CI Status](https://github.com/stratum-eng/stratum/actions/workflows/ci.yml/badge.svg)](https://github.com/stratum-eng/stratum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docs](https://img.shields.io/badge/docs-usestratum.dev-blue.svg)](https://docs.usestratum.dev)
 
-A code collaboration platform for the AI engineering era. Built on Cloudflare Workers with Artifacts, D1, KV, and Queues.
+**The governance layer for AI-written code** — the control plane that decides what agent
+output is allowed to merge, wherever your code lives. Built on Cloudflare Workers with
+Artifacts, D1, KV, R2, Queues, and Durable Objects.
 
-Stratum is self-hostable on your own Cloudflare account — see [Quick Start](#quick-start). Examples
-below use `https://your-instance.workers.dev` as a placeholder for your deployment.
+> [!NOTE]
+> **Project status: pre-1.0 and under active development.** The feature set below is
+> shipped and tested, but APIs and schemas may still change between releases. See
+> [ROADMAP.md](ROADMAP.md) for what's next and
+> [`docs/CURRENT_CAPABILITIES.md`](docs/CURRENT_CAPABILITIES.md) for the authoritative,
+> caveat-by-caveat account of what exists today.
 
-## What is Stratum?
+- **Try it:** [app.usestratum.dev](https://app.usestratum.dev) — the maintainer's hosted instance
+- **Read it:** [docs.usestratum.dev](https://docs.usestratum.dev)
+- **Run it:** self-host on your own Cloudflare account — see [Quick start](#quick-start)
 
-Stratum is the **governance layer for AI-written code** — the control plane that decides
-what agent output is allowed to merge, wherever your code lives. Humans and AI agents are
-both first-class citizens, with different powers by design:
+Examples below use `https://your-instance.workers.dev` as a placeholder for your deployment.
 
-- **Evaluation-gated merges** - Policy-as-code (`.stratum/policy.yaml`) blocks merges on
-  secret scans, diff rules, sandboxed tests, external CI, and LLM review
-- **Provenance & cost tracking** - Every merged commit records which agent, model, and
-  prompt produced it, its evaluation score, and what it cost (LLM tokens, sandbox time)
-- **Agent identities with a hard invariant** - Agents authenticate as themselves and can
-  never approve work; approvals are a human gate
-- **Any agent, any editor** - REST API, CLI, and MCP server: Claude Code, Cursor, Copilot,
-  or your own agents all speak to the same gate. No editor subscription required
-- **Two ways to run it** - As a **layer over GitHub** (keep your repos and PRs; eval
+## Contents
+
+- [Why Stratum](#why-stratum)
+- [Quick start](#quick-start)
+- [Using Stratum](#using-stratum)
+- [Configuring the merge gate](#configuring-the-merge-gate)
+- [What's included](#whats-included)
+- [Known limitations](#known-limitations)
+- [Architecture](#architecture)
+- [Documentation](#documentation)
+- [Deployment](#deployment)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+## Why Stratum
+
+Humans and AI agents are both first-class citizens, with different powers by design:
+
+- **Evaluation-gated merges** — policy-as-code (`.stratum/policy.yaml`) blocks merges on
+  secret scans, diff rules, sandboxed tests, external CI, and LLM review.
+- **Branch protection that agents can't relax** — required evaluators, required human
+  approvals, deny-by-default force-merge, and staleness rejection. A change that edits the
+  policy file itself always requires a human approval.
+- **Provenance & cost tracking** — every merged commit records which agent, model, and
+  prompt produced it, its evaluation score, and what it cost (LLM tokens, sandbox time).
+- **Agent identities with a hard invariant** — agents authenticate as themselves and can
+  never approve work; approvals are a human gate.
+- **Any agent, any editor** — REST API, CLI, and MCP server: Claude Code, Cursor, Copilot,
+  or your own agents all speak to the same gate. No editor subscription required.
+- **Two ways to run it** — as a **layer over GitHub** (keep your repos and PRs; eval
   verdicts land as PR comments and commit statuses) or as a **standalone forge** (Git
-  hosting on Cloudflare Artifacts, workspace forking, issues, orgs, server-rendered UI)
+  hosting on Cloudflare Artifacts, workspace forking, issues, orgs, server-rendered UI).
 
-## Features
-
-### Core Features
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| Git Repository Hosting | ✅ | Serverless Git via Cloudflare Artifacts |
-| Workspace Forking | ✅ | Isolated development environments |
-| Changes (PRs) | ✅ | Proposals with evaluation gates |
-| GitHub Import | ✅ | Import and sync with GitHub |
-| Web UI | ✅ | Server-rendered, no client JS |
-| Email Authentication | ✅ | Magic links, no GitHub required |
-| GitHub OAuth | ✅ | Alternative auth method |
-| API Tokens | ✅ | For programmatic access |
-| Agent Identities | ✅ | First-class AI agent support |
-
-### Evaluators
-
-| Evaluator | Status | Description |
-|-----------|--------|-------------|
-| Secret Scanner | ✅ | Detects API keys, tokens |
-| Diff Analysis | ✅ | Change size limits |
-| Webhook | ✅ | External CI/CD integration |
-| LLM Review | ✅ | AI-powered review (optional) |
-| Sandbox | ✅ | Test execution (optional) |
-
-### Management
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| Organizations | ✅ | Org-owned projects, members, and role-based access |
-| Teams | ✅ | Team-based write permissions within an org |
-| Issue Tracker | ✅ | Per-project issues, auto-close on linked-change merge |
-| Bidirectional GitHub Sync | ✅ | Inbound webhooks + outbound PR promotion |
-| CLI Tool | 🚧 | `@stratum/cli` at full API parity; install from `cli/` (not yet published to npm) |
-| MCP Server | 🚧 | `@stratum/mcp` — any MCP-capable agent or editor can drive the eval-gated change flow; install from `mcp/` (not yet published to npm) |
-
-**Legend:** ✅ Working | 🚧 In Progress | 📋 Planned
-
-## Quick Start
+## Quick start
 
 ### Prerequisites
 
-- Node.js 20+
-- Cloudflare account with access to:
-  - Workers
-  - Artifacts (beta)
-  - D1
-  - KV
-  - Queues
-  - AI Gateway (optional, for LLM evaluator)
+- **Node.js 22.13+** (the test suite uses `node:sqlite`, unflagged only from 22.13)
+- A Cloudflare account with access to:
+
+  | Binding | Used for | |
+  |---|---|---|
+  | Workers | the application | **required** |
+  | Artifacts (beta) | Git repository storage | **required** |
+  | D1 | changes, issues, events, audit, costs | **required** |
+  | KV | project/workspace identity, session state | **required** |
+  | Queues | imports, events, webhook delivery | recommended |
+  | Durable Objects | merge queue, repo hot index, rate limiting | recommended |
+  | R2 | backups; backups no-op when unbound | recommended |
+  | Analytics Engine | request analytics | optional |
+  | Workers AI | the LLM evaluator | optional |
+  | Sandboxes | sandbox evaluator, post-merge smoke tests | optional |
+
+  Every optional binding degrades rather than crashes — the sandbox evaluator, notably,
+  **fails closed** when its binding is absent, so a policy that requires it will block
+  merges rather than wave them through. `wrangler.toml` declares all of them.
 
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/stratum-eng/stratum.git
 cd stratum
-
-# Install dependencies
 npm install
 
 # Authenticate with Cloudflare
 npx wrangler login
+```
 
-# Set up required secrets (pick authentication method)
+Fill in the placeholder resource IDs in `wrangler.toml` (each one carries a comment with
+the `wrangler` command that creates it), then set up authentication — you need at least one
+method:
 
-# For email magic links (recommended - no external dependencies):
+```bash
+# Email magic links (recommended — no external dependencies):
 npx wrangler email sending enable yourdomain.com
-npx wrangler secret put EMAIL_FROM_ADDRESS  # e.g., noreply@yourdomain.com
+npx wrangler secret put EMAIL_FROM_ADDRESS   # e.g. noreply@yourdomain.com
 
-# Or for GitHub OAuth:
+# GitHub OAuth:
 npx wrangler secret put GITHUB_CLIENT_ID
 npx wrangler secret put GITHUB_CLIENT_SECRET
 
+# Google OAuth:
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+# and set GOOGLE_REDIRECT_URI in [vars]
+
 # Optional:
-npx wrangler secret put POSTHOG_API_KEY  # for analytics
+npx wrangler secret put POSTHOG_API_KEY      # analytics (route patterns only, never paths)
+npx wrangler secret put GITHUB_TOKEN         # higher rate limits on GitHub import
+npx wrangler secret put GITHUB_WEBHOOK_SECRET  # inbound GitHub sync
 ```
 
-### Local Development
+OAuth callback URLs are set in `[vars]` (`OAUTH_REDIRECT_URI`, `GOOGLE_REDIRECT_URI`) —
+point them at your own host and register the same URLs in your OAuth apps.
+
+### Database setup
 
 ```bash
-# Start local dev server
-npm run dev
-
-# Run tests
-npm test
-
-# Run linting
-npm run lint
-
-# Type check
-npm run typecheck
+npx wrangler d1 create stratum                              # if not already created
+npx wrangler d1 migrations apply stratum --local            # local dev
+npx wrangler d1 migrations apply stratum --remote           # production
 ```
 
-Visit http://localhost:8787 after starting the dev server.
-
-### Database Setup
+### Local development
 
 ```bash
-# Create D1 database (if not already created)
-npx wrangler d1 create stratum
-
-# Run migrations
-npx wrangler d1 migrations apply stratum --local   # for local dev
-npx wrangler d1 migrations apply stratum --remote  # for production
+npm run dev          # dev server at http://localhost:8787
+npm test             # unit tests
+npm run lint         # Biome
+npm run typecheck    # tsc --noEmit
 ```
 
-## Documentation
+`DEV_LOGIN_ENABLED` is on for local `wrangler dev` only, giving you a `/dev-login` session
+without configuring an email or OAuth provider. Named environments don't inherit it.
 
-The user and API documentation below is also published at
-[docs.usestratum.dev](https://docs.usestratum.dev), built from
-[`website/`](website/) (Astro Starlight) — see
-[`website/README.md`](website/README.md) for local development and deployment.
+For a fuller walkthrough see [`docs/developer/local-setup.md`](docs/developer/local-setup.md).
 
-### User Documentation
+## Using Stratum
 
-- [Getting Started Guide](docs/user-guide/getting-started.md) - Your first project
-- [Importing from GitHub](docs/user-guide/importing.md) - Import and sync repositories
-- [Troubleshooting](docs/user-guide/troubleshooting.md) - Common issues and solutions
-- [FAQ](docs/user-guide/faq.md) - Frequently asked questions
+### Git remotes
 
-### API Documentation
+A Stratum project is a real git remote over smart HTTP, authenticated with your API key over
+HTTP Basic (username ignored, password is the token):
 
-- [OpenAPI Specification](docs/api/openapi.yml) - Complete API reference
-- [Authentication](docs/api/authentication.md) - Auth methods and tokens
-- [Endpoints](docs/api/endpoints/README.md) - Detailed endpoint docs
+```bash
+# Clone a project (read)
+git clone https://your-instance.workers.dev/@yourname/my-project.git
 
-### Developer Documentation
+# Clone a workspace fork — this is where you push (write)
+git clone https://your-instance.workers.dev/@yourname/my-project/workspaces/my-branch.git
+cd my-branch
+git push
+```
 
-- [Architecture Overview](docs/developer/architecture.md) - System design
-- [Local Setup](docs/developer/local-setup.md) - Development environment
-- [Database Schema](docs/developer/database.md) - Data model
-- [Queue System](docs/developer/queues.md) - Background jobs
-- [Testing](docs/developer/testing.md) - Testing guide
-- [Deployment](docs/developer/deployment.md) - Deploy procedures
+Pushing directly to a project's default branch is refused in-protocol with a legible
+`ng` report-status pointing at the workspace remote — `main` only moves through the merge
+gate. Where the gated-push flag (`GIT_PUSH_GATED_ENABLED`) is on, such a push instead lands
+on a server-managed workspace fork and opens an eval-gated change automatically. See
+[ADR 005](docs/adr/005-git-smart-http-proxy.md). SSH transport is not supported — Workers
+have no raw TCP listener ([ADR 006](docs/adr/006-ssh-transport.md)).
 
-### Architecture Decisions
+### REST API
 
-- [ADR 001: Namespace Support](docs/adr/001-namespace-support.md)
-- [ADR 002: Queue-Based Imports](docs/adr/002-queue-based-imports.md)
-- [ADR 003: D1 for Import State](docs/adr/003-d1-for-import-state.md)
-- [ADR 004: High-Frequency Agent Commits](docs/adr/004-high-frequency-agent-commits.md)
+```bash
+# Authenticate with an API key or agent token
+curl https://your-instance.workers.dev/api/projects \
+  -H "Authorization: Bearer stratum_agent_xxxxx"
+
+# Import a repository (GitHub, GitLab, or Bitbucket)
+curl -X POST https://your-instance.workers.dev/api/projects/@you/react/import \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"url": "https://github.com/facebook/react", "branch": "main"}'
+
+# Fork a workspace, commit into it, then open an evaluation-gated change
+curl -X POST .../api/projects/@you/my-project/workspaces -d '{"name": "fix-bug"}'
+curl -X POST .../api/workspaces/fix-bug/commit \
+  -d '{"files": {"src/index.ts": "export const fixed = true;"}, "message": "Fix the bug", "projectId": "..."}'
+curl -X POST .../api/projects/@you/my-project/changes -d '{"workspace": "fix-bug"}'
+curl -X POST .../api/changes/<change-id>/merge
+```
+
+The full surface — 72 paths, 91 operations — is specified in
+[`docs/api/openapi.yml`](docs/api/openapi.yml), with per-resource guides under
+[`docs/api/endpoints/`](docs/api/endpoints/README.md).
+
+### CLI, MCP server, and reference agent
+
+Three first-party clients live in this repo. None are published to npm yet
+([tracked](ROADMAP.md#publish-the-client-packages-to-npm)), so install them from source:
+
+```bash
+# from the repository root
+for pkg in cli mcp agent; do
+  (cd "$pkg" && npm install && npm run build && npm link)
+done
+```
+
+That gives you `stratum` (CLI, full API parity), `stratum-mcp` (MCP server), and
+`stratum-agent` (reference agent: identity → fork → LLM edit plan → commit → change).
+
+`@stratum/mcp` exposes the whole eval-gated change flow as MCP tools, so Claude Code,
+Cursor, Zed, Copilot, or a custom agent can drive Stratum without a bespoke integration.
+
+## Configuring the merge gate
+
+Merge policy is a file in the repository, at `.stratum/policy.yaml` (or
+`stratum.config.json`). `evaluators` is **top level** — a policy file that's present but
+malformed fails the merge gate closed rather than silently falling back to the default.
+
+```yaml
+# Structural sanity plus an LLM review gate.
+# The secret scan is always on and blocking; it needs no entry here.
+evaluators:
+  - type: diff
+    maxFiles: 30                        # default 20
+    maxLines: 5000                      # default 500
+    forbiddenPatterns: ["src/auth/*"]   # globs, matched against changed file paths
+
+  - type: llm
+    threshold: 0.6
+    maxDiffChars: 48000
+
+  - type: webhook
+    url: "https://ci.example.com/evaluate"
+    timeoutMs: 300000
+
+  - type: sandbox
+    command: "npm test"
+    timeoutMs: 120000
+
+requireAll: true
+minScore: 0.6
+
+merge:
+  requiredApprovals: 1                  # human approvals; agents can never approve
+  requiredEvaluators: ["secret_scan"]   # latest run of each must have passed
+  allowForce: false                     # deny-by-default; ?force=true is rejected unless true
+  requireFreshBase: true                # block a change whose base moved (409 STALE_BASE)
+  postMergeCommand: "npm test"          # smoke test the merged HEAD in a sandbox
+  autoRevert: true                      # revert the merge commit if it fails
+```
+
+This repository runs under its own policy — [`.stratum/policy.yaml`](.stratum/policy.yaml)
+is the live, dogfooded example.
+
+## What's included
+
+Everything listed here works today. Anything not yet shipped lives in
+[ROADMAP.md](ROADMAP.md) — this section deliberately carries no status markers, so it can't
+drift out of sync with them.
+
+**Repositories and changes**
+Git hosting on Cloudflare Artifacts · clone/fetch/push over smart HTTP · workspace forking ·
+changes (PRs) with evaluation gates · hunk-level diffs with a pure-CSS unified/split toggle ·
+squash and true three-way merges · a Durable Object merge queue · batch merging ·
+post-merge smoke tests with auto-revert · repo browser, file viewer, commit log, and tags.
+
+**The evaluation gate**
+Secret scanner (always on and blocking; 25+ credential patterns plus entropy detection) ·
+diff analysis · webhook for external CI · LLM review via the Workers AI binding · sandboxed
+test execution · per-evaluator evidence and estimated resource costs (LLM tokens, sandbox
+time, git ops) · branch protection · provenance recorded per merged commit.
+
+**Import and sync**
+Import from GitHub, GitLab, and Bitbucket · bidirectional GitHub sync (inbound webhooks,
+outbound PR promotion) with conflict resolution · bulk import · queue-backed with
+resumable progress.
+
+**Identity and access**
+Magic-link email auth · GitHub OAuth · Google OAuth · API keys with rotation · agent
+identities with short-lived tokens scoped to an owning user · organizations, teams, and
+role-based project access · CSRF protection · rate limiting.
+
+**Collaboration**
+Per-project issue tracker with auto-close on linked-change merge · human reviews
+(approve / request changes) and comments · per-project activity feed · outbound webhooks
+with HMAC-SHA256 signatures, event filters, delivery logs, and SSRF-guarded URLs.
+
+**Operations**
+Append-only audit trail with an admin query API · daily and on-demand backups to R2 with a
+tested restore path · deletion jobs · admin metrics API · durable event outbox with a
+queue consumer and a stale-event sweep · workspace TTL sweep.
+
+**Interfaces**
+Server-rendered web UI · REST API (72 paths) · `@stratum/cli` at full API parity ·
+`@stratum/mcp` MCP server · `@stratum/agent` reference agent.
+
+## Known limitations
+
+- **Merge conflicts** — a three-way merge that conflicts falls back to a squash merge;
+  there's no interactive conflict resolution for changes (GitHub *sync* conflicts do have a
+  resolution UI).
+- **Diff depth** — diffs are hunk-level with unified and split views, but there's no
+  per-line intra-hunk highlighting, binary files aren't diffed, and very large files are
+  rendered whole.
+- **Git LFS is not supported at all** — there's no `/info/lfs` route or `objects/batch`
+  endpoint, and git push bodies are capped at 50 MB, so large-binary workflows aren't
+  viable. Keep LFS repos on GitHub and use layer mode.
+- **Git submodules are rejected**, not supported — a gitlink or `.gitmodules` fails import,
+  gated push, and change creation rather than corrupting the tree silently.
+- **Scale** — git operations run in-memory on the Worker; large repos will hit Worker limits.
+- **Synchronous evaluation** — the evaluator suite runs inline at change creation, so change
+  creation latency includes it.
+- **Identity in KV** — project and workspace identity records live in KV rather than D1,
+  which is why `workspace.deleted` events aren't emitted yet.
+- **Team permissions are org-wide** — per-project team grants aren't implemented.
+
+Each of these is documented in full, with the specific code paths involved, in
+[`docs/CURRENT_CAPABILITIES.md`](docs/CURRENT_CAPABILITIES.md).
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Cloudflare Worker                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │
-│  │   Hono API  │  │   Web UI    │  │  Queue Consumer │ │
-│  │   Routes    │  │   (JSX)     │  │                 │ │
-│  └─────────────┘  └─────────────┘  └─────────────────┘ │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │
-│  │   Auth      │  │  Evaluation │  │  Merge Queue    │ │
-│  │ Middleware  │  │   Engine    │  │  (Durable Obj)  │ │
-│  └─────────────┘  └─────────────┘  └─────────────────┘ │
+│                    Cloudflare Worker                    │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
+│  │  Hono API   │  │   Web UI    │  │ Queue Consumers │  │
+│  │   Routes    │  │    (JSX)    │  │ (events/import) │  │
+│  └─────────────┘  └─────────────┘  └─────────────────┘  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
+│  │    Auth     │  │  Evaluation │  │  Merge Queue    │  │
+│  │ Middleware  │  │   Engine    │  │ (Durable Obj)   │  │
+│  └─────────────┘  └─────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────┘
                            │
-     ┌─────────────────────┼─────────────────────┐
-     ▼                     ▼                     ▼
-┌─────────┐        ┌──────────┐         ┌──────────┐
-│   D1    │        │    KV    │         │ Artifacts│
-│(SQLite) │        │(Tokens,  │         │  (Git)   │
-│         │        │  State)  │         │          │
-└─────────┘        └──────────┘         └──────────┘
+    ┌─────────┬────────────┼───────────┬──────────┐
+    ▼         ▼            ▼           ▼          ▼
+┌───────┐ ┌────────┐ ┌───────────┐ ┌────────┐ ┌────────┐
+│  D1   │ │   KV   │ │ Artifacts │ │   R2   │ │ Queues │
+│changes│ │identity│ │   (Git)   │ │backups │ │  jobs  │
+│events │ │ state  │ │           │ │        │ │        │
+│ audit │ │        │ │           │ │        │ │        │
+└───────┘ └────────┘ └───────────┘ └────────┘ └────────┘
 ```
 
-### Tech Stack
+**Tech stack:** Cloudflare Workers (V8 isolates) · [Hono](https://hono.dev/) ·
+[isomorphic-git](https://isomorphic-git.org/) with an in-memory filesystem · D1 (SQLite) ·
+KV · R2 · [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) ·
+server-rendered Hono JSX with CSS-in-JSX. The UI is server-rendered by default; the handful
+of inline scripts (file tree, clipboard, import progress) are progressive enhancement — the
+pages work without them.
 
-- **Runtime**: Cloudflare Workers (V8 isolates)
-- **Web Framework**: Hono
-- **Git Operations**: isomorphic-git with in-memory filesystem
-- **Database**: D1 (SQLite)
-- **Caching/State**: KV
-- **Git Hosting**: Cloudflare Artifacts
-- **UI**: Server-rendered JSX (no client JS)
-- **Styling**: CSS-in-JSX
+See [`docs/developer/architecture.md`](docs/developer/architecture.md) for the full design.
 
-## API Usage
+## Documentation
 
-### Authentication
+Published at [docs.usestratum.dev](https://docs.usestratum.dev), built from
+[`website/`](website/) (Astro Starlight).
 
-Stratum supports multiple authentication methods:
+**Users** — [Getting started](docs/user-guide/getting-started.md) ·
+[Importing from GitHub](docs/user-guide/importing.md) ·
+[CI integration](docs/user-guide/ci-integration.md) ·
+[Troubleshooting](docs/user-guide/troubleshooting.md) ·
+[FAQ](docs/user-guide/faq.md)
 
-**Email Magic Links (Recommended):**
-```bash
-# Visit the login page
-curl https://your-instance.workers.dev/auth/email
+**API** — [OpenAPI spec](docs/api/openapi.yml) ·
+[Authentication](docs/api/authentication.md) ·
+[Endpoints](docs/api/endpoints/README.md) ·
+[Error codes](docs/api/errors.md)
 
-# Enter your email and click "Send Magic Link"
-# Check your inbox and click the secure link to sign in
-```
+**Developers** — [Architecture](docs/developer/architecture.md) ·
+[Local setup](docs/developer/local-setup.md) ·
+[Database schema](docs/developer/database.md) ·
+[Queues](docs/developer/queues.md) ·
+[Testing](docs/developer/testing.md) ·
+[Deployment](docs/developer/deployment.md)
 
-**GitHub OAuth:**
-```bash
-# Initiate login
-curl https://your-instance.workers.dev/auth/github
+**Operations** — [Backup & restore](docs/runbooks/backup-restore.md) ·
+[Artifacts scaling & operating policy](docs/runbooks/artifacts-scaling.md) ·
+[D1 migration reconciliation](docs/runbooks/d1-migration-reconciliation.md)
 
-# After OAuth callback, you'll have a session cookie
-```
-
-**API Tokens:**
-```bash
-# Create an agent identity (via web UI or API)
-# Then use the token in requests:
-curl https://your-instance.workers.dev/api/projects \
-  -H "Authorization: Bearer stratum_agent_xxxxx"
-```
-
-### Core Endpoints
-
-#### Projects
-```bash
-# List projects
-GET /api/projects
-
-# Create project
-POST /api/projects
-{
-  "name": "my-project",
-  "visibility": "private"
-}
-
-# Import from GitHub
-POST /api/projects/:namespace/:slug/import
-{
-  "url": "https://github.com/facebook/react",
-  "branch": "main"
-}
-```
-
-#### Workspaces
-```bash
-# Create workspace
-POST /api/projects/:namespace/:slug/workspaces
-{
-  "name": "feature-branch"
-}
-
-# Commit changes
-POST /api/workspaces/:name/commit
-{
-  "files": {
-    "src/index.ts": "export const fixed = true;"
-  },
-  "message": "Fix the bug",
-  "projectId": "..."
-}
-```
-
-#### Changes
-```bash
-# Create change
-POST /api/projects/:name/changes
-{
-  "workspace": "feature-branch"
-}
-
-# Merge change
-POST /api/changes/:id/merge
-```
-
-See [full API documentation](docs/api/openapi.yml) for complete reference.
-
-## Evaluation Configuration
-
-Configure evaluators in `.stratum/policy.yaml`:
-
-```yaml
-evaluation:
-  evaluators:
-    - id: secrets
-      type: secret_scan
-      required: true
-
-    - id: diff_check
-      type: diff
-      max_files_changed: 30
-      restricted_paths:
-        - "src/auth/**"
-
-    - id: ci
-      type: webhook
-      url: "https://ci.example.com/evaluate"
-      timeout_seconds: 300
-
-merge:
-  auto_merge:
-    enabled: false
-```
+**Decisions** — [ADR 001: Namespace support](docs/adr/001-namespace-support.md) ·
+[ADR 002: Queue-based imports](docs/adr/002-queue-based-imports.md) ·
+[ADR 003: D1 for import state](docs/adr/003-d1-for-import-state.md) ·
+[ADR 004: High-frequency agent commits](docs/adr/004-high-frequency-agent-commits.md) ·
+[ADR 005: Git smart-HTTP proxy](docs/adr/005-git-smart-http-proxy.md) ·
+[ADR 006: SSH transport](docs/adr/006-ssh-transport.md)
 
 ## Deployment
 
-### Automatic (GitHub Actions)
+### GitHub Actions
 
-The repository includes GitHub Actions workflows:
-
-- **CI** (`.github/workflows/ci.yml`): Runs tests, lint, and typecheck on PRs
-- **Deploy Staging**: Auto-deploys to staging on every push to `main`
-- **Deploy Production**: Manual trigger for production deploys
+- **`pr-checks.yml`** — tests, lint, typecheck, and the CLI/agent/MCP package builds on
+  every pull request, plus a staging preview deploy.
+- **`ci.yml`** — the same gates on every push to `main`, then deploys to staging and to
+  production. Both deploys are gated by GitHub deployment environments, so production waits
+  for whatever approvals that environment requires.
+- **`deploy-production.yml`** — manual (`workflow_dispatch`) production deploy.
+- **`d1-migrate.yml`** — manual D1 migrations against staging or production.
 
 ### Manual
 
 ```bash
-# Deploy to staging
 npx wrangler deploy --env=staging
+npx wrangler deploy --env=production
 
-# Deploy to production
-npx wrangler deploy
-
-# Apply database migrations
 npx wrangler d1 migrations apply stratum --remote
 npx wrangler d1 migrations apply stratum-staging --env=staging --remote
 ```
 
-See [Deployment Guide](docs/developer/deployment.md) for detailed instructions.
-
-## Known Limitations
-
-- **Authorization**: Project-level access control is minimal; auth middleware resolves users but doesn't enforce ownership on all routes
-- **Merge semantics**: Squash merge only; true merge commits not yet supported
-- **Diff limits**: Diffs are hunk-level with unified and split views, but binary files are not diffed and very large files are rendered whole
-- **Scale**: Git operations run in-memory; large repos will hit Worker limits
-
-See [CURRENT_CAPABILITIES.md](docs/CURRENT_CAPABILITIES.md) for more details.
-
-## Artifacts Operating Policy
-
-To align with Cloudflare Artifacts best practices:
-
-- **Environment namespace separation**: production and staging must use distinct Artifacts namespaces.
-- **Isolation unit**: each Stratum project maps to a dedicated Git repository in Artifacts.
-- **Metadata strategy**: commit/evaluation provenance that should not alter tree contents is **planned to be stored** as Git notes (Phase 2 design decision); relational/query metadata remains in D1.
-- **Scaling**: when namespace traffic grows, shard by workload class (for example: `stratum-prod-realtime` and `stratum-prod-batch`) and migrate new projects to shard-specific namespaces.
-
-### Namespace checklist
-
-- Production namespace: `stratum-prod`
-- Staging namespace: `stratum-staging`
-- Never share a namespace between environments.
-
-### Namespace change safety
-
-Before changing `[[artifacts]]` / `[[env.staging.artifacts]]` namespace values in `wrangler.toml`, perform a pre-deploy audit and migrate existing repos from the old namespace using the Artifacts REST API so data is not orphaned. Track project-to-namespace migration in the runbook at `docs/runbooks/artifacts-scaling.md`.
-
-## Development Roadmap
-
-For the authoritative, current state see [docs/CURRENT_CAPABILITIES.md](docs/CURRENT_CAPABILITIES.md);
-open items are tracked in [docs/REMAINING_WORK.md](docs/REMAINING_WORK.md).
-
-### Phase 0 ✅
-
-- Basic fork/commit/merge loop on Artifacts
-- GitHub import
-
-### Phase 1 ✅
-
-- Persistent storage (D1)
-- Authentication (OAuth + API tokens + email)
-- Evaluation engine (diff, webhook, secret scanning)
-- Basic web UI
-
-### Phase 2 ✅
-
-- LLM evaluator via AI Gateway
-- Sandbox execution
-- Event-driven evaluation pipeline
-- OAuth login for web UI
-- Durable Object merge queue
-- Provenance tracking
-
-### Phase 3 ✅
-
-- Organizations and teams
-- CLI tool (`@stratum/cli`) — built at full parity, not yet published to npm
-- Reference agent integration
-- Bidirectional GitHub sync
-- Issue tracker
-
-### Phase 4 (Current)
-
-- ✅ Security & durability hardening (audit trail, backup/restore, deletion jobs)
-- 📋 Stratum Cloud (managed offering)
-- 📋 Billing and multi-tenancy
+Production and staging **must** use distinct Artifacts namespaces, and changing a namespace
+in `wrangler.toml` requires a migration of the existing repos — see
+[`docs/runbooks/artifacts-scaling.md`](docs/runbooks/artifacts-scaling.md) for the operating
+policy and the migration procedure, and
+[`docs/developer/deployment.md`](docs/developer/deployment.md) for deploy detail.
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, coding
+standards, and the PR process; [ROADMAP.md](ROADMAP.md) lists the open work, and issues
+labelled [`good first issue`](https://github.com/stratum-eng/stratum/labels/good%20first%20issue)
+are a good entry point.
 
-Key areas needing work:
+Working with an AI coding agent? Point it at [AGENTS.md](AGENTS.md) — the agent-facing
+version of the contributor guide.
 
-1. **Authorization**: Enforce project-level access control
-2. **Diff depth**: Per-line intra-hunk highlighting and binary-file diffs (hunk-level unified/split views ship already)
-3. **Merge semantics**: Handle conflicts properly, support true merges
-4. **Scale**: Move git operations off the Worker to Containers or a backend service
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Notable changes are
+recorded in [CHANGELOG.md](CHANGELOG.md).
+
+## Security
+
+Please **do not** report vulnerabilities through public issues. Use a
+[private security advisory](https://github.com/stratum-eng/stratum/security/advisories/new)
+instead — see [SECURITY.md](SECURITY.md) for what to include and expected response times.
 
 ## License
 
-MIT - See [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-Built with:
-- [Cloudflare Workers](https://workers.cloudflare.com/)
-- [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/)
-- [Hono](https://hono.dev/)
-- [isomorphic-git](https://isomorphic-git.org/)
+Built with [Cloudflare Workers](https://workers.cloudflare.com/),
+[Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/),
+[Hono](https://hono.dev/), and [isomorphic-git](https://isomorphic-git.org/).
