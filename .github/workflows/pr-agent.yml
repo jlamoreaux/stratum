@@ -85,6 +85,8 @@ jobs:
           config.fallback_models: '["openai/workers-ai/@cf/zai-org/glm-5.3-flash","openai/openai/gpt-5.6-terra"]'
           # Gateway models are absent from LiteLLM's token registry; cap explicitly.
           config.custom_model_max_tokens: "131072"
+          # Default pr_actions excludes synchronize; opt in so pushes re-review.
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "synchronize"]'
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "false"
           github_action_config.auto_improve: "false"
