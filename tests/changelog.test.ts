@@ -405,7 +405,10 @@ describe("validateChangelog", () => {
   });
 
   it("does not flag a correctly ordered history of very large versions", () => {
-    const text = `# Changelog\n\n## [Unreleased]\n\n## [9007199254740993.0.0] - 2026-08-29\n\n### Added\n- x\n\n## [9007199254740992.0.0] - 2026-08-28\n\n### Added\n- y\n\n[Unreleased]: u\n[9007199254740993.0.0]: a\n[9007199254740992.0.0]: b\n`;
+    const text =
+      "# Changelog\n\n## [Unreleased]\n\n## [9007199254740993.0.0] - 2026-08-29\n\n### Added\n- x\n\n" +
+      "## [9007199254740992.0.0] - 2026-08-28\n\n### Added\n- y\n\n" +
+      "[Unreleased]: u\n[9007199254740993.0.0]: a\n[9007199254740992.0.0]: b\n";
     expect(validateChangelog(text)).toEqual([]);
   });
 
