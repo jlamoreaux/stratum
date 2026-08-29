@@ -50,7 +50,19 @@ pass-through. Verify actuals in AI Gateway analytics after the first week.
   run with base-repo secrets).
 - To change models, edit the workflow env — one line per model; no code involved.
 
-## Security posture
+## Security posture & abuse bounds
+
+Who can spend money, from broadest to narrowest:
+
+- **Strangers: nobody.** Fork PRs and non-collaborator comments skip the job before a runner
+  starts — a flood of drive-by PRs produces skipped jobs, not LLM calls.
+- **Collaborators: bounded.** Per-PR concurrency cancels the in-flight review when a new push
+  supersedes it, and a daily cap (50 successful runs, checked against the Actions API before
+  the review step) bounds total spend even for a compromised collaborator account.
+- **Backstop:** gateway-level rate limits / spend caps on the Cloudflare side, plus billing
+  notifications on the account. These should never be the first line of defense.
+
+Other hardening:
 
 - The action image is pinned by immutable sha256 digest, not by tag.
 - The job has `contents: read` — the bot can comment but never push.

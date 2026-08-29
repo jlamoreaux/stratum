@@ -21,6 +21,12 @@ on:
   issue_comment:
     types: [created]
 
+# One review at a time per PR; a new push cancels the in-flight review of the
+# now-stale commit instead of paying for both.
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
 jobs:
   pr_agent:
     # Trust gates:
@@ -45,7 +51,27 @@ jobs:
       pull-requests: write
       contents: read
     steps:
+      # Hard daily spend bound, independent of any Cloudflare-side control:
+      # past the cap the review step is skipped (job stays green). Cap-skipped
+      # runs also count as successful, so the counter cannot be outrun.
+      - name: Daily review cap
+        id: cap
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DAILY_REVIEW_CAP: "50"
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          count=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/pr-agent.yml/runs?created=%3E%3D${today}&status=success&per_page=1" --jq '.total_count')
+          echo "Successful pr-agent runs today: $count (cap: $DAILY_REVIEW_CAP)"
+          if [ "$count" -ge "$DAILY_REVIEW_CAP" ]; then
+            echo "::warning::Daily AI-review cap reached ($count/$DAILY_REVIEW_CAP); skipping review."
+            echo "under_cap=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "under_cap=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: PR-Agent
+        if: steps.cap.outputs.under_cap == 'true'
         # 0.41.0-github_action, pinned by immutable digest (tag alone is mutable).
         uses: docker://pragent/pr-agent@sha256:3121a7b8e3ab497b4df09dea6a444da8f01a474496c8c2f722828512c52fd266
         env:
