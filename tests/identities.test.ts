@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   deleteIdentitiesForUser,
   getIdentityByIssuerSubject,
@@ -19,6 +19,12 @@ const mockLogger: Logger = {
 
 const GITHUB_ISSUER = "https://github.com";
 const GOOGLE_ISSUER = "https://accounts.google.com";
+
+beforeEach(() => {
+  // The shared mockLogger persists across tests; without a reset, the
+  // re-point warn assertion could pass on a stale call from an earlier test.
+  vi.clearAllMocks();
+});
 
 function seedUser(raw: ReturnType<typeof makeSqliteD1>["raw"], id: string): void {
   raw

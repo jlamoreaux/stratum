@@ -185,6 +185,24 @@ describe("deleteAccountCascade — SSO/SCIM tables", () => {
     expect(survivor.disabled_at).toBeNull();
     expect(countWhere(raw, "scim_members", "connection_id", "conn_1")).toBe(0);
     expect(countWhere(raw, "org_sso_connections", "org_id", "org_1")).toBe(0);
+
+    // ONE summary audit for the batch re-enable, not a per-user fan-out.
+    const audits = raw
+      .prepare("SELECT action, actor_type, detail FROM audit_log WHERE subject = 'org_1'")
+      .all() as Array<{ action: string; actor_type: string; detail: string }>;
+    const summary = audits.find((row) => row.action === "sso.connection.deleted");
+    expect(summary).toBeDefined();
+    expect(summary?.actor_type).toBe("system");
+    const detail = JSON.parse(summary?.detail ?? "{}") as {
+      via: string;
+      orgId: string;
+      connectionId: string;
+      reenabledUserIds: string[];
+    };
+    expect(detail.via).toBe("org.deleted");
+    expect(detail.orgId).toBe("org_1");
+    expect(detail.connectionId).toBe("conn_1");
+    expect(detail.reenabledUserIds).toEqual(["usr_2"]);
   });
 
   it("keeps the connection when the org survives via successor promotion", async () => {

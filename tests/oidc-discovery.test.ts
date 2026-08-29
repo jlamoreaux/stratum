@@ -121,6 +121,7 @@ describe("discoverOidcConfiguration", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data).toEqual({
+      issuer: ISSUER,
       authorizationEndpoint: `${ISSUER}/authorize`,
       tokenEndpoint: `${ISSUER}/token`,
       jwksUri: `${ISSUER}/jwks`,
@@ -128,6 +129,23 @@ describe("discoverOidcConfiguration", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       `${ISSUER}/.well-known/openid-configuration`,
       expect.objectContaining({ redirect: "error" }),
+    );
+  });
+
+  it("normalizes a trailing-slash issuer: discovery succeeds and the returned issuer is canonical", async () => {
+    // The compliant stub advertises the canonical (no-trailing-slash) issuer;
+    // the admin typed one with a slash. The normalized form must drive the
+    // discovery URL, the RFC 8414 equality check, AND the returned issuer.
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(discoveryDoc()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await discoverOidcConfiguration(`${ISSUER}/`, mockLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.issuer).toBe(ISSUER);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${ISSUER}/.well-known/openid-configuration`,
+      expect.anything(),
     );
   });
 

@@ -68,6 +68,8 @@ describe("SEC-5: /dev-login gating", () => {
 
     const res = await app.fetch(devLoginRequest(), makeEnv({ DEV_LOGIN_ENABLED: "true" }));
     expect(res.status).toBe(403);
+    // No session cookie may be minted for the refused disabled account.
+    expect(res.headers.get("set-cookie")).toBeNull();
   });
 
   it("stays forbidden on a non-localhost host even when enabled", async () => {

@@ -382,12 +382,15 @@ app.post("/send-login", async (c) => {
   }
 
   try {
-    // A disabled account gets the same enumeration-safe `login_link_sent`
-    // response as an unknown one, but no mail: a link would only lead to a
-    // hard `account_disabled` rejection at verify time, and refusing loudly
-    // here would leak which addresses have (disabled) accounts.
-    if (existingUser.success && existingUser.data.disabledAt) {
-      logger.info("Login requested for disabled account; skipping send", { emailHash });
+    // A disabled or deleting account gets the same enumeration-safe
+    // `login_link_sent` response as an unknown one, but no mail: a link would
+    // only lead to a hard `account_disabled` rejection at verify time, and
+    // refusing loudly here would leak which addresses have (disabled or
+    // mid-erasure) accounts.
+    if (existingUser.success && (existingUser.data.disabledAt || existingUser.data.deletingAt)) {
+      logger.info("Login requested for disabled or deleting account; skipping send", {
+        emailHash,
+      });
       return emailAuthRedirect(c, "success", "login_link_sent", "/auth/login");
     }
 
@@ -481,10 +484,13 @@ app.post("/send", async (c) => {
     // Check if user exists to determine intent
     const existingUser = await getUserByEmail(c.env.DB, email, logger);
 
-    // Same silent refusal as /send-login: a disabled account gets the uniform
-    // success response but no mail (a link could only fail at verify time).
-    if (existingUser.success && existingUser.data.disabledAt) {
-      logger.info("Legacy magic link requested for disabled account; skipping send", { emailHash });
+    // Same silent refusal as /send-login: a disabled or deleting account gets
+    // the uniform success response but no mail (a link could only fail at
+    // verify time).
+    if (existingUser.success && (existingUser.data.disabledAt || existingUser.data.deletingAt)) {
+      logger.info("Legacy magic link requested for disabled or deleting account; skipping send", {
+        emailHash,
+      });
       return emailAuthRedirect(c, "success", "email_sent");
     }
 

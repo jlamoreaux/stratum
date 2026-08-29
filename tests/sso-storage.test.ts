@@ -7,8 +7,8 @@ import {
   getSsoConnectionByOrgId,
   getSsoConnectionByOrgSlug,
   getSsoConnectionByVerifiedDomain,
-  listDeactivatedScimUserIds,
   normalizeEmailDomains,
+  reenableUsersForConnectionRemoval,
   rotateScimToken,
   setSsoConnectionEnabled,
   setSsoDomainsVerified,
@@ -413,15 +413,95 @@ describe("deleteSsoConnection", () => {
       )
       .run(connection.id, "usr_b", 1, new Date().toISOString());
 
-    const deactivated = await listDeactivatedScimUserIds(db, mockLogger, connection.id);
-    expect(deactivated.success).toBe(true);
-    if (deactivated.success) expect(deactivated.data).toEqual(["usr_a"]);
-
     const result = await deleteSsoConnection(db, mockLogger, connection.id);
     expect(result.success).toBe(true);
 
     expect(raw.prepare("SELECT COUNT(*) AS n FROM scim_members").get()).toEqual({ n: 0 });
     expect(raw.prepare("SELECT COUNT(*) AS n FROM org_sso_connections").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("reenableUsersForConnectionRemoval", () => {
+  function addScimMember(raw: Raw, connectionId: string, userId: string, active: number): void {
+    raw
+      .prepare(
+        "INSERT INTO scim_members (connection_id, user_id, active, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(connectionId, userId, active, new Date().toISOString());
+  }
+
+  function disableUserRow(raw: Raw, userId: string): void {
+    raw
+      .prepare("UPDATE users SET disabled_at = ? WHERE id = ?")
+      .run("2026-02-01T00:00:00.000Z", userId);
+  }
+
+  function disabledAtOf(raw: Raw, userId: string): string | null {
+    const row = raw.prepare("SELECT disabled_at FROM users WHERE id = ?").get(userId) as {
+      disabled_at: string | null;
+    };
+    return row.disabled_at;
+  }
+
+  it("re-enables exactly the users this connection deactivated", async () => {
+    const { db, raw } = setup();
+    seedUser(raw, "usr_a");
+    seedUser(raw, "usr_b");
+    const connection = await seedConnection(db, "org_1");
+    addScimMember(raw, connection.id, "usr_a", 0);
+    disableUserRow(raw, "usr_a");
+    // usr_b is managed but holds no deactivation vote here; a stray
+    // disabled_at must not be cleared by an active=1 row.
+    addScimMember(raw, connection.id, "usr_b", 1);
+    disableUserRow(raw, "usr_b");
+
+    const result = await reenableUsersForConnectionRemoval(db, mockLogger, connection.id);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual(["usr_a"]);
+    expect(disabledAtOf(raw, "usr_a")).toBeNull();
+    expect(disabledAtOf(raw, "usr_b")).not.toBeNull();
+  });
+
+  it("cross-connection guard: another connection's standing deactivation keeps disabled_at", async () => {
+    const { db, raw } = setup();
+    seedUser(raw, "usr_shared");
+    seedOrg(raw, "org_2", "globex", "usr_owner");
+    const first = await seedConnection(db, "org_1", ["corp.example.com"]);
+    const second = await seedConnection(db, "org_2", ["globex.example.com"]);
+    addScimMember(raw, first.id, "usr_shared", 0);
+    addScimMember(raw, second.id, "usr_shared", 0);
+    disableUserRow(raw, "usr_shared");
+
+    // Removing connection A must not resurrect the account B still deactivates.
+    const result = await reenableUsersForConnectionRemoval(db, mockLogger, first.id);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual([]);
+    expect(disabledAtOf(raw, "usr_shared")).not.toBeNull();
+  });
+
+  it("excludeUserId leaves the excluded (being-erased) user untouched", async () => {
+    const { db, raw } = setup();
+    seedUser(raw, "usr_erased");
+    seedUser(raw, "usr_kept");
+    const connection = await seedConnection(db, "org_1");
+    addScimMember(raw, connection.id, "usr_erased", 0);
+    addScimMember(raw, connection.id, "usr_kept", 0);
+    disableUserRow(raw, "usr_erased");
+    disableUserRow(raw, "usr_kept");
+
+    const result = await reenableUsersForConnectionRemoval(db, mockLogger, connection.id, {
+      excludeUserId: "usr_erased",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual(["usr_kept"]);
+    expect(disabledAtOf(raw, "usr_erased")).not.toBeNull();
+    expect(disabledAtOf(raw, "usr_kept")).toBeNull();
+  });
+
+  it("returns STORAGE_ERROR when the database fails", async () => {
+    const result = await reenableUsersForConnectionRemoval(makeThrowingD1(), mockLogger, "ssoc_x");
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.code).toBe("STORAGE_ERROR");
   });
 });
 

@@ -7,8 +7,8 @@ import { findActiveJobForTarget } from "./deletion-jobs";
 import { artifactsRepoNameFromRemote } from "./git-ops";
 import { deleteIdentitiesForUser } from "./identities";
 import { deleteAllUserSessions } from "./sessions";
+import { reenableUsersForConnectionRemoval } from "./sso";
 import { listProjects } from "./state";
-import { enableUser } from "./users";
 
 /**
  * Shared tombstone for anonymized cross-project contributions. A single
@@ -751,28 +751,34 @@ async function resolveOrgOwnership(
     .run();
   // Removing a connection is a clean rollback, never a permanent lockout:
   // users its SCIM deactivated (possibly no longer org members) get their
-  // accounts back before the mapping rows vanish — mirrors the re-enable pass
-  // in DELETE /api/orgs/:slug/sso (src/routes/org-sso.ts). The erased user is
-  // excluded: their account is being deleted anyway.
-  const deactivated = await db
-    .prepare(
-      "SELECT user_id, connection_id FROM scim_members WHERE active = 0 AND user_id != ? " +
-        "AND connection_id IN (SELECT id FROM org_sso_connections WHERE org_id = ?)",
-    )
-    .bind(userId, org.id)
-    .all<{ user_id: string; connection_id: string }>();
-  for (const row of deactivated.results) {
-    const enabled = await enableUser(db, row.user_id, logger);
-    if (!enabled.success) {
-      residuals.push(`org:${org.id}:scim-reenable:${row.user_id}`);
-      continue;
-    }
-    await recordAudit(db, logger, {
-      action: "user.enabled",
-      actorType: "system",
-      subject: row.user_id,
-      detail: { via: "org.deleted", orgId: org.id, connectionId: row.connection_id },
+  // accounts back before the mapping rows vanish — the same set-based helper
+  // (with the cross-connection vote guard) as DELETE /api/orgs/:slug/sso
+  // (src/routes/org-sso.ts). The erased user is excluded: their account is
+  // being deleted anyway. org_id is UNIQUE, so the org has at most one
+  // connection.
+  const connectionRow = await db
+    .prepare("SELECT id FROM org_sso_connections WHERE org_id = ?")
+    .bind(org.id)
+    .first<{ id: string }>();
+  if (connectionRow) {
+    const reenabled = await reenableUsersForConnectionRemoval(db, logger, connectionRow.id, {
+      excludeUserId: userId,
     });
+    if (!reenabled.success) {
+      residuals.push(`org:${org.id}:scim-reenable-batch`);
+    } else {
+      await recordAudit(db, logger, {
+        action: "sso.connection.deleted",
+        actorType: "system",
+        subject: org.id,
+        detail: {
+          via: "org.deleted",
+          orgId: org.id,
+          connectionId: connectionRow.id,
+          reenabledUserIds: reenabled.data,
+        },
+      });
+    }
   }
   await db
     .prepare(

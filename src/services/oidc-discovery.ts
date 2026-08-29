@@ -20,6 +20,8 @@ import { type Result, err, ok } from "../utils/result";
 export const RESERVED_ISSUERS = ["https://github.com", "https://accounts.google.com"] as const;
 
 export interface OidcEndpoints {
+  /** The canonical (trailing-slash-normalized) issuer callers should store. */
+  issuer: string;
   authorizationEndpoint: string;
   tokenEndpoint: string;
   jwksUri: string;
@@ -145,8 +147,12 @@ export async function discoverOidcConfiguration(
   const issuerError = validateIssuer(issuer);
   if (issuerError) return err(issuerError);
 
-  const discoveryUrl = `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
-  logger.info("Fetching OIDC discovery document", { issuer });
+  // Normalize once and use the normalized form everywhere — the discovery URL,
+  // the RFC 8414 issuer equality check, and the returned (stored) issuer — so
+  // a trailing-slash input cannot desync any of the three.
+  const normalizedIssuer = issuer.replace(/\/+$/, "");
+  const discoveryUrl = `${normalizedIssuer}/.well-known/openid-configuration`;
+  logger.info("Fetching OIDC discovery document", { issuer: normalizedIssuer });
 
   let res: Response;
   try {
@@ -194,12 +200,13 @@ export async function discoverOidcConfiguration(
     return err(new ValidationError("discovery document is not valid JSON"));
   }
 
-  if (doc.issuer !== issuer) {
-    logger.warn("OIDC discovery issuer mismatch", { issuer });
+  if (doc.issuer !== normalizedIssuer) {
+    logger.warn("OIDC discovery issuer mismatch", { issuer: normalizedIssuer });
     return err(new ValidationError("discovery document issuer does not match the supplied issuer"));
   }
 
   const endpoints: OidcEndpoints = {
+    issuer: normalizedIssuer,
     authorizationEndpoint: "",
     tokenEndpoint: "",
     jwksUri: "",

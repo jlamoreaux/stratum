@@ -224,11 +224,15 @@ describe("getSsoConnectionByScimTokenHash", () => {
     expect(result.success).toBe(false);
   });
 
-  it("a disabled connection's token gets a plain 401 from the middleware", async () => {
+  it("a disabled connection's token gets a SCIM-envelope 401 from the middleware", async () => {
     await setSsoConnectionEnabled(db, logger, connectionId, false);
     const res = await scimFetch("GET", "/scim/v2/Users");
     expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("Invalid token");
+    expect(res.headers.get("Content-Type")).toBe("application/scim+json");
+    const body = (await res.json()) as { schemas: string[]; status: string; detail: string };
+    expect(body.schemas).toEqual([ERROR_SCHEMA]);
+    expect(body.status).toBe("401");
+    expect(body.detail).toBe("Invalid token");
   });
 });
 
@@ -333,6 +337,7 @@ describe("POST /Users (provision + adopt)", () => {
     expect(body.emails).toEqual([{ value: `alice@${DOMAIN}`, primary: true }]);
     expect(body.meta.resourceType).toBe("User");
     expect(body.meta.location).toBe(`${BASE}/scim/v2/Users/${body.id}`);
+    expect(res.headers.get("Location")).toBe(body.meta.location);
 
     // Username derived exactly like SSO JIT / signup would.
     const user = raw.prepare("SELECT username, email FROM users WHERE id = ?").get(body.id) as {
@@ -376,7 +381,7 @@ describe("POST /Users (provision + adopt)", () => {
     expect(res.status).toBe(400);
   });
 
-  it("adopts an existing verified-domain account with 200, preserving its admin role", async () => {
+  it("adopts an existing verified-domain account with 201 + Location, preserving its admin role", async () => {
     const created = await createUser(db, `carol@${DOMAIN}`, logger);
     if (!created.success) throw new Error("seed failed");
     const carolId = created.data.user.id;
@@ -385,7 +390,8 @@ describe("POST /Users (provision + adopt)", () => {
     const res = await scimFetch("POST", "/scim/v2/Users", {
       body: { schemas: [USER_SCHEMA], userName: `carol@${DOMAIN}`, externalId: "idp-carol" },
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
+    expect(res.headers.get("Location")).toBe(`${BASE}/scim/v2/Users/${carolId}`);
     const body = (await res.json()) as ScimResource;
     expect(body.id).toBe(carolId);
     expect(body.externalId).toBe("idp-carol");
@@ -398,16 +404,65 @@ describe("POST /Users (provision + adopt)", () => {
     expect(scimRowOf(connectionId, carolId)?.active).toBe(1);
   });
 
-  it("a second POST for an already-managed user is 409 uniqueness", async () => {
-    await provision(`dana@${DOMAIN}`);
+  it("a plain duplicate POST converges idempotently (201, no duplicate rows)", async () => {
+    const first = await provision(`dana@${DOMAIN}`);
     const res = await scimFetch("POST", "/scim/v2/Users", {
       body: { schemas: [USER_SCHEMA], userName: `dana@${DOMAIN}` },
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as ScimResource;
+    expect(body.id).toBe(first.id);
+
+    const users = raw
+      .prepare("SELECT COUNT(*) AS n FROM users WHERE email = ?")
+      .get(`dana@${DOMAIN}`) as { n: number };
+    expect(users.n).toBe(1);
+    const members = raw
+      .prepare("SELECT COUNT(*) AS n FROM scim_members WHERE connection_id = ? AND user_id = ?")
+      .get(connectionId, first.id) as { n: number };
+    expect(members.n).toBe(1);
+  });
+
+  it("a retried POST after a partial provision finishes the job (deactivation applied)", async () => {
+    // Partial state: the first POST created the user and the scim_members row
+    // (active=1, no externalId) but died before applying active:false. The IdP
+    // retries the same POST; a 409 would end its retries and strand the
+    // account enabled.
+    const alice = await provision(`alice@${DOMAIN}`);
+    expect(disabledAtOf(alice.id)).toBeNull();
+
+    const res = await scimFetch("POST", "/scim/v2/Users", {
+      body: { schemas: [USER_SCHEMA], userName: `alice@${DOMAIN}`, active: false },
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as ScimResource).active).toBe(false);
+    expect(disabledAtOf(alice.id)).not.toBeNull();
+    expect(scimRowOf(connectionId, alice.id)?.active).toBe(0);
+  });
+
+  it("a retried POST with active:true reactivates a deactivated account (both directions)", async () => {
+    const alice = await provision(`alice@${DOMAIN}`, { active: false });
+    expect(disabledAtOf(alice.id)).not.toBeNull();
+
+    const res = await scimFetch("POST", "/scim/v2/Users", {
+      body: { schemas: [USER_SCHEMA], userName: `alice@${DOMAIN}`, active: true },
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as ScimResource).active).toBe(true);
+    expect(disabledAtOf(alice.id)).toBeNull();
+    expect(scimRowOf(connectionId, alice.id)?.active).toBe(1);
+  });
+
+  it("a POST whose externalId mismatches the stored one is a genuine 409 uniqueness", async () => {
+    await provision(`dana@${DOMAIN}`, { externalId: "idp-dana" });
+    const res = await scimFetch("POST", "/scim/v2/Users", {
+      body: { schemas: [USER_SCHEMA], userName: `dana@${DOMAIN}`, externalId: "idp-other" },
     });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { scimType: string }).scimType).toBe("uniqueness");
   });
 
-  it("heals the concurrent-email race: a lost createUser insert falls into the adopt path (200)", async () => {
+  it("heals the concurrent-email race: a lost createUser insert falls into the adopt path (201)", async () => {
     const actualUsers =
       await vi.importActual<typeof import("../src/storage/users")>("../src/storage/users");
     // Simulate a concurrent OIDC JIT login (or duplicate POST) winning the
@@ -424,7 +479,7 @@ describe("POST /Users (provision + adopt)", () => {
     const res = await scimFetch("POST", "/scim/v2/Users", {
       body: { schemas: [USER_SCHEMA], userName: `raced@${DOMAIN}` },
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     const body = (await res.json()) as ScimResource;
     expect(body.userName).toBe(`raced@${DOMAIN}`);
     expect(scimRowOf(connectionId, body.id)?.active).toBe(1);
@@ -574,6 +629,21 @@ describe("PUT /Users/:id", () => {
     // user cannot silently fall out of the connection's scope.
     expect(scimRowOf(connectionId, userId)).toEqual({ scim_external_id: null, active: 1 });
   });
+
+  it("an invalid PUT (userName change) does NOT adopt the user", async () => {
+    const created = await createUser(db, `visible@${DOMAIN}`, logger);
+    if (!created.success) throw new Error("seed failed");
+    const userId = created.data.user.id;
+    await addOrgMember(db, logger, "org_1", userId, "member");
+
+    const res = await scimFetch("PUT", `/scim/v2/Users/${userId}`, {
+      body: { schemas: [USER_SCHEMA], userName: `renamed@${DOMAIN}`, active: true },
+    });
+    expect(res.status).toBe(400);
+    // A 400 must not adopt: the IdP was told the write failed, so no
+    // scim_members row may record it as managing this user.
+    expect(scimRowOf(connectionId, userId)).toBeUndefined();
+  });
 });
 
 describe("PATCH /Users/:id", () => {
@@ -614,13 +684,25 @@ describe("PATCH /Users/:id", () => {
     expect(((await res.json()) as ScimResource).externalId).toBe("after");
   });
 
-  it("ignores unknown-attribute replaces (Okta/Entra profile sync) instead of erroring", async () => {
+  it("accepts an add op on a stored path (Entra sends Add on link)", async () => {
+    const alice = await provision(`alice@${DOMAIN}`);
+    const res = await scimFetch("PATCH", `/scim/v2/Users/${alice.id}`, {
+      body: { Operations: [{ op: "Add", path: "externalId", value: "linked" }] },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as ScimResource).externalId).toBe("linked");
+  });
+
+  it("ignores unknown-attribute ops (Okta/Entra profile sync) instead of erroring", async () => {
     const alice = await provision(`alice@${DOMAIN}`);
     const res = await scimFetch("PATCH", `/scim/v2/Users/${alice.id}`, {
       body: {
         Operations: [
           { op: "replace", path: "displayName", value: "Alice E." },
           { op: "replace", value: { "name.givenName": "Alice" } },
+          // An add (or any op) on an unknown path is ignored too — the path
+          // resolves first, so the op type never matters for unstored paths.
+          { op: "add", path: "nickName", value: "Al" },
         ],
       },
     });
@@ -628,19 +710,33 @@ describe("PATCH /Users/:id", () => {
     expect(((await res.json()) as ScimResource).active).toBe(true);
   });
 
-  it("rejects non-replace ops with 400 and malformed active values with invalidValue", async () => {
+  it("rejects remove ops on stored paths with 400 and malformed active values with invalidValue", async () => {
     const alice = await provision(`alice@${DOMAIN}`);
-    const add = await scimFetch("PATCH", `/scim/v2/Users/${alice.id}`, {
+    const removed = await scimFetch("PATCH", `/scim/v2/Users/${alice.id}`, {
       body: { Operations: [{ op: "remove", path: "active" }] },
     });
-    expect(add.status).toBe(400);
-    expect(((await add.json()) as { scimType: string }).scimType).toBe("invalidPath");
+    expect(removed.status).toBe(400);
+    expect(((await removed.json()) as { scimType: string }).scimType).toBe("invalidPath");
 
     const bad = await scimFetch("PATCH", `/scim/v2/Users/${alice.id}`, {
       body: { Operations: [{ op: "replace", path: "active", value: "maybe" }] },
     });
     expect(bad.status).toBe(400);
     expect(((await bad.json()) as { scimType: string }).scimType).toBe("invalidValue");
+  });
+
+  it("an invalid PATCH (non-array Operations) does NOT adopt the user", async () => {
+    const created = await createUser(db, `patchable@${DOMAIN}`, logger);
+    if (!created.success) throw new Error("seed failed");
+    const userId = created.data.user.id;
+    await addOrgMember(db, logger, "org_1", userId, "member");
+
+    const res = await scimFetch("PATCH", `/scim/v2/Users/${userId}`, {
+      body: { Operations: { op: "replace", path: "active", value: false } },
+    });
+    expect(res.status).toBe(400);
+    // A 400 must not adopt — see the PUT counterpart.
+    expect(scimRowOf(connectionId, userId)).toBeUndefined();
   });
 
   it("404s for a user outside the connection's scope", async () => {
@@ -795,7 +891,7 @@ describe("Goal-8 E2E: deactivate kills every credential; reactivate restores", (
     const adopted = await scimFetch("POST", "/scim/v2/Users", {
       body: { schemas: [USER_SCHEMA], userName: `dave@${DOMAIN}` },
     });
-    expect(adopted.status).toBe(200);
+    expect(adopted.status).toBe(201);
 
     const whoami = (headers: Record<string, string>) =>
       app.fetch(new Request(`${BASE}/api/whoami`, { headers }), env);

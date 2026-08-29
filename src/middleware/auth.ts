@@ -160,7 +160,18 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
           path: c.req.path,
           tokenHint: sanitizeToken(token),
         });
-        return c.json({ error: "Invalid token" }, 401);
+        // A stratum_scim_ bearer identifies an IdP caller, so answer in the
+        // SCIM Error schema (RFC 7644 §3.12) rather than the repo's plain
+        // {error} JSON — this branch only; other token classes keep theirs.
+        return c.json(
+          {
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            status: "401",
+            detail: "Invalid token",
+          },
+          401,
+          { "Content-Type": "application/scim+json" },
+        );
       }
       c.set("scimConnectionId", connectionResult.data.id);
       c.set("authVia", "token");

@@ -670,6 +670,13 @@ describe("OIDC SSO login", () => {
       setIdToken(await signIdToken({ nonce: first.nonce, emailVerified: true }));
       const okRes = await app.fetch(callbackRequest(first.state, first.cookie), env);
       expect(okRes.headers.get("Location")).toBe("/");
+
+      // Absent claim: the org controls both the DNS-verified domain and the
+      // IdP, so a missing email_verified is treated as verified.
+      const second = await startLogin();
+      setIdToken(await signIdToken({ nonce: second.nonce }));
+      const absentRes = await app.fetch(callbackRequest(second.state, second.cookie), env);
+      expect(absentRes.headers.get("Location")).toBe("/");
     });
 
     it("rejects an out-of-domain guest with domain_not_allowed", async () => {

@@ -762,28 +762,49 @@ export async function purgeExpiredOidcStates(
 }
 
 /**
- * Users this connection deactivated via SCIM (`scim_members.active = 0`) —
- * the set connection deletion must re-enable so removing a connection is a
- * clean rollback, never a permanent lockout.
+ * Re-enable the users a connection deactivated via SCIM
+ * (`scim_members.active = 0`), for connection removal: deleting a connection
+ * is a clean rollback, never a permanent lockout. The NOT-IN subquery is the
+ * cross-connection vote guard — removing one connection must not resurrect a
+ * user ANOTHER connection still deactivates (mirrors `reactivateUser`'s
+ * guard), and doing it set-based in one UPDATE bounds the D1 query count on
+ * large connections. `excludeUserId` skips a user whose account is being
+ * erased anyway. Returns the re-enabled user ids.
  */
-export async function listDeactivatedScimUserIds(
+export async function reenableUsersForConnectionRemoval(
   db: D1Database,
   logger: Logger,
   connectionId: string,
+  opts: { excludeUserId?: string } = {},
 ): Promise<Result<string[], AppError>> {
   try {
-    const { results } = await db
-      .prepare("SELECT user_id FROM scim_members WHERE connection_id = ? AND active = 0")
-      .bind(connectionId)
-      .all<{ user_id: string }>();
-    return ok(results.map((row) => row.user_id));
+    const excludeClause = opts.excludeUserId === undefined ? "" : "AND id != ?";
+    const stmt = db.prepare(
+      `UPDATE users SET disabled_at = NULL
+       WHERE disabled_at IS NOT NULL
+         AND id IN (SELECT user_id FROM scim_members WHERE connection_id = ? AND active = 0)
+         AND id NOT IN (SELECT user_id FROM scim_members WHERE connection_id != ? AND active = 0)
+         ${excludeClause}
+       RETURNING id`,
+    );
+    const bound =
+      opts.excludeUserId === undefined
+        ? stmt.bind(connectionId, connectionId)
+        : stmt.bind(connectionId, connectionId, opts.excludeUserId);
+    const { results } = await bound.all<{ id: string }>();
+    const reenabledUserIds = results.map((row) => row.id);
+    logger.info("Re-enabled SCIM-disabled users for connection removal", {
+      connectionId,
+      reenabled: reenabledUserIds.length,
+    });
+    return ok(reenabledUserIds);
   } catch (error) {
     logger.error(
-      "Failed to list deactivated SCIM users",
+      "Failed to re-enable SCIM-disabled users",
       error instanceof Error ? error : undefined,
       { connectionId },
     );
-    return err(new AppError("Failed to list deactivated SCIM users", "STORAGE_ERROR", 500));
+    return err(new AppError("Failed to re-enable SCIM-disabled users", "STORAGE_ERROR", 500));
   }
 }
 

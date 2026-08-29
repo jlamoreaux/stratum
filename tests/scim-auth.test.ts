@@ -109,7 +109,7 @@ describe("authMiddleware — stratum_scim_* bearer", () => {
     );
   });
 
-  it("returns 401 for an unknown SCIM token, exactly like other invalid tokens", async () => {
+  it("returns a SCIM-envelope 401 for an unknown SCIM token", async () => {
     vi.mocked(getSsoConnectionByScimTokenHash).mockResolvedValue({
       success: false,
       error: new NotFoundError("SSO connection", "by-scim-token"),
@@ -120,10 +120,14 @@ describe("authMiddleware — stratum_scim_* bearer", () => {
       env,
     );
     expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("Invalid token");
+    expect(res.headers.get("Content-Type")).toBe("application/scim+json");
+    const body = (await res.json()) as { schemas: string[]; status: string; detail: string };
+    expect(body.schemas).toEqual(["urn:ietf:params:scim:api:messages:2.0:Error"]);
+    expect(body.status).toBe("401");
+    expect(body.detail).toBe("Invalid token");
   });
 
-  it("returns 401 when the connection lookup errors (fail closed)", async () => {
+  it("returns a SCIM-envelope 401 when the connection lookup errors (fail closed)", async () => {
     vi.mocked(getSsoConnectionByScimTokenHash).mockResolvedValue({
       success: false,
       error: new AppError("boom", "STORAGE_ERROR", 500),
@@ -134,6 +138,10 @@ describe("authMiddleware — stratum_scim_* bearer", () => {
       env,
     );
     expect(res.status).toBe(401);
+    expect(res.headers.get("Content-Type")).toBe("application/scim+json");
+    expect(((await res.json()) as { schemas: string[] }).schemas).toEqual([
+      "urn:ietf:params:scim:api:messages:2.0:Error",
+    ]);
   });
 
   it("does NOT set scimConnectionId for a user token", async () => {

@@ -12,14 +12,13 @@ import {
   deleteSsoConnection,
   findVerifiedDomainConflicts,
   getSsoConnectionByOrgId,
-  listDeactivatedScimUserIds,
   normalizeEmailDomains,
+  reenableUsersForConnectionRemoval,
   rotateScimToken,
   setSsoConnectionEnabled,
   setSsoDomainsVerified,
   upsertSsoConnection,
 } from "../storage/sso";
-import { enableUser } from "../storage/users";
 import type { Env } from "../types";
 import { SSO_SECRET_SALT, encryptToken } from "../utils/crypto";
 import { ConflictError, ValidationError } from "../utils/errors";
@@ -163,10 +162,12 @@ app.put("/:slug/sso", async (c) => {
   if (!domainsResult.success) return appError(domainsResult.error);
   const emailDomains = domainsResult.data;
 
-  const issuer = body.issuer.trim();
-  const discoveryResult = await discoverOidcConfiguration(issuer, logger);
+  const discoveryResult = await discoverOidcConfiguration(body.issuer.trim(), logger);
   if (!discoveryResult.success) return appError(discoveryResult.error);
   const endpoints = discoveryResult.data;
+  // Store the discovery module's canonical (trailing-slash-normalized) issuer,
+  // not the admin's raw input, so id_token `iss` comparisons stay exact.
+  const issuer = endpoints.issuer;
 
   // c.env.SSO_ENCRYPTION_SECRET is set — requireOrgAdmin 501s otherwise.
   const secret = c.env.SSO_ENCRYPTION_SECRET as string;
@@ -228,29 +229,10 @@ app.delete("/:slug/sso", async (c) => {
 
   // Deleting a connection is a clean rollback, never a permanent lockout:
   // users this connection deactivated via SCIM get their accounts back first.
-  const deactivatedResult = await listDeactivatedScimUserIds(c.env.DB, logger, connection.id);
-  if (!deactivatedResult.success) return appError(deactivatedResult.error);
-
-  const reenabledUserIds: string[] = [];
-  for (const targetUserId of deactivatedResult.data) {
-    const enableResult = await enableUser(c.env.DB, targetUserId, logger);
-    if (!enableResult.success) {
-      logger.error(
-        "Failed to re-enable SCIM-disabled user during connection deletion",
-        enableResult.error,
-        { connectionId: connection.id, targetUserId },
-      );
-      return appError(enableResult.error);
-    }
-    reenabledUserIds.push(targetUserId);
-    await recordAudit(c.env.DB, logger, {
-      action: "user.enabled",
-      actorType: "user",
-      actorId: userId,
-      subject: targetUserId,
-      detail: { via: "sso.connection.deleted", connectionId: connection.id },
-    });
-  }
+  // Set-based; the storage helper carries the cross-connection vote guard.
+  const reenableResult = await reenableUsersForConnectionRemoval(c.env.DB, logger, connection.id);
+  if (!reenableResult.success) return appError(reenableResult.error);
+  const reenabledUserIds = reenableResult.data;
 
   const deleteResult = await deleteSsoConnection(c.env.DB, logger, connection.id);
   if (!deleteResult.success) return appError(deleteResult.error);

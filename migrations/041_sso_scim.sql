@@ -89,6 +89,11 @@ CREATE INDEX IF NOT EXISTS idx_oidc_login_states_expires ON oidc_login_states(ex
 ALTER TABLE users ADD COLUMN disabled_at TEXT;
 
 -- Schema drift fix: src/github/client.ts already reads/writes these columns,
--- but no migration ever created them.
+-- but no migration ever created them. SQLite has no ADD COLUMN IF NOT EXISTS,
+-- so before applying in any environment where they might have been hot-fixed
+-- out of band, run `PRAGMA table_info(users)` and reconcile (drop the
+-- out-of-band columns or mark this migration applied). Production evidence
+-- says they don't exist: the reading code has silently error-caught since
+-- migration 007.
 ALTER TABLE users ADD COLUMN github_refresh_token TEXT;
 ALTER TABLE users ADD COLUMN github_token_expires_at INTEGER;

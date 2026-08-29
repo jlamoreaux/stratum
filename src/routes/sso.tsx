@@ -128,9 +128,11 @@ function loginUsable(connection: SsoConnection): boolean {
 }
 
 /**
- * Per-IP hourly cap on /start, mirroring checkMagicLinkRateLimits: reads fail
- * open (an auth path must not lock users out on a KV blip) and the counter is
- * committed only once the request is actually going to redirect to the IdP.
+ * Per-IP hourly cap on /start: reads fail open (an auth path must not lock
+ * users out on a KV blip) and the counter is committed only once the request
+ * is actually going to redirect to the IdP. KV read-then-write is best-effort
+ * under concurrency; unlike magic-link sends (#283) a /start admits no email,
+ * so an atomic Durable Object counter isn't warranted here.
  */
 async function checkSsoStartRateLimit(
   c: SsoContext,
@@ -437,7 +439,7 @@ app.get("/", async (c) => {
   if (!connection) {
     const domain = identifier.split("@").pop() ?? "";
     const byDomain = await getSsoConnectionByVerifiedDomain(c.env.DB, logger, domain);
-    if (byDomain.success) connection = byDomain.data;
+    if (byDomain.success && loginUsable(byDomain.data)) connection = byDomain.data;
   }
 
   if (!connection) {

@@ -1898,6 +1898,49 @@ describe("Auth Signup/Login Integration Tests", () => {
       expect(await extractMagicLinkToken(env)).toBeNull();
     });
 
+    async function seedDeletingUser(email: string, username: string): Promise<User> {
+      const { createUser } = await import("../src/storage/users");
+      await createUser(env.DB, email, {} as unknown as Logger, username);
+      const user = mockUsers.get(`email:${email}`);
+      if (!user) throw new Error(`Failed to seed user ${email}`);
+      user.deletingAt = "2026-08-01T00:00:00.000Z";
+      return user;
+    }
+
+    it("send-login treats a deleting account like a disabled one: uniform success, no mail", async () => {
+      await seedDeletingUser("deleting-send@example.com", "deletingsend");
+
+      const res = await app.fetch(
+        request("/auth/email/send-login", {
+          method: "POST",
+          body: createFormData({ email: "deleting-send@example.com" }),
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("success=login_link_sent");
+      expect(env.EMAIL?.send).not.toHaveBeenCalled();
+      expect(await extractMagicLinkToken(env)).toBeNull();
+    });
+
+    it("legacy send treats a deleting account like a disabled one: uniform success, no mail", async () => {
+      await seedDeletingUser("deleting-legacy@example.com", "deletinglegacy");
+
+      const res = await app.fetch(
+        request("/auth/email/send", {
+          method: "POST",
+          body: createFormData({ email: "deleting-legacy@example.com" }),
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("success=email_sent");
+      expect(env.EMAIL?.send).not.toHaveBeenCalled();
+      expect(await extractMagicLinkToken(env)).toBeNull();
+    });
+
     it("verify hard-rejects a login link for a disabled account with no session or audit row", async () => {
       await seedDisabledUser("disabled-verify@example.com", "disabledverify");
       // A link minted BEFORE the account was disabled must still be refused.

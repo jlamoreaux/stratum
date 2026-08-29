@@ -30,11 +30,12 @@ import { readJsonWithLimit } from "../utils/request-body";
  * - DELETE deactivates instead of erasing; a later GET returns the resource
  *   with active:false. (Okta's lifecycle uses PATCH active:false; a DELETE
  *   that destroyed data would make an IdP misconfiguration unrecoverable.)
- * - PATCH ignores replaces of attributes we don't store (displayName, name.*,
+ * - PATCH ignores ops on attributes we don't store (displayName, name.*,
  *   enterprise-extension paths, ...) instead of erroring: Okta and Entra send
  *   them on every profile sync, and a 4xx would mark the whole user as failed.
- *   Only structurally invalid operations (non-replace ops, malformed values)
- *   are rejected.
+ *   Stored attributes accept replace AND add (Entra sends Add on link; RFC
+ *   7644 add-on-existing-attribute replaces); only remove ops on stored
+ *   attributes and malformed values are rejected.
  */
 
 const app = new Hono<{ Bindings: Env }>();
@@ -50,11 +51,15 @@ const MAX_PAGE_COUNT = 200;
 
 type ScimContext = Context<{ Bindings: Env }>;
 
-function scimJson(body: Record<string, unknown>, status = 200): Response {
+function scimJson(
+  body: Record<string, unknown>,
+  status = 200,
+  headers: Record<string, string> = {},
+): Response {
   // The explicit Content-Type in init survives Response.json's default.
   return Response.json(body, {
     status,
-    headers: { "Content-Type": SCIM_CONTENT_TYPE },
+    headers: { "Content-Type": SCIM_CONTENT_TYPE, ...headers },
   });
 }
 
@@ -462,6 +467,9 @@ app.post("/Users", async (c) => {
   const existing = await getUserByEmail(c.env.DB, email, logger);
   let userId: string;
   let adopted: boolean;
+  // Set when the payload asks for active:true but the account is currently
+  // deactivated for this connection — a retried POST must repair that.
+  let needsReactivation = false;
   if (existing.success) {
     // A soft-deleting account still owns the email; it cannot be adopted and
     // the email cannot be reissued mid-erasure.
@@ -471,7 +479,21 @@ app.post("/Users", async (c) => {
     const memberResult = await getScimMember(c.env.DB, logger, connection.id, existing.data.id);
     if (!memberResult.success) return scimError(500, "Failed to provision user");
     if (memberResult.data !== null) {
-      return scimError(409, "User is already provisioned for this connection", "uniqueness");
+      // An already-managed user is not automatically a conflict: a retried
+      // POST after a partial provision must finish the job — IdPs stop
+      // retrying on 409 and would strand the account in whatever state the
+      // failed step never reached. Only a mismatched externalId against a
+      // non-null stored one is a genuine uniqueness conflict; otherwise
+      // converge and let the normal flow re-apply the remaining steps.
+      if (
+        externalId !== undefined &&
+        memberResult.data.externalId !== null &&
+        memberResult.data.externalId !== externalId
+      ) {
+        return scimError(409, "User is already provisioned for this connection", "uniqueness");
+      }
+      needsReactivation =
+        existing.data.disabledAt !== undefined || memberResult.data.active === false;
     }
     userId = existing.data.id;
     adopted = true;
@@ -539,6 +561,12 @@ app.post("/Users", async (c) => {
   if (!active) {
     const deprovisionResult = await deprovisionUser(c.env.DB, logger, connection.id, userId);
     if (!deprovisionResult.success) return scimError(500, "Failed to provision user");
+  } else if (needsReactivation) {
+    // Convergence applies BOTH active directions: idempotent, and carries the
+    // cross-connection guard, so a repaired retry cannot override another
+    // connection's standing deactivation.
+    const reactivateResult = await reactivateUser(c.env.DB, logger, connection.id, userId);
+    if (!reactivateResult.success) return scimError(500, "Failed to provision user");
   }
 
   await recordAudit(c.env.DB, logger, {
@@ -550,7 +578,12 @@ app.post("/Users", async (c) => {
 
   const provisioned = await getScimScopedUser(c.env.DB, logger, connection, userId);
   if (!provisioned.success) return scimError(500, "Failed to provision user");
-  return scimJson(userResource(c, provisioned.data), adopted ? 200 : 201);
+  // RFC 7644 §3.3: creation answers 201 with a Location header — including
+  // adoption/convergence, where "created" means "now managed here"; Okta and
+  // Entra key off the 201 + Location pair.
+  return scimJson(userResource(c, provisioned.data), 201, {
+    Location: userLocation(c, provisioned.data.userId),
+  });
 });
 
 app.put("/Users/:id", async (c) => {
@@ -565,12 +598,6 @@ app.put("/Users/:id", async (c) => {
   }
   const user = userResult.data;
 
-  // Any successful write verb adopts: after a 2xx the IdP believes it manages
-  // this user, so even a no-op PUT must create the scim_members row —
-  // otherwise the user could silently fall out of the connection's scope.
-  const adoptResult = await ensureScimMember(c.env.DB, logger, connection.id, user.userId);
-  if (!adoptResult.success) return scimError(500, "Failed to update user");
-
   const body = await readScimBody(c, logger);
   if (body instanceof Response) return body;
 
@@ -580,6 +607,14 @@ app.put("/Users/:id", async (c) => {
   if (typeof body.userName === "string" && body.userName.trim().toLowerCase() !== user.email) {
     return scimError(400, "userName cannot be changed", "mutability");
   }
+
+  // Any successful write verb adopts: after a 2xx the IdP believes it manages
+  // this user, so even a no-op PUT must create the scim_members row —
+  // otherwise the user could silently fall out of the connection's scope.
+  // Adoption runs AFTER body parsing and structural validation: a 400 must
+  // not adopt.
+  const adoptResult = await ensureScimMember(c.env.DB, logger, connection.id, user.userId);
+  if (!adoptResult.success) return scimError(500, "Failed to update user");
 
   if (body.externalId !== undefined) {
     if (typeof body.externalId !== "string" && body.externalId !== null) {
@@ -635,10 +670,6 @@ app.patch("/Users/:id", async (c) => {
   }
   const user = userResult.data;
 
-  // Adopt on any successful write verb — see the PUT handler's rationale.
-  const adoptResult = await ensureScimMember(c.env.DB, logger, connection.id, user.userId);
-  if (!adoptResult.success) return scimError(500, "Failed to update user");
-
   const body = await readScimBody(c, logger);
   if (body instanceof Response) return body;
   const operations = body.Operations;
@@ -654,16 +685,31 @@ app.patch("/Users/:id", async (c) => {
       return scimError(400, "Each operation must be an object", "invalidSyntax");
     }
     const op = operation as Record<string, unknown>;
-    // Entra capitalizes op names ("Replace"); compare case-insensitively.
-    if (typeof op.op !== "string" || op.op.toLowerCase() !== "replace") {
+    if (typeof op.op !== "string") {
       return scimError(400, `Unsupported PATCH operation '${String(op.op)}'`, "invalidPath");
     }
+    // Entra capitalizes op names ("Replace", "Add"); compare case-insensitively.
+    const opName = op.op.toLowerCase();
     const path = typeof op.path === "string" ? op.path.trim().toLowerCase() : undefined;
 
+    // Resolve the path FIRST: an op on an attribute we don't store
+    // (displayName, name.givenName, enterprise extension paths, ...) is
+    // ignored regardless of op type — Okta/Entra profile syncs send them on
+    // every update, and a 4xx would mark the whole user as failed.
+    if (path !== undefined && path !== "active" && path !== "externalid") {
+      continue;
+    }
+    // On stored paths: RFC 7644 §3.5.2.1 says add on an existing single-valued
+    // attribute replaces it (Entra sends Add on initial link), so add and
+    // replace are equivalent here; remove (and anything else) is invalid.
+    if (opName !== "replace" && opName !== "add") {
+      return scimError(400, `Unsupported PATCH operation '${String(op.op)}'`, "invalidPath");
+    }
+
     if (path === undefined) {
-      // No-path replace: the value object carries the attributes.
+      // No-path op: the value object carries the attributes.
       if (op.value === null || typeof op.value !== "object" || Array.isArray(op.value)) {
-        return scimError(400, "replace without a path requires an object value", "invalidValue");
+        return scimError(400, `${opName} without a path requires an object value`, "invalidValue");
       }
       for (const [key, value] of Object.entries(op.value as Record<string, unknown>)) {
         const attribute = key.toLowerCase();
@@ -687,15 +733,18 @@ app.patch("/Users/:id", async (c) => {
         return scimError(400, "active must be a boolean", "invalidValue");
       }
       desiredActive = coerced;
-    } else if (path === "externalid") {
+    } else {
       if (typeof op.value !== "string" && op.value !== null) {
         return scimError(400, "externalId must be a string", "invalidValue");
       }
       externalIdUpdate = op.value;
     }
-    // else: unknown-path replace (displayName, name.givenName, enterprise
-    // extension paths, ...) — ignored, not errored; see module doc.
   }
+
+  // Adopt on any successful write verb — see the PUT handler's rationale.
+  // Adoption runs AFTER the Operations validation above: a 400 must not adopt.
+  const adoptResult = await ensureScimMember(c.env.DB, logger, connection.id, user.userId);
+  if (!adoptResult.success) return scimError(500, "Failed to update user");
 
   if (externalIdUpdate !== undefined && externalIdUpdate !== user.externalId) {
     const failure = await applyExternalId(

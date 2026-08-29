@@ -9,7 +9,6 @@ import { NotFoundError } from "../src/utils/errors";
 vi.mock("../src/storage/users", () => ({
   getUser: vi.fn(),
   getUserByToken: vi.fn(),
-  enableUser: vi.fn(),
 }));
 
 vi.mock("../src/storage/agents", () => ({
@@ -36,7 +35,7 @@ vi.mock("../src/storage/sso", async (importOriginal) => {
     upsertSsoConnection: vi.fn(),
     getSsoConnectionByOrgId: vi.fn(),
     deleteSsoConnection: vi.fn(),
-    listDeactivatedScimUserIds: vi.fn(),
+    reenableUsersForConnectionRemoval: vi.fn(),
     findVerifiedDomainConflicts: vi.fn(),
     setSsoDomainsVerified: vi.fn(),
     setSsoConnectionEnabled: vi.fn(),
@@ -66,13 +65,13 @@ import {
   deleteSsoConnection,
   findVerifiedDomainConflicts,
   getSsoConnectionByOrgId,
-  listDeactivatedScimUserIds,
+  reenableUsersForConnectionRemoval,
   rotateScimToken,
   setSsoConnectionEnabled,
   setSsoDomainsVerified,
   upsertSsoConnection,
 } from "../src/storage/sso";
-import { enableUser, getUserByToken } from "../src/storage/users";
+import { getUserByToken } from "../src/storage/users";
 
 function makeApp() {
   const app = new Hono<{ Bindings: Env }>();
@@ -171,6 +170,7 @@ beforeEach(() => {
   vi.mocked(discoverOidcConfiguration).mockResolvedValue({
     success: true,
     data: {
+      issuer: "https://idp.example.com",
       authorizationEndpoint: "https://idp.example.com/authorize",
       tokenEndpoint: "https://idp.example.com/token",
       jwksUri: "https://idp.example.com/jwks",
@@ -364,6 +364,21 @@ describe("PUT /api/orgs/:slug/sso", () => {
     expect(upsertSsoConnection).not.toHaveBeenCalled();
   });
 
+  it("stores the discovery module's canonical issuer, not the raw trailing-slash input", async () => {
+    const res = await makeApp().fetch(
+      request(
+        "PUT",
+        "/api/orgs/acme/sso",
+        { ...validPutBody, issuer: "https://idp.example.com/" },
+        authHeader,
+      ),
+      makeEnv(),
+    );
+    expect(res.status).toBe(201);
+    const input = vi.mocked(upsertSsoConnection).mock.calls[0]?.[2];
+    expect(input?.issuer).toBe("https://idp.example.com");
+  });
+
   it("returns 400 (not 500) for a malformed JSON body", async () => {
     const res = await makeApp().fetch(
       new Request("http://localhost/api/orgs/acme/sso", {
@@ -445,11 +460,10 @@ describe("DELETE /api/orgs/:slug/sso", () => {
   });
 
   it("re-enables users the connection disabled, then deletes it", async () => {
-    vi.mocked(listDeactivatedScimUserIds).mockResolvedValue({
+    vi.mocked(reenableUsersForConnectionRemoval).mockResolvedValue({
       success: true,
       data: ["usr_x", "usr_y"],
     });
-    vi.mocked(enableUser).mockResolvedValue({ success: true, data: undefined });
 
     const res = await makeApp().fetch(
       request("DELETE", "/api/orgs/acme/sso", undefined, authHeader),
@@ -459,9 +473,11 @@ describe("DELETE /api/orgs/:slug/sso", () => {
     const body = (await res.json()) as { deleted: boolean; reenabledUserIds: string[] };
     expect(body.deleted).toBe(true);
     expect(body.reenabledUserIds).toEqual(["usr_x", "usr_y"]);
-    expect(enableUser).toHaveBeenCalledTimes(2);
-    expect(enableUser).toHaveBeenCalledWith(expect.anything(), "usr_x", expect.anything());
-    expect(enableUser).toHaveBeenCalledWith(expect.anything(), "usr_y", expect.anything());
+    expect(reenableUsersForConnectionRemoval).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "ssoc_1",
+    );
     expect(deleteSsoConnection).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
@@ -470,18 +486,41 @@ describe("DELETE /api/orgs/:slug/sso", () => {
     expect(recordAudit).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      expect.objectContaining({ action: "sso.connection.deleted" }),
+      expect.objectContaining({
+        action: "sso.connection.deleted",
+        detail: expect.objectContaining({ reenabledUserIds: ["usr_x", "usr_y"] }),
+      }),
     );
   });
 
   it("deletes cleanly when no user was disabled", async () => {
-    vi.mocked(listDeactivatedScimUserIds).mockResolvedValue({ success: true, data: [] });
+    vi.mocked(reenableUsersForConnectionRemoval).mockResolvedValue({ success: true, data: [] });
     const res = await makeApp().fetch(
       request("DELETE", "/api/orgs/acme/sso", undefined, authHeader),
       makeEnv(),
     );
     expect(res.status).toBe(200);
-    expect(enableUser).not.toHaveBeenCalled();
+    const body = (await res.json()) as { reenabledUserIds: string[] };
+    expect(body.reenabledUserIds).toEqual([]);
+  });
+
+  it("a failed re-enable returns the error and does NOT delete the connection", async () => {
+    const { AppError } = await import("../src/utils/errors");
+    vi.mocked(reenableUsersForConnectionRemoval).mockResolvedValue({
+      success: false,
+      error: new AppError("Failed to re-enable SCIM-disabled users", "STORAGE_ERROR", 500),
+    });
+    const res = await makeApp().fetch(
+      request("DELETE", "/api/orgs/acme/sso", undefined, authHeader),
+      makeEnv(),
+    );
+    expect(res.status).toBe(500);
+    expect(deleteSsoConnection).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ action: "sso.connection.deleted" }),
+    );
   });
 });
 
