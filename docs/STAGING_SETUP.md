@@ -92,9 +92,14 @@ staging a tag ahead and blocks the `main` pipeline — see
 
 When you genuinely need to recover the environment out of band, deploy from a
 clean checkout of `main` so the configuration you publish matches what CI would
-publish:
+publish. Refuse to deploy if the worktree has any modified, staged, or untracked
+files — including changes to `wrangler.toml` or migrations:
 
 ```bash
+test -z "$(git status --porcelain)" || {
+  echo "Refusing staging deployment: use a clean worktree or fresh clone." >&2
+  exit 1
+}
 git fetch origin main && git checkout origin/main
 npx wrangler deploy --env=staging
 ```

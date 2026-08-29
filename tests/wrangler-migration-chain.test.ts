@@ -66,7 +66,23 @@ function stripComment(line: string): string {
 
 function countChar(text: string, char: string): number {
   let count = 0;
-  for (const candidate of text) if (candidate === char) count++;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const candidate = text[i];
+    if (quote === '"' && candidate === "\\") {
+      i++;
+      continue;
+    }
+    if (quote) {
+      if (candidate === quote) quote = null;
+      continue;
+    }
+    if (candidate === '"' || candidate === "'") {
+      quote = candidate;
+      continue;
+    }
+    if (candidate === char) count++;
+  }
   return count;
 }
 
@@ -256,10 +272,16 @@ tag = "not-a-migration"
     ).toThrow(/spans multiple lines/);
   });
 
-  it("accepts a single-line array containing brackets in a string", () => {
-    expect(parseMigrations('[[migrations]]\ntag = "v1"\nnew_classes = ["A[]"]\n')).toEqual([
-      { tag: "v1", fields: ['new_classes = ["A[]"]'] },
-    ]);
+  it("accepts a single-line array containing brackets in strings", () => {
+    expect(
+      parseMigrations('[[migrations]]\ntag = "v1"\nnew_classes = ["A[]", "A[", "A]"]\n'),
+    ).toEqual([{ tag: "v1", fields: ['new_classes = ["A[]", "A[", "A]"]'] }]);
+  });
+
+  it("refuses genuinely unbalanced brackets outside strings", () => {
+    expect(() => parseMigrations('[[migrations]]\ntag = "v1"\nnew_classes = ["A"]]\n')).toThrow(
+      /spans multiple lines/,
+    );
   });
 });
 
