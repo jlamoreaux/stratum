@@ -1,15 +1,18 @@
-# AI code review via PR-Agent (https://github.com/qodo-ai/pr-agent), routed through
-# Cloudflare AI Gateway -> OpenRouter for observability and spend control.
+# AI code review via PR-Agent (https://github.com/qodo-ai/pr-agent), routed entirely
+# through Cloudflare AI Gateway's OpenAI-compatible endpoint with unified billing —
+# one Cloudflare token, one Cloudflare bill, no third-party model accounts.
 #
 # Model chain (fallbacks fire on API errors/context overflow, not quality):
-#   z-ai/glm-5.3 -> z-ai/glm-5.3-flash -> moonshotai/kimi-k3 -> openai/gpt-5.6-terra
+#   workers-ai/@cf/zai-org/glm-5.3  ($1.40/$4.40 per MTok, Cloudflare-hosted)
+#   -> workers-ai/@cf/zai-org/glm-5.3-flash
+#   -> openai/gpt-5.6-terra          (via unified billing, Cloudflare-managed credentials)
 #
-# Required repository secrets (see docs/ai-review.md for setup):
-#   OPENROUTER_KEY           - OpenRouter API key
-#   AI_GATEWAY_OPENROUTER_BASE - https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/openrouter/v1
+# Required repository secrets (see docs/runbooks/ai-review.md for setup):
+#   AI_GATEWAY_COMPAT_BASE - https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/compat
+#   CLOUDFLARE_AI_TOKEN    - Cloudflare API token with AI Gateway Run permission
 #
-# Auto-review runs on PR lifecycle events. Maintainers can also comment
-# /review, /describe, /improve, /ask <question> on any PR.
+# Auto-review runs on PR lifecycle events. Collaborators can also comment
+# /review, /describe, /improve, /ask <question> on any PR (including fork PRs).
 name: PR-Agent review
 
 on:
@@ -20,14 +23,19 @@ on:
 
 jobs:
   pr_agent:
-    # Skip bot-authored events (prevents self-trigger loops), draft PRs, and
-    # fork PRs (secrets are unavailable there; a maintainer can still request a
-    # review on a fork PR by commenting /review, which runs in base-repo context).
+    # Trust gates:
+    # - bot senders skipped (prevents self-trigger loops)
+    # - drafts and fork PRs skipped for auto-review (secrets absent on forks anyway)
+    # - comment commands restricted to owner/member/collaborator, so drive-by
+    #   accounts on a public repo cannot trigger paid LLM calls
     if: >
       github.event.sender.type != 'Bot' &&
       (github.event_name != 'pull_request' ||
         (github.event.pull_request.draft == false &&
-         github.event.pull_request.head.repo.full_name == github.repository))
+         github.event.pull_request.head.repo.full_name == github.repository)) &&
+      (github.event_name != 'issue_comment' ||
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+                 github.event.comment.author_association))
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -35,17 +43,18 @@ jobs:
       contents: read
     steps:
       - name: PR-Agent
-        # Pinned release; bump deliberately (upstream moves fast).
-        uses: docker://pragent/pr-agent:0.41.0-github_action
+        # 0.41.0-github_action, pinned by immutable digest (tag alone is mutable).
+        uses: docker://pragent/pr-agent@sha256:3121a7b8e3ab497b4df09dea6a444da8f01a474496c8c2f722828512c52fd266
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          openrouter.key: ${{ secrets.OPENROUTER_KEY }}
-          # LiteLLM reads this env var and swaps OpenRouter's default base URL for
-          # the Cloudflare AI Gateway endpoint, keeping every LLM call observable.
-          OPENROUTER_API_BASE: ${{ secrets.AI_GATEWAY_OPENROUTER_BASE }}
-          config.model: "openrouter/z-ai/glm-5.3"
-          config.fallback_models: '["openrouter/z-ai/glm-5.3-flash","openrouter/moonshotai/kimi-k3","openrouter/openai/gpt-5.6-terra"]'
-          # OpenRouter models are not all in LiteLLM's token registry; cap explicitly.
+          # AI Gateway's /compat endpoint speaks the OpenAI chat-completions schema for
+          # every provider it fronts, so PR-Agent talks to it as an "OpenAI" endpoint;
+          # the real provider is chosen per-request by the model prefix in the body.
+          openai.key: ${{ secrets.CLOUDFLARE_AI_TOKEN }}
+          openai.api_base: ${{ secrets.AI_GATEWAY_COMPAT_BASE }}
+          config.model: "openai/workers-ai/@cf/zai-org/glm-5.3"
+          config.fallback_models: '["openai/workers-ai/@cf/zai-org/glm-5.3-flash","openai/openai/gpt-5.6-terra"]'
+          # Gateway models are absent from LiteLLM's token registry; cap explicitly.
           config.custom_model_max_tokens: "131072"
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "false"
