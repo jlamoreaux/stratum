@@ -21,7 +21,10 @@ jobs:
   cleanup:
     name: Cleanup Preview Environment
     runs-on: ubuntu-latest
-    if: github.event.action == 'closed'
+    # Fork PRs never get a preview (see deploy job), so there is nothing to clean up.
+    if: >
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       pull-requests: write
@@ -139,7 +142,12 @@ jobs:
   deploy:
     name: Deploy Preview Environment
     runs-on: ubuntu-latest
-    if: github.event.action != 'closed'
+    # Fork PRs are excluded: pull_request withholds secrets from forks, so the
+    # deploy can only fail there — and unreviewed fork code shouldn't get a live
+    # preview environment anyway. Never convert this workflow to pull_request_target.
+    if: >
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       pull-requests: write
