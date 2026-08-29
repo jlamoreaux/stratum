@@ -4,6 +4,7 @@ import {
   MAX_ACTIVE_TOKENS_PER_USER,
   MAX_TOKEN_EXPIRY_DAYS,
   MIN_TOKEN_EXPIRY_DAYS,
+  isExpired,
 } from "../../storage/api-tokens";
 import type { ApiTokenScope } from "../../types";
 import { Layout } from "../layout";
@@ -130,7 +131,12 @@ export const SettingsPage: FC<SettingsPageProps> = ({
   nonce,
 }) => {
   const now = Date.now();
-  const activeTokens = apiTokens.filter((token) => token.revokedAt === undefined).length;
+  // Mirrors the server-side cap in `createApiToken`: an expired row occupies no
+  // slot, so showing it as active would tell a user they are full when they can
+  // still create a token.
+  const activeTokens = apiTokens.filter(
+    (token) => token.revokedAt === undefined && !isExpired(token.expiresAt ?? null),
+  ).length;
   return (
     <Layout title="Settings" user={user}>
       <div class="page-header">
@@ -250,8 +256,8 @@ export const SettingsPage: FC<SettingsPageProps> = ({
           </button>
         </form>
         <p class="settings-help">
-          {activeTokens} of {MAX_ACTIVE_TOKENS_PER_USER} active tokens used. Revoked tokens do not
-          count towards the limit.
+          {activeTokens} of {MAX_ACTIVE_TOKENS_PER_USER} active tokens used. Revoked and expired
+          tokens do not count towards the limit.
         </p>
       </div>
 

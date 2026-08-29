@@ -21,6 +21,11 @@ declare module "hono" {
     /** What the authenticating API token may do (#254). Absent for session and
      * agent callers, whose authority is not token-scoped. */
     tokenScope?: ApiTokenScope;
+    /** Row id of the authenticating scoped token (#254). Present for scoped
+     * tokens ONLY — the legacy credential also resolves to `read_write`, so
+     * `tokenScope` cannot tell the two apart and anything that must treat them
+     * differently has to key on this. */
+    apiTokenId?: string;
     logger: Logger;
   }
 }
@@ -29,6 +34,23 @@ function sanitizeToken(token: string): string {
   // Only show first 8 characters of token for logging
   if (token.length <= 12) return "***";
   return `${token.slice(0, 4)}...${token.slice(-4)}`;
+}
+
+/**
+ * Did this request authenticate with a scoped API token (#254)?
+ *
+ * Gates the endpoints that mint the LEGACY credential. That key never expires
+ * and cannot be revoked one-at-a-time, so a scoped token able to rotate it
+ * could outlive its own revocation: "revoke the lost laptop" would leave the
+ * laptop holding a permanent key it minted on the way out. Session callers and
+ * legacy-token callers are unaffected, which is what keeps existing automation
+ * working — scoped tokens are new in #254, so nothing can yet depend on them
+ * reaching these routes.
+ */
+export function isScopedTokenCaller(c: {
+  get: (key: "apiTokenId") => string | undefined;
+}): boolean {
+  return c.get("apiTokenId") !== undefined;
 }
 
 /**
@@ -144,6 +166,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       c.set("username", user.username);
       c.set("authVia", "token");
       c.set("tokenScope", scope);
+      if (tokenId !== null) c.set("apiTokenId", tokenId);
 
       // Off the response path, and debounced inside `touchApiTokenLastUsed` so
       // this is not a write per request. `getWaitUntil` rather than

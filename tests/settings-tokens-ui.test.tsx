@@ -13,10 +13,11 @@ import type { ApiTokenSummary } from "../src/storage/api-tokens";
 import type { Env } from "../src/types";
 
 vi.mock("../src/storage/audit", () => ({ recordAudit: vi.fn(async () => ({ success: true })) }));
-vi.mock("../src/storage/api-tokens", () => ({
-  MIN_TOKEN_EXPIRY_DAYS: 1,
-  MAX_TOKEN_EXPIRY_DAYS: 365,
-  MAX_ACTIVE_TOKENS_PER_USER: 20,
+// Spread the real module and override only what touches D1. Listing the
+// exports by hand silently drops any added later — `isExpired`, which the page
+// calls to count active tokens, would arrive as undefined and 500 the render.
+vi.mock("../src/storage/api-tokens", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/storage/api-tokens")>()),
   createApiToken: vi.fn(),
   listApiTokens: vi.fn(),
   revokeApiToken: vi.fn(),
@@ -49,7 +50,7 @@ vi.mock("../src/storage/agents", () => ({
 import { uiRouter } from "../src/routes/ui";
 import { createApiToken, listApiTokens, revokeApiToken } from "../src/storage/api-tokens";
 import { recordAudit } from "../src/storage/audit";
-import { disableLegacyToken } from "../src/storage/users";
+import { disableLegacyToken, rotateUserToken } from "../src/storage/users";
 
 const env = { DB: {} } as unknown as Env;
 const ctx = {
@@ -58,7 +59,7 @@ const ctx = {
 } as unknown as ExecutionContext;
 
 /** How the caller reached the page: a browser session, an API token, or nothing. */
-type Identity = { userId?: string; authVia?: "token" | "session" };
+type Identity = { userId?: string; authVia?: "token" | "session"; apiTokenId?: string };
 
 /** Mounts the UI router with an injected identity, so each test controls how
  * the caller authenticated without standing up real auth. */
@@ -67,6 +68,7 @@ function makeApp(identity: Identity) {
   app.use("*", async (c, next) => {
     if (identity.userId) c.set("userId", identity.userId);
     if (identity.authVia) c.set("authVia", identity.authVia);
+    if (identity.apiTokenId) c.set("apiTokenId", identity.apiTokenId);
     await next();
   });
   app.route("/", uiRouter);
@@ -74,7 +76,10 @@ function makeApp(identity: Identity) {
 }
 
 const SESSION = { userId: "usr_1", authVia: "session" as const };
+/** The LEGACY credential: a token caller with no scoped-token row id. */
 const TOKEN = { userId: "usr_1", authVia: "token" as const };
+/** A scoped token (#254) — same `read_write` power, told apart by `apiTokenId`. */
+const SCOPED_TOKEN = { userId: "usr_1", authVia: "token" as const, apiTokenId: "tok_1" };
 
 function get(path: string, identity: Identity = SESSION): Promise<Response> {
   return Promise.resolve(makeApp(identity).fetch(new Request(`http://localhost${path}`), env, ctx));
@@ -376,5 +381,25 @@ describe("the settings surfaces require a browser session", () => {
     expect(createApiToken).not.toHaveBeenCalled();
     expect(revokeApiToken).not.toHaveBeenCalled();
     expect(disableLegacyToken).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /settings/rotate-token — the legacy key stays reachable, scoped tokens do not", () => {
+  it("still rotates for a session", async () => {
+    const res = await post("/settings/rotate-token", {}, SESSION);
+    expect(res.status).toBe(200);
+    expect(rotateUserToken).toHaveBeenCalled();
+  });
+
+  it("still rotates for the legacy credential, so existing automation survives", async () => {
+    const res = await post("/settings/rotate-token", {}, TOKEN);
+    expect(res.status).toBe(200);
+    expect(rotateUserToken).toHaveBeenCalled();
+  });
+
+  it("403s a SCOPED token, which must not mint a key that outlives its revocation", async () => {
+    const res = await post("/settings/rotate-token", {}, SCOPED_TOKEN);
+    expect(res.status).toBe(403);
+    expect(rotateUserToken).not.toHaveBeenCalled();
   });
 });

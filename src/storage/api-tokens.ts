@@ -6,10 +6,11 @@ import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
 
 /**
- * Most active tokens one user may hold. Revoked rows deliberately do NOT count:
- * they are kept for the audit trail, and counting them would mean a user who
- * rotates often is eventually locked out of creating any token at all, with no
- * remedy that does not destroy the trail.
+ * Most active tokens one user may hold. Revoked AND expired rows deliberately
+ * do NOT count: both are kept for the audit trail, and counting them would mean
+ * a user who rotates often — or who simply let short-lived tokens lapse — is
+ * eventually locked out of creating any token at all, with no remedy that does
+ * not destroy the trail.
  */
 export const MAX_ACTIVE_TOKENS_PER_USER = 20;
 
@@ -24,6 +25,23 @@ export const MAX_TOKEN_EXPIRY_DAYS = 365;
  * hour is coarse enough to cost nothing and fine enough to answer "is this
  * credential still in use". */
 export const LAST_USED_DEBOUNCE_MS = 60 * 60 * 1000;
+
+/**
+ * Has this expiry passed? A `null` expiry never has.
+ *
+ * ALWAYS compared in JavaScript, never in SQL. This codebase stores both
+ * `datetime('now')` (`"… 12:00:00"`) and ISO (`"…T12:00:00.000Z"`), and `' '`
+ * (0x20) sorts below `'T'` (0x54) — so `WHERE expires_at > datetime('now')`
+ * against an ISO value reads every expired token as live.
+ *
+ * An unparseable expiry counts as EXPIRED: a token whose lifetime cannot be
+ * established must not be honoured indefinitely.
+ */
+export function isExpired(expiresAt: string | null): boolean {
+  if (expiresAt === null) return false;
+  const at = Date.parse(expiresAt);
+  return !Number.isFinite(at) || at <= Date.now();
+}
 
 /** A token as listed to its owner. Deliberately carries no hash. */
 export interface ApiTokenSummary {
@@ -136,11 +154,16 @@ export async function createApiToken(
   }
 
   try {
-    const active = await db
-      .prepare("SELECT COUNT(*) AS n FROM api_tokens WHERE user_id = ? AND revoked_at IS NULL")
+    // Counted in JS, not with a SQL `COUNT(*)` filtered on expiry: this table
+    // stores ISO timestamps while other rows in this codebase carry
+    // `datetime('now')`, and `' '` sorts below `'T'`, so a SQL comparison reads
+    // expired rows as live. `resolveApiToken` dodges the same trap the same way.
+    const live = await db
+      .prepare("SELECT expires_at FROM api_tokens WHERE user_id = ? AND revoked_at IS NULL")
       .bind(userId)
-      .first<{ n: number }>();
-    if ((active?.n ?? 0) >= MAX_ACTIVE_TOKENS_PER_USER) {
+      .all<{ expires_at: string | null }>();
+    const activeCount = (live.results ?? []).filter((row) => !isExpired(row.expires_at)).length;
+    if (activeCount >= MAX_ACTIVE_TOKENS_PER_USER) {
       return err(
         new AppError(
           `At most ${MAX_ACTIVE_TOKENS_PER_USER} active tokens per user. Revoke one first.`,
@@ -348,14 +371,7 @@ export async function resolveApiToken(
   if (!row) return err(new NotFoundError("Token", "by-token"));
   if (row.token_revoked_at !== null) return err(new NotFoundError("Token", "revoked"));
   if (row.deleting_at !== null) return err(new NotFoundError("Token", "owner-deleting"));
-  if (row.token_expires_at !== null) {
-    const expiresAt = Date.parse(row.token_expires_at);
-    // An unparseable expiry counts as expired: a token whose lifetime cannot be
-    // established must not be honoured indefinitely.
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-      return err(new NotFoundError("Token", "expired"));
-    }
-  }
+  if (isExpired(row.token_expires_at)) return err(new NotFoundError("Token", "expired"));
 
   const user: User = {
     id: row.user_id,

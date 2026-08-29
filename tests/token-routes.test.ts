@@ -17,6 +17,9 @@ vi.mock("../src/storage/api-tokens", () => ({
   createApiToken: vi.fn(),
   listApiTokens: vi.fn(),
   revokeApiToken: vi.fn(),
+  resolveApiToken: vi.fn(),
+  touchApiTokenLastUsed: vi.fn(),
+  isExpired: vi.fn(() => false),
 }));
 vi.mock("../src/storage/users", () => ({
   disableLegacyToken: vi.fn(async () => ({ success: true, data: undefined })),
@@ -30,7 +33,7 @@ vi.mock("../src/storage/deletion-jobs", () => ({ createDeletionJob: vi.fn() }));
 import { usersRouter } from "../src/routes/users";
 import { createApiToken, listApiTokens, revokeApiToken } from "../src/storage/api-tokens";
 import { recordAudit } from "../src/storage/audit";
-import { disableLegacyToken } from "../src/storage/users";
+import { disableLegacyToken, rotateUserToken } from "../src/storage/users";
 
 const env = { DB: {} } as unknown as Env;
 const ctx = {
@@ -40,11 +43,16 @@ const ctx = {
 
 /** Mounts the router with an injected identity, so each test controls how the
  * caller authenticated without standing up real auth. */
-function makeApp(identity: { userId?: string; authVia?: "token" | "session" }) {
+function makeApp(identity: {
+  userId?: string;
+  authVia?: "token" | "session";
+  apiTokenId?: string;
+}) {
   const app = new Hono<{ Bindings: Env }>();
   app.use("*", async (c, next) => {
     if (identity.userId) c.set("userId", identity.userId);
     if (identity.authVia) c.set("authVia", identity.authVia);
+    if (identity.apiTokenId) c.set("apiTokenId", identity.apiTokenId);
     await next();
   });
   app.route("/api/users", usersRouter);
@@ -52,7 +60,11 @@ function makeApp(identity: { userId?: string; authVia?: "token" | "session" }) {
 }
 
 const SESSION = { userId: "usr_1", authVia: "session" as const };
+/** The LEGACY credential: a token caller carrying no scoped-token row id. */
 const TOKEN = { userId: "usr_1", authVia: "token" as const };
+/** A scoped token (#254). Distinguished from the legacy key by `apiTokenId` —
+ * both resolve to `read_write`, so the scope alone cannot tell them apart. */
+const SCOPED_TOKEN = { userId: "usr_1", authVia: "token" as const, apiTokenId: "tok_1" };
 
 function req(method: string, path: string, body?: unknown): Request {
   return new Request(`http://localhost${path}`, {
@@ -257,11 +269,30 @@ describe("legacy token disable", () => {
   });
 });
 
-describe("rotate-token stays token-accessible", () => {
-  it("still works with an API token, so existing automation is not broken", async () => {
+describe("rotate-token: legacy callers keep working, scoped tokens cannot escalate", () => {
+  it("still works with the legacy key, so existing automation is not broken", async () => {
     const res = await makeApp(TOKEN).fetch(req("POST", "/api/users/me/rotate-token"), env, ctx);
     // Deliberately NOT session-gated: it predates this change and restricting it
     // would break callers that rely on it today.
     expect(res.status).toBe(200);
+  });
+
+  it("still works with a session", async () => {
+    const res = await makeApp(SESSION).fetch(req("POST", "/api/users/me/rotate-token"), env, ctx);
+    expect(res.status).toBe(200);
+  });
+
+  it("403s a SCOPED token, which must not mint a credential that outlives it", async () => {
+    // The containment property: the legacy key never expires and cannot be
+    // revoked one-at-a-time, so a scoped token able to rotate it would survive
+    // its own revocation — "revoke the lost laptop" would not contain anything.
+    const res = await makeApp(SCOPED_TOKEN).fetch(
+      req("POST", "/api/users/me/rotate-token"),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()) as { code: string }).toMatchObject({ code: "SESSION_REQUIRED" });
+    expect(rotateUserToken).not.toHaveBeenCalled();
   });
 });

@@ -133,6 +133,32 @@ describe("createApiToken", () => {
     expect(afterRevoke.success).toBe(true);
   });
 
+  it("does not let EXPIRED tokens occupy slots", async () => {
+    await seedUser();
+    // Fill the cap with rows that have already lapsed. Written directly because
+    // `createApiToken` will not mint a token that is expired on arrival.
+    const past = new Date(Date.now() - 60_000).toISOString();
+    for (let i = 0; i < MAX_ACTIVE_TOKENS_PER_USER; i++) {
+      raw
+        .prepare(
+          `INSERT INTO api_tokens
+             (id, user_id, name, token_hash, token_prefix, scope, expires_at, created_at)
+           VALUES (?, 'usr_1', ?, ?, 'stratum_user_0000', 'read', ?, ?)`,
+        )
+        .run(`tok_old_${i}`, `t${i}`, `hash_${i}`, past, past);
+    }
+
+    // Nothing was revoked, so a cap keyed on `revoked_at IS NULL` alone reads
+    // this user as full — locking them out with no remedy but revoking twenty
+    // already-dead rows one at a time.
+    const made = await createApiToken(db, logger, {
+      userId: "usr_1",
+      name: "replacement",
+      scope: "read",
+    });
+    expect(made.success).toBe(true);
+  });
+
   it("refuses a scope the schema does not allow", async () => {
     await seedUser();
     // The CHECK constraint is the backstop behind the route's validation.

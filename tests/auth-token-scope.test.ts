@@ -55,7 +55,13 @@ const env = { DB: {} } as unknown as Env;
 function makeApp() {
   const app = new Hono<{ Bindings: Env }>();
   app.use("*", authMiddleware);
-  app.all("/probe", (c) => c.json({ userId: c.get("userId"), scope: c.get("tokenScope") ?? null }));
+  app.all("/probe", (c) =>
+    c.json({
+      userId: c.get("userId"),
+      scope: c.get("tokenScope") ?? null,
+      apiTokenId: c.get("apiTokenId") ?? null,
+    }),
+  );
   return app;
 }
 
@@ -135,5 +141,35 @@ describe("an invalid token", () => {
   it("is a 401, not a scope error", async () => {
     const res = await call("GET", "stratum_user_00000000000000000000000000000000");
     expect(res.status).toBe(401);
+  });
+});
+
+describe("scoped tokens are distinguishable from the legacy credential", () => {
+  // Both resolve to `read_write`, so `tokenScope` cannot tell them apart. The
+  // routes that mint the never-expiring legacy key key on `apiTokenId` instead;
+  // if the middleware stopped setting it, that guard would silently pass
+  // everyone and the containment property would be gone with no test red.
+  async function probe(
+    token: string,
+  ): Promise<{ scope: string | null; apiTokenId: string | null }> {
+    const res = await makeApp().fetch(
+      new Request("http://localhost/probe", { headers: { Authorization: `Bearer ${token}` } }),
+      env,
+    );
+    return (await res.json()) as { scope: string | null; apiTokenId: string | null };
+  }
+
+  it("sets apiTokenId for a scoped token", async () => {
+    await expect(probe(WRITE_TOKEN)).resolves.toMatchObject({
+      scope: "read_write",
+      apiTokenId: "tok_read_write",
+    });
+  });
+
+  it("leaves apiTokenId unset for the legacy credential", async () => {
+    await expect(probe(LEGACY_TOKEN)).resolves.toMatchObject({
+      scope: "read_write",
+      apiTokenId: null,
+    });
   });
 });

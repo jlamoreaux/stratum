@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { isScopedTokenCaller } from "../middleware/auth";
 import { createAgent, deleteAgent, getAgent, listAgents } from "../storage/agents";
 import {
   type ApiTokenSummary,
@@ -469,6 +470,14 @@ app.post("/settings/rotate-token", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const user = await getCurrentUser(c, logger);
   if (!user) return c.redirect("/auth/login");
+
+  // Not `requireSettingsSession`: the legacy key must keep rotating for callers
+  // that predate #254. Only a SCOPED token is refused, because the key it would
+  // mint never expires and survives revocation of the token that minted it.
+  if (isScopedTokenCaller(c)) {
+    logger.warn("Rotate rejected - scoped token cannot mint the legacy credential", {});
+    return c.html(sessionRequiredError(), 403);
+  }
 
   const rotateResult = await rotateUserToken(c.env.DB, user.id, logger);
   if (!rotateResult.success) {
