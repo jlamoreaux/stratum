@@ -94,7 +94,12 @@ jobs:
     name: Deploy to Staging
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Repo guard: forks pushing to their own main lack the secrets and
+    # environments, so deploys there can only fail. Tests above still run
+    # in forks, where they are actually useful.
+    if: >
+      github.repository == 'stratum-eng/stratum' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: staging
       url: ${{ steps.deploy.outputs.url }}
@@ -176,7 +181,10 @@ jobs:
     name: Deploy to Production
     needs: [test, deploy-staging]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Repo guard: see deploy-staging.
+    if: >
+      github.repository == 'stratum-eng/stratum' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: production
       url: ${{ steps.deploy.outputs.url }}
