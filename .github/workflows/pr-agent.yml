@@ -98,6 +98,12 @@ jobs:
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "synchronize"]'
           # Strictness dials (CodeRabbit-ish): inline code suggestions on, more findings.
           pr_reviewer.num_max_findings: "8"
+          # Packaging ("safe preset"): quality-score row, walkthrough + changes
+          # diagram posted as a comment (never edits the author's description).
+          # Committable ```suggestion blocks stay OFF by documented security
+          # decision — suggestions render in a table only.
+          pr_reviewer.require_score_review: "true"
+          pr_description.publish_description_as_comment: "true"
           github_action_config.auto_review: "true"
-          github_action_config.auto_describe: "false"
+          github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "true"

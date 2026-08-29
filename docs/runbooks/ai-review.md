@@ -49,9 +49,11 @@ pass-through. Verify actuals in AI Gateway analytics after the first week.
   `/` (ordinary discussion comments never start a run): `/review`, `/describe`, `/improve`,
   `/ask <question>`. `/review` also works on fork PRs (comment events run with base-repo
   secrets).
-- Every auto-review also posts inline code suggestions (`auto_improve`); the reviewer guide
-  lists up to 8 findings (`pr_reviewer.num_max_findings`). Turn these dials down if the bot
-  gets noisy.
+- Each PR event posts three artifacts: the reviewer guide (up to 8 findings + quality score +
+  effort/security labels), a walkthrough comment with a changes diagram (`auto_describe`,
+  as a comment — the bot never edits the author's description), and a code-suggestions table
+  (`auto_improve`). Committable ` ```suggestion ` blocks remain off by security decision.
+  Turn dials down if the bot gets noisy.
 - To change models, edit the workflow env — one line per model; no code involved.
 
 ## Security posture & abuse bounds
