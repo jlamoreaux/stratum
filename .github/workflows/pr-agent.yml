@@ -81,8 +81,8 @@ jobs:
           # the real provider is chosen per-request by the model prefix in the body.
           openai.key: ${{ secrets.CLOUDFLARE_AI_TOKEN }}
           openai.api_base: ${{ secrets.AI_GATEWAY_COMPAT_BASE }}
-          config.model: "openai/workers-ai/@cf/zai-org/glm-5.3"
-          config.fallback_models: '["openai/workers-ai/@cf/zai-org/glm-5.3-flash","openai/openai/gpt-5.6-terra"]'
+          config.model: "openai/workers-ai/@cf/zai-org/glm-5.3-flash"
+          config.fallback_models: '["openai/workers-ai/@cf/zai-org/glm-5.3","openai/openai/gpt-5.6-terra"]'
           # Gateway models are absent from LiteLLM's token registry; cap explicitly.
           config.custom_model_max_tokens: "131072"
           # GLM-5.3 is a reasoning model; a full review takes minutes. The default
