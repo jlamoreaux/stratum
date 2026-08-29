@@ -108,6 +108,11 @@ jobs:
           # decision — suggestions render in a table only.
           pr_reviewer.require_score_review: "true"
           pr_description.publish_description_as_comment: "true"
+          # The walkthrough comment sits under the description — don't echo it back,
+          # and keep it lean: no PR-type row, no mermaid diagram.
+          pr_description.add_original_user_description: "false"
+          pr_description.enable_pr_type: "false"
+          pr_description.enable_pr_diagram: "false"
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "true"
