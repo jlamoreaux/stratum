@@ -96,6 +96,12 @@ to anyone. Named API tokens are unaffected. Move anything still using the legacy
 credential onto a named token first — disabling it cannot be undone, though
 `rotate-token` will mint a fresh legacy credential if you truly need one.
 
+`rotate-token` accepts a browser session or the legacy credential itself, but
+refuses a **scoped** token with `SESSION_REQUIRED`. The key it mints never
+expires and cannot be revoked one at a time, so letting a scoped token rotate it
+would mean revoking that token contained nothing — it could have issued itself a
+permanent replacement on the way out.
+
 ## Session cookies
 
 Signing in through the web UI (email magic link, GitHub OAuth, or Google

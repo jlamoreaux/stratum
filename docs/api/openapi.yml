@@ -2448,6 +2448,12 @@ paths:
         The old token is invalid as of this response; the new one is shown once.
         This rotates the single legacy `users.token_hash` credential, not a named
         API token — prefer `POST /api/users/me/tokens`.
+
+
+        Callable with a browser session or the legacy credential itself. A
+        SCOPED API token is refused with `SESSION_REQUIRED`: the key this mints
+        never expires and cannot be revoked individually, so a scoped token able
+        to rotate it would outlive its own revocation.
       responses:
         "200":
           description: New API token
