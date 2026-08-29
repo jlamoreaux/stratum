@@ -419,7 +419,8 @@ Working with an AI coding agent? Point it at [AGENTS.md](AGENTS.md) — the agen
 version of the contributor guide.
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Notable changes are
-recorded in [CHANGELOG.md](CHANGELOG.md).
+recorded in [CHANGELOG.md](CHANGELOG.md), and tagged versions are published on the
+[releases page](https://github.com/stratum-eng/stratum/releases).
 
 ## Security
 
