@@ -11,8 +11,31 @@ export interface EvalResult {
   costs?: Array<{ kind: "llm_tokens" | "sandbox_ms"; quantity: number; estimated?: boolean }>;
 }
 
+/**
+ * Provenance about the revision under evaluation, for evaluators that must name
+ * it to a third party. Read-only because one instance is shared across the
+ * evaluator fan-out in `runEvaluation`.
+ */
+export interface EvaluationContext {
+  /**
+   * The project commit the diff was computed against, resolved from the same
+   * clone that produced the diff (`getDiffBetweenRepos`).
+   *
+   * NOT `change.baseSha`: that one comes from `resolveProjectHead`, a separate
+   * KV-snapshot read taken before the diff clone, and the two can disagree.
+   * Sending the wrong one would tell a receiver it can reproduce a base the
+   * diff was never computed against (#274).
+   */
+  readonly baseSha?: string;
+}
+
 export interface Evaluator {
-  evaluate(diff: string, policy: EvalPolicy, logger: Logger): Promise<Result<EvalResult, AppError>>;
+  evaluate(
+    diff: string,
+    policy: EvalPolicy,
+    logger: Logger,
+    context?: EvaluationContext,
+  ): Promise<Result<EvalResult, AppError>>;
 }
 
 export interface EvalPolicy {

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The webhook evaluator payload now names the base commit.** The POST body gains a
+  top-level `baseSha`: the project commit the diff was actually computed against,
+  resolved from the same clone that produced the diff. A bring-your-own-CI receiver
+  can now check out that exact revision instead of evaluating against whatever its
+  default branch happens to point at when the request lands — previously the body was
+  `{ diff, policy }` and the base was unknowable, so a receiver applying the diff to a
+  moving branch could return a confident verdict for a tree no change ever proposed
+  (#274). The field is covered by the existing `X-Stratum-Signature` HMAC. Every
+  path that ships today pins a base, so it is always present in practice; the
+  contract specifies it as omittable — omitted outright, never `null` — so a
+  future caller that cannot pin one has an honest way to say so. The diff itself is unchanged, so
+  its existing limits still apply — see `docs/user-guide/ci-integration.md`.
+
+  **Check your receiver before upgrading.** A receiver that rejects unknown fields
+  (zod `.strict()`, JSON Schema `additionalProperties: false`, serde
+  `deny_unknown_fields`) will answer the new payload with a 4xx, which Stratum records
+  as a failed evaluation — and with `merge.requiredEvaluators: ["webhook"]` that blocks
+  every merge in the project. Allow unknown fields first.
+
 ## [0.2.0] - 2026-08-29
 
 ### Security

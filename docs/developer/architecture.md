@@ -187,6 +187,11 @@ The evaluation engine runs configured evaluators against workspace changes and p
 
 ### Evaluator Interface
 
+> **Stale:** the interfaces sketched below are aspirational and do not match what
+> shipped — the real `evaluate` takes `(diff, policy, logger, context?)`, and there
+> is no `id`, `EvalContext`, or `Finding`. `src/evaluation/types.ts` is the source
+> of truth for `Evaluator`, `EvalResult`, `EvalPolicy`, and `EvaluationContext`.
+
 ```typescript
 interface Evaluator {
   id: string;

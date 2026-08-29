@@ -546,6 +546,68 @@ describe("POST /api/projects/conflicts/:id/resolve (route)", () => {
     expect(vi.mocked(resolveConflict)).not.toHaveBeenCalled();
   });
 
+  it("forwards the resolution's base commit to the webhook evaluator (#274)", async () => {
+    const kv = makeKv();
+    vi.mocked(resolveConflict).mockClear();
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: true,
+      data: { ...PROJECT, ownerId: "user_test" },
+    } as Awaited<ReturnType<typeof getProjectByPath>>);
+    vi.mocked(getWorkspace).mockResolvedValue({
+      success: true,
+      data: WORKSPACE,
+    } as Awaited<ReturnType<typeof getWorkspace>>);
+    vi.mocked(resolveConflict).mockResolvedValue({
+      success: true,
+      data: { commitSha: "resolved-sha" },
+    });
+    vi.mocked(buildManualResolutionDiff).mockResolvedValueOnce({
+      success: true,
+      data: { diff: "diff --git a/src/foo.ts b/src/foo.ts", baseSha: "resolution_base_sha" },
+    });
+    vi.mocked(loadPolicy).mockResolvedValueOnce({
+      evaluators: [{ type: "webhook", url: "https://ci.example.com/eval" }],
+      requireAll: true,
+      minScore: 0.7,
+    });
+
+    // A manual resolution has no commit of its own yet -- it must clear the gate
+    // before one exists -- so baseSha plus the diff is the only way a receiver
+    // can reconstruct what it is being asked to judge.
+    let capturedBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = init.body as string;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ score: 1, passed: true, reason: "ok" }),
+        });
+      }),
+    );
+
+    try {
+      const res = await app.fetch(
+        new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+          method: "POST",
+          headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            strategy: "manual",
+            resolutions: [{ file: "src/foo.ts", content: "export const x = 1;" }],
+          }),
+        }),
+        { STATE: kv, DB: makeDb() },
+      );
+
+      expect(res.status).toBe(200);
+      const payload = JSON.parse(capturedBody) as { baseSha?: string };
+      expect(payload.baseSha).toBe("resolution_base_sha");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("blocks a manual resolution when merge protection requires more approvals than recorded (never pushes)", async () => {
     const kv = makeKv();
     // Overwrite with a conflict context carrying the originating changeId, so

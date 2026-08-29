@@ -488,6 +488,48 @@ describe("getDiffBetweenRepos", () => {
     });
     expect(result.data.workspaceOid).toBe(wsTip);
     expect(result.data.workspaceSha).toBe(wsTip);
+
+    // #274: the base pin names the BASE clone's tip, not the workspace tip.
+    const [baseTip] = await precomputeShas({
+      branch: "trunk",
+      commits: [{ "a.txt": "line1\n" }],
+    });
+    expect(result.data.baseSha).toBe(baseTip);
+    expect(result.data.baseSha).not.toBe(result.data.workspaceOid);
+  });
+
+  it("pins baseSha to the base tip the diff content was read from (#274)", async () => {
+    // Two commits on the base: both the diff and baseSha must come from the tip,
+    // so a receiver checking out baseSha reconstructs exactly what was diffed.
+    h.servers.set("https://r/base.git", {
+      branch: "trunk",
+      commits: [{ "a.txt": "v1\n" }, { "a.txt": "v2\n" }],
+    });
+    h.servers.set("https://r/fork.git", {
+      branch: "trunk",
+      commits: [{ "a.txt": "v1\n" }, { "a.txt": "v2\n" }, { "a.txt": "v3\n" }],
+    });
+
+    const result = await getDiffBetweenRepos(
+      "https://r/base.git",
+      "btok",
+      "https://r/fork.git",
+      "wtok",
+      logger,
+      "trunk",
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    const [, baseTip] = await precomputeShas({
+      branch: "trunk",
+      commits: [{ "a.txt": "v1\n" }, { "a.txt": "v2\n" }],
+    });
+    expect(result.data.baseSha).toBe(baseTip);
+    // The diff runs v2 -> v3, so baseSha names the same revision the base
+    // content was read from rather than an independently resolved head.
+    expect(result.data.diff).toContain("-v2");
+    expect(result.data.diff).toContain("+v3");
   });
 
   it("errs when either side lacks the requested branch", async () => {

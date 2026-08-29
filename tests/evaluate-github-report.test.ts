@@ -228,6 +228,7 @@ describe("POST /api/changes/:id/evaluate — GitHub verdict reporting", () => {
       success: true,
       data: {
         diff: "diff --git a/x b/x",
+        baseSha: "base-sha",
         workspaceOid: "ws-oid",
         workspaceTreeOid: "ws-tree-oid",
         workspaceSha: "ws-sha",

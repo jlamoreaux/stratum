@@ -1364,6 +1364,9 @@ app.post("/changes/:id/evaluate", async (c) => {
   // tree oid for content-addressing, #115 pins workspaceHeadSha for the merge.
   const {
     diff,
+    // The diff clone's base -- deliberately not bound as `baseSha`, which names
+    // the separately resolved project head and can be a different commit (#274).
+    baseSha: diffBaseSha,
     workspaceOid: evaluatedSha,
     workspaceTreeOid: evaluatedTreeOid,
     workspaceSha: workspaceHeadSha,
@@ -1374,7 +1377,9 @@ app.post("/changes/:id/evaluate", async (c) => {
     token: workspaceReadToken.data,
     ref: evaluatedSha,
   });
-  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
+  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
+    baseSha: diffBaseSha,
+  });
 
   const recordResult = await recordEvalRuns(c.env.DB, logger, id, evalRuns);
   if (!recordResult.success) {

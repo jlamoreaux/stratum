@@ -173,6 +173,7 @@ vi.mock("../src/storage/agents", () => ({
 import {
   CompositeEvaluator,
   SecretScanEvaluator,
+  WebhookEvaluator,
   diffTouchesProtectedConfig,
   loadPolicy,
 } from "../src/evaluation";
@@ -379,6 +380,7 @@ describe("POST /api/projects/:name/changes", () => {
       success: true,
       data: {
         diff: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+        baseSha: "diff_base_sha",
         workspaceOid: "ws_tip_sha",
         workspaceTreeOid: "ws_tree_oid",
         workspaceSha: "ws_tip_sha",
@@ -418,6 +420,36 @@ describe("POST /api/projects/:name/changes", () => {
     const body = (await res.json()) as { code: string };
     expect(body.code).toBe("TARGET_DELETING");
     expect(vi.mocked(createChange)).not.toHaveBeenCalled();
+  });
+
+  it("evaluates against the diff's base commit, not the resolved project head (#274)", async () => {
+    // Two different reads name two different commits: resolveProjectHead falls
+    // back to getCommitLog ("sha_base", recorded as change.baseSha), while the
+    // diff was actually computed against "diff_base_sha". Telling a webhook
+    // receiver the former would let it check out a tree the diff was never
+    // built from — the exact wrong-verdict race #274 is about.
+    vi.mocked(loadPolicy).mockResolvedValue({
+      evaluators: [{ type: "webhook", url: "https://ci.example.com/eval" }],
+      requireAll: true,
+      minScore: 0.7,
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/projects/my-project/changes", { workspace: "fix-bug" }, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(201);
+
+    const webhookInstance = vi.mocked(WebhookEvaluator).mock.results[0]?.value as
+      | { evaluate: ReturnType<typeof vi.fn> }
+      | undefined;
+    expect(webhookInstance).toBeDefined();
+
+    const context = webhookInstance?.evaluate.mock.calls[0]?.[3] as
+      | { baseSha?: string }
+      | undefined;
+    expect(context?.baseSha).toBe("diff_base_sha");
+    expect(context?.baseSha).not.toBe("sha_base");
   });
 
   it("creates a change, runs evaluators, and returns accepted status when eval passes", async () => {
@@ -3325,6 +3357,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       success: true,
       data: {
         diff: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+        baseSha: "reeval_base_sha",
         workspaceOid: "new_sha",
         workspaceTreeOid: "new_tree",
         workspaceSha: "new_sha",
@@ -3429,6 +3462,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       success: true,
       data: {
         diff: policyDiff,
+        baseSha: "policy_base_sha",
         workspaceOid: "new_sha",
         workspaceTreeOid: "new_tree",
         workspaceSha: "new_sha",
@@ -3484,6 +3518,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       success: true,
       data: {
         diff: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+        baseSha: "unchanged_base_sha",
         workspaceOid: "old_sha",
         workspaceTreeOid: "old_tree",
         workspaceSha: "old_sha",

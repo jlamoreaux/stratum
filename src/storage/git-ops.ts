@@ -3285,7 +3285,13 @@ export async function getDiffBetweenRepos(
   branch = "main",
 ): Promise<
   Result<
-    { diff: string; workspaceOid: string; workspaceTreeOid: string; workspaceSha: string },
+    {
+      diff: string;
+      baseSha: string;
+      workspaceOid: string;
+      workspaceTreeOid: string;
+      workspaceSha: string;
+    },
     AppError
   >
 > {
@@ -3347,6 +3353,12 @@ export async function getDiffBetweenRepos(
   // parameter does NOT resolve ref names (a ref string fails with NotFoundError,
   // silently dropping the file from the diff) — so both sides read at their
   // resolved tip commit, pinned to the same clone the file listing came from.
+  //
+  // Returned to callers as `baseSha` for the same reason the workspace pins above
+  // are returned: it names the exact commit this diff was computed against, so a
+  // consumer can reproduce the base rather than guess at whatever the branch
+  // points at later (#274). Resolving it separately -- as resolveProjectHead does
+  // for change.baseSha -- would reopen the TOCTOU window this pinning closes.
   const baseOidResult = await fromPromise(git.resolveRef({ fs: baseFs, dir: DIR, ref: branch }));
   if (!baseOidResult.success) {
     return err(new AppError("Failed to resolve base tip for diff", "GIT_ERROR", 500));
@@ -3384,7 +3396,7 @@ export async function getDiffBetweenRepos(
 
   const diff = buildUnifiedDiff(baseContent, workspaceContent);
   logger.info("Successfully generated diff between repos", { baseRemote, workspaceRemote });
-  return ok({ diff, workspaceOid, workspaceTreeOid, workspaceSha });
+  return ok({ diff, baseSha: baseOid, workspaceOid, workspaceTreeOid, workspaceSha });
 }
 
 export function buildUnifiedDiff(

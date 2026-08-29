@@ -5,7 +5,7 @@ import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
 import { validateWebhookUrl } from "../utils/validation";
 import { sanitizePolicy } from "./sanitize-policy";
-import type { EvalPolicy, EvalResult, Evaluator } from "./types";
+import type { EvalPolicy, EvalResult, EvaluationContext, Evaluator } from "./types";
 
 async function computeHmacSha256(secret: string, body: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -27,6 +27,7 @@ export class WebhookEvaluator implements Evaluator {
     diff: string,
     policy: EvalPolicy,
     logger: Logger,
+    context?: EvaluationContext,
   ): Promise<Result<EvalResult, AppError>> {
     logger.debug("Starting webhook evaluation");
 
@@ -52,7 +53,18 @@ export class WebhookEvaluator implements Evaluator {
     const timeoutMs = config.timeoutMs ?? 10000;
     // The payload leaves the Worker, so strip credentials (webhook secrets)
     // from the policy first — the secret signs the request, it is not content.
-    const body = JSON.stringify({ diff, policy: sanitizePolicy(policy) });
+    //
+    // `baseSha` names the commit the diff was computed against so the receiver
+    // can pin its mirror to that exact revision instead of evaluating against
+    // whatever its default branch points at when the request lands (#274).
+    // JSON.stringify drops an undefined value, so an unpinned base yields the
+    // byte-identical body — and therefore the identical HMAC — that shipped
+    // before this field existed.
+    const body = JSON.stringify({
+      diff,
+      baseSha: context?.baseSha,
+      policy: sanitizePolicy(policy),
+    });
     const headers: Record<string, string> = { "Content-Type": "application/json" };
 
     if (config.secret) {

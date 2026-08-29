@@ -84,9 +84,20 @@ merge:
 ### Request (Stratum → your endpoint)
 
 - `POST` with `Content-Type: application/json`.
-- Body: `{"diff": "<unified diff of the change>", "policy": {...}}` — the
-  policy object is the parsed evaluation policy, so your endpoint can read
-  its own config from `policy.evaluators`. It is passed through
+- Body: `{"diff": "<unified diff>", "baseSha": "<40-hex commit>", "policy": {...}}`.
+- `diff` — the unified diff of the change.
+- `baseSha` — the project commit the diff was computed against, resolved from the
+  very same clone that produced the diff. Check this revision out in your mirror
+  before applying the diff. Every path that ships today pins a base, so in
+  practice the field is always present; the contract specifies it as **omittable**
+  (omitted outright — never `null`, never `""`) so that a future caller which
+  genuinely cannot pin one has an honest way to say so. Guard for it anyway:
+  `if (!body.baseSha)` is a sound test. If your check needs to be reproducible,
+  reject a request carrying no `baseSha`, or one naming a commit your mirror does
+  not have, rather than silently falling back to your default branch — that
+  fallback is the failure this field exists to prevent.
+- `policy` — the parsed evaluation policy, so your endpoint can read its own
+  config from `policy.evaluators`. It is passed through
   `sanitizePolicy` first (`src/evaluation/sanitize-policy.ts`), which strips
   `secret` from every webhook evaluator entry, so no receiver sees any
   evaluator's signing secret — including its own. Provision your receiver's
@@ -99,16 +110,45 @@ merge:
   rejected and the evaluation fails closed (score 0). Redirects are **not
   followed**; a 3xx counts as failure.
 
+> **Upgrading: allow unknown fields before you take this version.** `baseSha` was
+> added to a body that previously carried only `diff` and `policy`. A receiver that
+> rejects unknown fields — zod `.strict()`, JSON Schema `additionalProperties:
+> false`, a serde struct with `deny_unknown_fields` — will answer the new payload
+> with a 4xx, and Stratum records any non-2xx as a failed evaluation (score 0). With
+> `merge.requiredEvaluators: ["webhook"]` that blocks **every merge in the project**
+> until the receiver is fixed. Loosening the check first costs nothing.
+
 Two properties of the current contract are worth knowing before you point a
 receiver at it. This section describes what ships today.
 
 - **`http://` URLs are accepted**, and the HMAC authenticates the body without
   encrypting it. Over plain HTTP the diff and the policy travel in cleartext.
   Use an `https://` URL, and terminate TLS in front of your receiver.
-- **The payload does not name the base commit** the diff was generated
-  against. A receiver that checks out its own `main` may evaluate against a
-  newer tree than Stratum diffed, and `git apply` may succeed against the wrong
-  base. Keep the mirror pinned rather than tracking a moving branch ([#274](https://github.com/stratum-eng/stratum/issues/274)).
+- **The diff is a content diff, not a full git patch.** It is built by comparing
+  decoded file contents (`buildUnifiedDiff` in `src/storage/git-ops.ts`), which
+  has consequences worth knowing before you `git apply` it:
+  - **File modes are asserted, not preserved.** Every added file is labelled
+    `new file mode 100644` and every removed one `deleted file mode 100644`,
+    whatever the real mode was — so an added executable (`100755`) arrives
+    non-executable, and a symlink (`120000`) arrives as a regular file whose
+    contents are its target path.
+  - **Renames are not detected**, and appear as a delete plus an add.
+  - **Binary files are decoded as text** and will not round-trip.
+  - **A file whose content could not be read is silently omitted from its side
+    of the comparison.** On the base side that renders the file as an addition,
+    and `git apply` fails loudly against the correct base. On the workspace side
+    it renders as a *deletion* — which applies cleanly, leaving you evaluating a
+    tree with a file removed that the change never touched.
+
+  `baseSha` tells you *which* revision to compare against; it does not make the
+  diff a faithful patch. Pin your mirror to `baseSha`, and treat a failed apply
+  as "cannot evaluate" — report that rather than retrying against another tree.
+
+One case behaves differently. When the change under evaluation is a **manual
+conflict resolution**, the content being judged has no commit of its own yet — that
+is the point, it must clear the gate *before* Stratum commits it. There, `baseSha`
+plus the diff is the only possible reconstruction; there is no workspace revision
+you could fetch instead.
 
 ### Response (your endpoint → Stratum)
 
@@ -169,13 +209,20 @@ function signatureValid(rawBody, header) {
 if (!signatureValid(rawBody, headers["x-stratum-signature"])) {
   respond(401, { error: "bad signature" });
 } else {
-  const { diff, policy } = JSON.parse(rawBody);
-  const verdict = await yourCi(diff, policy); // whatever "run the checks" means for you
-  respond(200, {
-    score: verdict.score,     // 0..1, as in the contract above
-    passed: verdict.passed,   // boolean — this is what gates the merge
-    reason: verdict.reason,   // shown in the change UI
-  });
+  const { diff, baseSha, policy } = JSON.parse(rawBody);
+  if (!baseSha) {
+    // Nothing to reproduce against. Fail the check rather than guessing at
+    // whatever your default branch currently points at.
+    respond(200, { score: 0, passed: false, reason: "request named no base commit" });
+  } else {
+    // Check out baseSha in your mirror first, then apply the diff on top of it.
+    const verdict = await yourCi(diff, baseSha, policy); // "run the checks", whatever that means for you
+    respond(200, {
+      score: verdict.score,     // 0..1, as in the contract above
+      passed: verdict.passed,   // boolean — this is what gates the merge
+      reason: verdict.reason,   // shown in the change UI
+    });
+  }
 }
 ```
 

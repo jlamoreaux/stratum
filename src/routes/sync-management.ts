@@ -663,7 +663,9 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     // could check out. A policy naming `sandbox` fails closed via
     // UnavailableEvaluator, same as any other missing prerequisite.
     const evaluators = buildEvaluators(c.env, policy, projectName, logger);
-    const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
+    const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
+      baseSha,
+    });
 
     if (!evalResult.passed) {
       logger.warn("Manual conflict resolution blocked by evaluator suite", {

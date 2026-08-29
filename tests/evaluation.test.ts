@@ -473,6 +473,79 @@ describe("WebhookEvaluator", () => {
       { type: "webhook", url: "https://example.com/eval" },
     ]);
   });
+
+  /** Captures what the evaluator actually put on the wire. */
+  function stubFetchCapture(): { body: () => string; signature: () => string } {
+    let capturedBody = "";
+    let capturedSignature = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = init.body as string;
+        capturedSignature = (init.headers as Record<string, string>)["X-Stratum-Signature"] ?? "";
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ score: 1, passed: true, reason: "ok" }),
+        });
+      }),
+    );
+    return { body: () => capturedBody, signature: () => capturedSignature };
+  }
+
+  const webhookPolicy = makePolicy({
+    evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+  });
+
+  it("carries the diff's base commit in the request body (#274)", async () => {
+    const captured = stubFetchCapture();
+
+    await evaluator.evaluate("diff content", webhookPolicy, mockLogger, {
+      baseSha: "9f3c1a2b4d5e6f708192a3b4c5d6e7f809a1b2c3",
+    });
+
+    const payload = JSON.parse(captured.body()) as { diff: string; baseSha?: string };
+    expect(payload.baseSha).toBe("9f3c1a2b4d5e6f708192a3b4c5d6e7f809a1b2c3");
+    expect(payload.diff).toBe("diff content");
+  });
+
+  it("omits baseSha entirely when no base was pinned (#274)", async () => {
+    const captured = stubFetchCapture();
+
+    await evaluator.evaluate("diff content", webhookPolicy, mockLogger);
+
+    // Omitted, not null and not "": a receiver's `if (!body.baseSha) reject()`
+    // must be able to tell "no base pinned" from "base is the empty string".
+    const payload = JSON.parse(captured.body()) as Record<string, unknown>;
+    expect("baseSha" in payload).toBe(false);
+    expect(payload.diff).toBe("diff content");
+  });
+
+  it("signs the exact body, so baseSha is covered by the HMAC (#274)", async () => {
+    const captured = stubFetchCapture();
+    const secret = "shared-secret";
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval", secret }],
+    });
+
+    await evaluator.evaluate("diff content", policy, mockLogger, { baseSha: "abc123" });
+
+    const body = captured.body();
+    expect((JSON.parse(body) as { baseSha?: string }).baseSha).toBe("abc123");
+
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signed = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+    const hex = Array.from(new Uint8Array(signed))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    expect(captured.signature()).toBe(`sha256=${hex}`);
+  });
 });
 
 describe("CompositeEvaluator", () => {

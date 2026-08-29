@@ -9,7 +9,7 @@ import {
   loadPolicy,
 } from "../evaluation";
 import type { SandboxRepoAccess } from "../evaluation/sandbox-evaluator";
-import type { EvalPolicy, EvalResult, Evaluator } from "../evaluation/types";
+import type { EvalPolicy, EvalResult, EvaluationContext, Evaluator } from "../evaluation/types";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { type EventActor, emitEvent } from "../queue/events";
 import { getAgent } from "../storage/agents";
@@ -185,16 +185,21 @@ export interface EvaluationRun {
  * blocking secret-scan override (a failed secret scan fails the aggregate and
  * caps its score regardless of policy weighting). Shared by change creation
  * and the re-evaluate route so the two verdicts can't drift.
+ *
+ * `context` carries provenance about the revision being judged (the diff's base
+ * commit) to the evaluators that need to name it to a third party -- today only
+ * the webhook evaluator, which forwards it to the receiver (#274).
  */
 export async function runEvaluation(
   evaluators: Array<{ type: string; evaluator: Evaluator }>,
   diff: string,
   policy: EvalPolicy,
   logger: Logger,
+  context?: EvaluationContext,
 ): Promise<{ evalRuns: EvaluationRun[]; evalResult: EvalResult }> {
   const evalRuns = await Promise.all(
     evaluators.map(async ({ type, evaluator }) => {
-      const result = await evaluator.evaluate(diff, policy, logger);
+      const result = await evaluator.evaluate(diff, policy, logger, context);
       return {
         evaluatorType: type,
         result: result.success
@@ -382,6 +387,9 @@ export async function createChangeWithEvaluation(
   // tree oid for content-addressing, #115 pins workspaceHeadSha for the merge.
   const {
     diff,
+    // The diff clone's base -- deliberately not bound as `baseSha`, which names
+    // the separately resolved project head and can be a different commit (#274).
+    baseSha: diffBaseSha,
     workspaceOid: evaluatedSha,
     workspaceTreeOid: evaluatedTreeOid,
     workspaceSha: workspaceHeadSha,
@@ -392,7 +400,9 @@ export async function createChangeWithEvaluation(
     token: workspaceReadToken.data,
     ref: evaluatedSha,
   });
-  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
+  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
+    baseSha: diffBaseSha,
+  });
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
 
