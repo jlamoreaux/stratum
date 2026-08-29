@@ -43,15 +43,18 @@ const PACKAGE_PATH = resolve(REPO_ROOT, "package.json");
 
 const BUMPS: BumpRequest[] = ["auto", "major", "minor", "patch"];
 
+/** Report a fatal problem and exit non-zero, so CI stops on a bad changelog. */
 function fail(message: string): never {
   console.error(`✗ ${message}`);
   process.exit(1);
 }
 
+/** Read CHANGELOG.md from the repository root, wherever the script is invoked from. */
 function readChangelog(): string {
   return readFileSync(CHANGELOG_PATH, "utf8");
 }
 
+/** The root manifest's raw text, its version, and its repository URL without the `.git` suffix. */
 function readPackage(): { raw: string; version: string; repoUrl: string } {
   const raw = readFileSync(PACKAGE_PATH, "utf8");
   const parsed = JSON.parse(raw);
@@ -72,6 +75,7 @@ function withVersion(raw: string, version: string): string {
   return updated;
 }
 
+/** The value following `flag`, or undefined when it is absent; exits if the value is missing. */
 function argValue(args: string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   if (index === -1) return undefined;
@@ -80,6 +84,7 @@ function argValue(args: string[], flag: string): string | undefined {
   return value;
 }
 
+/** `check`: report every structural problem in CHANGELOG.md, plus package.json drift. */
 function commandCheck(): void {
   const changelog = readChangelog();
   const problems = validateChangelog(changelog);
@@ -97,12 +102,14 @@ function commandCheck(): void {
   console.log(`✓ CHANGELOG.md is well-formed; latest release is ${latest ?? "(none)"}`);
 }
 
+/** `latest`: print the newest released version. */
 function commandLatest(): void {
   const latest = latestRelease(readChangelog());
   if (!latest) fail("CHANGELOG.md has no released version yet");
   console.log(latest);
 }
 
+/** `previous`: print the predecessor whose tag a version's compare link depends on. */
 function commandPrevious(args: string[]): void {
   const changelog = readChangelog();
   const requested = args[0]?.replace(/^v/, "") ?? latestRelease(changelog);
@@ -113,6 +120,7 @@ function commandPrevious(args: string[]): void {
   console.log(previousRelease(changelog, requested) ?? "");
 }
 
+/** `notes`: print one release's changelog entries, ready to be a GitHub release body. */
 function commandNotes(args: string[]): void {
   const changelog = readChangelog();
   const requested = args[0]?.replace(/^v/, "") ?? latestRelease(changelog);
@@ -123,6 +131,7 @@ function commandNotes(args: string[]): void {
   console.log(notes.data);
 }
 
+/** `prepare`: cut a release — date the `Unreleased` section, relink it, bump package.json. */
 function commandPrepare(args: string[]): void {
   const bump = (argValue(args, "--bump") ?? "auto") as BumpRequest;
   if (!BUMPS.includes(bump)) fail(`--bump must be one of ${BUMPS.join(", ")}`);
@@ -161,6 +170,7 @@ function commandPrepare(args: string[]): void {
   console.log("  Review the diff, open a PR, and merge it; then run the Release workflow.");
 }
 
+/** Dispatch the subcommand named by the first argument. */
 function main(argv: string[]): void {
   const [command, ...args] = argv;
   switch (command) {

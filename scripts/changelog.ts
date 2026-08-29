@@ -41,6 +41,7 @@ interface ParsedVersion {
   prerelease: string[];
 }
 
+/** Split a canonical SemVer string into its core numbers and prerelease identifiers. */
 function parseVersion(version: string): ParsedVersion | null {
   const match = SEMVER_RE.exec(version);
   if (!match?.[1] || !match[2] || !match[3]) return null;
@@ -199,6 +200,7 @@ export function nextVersion(current: string, bump: Bump): Result<string> {
   return { success: true, data: `${major}.${minor}.${patch + 1}` };
 }
 
+/** Whether `version` is canonical SemVer 2.0.0 — the form a release tag must take. */
 export function isSemver(version: string): boolean {
   return SEMVER_RE.test(version);
 }
@@ -222,6 +224,7 @@ export function releaseNotes(text: string, version: string): Result<string> {
   return { success: true, data: section.body };
 }
 
+/** Serialise a parsed changelog back to Keep a Changelog markdown, links last. */
 function renderChangelog(parsed: ParsedChangelog): string {
   const parts = [parsed.preamble, ""];
   for (const section of parsed.sections) {
@@ -366,6 +369,7 @@ export function compareVersions(a: string, b: string): number {
   return comparePrerelease(left.prerelease, right.prerelease);
 }
 
+/** Compare two prerelease identifier sets under SemVer §11.4. */
 function comparePrerelease(left: string[], right: string[]): number {
   // A version without a prerelease has higher precedence than one with it.
   if (left.length === 0) return right.length === 0 ? 0 : 1;
