@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Sandbox evaluation of a pinned commit no longer clones a workspace's entire reachable
+  history into memory: `readRepoFiles` now clones shallow and grows the fetch window only
+  as far as needed to reach the pinned commit, capped at 500 commits, instead of an
+  unbounded full-history clone (#246).
+
 ## [0.2.0] - 2026-08-29
 
 ### Security

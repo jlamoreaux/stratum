@@ -742,6 +742,7 @@ clone, all in `src/storage/git-ops.ts` unless noted):
 | git push command section | 1 MiB (`MAX_COMMAND_SECTION_BYTES`) — the inflated pkt-line command list a push is inspected through, bounded so a compressed body cannot expand without limit | `src/routes/git-http.ts` |
 | REST commit payload | 25 MB aggregate (`MAX_COMMIT_BYTES`), 2000 files (`MAX_COMMIT_FILES`), 10 MB per file (`MAX_FILE_BYTES`) | `src/routes/workspaces.ts` |
 | Conflict resolution repo size | 500 files (`MAX_REPO_FILES`), 10 MB per file (`MAX_FILE_BYTES`) | `src/storage/git-ops.ts` |
+| Pinned-commit sandbox tree read (`readRepoFiles`) | clones shallow, then grows the fetch window (doubling) only as far as needed to reach the pinned commit, capped at 500 commits (`PINNED_COMMIT_MAX_FETCH_DEPTH`) — never an unbounded full-history clone (#246) | `src/storage/git-ops.ts` |
 | Worker isolate memory | ~128 MB (Cloudflare Workers platform limit) — the budget belongs to the **whole isolate**, not to one request. Concurrent requests share it, and each contributes every clone it opens (diff holds two at once), the fetch buffers those clones fill, and its fully-buffered request body. Peak usage is the sum across all of them | platform |
 
 `MAX_FILE_BYTES` is one constant, exported from `git-ops.ts` and enforced at

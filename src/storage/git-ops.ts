@@ -2350,9 +2350,14 @@ export async function listFilesInRepo(
  * Read the full working tree (paths → raw bytes) in a single clone. Used by
  * the post-merge smoke check and the sandbox evaluator to populate a sandbox.
  * When `ref` (a commit sha) is given, the tree of that commit is read instead
- * of the clone's HEAD, so callers can pin the exact evaluated commit — cloned
- * in full, since a pinned sha can fall outside a shallow clone's depth
- * window; a ref still not reachable after that is an error, never a silent
+ * of the clone's HEAD, so callers can pin the exact evaluated commit.
+ *
+ * The pinned path clones shallow like the unpinned path, then grows the fetch
+ * window only as far as needed to reach `ref` — bounded by
+ * {@link PINNED_COMMIT_MAX_FETCH_DEPTH} — rather than cloning full history
+ * (#246: a repo with a large or deliberately inflated history could otherwise
+ * exhaust the Worker isolate before a single commit tree was even read). A
+ * ref still not reachable within the bound is an error, never a silent
  * fall-through to evaluating something else.
  *
  * Bytes are returned as-is (no UTF-8 decoding): a repo tree can contain
@@ -2369,15 +2374,48 @@ export async function readRepoFiles(
 ): Promise<Result<Map<string, Uint8Array>, AppError>> {
   logger.debug("Reading repo files", { remote, ref });
 
-  const cloneResult = await cloneRepo(remote, token, logger, {
-    ref: branch,
-    ...(ref !== undefined ? { fullHistory: true } : {}),
-  });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
   if (ref !== undefined) {
-    return readTreeAtCommit(fs, dir, ref, logger);
+    const deepen: DeepenFetch = async (increment) => {
+      const result = await fromPromise(
+        git.fetch({
+          fs,
+          http,
+          dir,
+          remote: "origin",
+          ref: branch,
+          singleBranch: true,
+          depth: increment,
+          relative: true,
+          onAuth: makeAuth(token),
+        }),
+      );
+      if (!result.success) {
+        logger.error(
+          "Failed to deepen repository history while searching for a pinned commit",
+          result.error,
+          { remote, ref },
+        );
+        return err(
+          new ExternalServiceError("Git", "Failed to deepen repository history", result.error),
+        );
+      }
+      return ok(undefined);
+    };
+
+    return readTreeAtCommitWithDeepening(
+      fs,
+      dir,
+      ref,
+      branch,
+      DEFAULT_SHALLOW_DEPTH,
+      PINNED_COMMIT_MAX_FETCH_DEPTH,
+      deepen,
+      logger,
+    );
   }
 
   const filesResult = await walkDir(fs, dir, "", logger);
@@ -2977,6 +3015,99 @@ export async function applySourceUpdateWithDeepening(
   }
 
   return applyResult;
+}
+
+/**
+ * Cap on the fetch window {@link readTreeAtCommitWithDeepening} will grow to
+ * while searching for a pinned commit that a shallow clone's initial window
+ * missed (#246). Set independently of {@link SYNC_MAX_FETCH_DEPTH} even
+ * though the value happens to match: that constant's rationale is a
+ * background/scheduled sync, where extra latency is cheap. This one bounds a
+ * pinned-commit tree read that runs synchronously inside a merge-gating
+ * evaluation request — worst case here is 4 doubling rounds (50 -> 100 -> 200
+ * -> 400 -> 500), i.e. 4 extra `git.fetch` calls against the remote just
+ * cloned from moments earlier, which is small next to the sandbox
+ * evaluator's own 60-180s install/test budget that follows this step. The
+ * realistic production case (the pinned sha is the branch tip fetched
+ * milliseconds earlier in the same request) needs zero deepening rounds.
+ */
+const PINNED_COMMIT_MAX_FETCH_DEPTH = 500;
+
+/**
+ * Reads the tree at `commitSha`, growing the shallow fetch window
+ * (doubling, like {@link applySourceUpdateWithDeepening}) only as far as
+ * needed to make the commit resolvable — never an unbounded full-history
+ * clone (#246).
+ *
+ * Gates the retry loop strictly on whether `commitSha` RESOLVES
+ * (`git.listFiles`, the same first step `readTreeAtCommit` takes) — never on
+ * `readTreeAtCommit`'s overall result. This keeps "do we have enough
+ * history" independent of "is the tree readable": a corrupted or dangling
+ * blob inside an already-resolved commit fails immediately via the delegated
+ * `readTreeAtCommit` call below, rather than being misread as "needs more
+ * history" and churning through deepen rounds that could never fix it.
+ *
+ * Network specifics are injected via `deepen` (same shape as
+ * {@link applySourceUpdateWithDeepening}'s `DeepenFetch`), so the retry/cap
+ * logic is testable against a real in-memory repo without a network mock —
+ * see {@link readRepoFiles} for the production wiring.
+ */
+export async function readTreeAtCommitWithDeepening(
+  fs: NodeFS,
+  dir: string,
+  commitSha: string,
+  branch: string,
+  startDepth: number,
+  maxDepth: number,
+  deepen: DeepenFetch,
+  logger: Logger,
+): Promise<Result<Map<string, Uint8Array>, AppError>> {
+  let resolved = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
+  // Same floor as applySourceUpdateWithDeepening, and for the same reason: a
+  // `startDepth` of 0 would make the first `increment` 0, so the window would
+  // never advance and a genuinely-shallow ref would loop until `maxDepth`
+  // without ever fetching anything.
+  let window = Math.max(1, startDepth);
+
+  while (!resolved.success) {
+    const stillShallow = await isRefShallow(fs, dir, branch);
+    if (!stillShallow) {
+      // Full local history for `branch` is already present and the commit
+      // still didn't resolve — it's not reachable from this branch at all.
+      // More fetching can't change that; let readTreeAtCommit produce its
+      // normal, specific error below.
+      break;
+    }
+    if (window >= maxDepth) {
+      logger.error("Pinned commit not found within the max fetch-depth bound", resolved.error, {
+        commitSha,
+        maxDepth,
+      });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Pinned commit ${commitSha} was not found within the ${maxDepth}-commit history bound`,
+          resolved.error,
+        ),
+      );
+    }
+
+    const nextWindow = Math.min(window * 2, maxDepth);
+    const increment = nextWindow - window;
+    logger.warn("Pinned commit not found within the shallow window — deepening and retrying", {
+      commitSha,
+      window,
+      nextWindow,
+    });
+
+    const deepened = await deepen(increment);
+    if (!deepened.success) return err(deepened.error);
+
+    window = nextWindow;
+    resolved = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
+  }
+
+  return readTreeAtCommit(fs, dir, commitSha, logger);
 }
 
 /**
