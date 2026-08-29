@@ -234,6 +234,7 @@ describe("classifyError — a repository's name must not decide its error messag
     ["name that is a status", "fatal: couldn't find remote ref 401"],
     ["status at the end", "fatal: couldn't find remote ref release-403"],
     ["the other phrasing", "fatal: could not find remote ref rate-limit-429"],
+    ["status mid-name", "fatal: couldn't find remote ref release-403-fix"],
   ])("does not read a bare ref's own name as an HTTP status (%s)", (_label, message) => {
     expect(classifyError(message).type).toBe("NOT_FOUND");
   });
@@ -245,6 +246,16 @@ describe("classifyError — a repository's name must not decide its error messag
     const info = classifyError("fatal: couldn't find remote ref my-branch");
     expect(info.type).toBe("NOT_FOUND");
     expect(info.title).toBe("Repository Not Found");
+  });
+
+  // Upper case is what separates a real Node transport code from a lower-case
+  // ref name, so a ref SHOUTING one is the case that rule cannot decide. The
+  // phrase settles it: this is a ref, whatever it is called.
+  it.each([
+    ["dns code", "fatal: couldn't find remote ref ENOTFOUND-retry"],
+    ["refused code", "fatal: couldn't find remote ref ECONNREFUSED-handling"],
+  ])("does not read an upper-case bare ref name as a transport code (%s)", (_label, message) => {
+    expect(classifyError(message).type).toBe("NOT_FOUND");
   });
 
   // The counterpart to the phrase above: a real disk failure still reaches the
