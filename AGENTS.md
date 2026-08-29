@@ -21,8 +21,9 @@ client-side framework or a build step.
 | `mcp/` | `@stratum/mcp` — MCP server for any MCP-capable agent/editor, standalone publishable package |
 | `tests/` | Vitest suites: unit (`tests/*.test.ts`), `tests/integration/`, `tests/smoke/` |
 | `migrations/` | D1 SQL migrations |
-| `docs/` | User, API, developer docs, and ADRs (`docs/adr/`) |
+| `docs/` | User, API, developer docs, ADRs (`docs/adr/`), and runbooks (`docs/runbooks/`) |
 | `scripts/` | Benchmark and operational scripts |
+| `website/` | Docs site (own build; deployed by `deploy-docs.yml`) |
 
 ## Commands
 
@@ -44,7 +45,9 @@ it is network-dependent and not part of the offline gate.
 
 ## Quality gates (must pass before a PR is mergeable)
 
-CI runs, in order: **lint → typecheck → test:coverage**. Mirror that locally.
+CI (`pr-checks.yml`) runs **lint, typecheck, unit tests, and the `cli/`/`agent/`/`mcp/`
+package suites in parallel**, then integration tests, then a staging deploy + smoke test.
+Mirror lint → typecheck → test locally before pushing.
 
 1. **Typecheck and tests must pass.** Never comment out, skip, or `.skip` a test to get green.
 2. **Run lint last.** Biome autofixes formatting — running it before you finish editing just
@@ -73,11 +76,15 @@ CI runs, in order: **lint → typecheck → test:coverage**. Mirror that locally
 
 ## Commit & PR conventions
 
-- End every commit message with a trailer:
+- End every commit message with a `Co-Authored-By` trailer naming the model that actually
+  wrote the change, e.g.:
   ```
-  Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+  Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
   ```
 - Commit or push only when asked; if on `main`, branch first.
 - Keep PRs focused; describe what changed and how it was verified (which gates ran).
+- Every PR receives an automated AI review (PR-Agent via Cloudflare AI Gateway — see
+  `docs/runbooks/ai-review.md`). Its findings are advisory, never a merge gate; collaborators
+  can run `/review`, `/improve`, or `/ask <question>` in PR comments.
 
 See `CONTRIBUTING.md` for the human-facing version of all of this.
