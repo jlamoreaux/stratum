@@ -24,11 +24,14 @@ on:
 jobs:
   pr_agent:
     # Trust gates:
+    # - runs only in the canonical repo — forks of stratum skip the job silently
+    #   instead of failing for lack of secrets
     # - bot senders skipped (prevents self-trigger loops)
     # - drafts and fork PRs skipped for auto-review (secrets absent on forks anyway)
     # - comment commands restricted to owner/member/collaborator, so drive-by
     #   accounts on a public repo cannot trigger paid LLM calls
     if: >
+      github.repository == 'stratum-eng/stratum' &&
       github.event.sender.type != 'Bot' &&
       (github.event_name != 'pull_request' ||
         (github.event.pull_request.draft == false &&
