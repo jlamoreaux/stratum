@@ -67,7 +67,7 @@ docs/
 ### For Everyone
 
 **Current Priorities & Roadmap:**
-- [TODO.md](../TODO.md) - Current priorities and what's being worked on
+- [ROADMAP.md](../ROADMAP.md) - Open work and priorities
 - [CURRENT_CAPABILITIES.md](CURRENT_CAPABILITIES.md) - What the platform can do today
 - [REMAINING_WORK.md](REMAINING_WORK.md) - Known remaining work
 
@@ -128,7 +128,7 @@ docs/
 
 | Document | Status | Priority | Last Updated |
 |----------|--------|----------|--------------|
-| TODO.md (Priorities) | ✅ Complete | Critical | 2026-07-20 |
+| ROADMAP.md (Open work) | ✅ Complete | Critical | 2026-08-29 |
 | API OpenAPI Spec | ✅ Complete | High | 2026-08-18 |
 | API Authentication | 🚧 Outline | High | 2026-06-17 |
 | API Endpoints | 🚧 Outline | High | 2026-07-19 |

@@ -822,7 +822,7 @@ direction).
 
 ## Related Documents
 
-- [TODO.md](../../TODO.md) - Current priorities and roadmap
+- [ROADMAP.md](../../ROADMAP.md) - Open work and priorities
 - [Database Schema](database.md) - Detailed D1 schema
 - [Queue Processing](queues.md) - Queue architecture
 - [Testing Guide](testing.md) - Testing patterns

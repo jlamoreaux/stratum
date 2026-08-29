@@ -3,6 +3,28 @@
 ## Purpose
 Provide a repeatable process when a single Artifacts namespace becomes a bottleneck.
 
+## Standing operating policy
+These rules hold at all times, not only during a sharding exercise. They align Stratum with
+Cloudflare Artifacts best practices.
+
+- **Environment namespace separation.** Production and staging must use distinct Artifacts
+  namespaces. Never share a namespace between environments.
+  - Production namespace (`[env.production]`): `stratum-prod`
+  - Staging namespace (`[env.staging]`): `stratum-staging`
+  - Top-level default, used by `wrangler dev` and an unqualified `wrangler deploy`:
+    `stratum`
+- **Isolation unit.** Each Stratum project maps to a dedicated Git repository in Artifacts.
+- **Metadata strategy.** Relational and queryable metadata lives in D1. Commit and
+  evaluation provenance that should not alter tree contents is **planned to be stored** as
+  Git notes (Phase 2 design decision); that is not yet implemented.
+- **Scaling.** When namespace traffic grows, shard by workload class (for example
+  `stratum-prod-realtime` and `stratum-prod-batch`) and route new projects to
+  shard-specific namespaces — see the rest of this runbook.
+- **Namespace change safety.** Before changing `[[artifacts]]` / `[[env.staging.artifacts]]`
+  values in `wrangler.toml`, run a pre-deploy audit and migrate existing repos off the old
+  namespace using the Artifacts REST API, or the data is orphaned. Track project-to-namespace
+  migration here.
+
 ## Triggers
 Start sharding when one or more of these persists for 24h+:
 - Elevated Git operation latency for clone/fetch/push.
