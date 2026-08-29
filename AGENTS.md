@@ -38,6 +38,8 @@ npm run test:integration  # tests/integration/
 npm run typecheck    # tsc --noEmit
 npm run lint         # biome check src tests
 npm run lint:fix     # biome check --write src tests
+npm run release:check   # validate CHANGELOG.md against package.json
+npm run release:prepare # cut a release from the Unreleased section (maintainers)
 ```
 
 `npm run test:smoke` hits a **live deployed instance** (set `STAGING_URL` + `TEST_AUTH_TOKEN`);
@@ -64,6 +66,9 @@ Mirror lint → typecheck → test locally before pushing.
 - **Comments explain *why*, not *what*.** Add one only for a non-obvious constraint, invariant, or
   workaround. JSDoc on public APIs is welcome.
 - **Server-rendered only.** Do not introduce client-side JS into the UI.
+- **Every user-visible change gets a `CHANGELOG.md` entry** under `## [Unreleased]`, in the same
+  PR, under a Keep a Changelog group. That text ships verbatim as the release notes; the release
+  tooling infers the version bump from which groups are present (`docs/developer/releasing.md`).
 - Highlight.js / type gotchas and the full ship flow live in `docs/developer/`.
 
 ## Operational rules (do not violate)

@@ -1,0 +1,322 @@
+/**
+ * Keep a Changelog parsing and the version mechanics behind `scripts/release.ts`.
+ *
+ * Pure string in, string out: no file system, no Node built-ins, no imports.
+ * `tests/changelog.test.ts` type-checks under the Workers tsconfig (which has no
+ * `@types/node`), and `scripts/release.ts` runs under bare `node`, which needs
+ * explicit `.ts` import specifiers that the same tsconfig rejects. Keeping this
+ * module dependency-free is what lets both consume it unchanged.
+ */
+
+/**
+ * Same shape as `src/utils/result.ts`, redeclared for the reason above — this
+ * module cannot import from `src/`.
+ */
+export type Result<T, E = string> = { success: true; data: T } | { success: false; error: E };
+
+export type Bump = "major" | "minor" | "patch";
+export type BumpRequest = Bump | "auto";
+
+export const UNRELEASED = "Unreleased";
+
+/** Group headings that force a major bump under `auto`. */
+const BREAKING_GROUPS = new Set(["breaking", "removed"]);
+
+/** Group headings that force at least a minor bump under `auto`. */
+const FEATURE_GROUPS = new Set(["added"]);
+
+const HEADING_RE = /^## \[([^\]]+)\](?:\s+-\s+(\S+))?\s*$/;
+const GROUP_RE = /^### (.+?)\s*$/;
+const LINK_RE = /^\[([^\]]+)\]:\s*(\S+)\s*$/;
+const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export interface ChangelogSection {
+  /** `Unreleased`, or a semver string such as `0.1.0`. */
+  version: string;
+  /** The `YYYY-MM-DD` on the heading. Absent on `Unreleased`. */
+  date?: string;
+  /** Everything under the heading, with surrounding blank lines trimmed. */
+  body: string;
+}
+
+export interface ParsedChangelog {
+  /** Everything above the first `## [...]` heading, trailing blanks trimmed. */
+  preamble: string;
+  sections: ChangelogSection[];
+  /** `[0.1.0]: https://…` reference definitions, keyed by label, in file order. */
+  links: Map<string, string>;
+}
+
+/** Trim leading and trailing blank lines without touching interior blank lines. */
+function trimBlankLines(lines: string[]): string {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && lines[start]?.trim() === "") start++;
+  while (end > start && lines[end - 1]?.trim() === "") end--;
+  return lines.slice(start, end).join("\n");
+}
+
+/**
+ * Split a changelog into its preamble, its `## [version]` sections, and its
+ * link-reference definitions. Link definitions are pulled out wherever they
+ * appear rather than assumed to be a trailing block, so a section body never
+ * carries one into the rendered release notes.
+ */
+export function parseChangelog(text: string): ParsedChangelog {
+  const preamble: string[] = [];
+  const sections: ChangelogSection[] = [];
+  const links = new Map<string, string>();
+
+  let current: { version: string; date?: string; lines: string[] } | null = null;
+
+  const flush = (): void => {
+    if (!current) return;
+    const section: ChangelogSection = {
+      version: current.version,
+      body: trimBlankLines(current.lines),
+    };
+    if (current.date !== undefined) section.date = current.date;
+    sections.push(section);
+    current = null;
+  };
+
+  for (const line of text.split("\n")) {
+    const link = LINK_RE.exec(line);
+    if (link?.[1] && link[2]) {
+      links.set(link[1], link[2]);
+      continue;
+    }
+
+    const heading = HEADING_RE.exec(line);
+    if (heading?.[1]) {
+      flush();
+      current = heading[2]
+        ? { version: heading[1], date: heading[2], lines: [] }
+        : { version: heading[1], lines: [] };
+      continue;
+    }
+
+    if (current) current.lines.push(line);
+    else preamble.push(line);
+  }
+  flush();
+
+  return { preamble: trimBlankLines(preamble), sections, links };
+}
+
+/** The `### Group` headings present in a section body, lowercased. */
+export function groupsIn(body: string): string[] {
+  const groups: string[] = [];
+  for (const line of body.split("\n")) {
+    const match = GROUP_RE.exec(line);
+    if (match?.[1]) groups.push(match[1].toLowerCase());
+  }
+  return groups;
+}
+
+/**
+ * Derive a bump from what the `Unreleased` section actually says: a `Breaking`
+ * or `Removed` group is a major, an `Added` group is a minor, anything else
+ * (Changed, Fixed, Security, Deprecated) is a patch.
+ */
+export function inferBump(body: string): Bump {
+  const groups = groupsIn(body);
+  if (groups.some((group) => BREAKING_GROUPS.has(group))) return "major";
+  if (groups.some((group) => FEATURE_GROUPS.has(group))) return "minor";
+  return "patch";
+}
+
+/**
+ * Apply an explicit bump request, or infer one. While the major version is 0
+ * an inferred major is clamped to a minor, per SemVer's "anything MAY change
+ * at any time" rule for 0.y.z — an explicit `major` still means 1.0.0.
+ */
+export function resolveBump(
+  current: string,
+  request: BumpRequest,
+  unreleasedBody: string,
+): Result<Bump> {
+  const parsed = SEMVER_RE.exec(current);
+  if (!parsed) return { success: false, error: `Current version is not semver: ${current}` };
+  if (request !== "auto") return { success: true, data: request };
+
+  const inferred = inferBump(unreleasedBody);
+  const isZeroMajor = parsed[1] === "0";
+  return { success: true, data: isZeroMajor && inferred === "major" ? "minor" : inferred };
+}
+
+/** Increment `current` by `bump`, dropping any prerelease or build metadata. */
+export function nextVersion(current: string, bump: Bump): Result<string> {
+  const parsed = SEMVER_RE.exec(current);
+  if (!parsed?.[1] || !parsed[2] || !parsed[3]) {
+    return { success: false, error: `Current version is not semver: ${current}` };
+  }
+  const major = Number(parsed[1]);
+  const minor = Number(parsed[2]);
+  const patch = Number(parsed[3]);
+
+  if (bump === "major") return { success: true, data: `${major + 1}.0.0` };
+  if (bump === "minor") return { success: true, data: `${major}.${minor + 1}.0` };
+  return { success: true, data: `${major}.${minor}.${patch + 1}` };
+}
+
+export function isSemver(version: string): boolean {
+  return SEMVER_RE.test(version);
+}
+
+/** The most recently released version, or null when nothing has shipped yet. */
+export function latestRelease(text: string): string | null {
+  const released = parseChangelog(text).sections.find((section) => section.version !== UNRELEASED);
+  return released?.version ?? null;
+}
+
+/**
+ * The body of one release's section, ready to be a GitHub release description.
+ * Fails loudly on a missing or empty section rather than publishing a release
+ * with no notes.
+ */
+export function releaseNotes(text: string, version: string): Result<string> {
+  const section = parseChangelog(text).sections.find((entry) => entry.version === version);
+  if (!section) return { success: false, error: `No \`## [${version}]\` section in CHANGELOG.md` };
+  if (section.body.trim() === "")
+    return { success: false, error: `The \`## [${version}]\` section is empty` };
+  return { success: true, data: section.body };
+}
+
+function renderChangelog(parsed: ParsedChangelog): string {
+  const parts = [parsed.preamble, ""];
+  for (const section of parsed.sections) {
+    parts.push(
+      section.date ? `## [${section.version}] - ${section.date}` : `## [${section.version}]`,
+    );
+    if (section.body !== "") parts.push("", section.body);
+    parts.push("");
+  }
+  for (const [label, url] of parsed.links) parts.push(`[${label}]: ${url}`);
+  return `${parts.join("\n")}\n`;
+}
+
+export interface CutOptions {
+  /** The version being cut, e.g. `0.2.0`. */
+  version: string;
+  /** Release date as `YYYY-MM-DD`. */
+  date: string;
+  /** Repository URL without a trailing slash, e.g. `https://github.com/owner/repo`. */
+  repoUrl: string;
+}
+
+/**
+ * Move everything under `Unreleased` into a dated section for `version`, open a
+ * fresh empty `Unreleased`, and rewrite the compare links so `Unreleased` spans
+ * from the new tag and the new version spans from its predecessor.
+ */
+export function cutRelease(text: string, options: CutOptions): Result<string> {
+  const { version, date, repoUrl } = options;
+  if (!isSemver(version)) return { success: false, error: `Not a semver version: ${version}` };
+  if (!DATE_RE.test(date)) return { success: false, error: `Not a YYYY-MM-DD date: ${date}` };
+
+  const parsed = parseChangelog(text);
+  const unreleased = parsed.sections.find((section) => section.version === UNRELEASED);
+  if (!unreleased)
+    return { success: false, error: "CHANGELOG.md has no `## [Unreleased]` section" };
+  if (unreleased.body.trim() === "") {
+    return { success: false, error: "Nothing to release: the `Unreleased` section is empty" };
+  }
+  if (parsed.sections.some((section) => section.version === version)) {
+    return { success: false, error: `CHANGELOG.md already has a \`## [${version}]\` section` };
+  }
+
+  const previous = latestRelease(text);
+  const rest = parsed.sections.filter((section) => section.version !== UNRELEASED);
+
+  const links = new Map<string, string>();
+  links.set(UNRELEASED, `${repoUrl}/compare/v${version}...HEAD`);
+  links.set(
+    version,
+    previous
+      ? `${repoUrl}/compare/v${previous}...v${version}`
+      : `${repoUrl}/releases/tag/v${version}`,
+  );
+  for (const [label, url] of parsed.links) {
+    if (label !== UNRELEASED && label !== version) links.set(label, url);
+  }
+
+  return {
+    success: true,
+    data: renderChangelog({
+      preamble: parsed.preamble,
+      sections: [
+        { version: UNRELEASED, body: "" },
+        { version, date, body: unreleased.body },
+        ...rest,
+      ],
+      links,
+    }),
+  };
+}
+
+/**
+ * Structural problems that would break the release automation later: a missing
+ * `Unreleased` heading, an undated or non-semver release, a version with no
+ * link definition (the dead-link failure mode this file exists to prevent), or
+ * releases listed out of order. Returns an empty array when the file is sound.
+ */
+export function validateChangelog(text: string): string[] {
+  const problems: string[] = [];
+  const parsed = parseChangelog(text);
+  const seen = new Set<string>();
+
+  if (!parsed.sections.some((section) => section.version === UNRELEASED)) {
+    problems.push("Missing an `## [Unreleased]` section");
+  }
+
+  const releases: string[] = [];
+  for (const section of parsed.sections) {
+    if (seen.has(section.version)) problems.push(`Duplicate section: ${section.version}`);
+    seen.add(section.version);
+
+    if (section.version === UNRELEASED) {
+      if (section.date) problems.push("`Unreleased` must not carry a date");
+      continue;
+    }
+
+    if (!isSemver(section.version)) problems.push(`Not a semver version: ${section.version}`);
+    else releases.push(section.version);
+
+    if (!section.date) problems.push(`\`${section.version}\` has no release date`);
+    else if (!DATE_RE.test(section.date))
+      problems.push(`\`${section.version}\` date is not YYYY-MM-DD`);
+
+    if (section.body.trim() === "") problems.push(`\`${section.version}\` has no entries`);
+  }
+
+  for (const version of seen) {
+    if (!parsed.links.has(version)) problems.push(`No link definition for \`${version}\``);
+  }
+  for (const label of parsed.links.keys()) {
+    if (!seen.has(label)) problems.push(`Link definition \`${label}\` has no matching section`);
+  }
+
+  for (let i = 1; i < releases.length; i++) {
+    const newer = releases[i - 1];
+    const older = releases[i];
+    if (newer && older && compareVersions(newer, older) <= 0) {
+      problems.push(`Releases are out of order: \`${newer}\` is listed above \`${older}\``);
+    }
+  }
+
+  return problems;
+}
+
+/** Compare two semver cores; prerelease identifiers are ignored. */
+export function compareVersions(a: string, b: string): number {
+  const left = SEMVER_RE.exec(a);
+  const right = SEMVER_RE.exec(b);
+  if (!left || !right) return 0;
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(left[i]) - Number(right[i]);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}

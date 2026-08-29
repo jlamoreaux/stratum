@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-29
+
 ### Security
 - Workspace commit/delete now require project write access (was unauthenticated in practice).
 - Bulk import enforces own-namespace ownership (no more namespace squatting).
@@ -21,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to restore it.
 
 ### Added
+- **A release process.** `CHANGELOG.md` is now the source of truth for the version:
+  `npm run release:prepare` moves `Unreleased` into a dated section, infers the SemVer
+  bump from which groups are present, rewrites the compare links, and bumps
+  `package.json`; the `Release` workflow tags the result and publishes a GitHub release
+  whose notes are that section. `npm run release:check` (and `npm test`) fail on a
+  changelog that would produce a dead link. See `docs/developer/releasing.md`.
 - **Gated `git push` (ADR 005 slice 2b), staging-flagged.** With
   `GIT_PUSH_GATED_ENABLED`, pushing to a project's default branch lands the pack
   on a server-managed workspace fork and opens an eval-gated change through the
@@ -84,5 +92,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes, GitHub import/sync, server-rendered web UI, email and GitHub OAuth authentication,
   API tokens, agent identities, and provenance tracking.
 
-[Unreleased]: https://github.com/stratum-eng/stratum/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/stratum-eng/stratum/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/stratum-eng/stratum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/stratum-eng/stratum/releases/tag/v0.1.0
