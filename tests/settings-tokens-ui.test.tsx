@@ -221,7 +221,16 @@ describe("POST /settings/tokens — creating a token", () => {
     const html = await res.text();
     expect(html.split(PLAINTEXT).length - 1).toBe(1);
     expect(html).toContain("shown only once");
-    expect(html).not.toMatch(/<script/i);
+
+    // This page carries one inline script (the nonce'd copy button added in
+    // #312), so "no script at all" is no longer the invariant. What the
+    // assertion was protecting still is: the secret must never be handed to
+    // client-side code. That script reads the value out of the DOM and never
+    // re-serializes it, so no script block may contain the plaintext.
+    const scriptBodies = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(
+      (match) => match[1] ?? "",
+    );
+    for (const body of scriptBodies) expect(body).not.toContain(PLAINTEXT);
   });
 
   it("defaults to the WEAKER scope when the form does not say", async () => {
