@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22.13+ (the test suite uses `node:sqlite`, unflagged only from 22.13)
 - npm
 - Cloudflare account
 
