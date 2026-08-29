@@ -44,7 +44,8 @@ jobs:
         (github.event.pull_request.draft == false &&
          github.event.pull_request.head.repo.full_name == github.repository)) &&
       (github.event_name != 'issue_comment' ||
-        (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+        (github.event.issue.pull_request &&
+         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
                   github.event.comment.author_association) &&
          startsWith(github.event.comment.body, '/')))
     runs-on: ubuntu-latest
@@ -66,7 +67,10 @@ jobs:
           DAILY_REVIEW_CAP: "50"
         run: |
           today=$(date -u +%Y-%m-%d)
-          count=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/pr-agent.yml/runs?created=%3E%3D${today}&status=success&per_page=1" --jq '.total_count')
+          # Fail open on API errors: a transient GitHub 5xx must not red-X the
+          # PR — the cap is best-effort and the gateway spend cap backstops it.
+          count=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/pr-agent.yml/runs?created=%3E%3D${today}&status=success&per_page=1" --jq '.total_count' || echo 0)
+          count=${count:-0}
           echo "Successful pr-agent runs today: $count (cap: $DAILY_REVIEW_CAP)"
           if [ "$count" -ge "$DAILY_REVIEW_CAP" ]; then
             echo "::warning::Daily AI-review cap reached ($count/$DAILY_REVIEW_CAP); skipping review."
