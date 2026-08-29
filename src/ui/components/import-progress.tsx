@@ -102,12 +102,33 @@ const REMOTE_SPAN = /\b[a-z][a-z0-9+.-]*:\/\/\S+|\b[\w.-]+@[\w.-]+:\S+/gi;
  * failure. A ref name is not inside a URL, so remote-stripping alone never
  * reached these.
  *
- * Only the `refs/...` form is removed. A message naming a bare branch (`couldn't
- * find remote ref my-branch`) is not structurally distinguishable from prose, so
- * the marker shape has to carry that case — which is why every marker below is a
- * phrase git emits rather than a word a name can contain.
+ * Only the `refs/...` form is removed here; a bare branch name is handled by
+ * {@link MISSING_REF_SPAN}, which needs git's phrasing to recognise one.
  */
 const REF_SPAN = /\brefs\/(?:heads|tags|remotes)\/\S+/gi;
+
+/**
+ * git's own wording for a ref the remote does not have. Shared by the stripper
+ * below and the not-found branch, so a phrase can never be taught to one and
+ * not the other.
+ */
+const MISSING_REF_MARKERS = ["couldn't find remote ref", "could not find remote ref"];
+
+/**
+ * The bare ref name in `couldn't find remote ref fix-401-redirect`.
+ *
+ * A bare name carries no `refs/` prefix, so {@link REF_SPAN} cannot see it and
+ * the marker shape cannot exclude it: a phrase marker holds a space and a name
+ * cannot, but an HTTP status is digits, and digits are something a branch is
+ * plausibly called. `fix-401-redirect` and `release-403` are ordinary branch
+ * names, and both reported an authentication failure for a ref that simply is
+ * not there.
+ *
+ * What makes the name recognisable is the phrase in front of it: git only says
+ * this about a ref, so the token that follows is a ref name by construction.
+ * The phrase itself is kept — the not-found branch classifies on it.
+ */
+const MISSING_REF_SPAN = new RegExp(`(${MISSING_REF_MARKERS.join("|")})\\s+\\S+`, "gi");
 
 /**
  * Markers of a real authentication failure, as git and the GitHub API phrase
@@ -201,9 +222,15 @@ export function classifyError(errorMessage: string): ErrorInfo {
   // read the full message on purpose: LFS_BATCH_RESPONSE_MARKERS requires the
   // path `/info/lfs/objects/batch`, which legitimately arrives inside a URL,
   // so stripping there would undo the LFS detection #218 added.
-  const prose = msg.replace(REMOTE_SPAN, " ").replace(REF_SPAN, " ");
+  const prose = msg
+    .replace(REMOTE_SPAN, " ")
+    .replace(REF_SPAN, " ")
+    .replace(MISSING_REF_SPAN, "$1 ");
   // The same text with its original case kept, for the transport codes above.
-  const proseRaw = errorMessage.replace(REMOTE_SPAN, " ").replace(REF_SPAN, " ");
+  const proseRaw = errorMessage
+    .replace(REMOTE_SPAN, " ")
+    .replace(REF_SPAN, " ")
+    .replace(MISSING_REF_SPAN, "$1 ");
 
   // Authentication errors
   // 401/403 carry the refusal on their own, so the original predicate's bare
@@ -289,8 +316,7 @@ export function classifyError(errorMessage: string): ErrorInfo {
     msg.includes("404") ||
     msg.includes("doesn't exist") ||
     msg.includes("does not exist") ||
-    msg.includes("couldn't find remote ref") ||
-    msg.includes("could not find remote ref")
+    MISSING_REF_MARKERS.some((marker) => msg.includes(marker))
   ) {
     return {
       type: "NOT_FOUND",

@@ -224,6 +224,29 @@ describe("classifyError — a repository's name must not decide its error messag
     expect(info.type).toBe("NOT_FOUND");
   });
 
+  // A bare name has no `refs/` prefix for the ref strip to see, and the marker
+  // shape cannot exclude it either: a phrase marker holds a space and a name
+  // cannot, but an HTTP status is digits — and digits are something a branch is
+  // plausibly called. What identifies the name is the phrase in front of it,
+  // since git says this only about a ref.
+  it.each([
+    ["status inside a name", "fatal: couldn't find remote ref fix-401-redirect"],
+    ["name that is a status", "fatal: couldn't find remote ref 401"],
+    ["status at the end", "fatal: couldn't find remote ref release-403"],
+    ["the other phrasing", "fatal: could not find remote ref rate-limit-429"],
+  ])("does not read a bare ref's own name as an HTTP status (%s)", (_label, message) => {
+    expect(classifyError(message).type).toBe("NOT_FOUND");
+  });
+
+  // The strip removes the name, not the phrase — the not-found branch
+  // classifies on the phrase, so eating it would trade one wrong answer for
+  // another.
+  it("still reports a missing bare ref as NOT_FOUND, not UNKNOWN", () => {
+    const info = classifyError("fatal: couldn't find remote ref my-branch");
+    expect(info.type).toBe("NOT_FOUND");
+    expect(info.title).toBe("Repository Not Found");
+  });
+
   // The counterpart to the phrase above: a real disk failure still reaches the
   // storage branch, which the strip must not have starved of its noun.
   it("still reports a real storage failure as STORAGE_ERROR", () => {
