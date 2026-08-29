@@ -100,8 +100,7 @@ test -z "$(git status --porcelain)" || {
   echo "Refusing staging deployment: use a clean worktree or fresh clone." >&2
   exit 1
 }
-git fetch origin main && git checkout origin/main
-npx wrangler deploy --env=staging
+git fetch origin main && git checkout origin/main && npx wrangler deploy --env=staging
 ```
 
 ### Local Development with Staging Services
