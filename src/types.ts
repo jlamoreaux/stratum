@@ -392,6 +392,12 @@ export interface User {
    * Absent/null on live accounts. See PRD "Grace window".
    */
   deletingAt?: string;
+  /**
+   * When true, the user has opted out of product analytics: no PostHog event is
+   * exported for their requests or for domain events they author (#257).
+   * Absent means opted in, which is the default for every account.
+   */
+  telemetryOptOut?: boolean;
 }
 
 export interface Session {

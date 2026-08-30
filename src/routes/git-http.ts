@@ -151,12 +151,29 @@ interface Identity {
 }
 
 /**
+ * The subset of the Hono context the git auth path needs. `set` is optional so
+ * the narrow stubs in tests keep type-checking; it is always present on a real
+ * request.
+ */
+interface GitAuthContext {
+  req: { header(name: string): string | undefined };
+  env: Env;
+  set?: (key: "telemetryOptOut", value: boolean) => void;
+}
+
+/**
  * Resolve the caller's identity from Basic credentials. Returns `null` for
  * anonymous *or* unrecognized/invalid credentials — both collapse to "no
  * identity" for the access truth table, never a 500.
+ *
+ * Also publishes the caller's telemetry preference (#257) into the context.
+ * This router owns its own auth — `authMiddleware` steps aside for git paths —
+ * so without this, `analyticsMiddleware` would keep exporting an `api_request`
+ * for every clone, fetch, and push by a user who has opted out. The rows are
+ * already loaded here for the deleting-account checks.
  */
 async function authenticate(
-  c: { req: { header(name: string): string | undefined }; env: Env },
+  c: GitAuthContext,
   logger: ReturnType<typeof createLogger>,
 ): Promise<Identity | null> {
   const token = parseBasicToken(c.req.header("Authorization"));
@@ -169,6 +186,7 @@ async function authenticate(
     // and must apply the same gate, or an erasure-requested user keeps clone/push
     // access until the cascade lands.
     if (!result.success || result.data.deletingAt) return null;
+    c.set?.("telemetryOptOut", result.data.telemetryOptOut === true);
     return { userId: result.data.id };
   }
   const result = await getAgentByToken(c.env.DB, token, logger);
@@ -189,6 +207,9 @@ async function authenticate(
     return null;
   }
   if (!owner.success || owner.data.deletingAt) return null;
+  // An agent's git traffic inherits its owner's telemetry choice, matching the
+  // way it inherits the owner's access.
+  c.set?.("telemetryOptOut", owner.data.telemetryOptOut === true);
   return { agentId: result.data.id, agentOwnerId: result.data.ownerId };
 }
 
@@ -281,7 +302,7 @@ function normalizeSlug(slug: string): string {
  * `Response` to return as-is.
  */
 async function authorizeProject(
-  c: { req: { header(name: string): string | undefined; param(name: string): string }; env: Env },
+  c: GitAuthContext & { req: { param(name: string): string } },
   scope: "read" | "write",
   logger: ReturnType<typeof createLogger>,
 ): Promise<{ project: ProjectEntry; identity: Identity | null } | Response> {
@@ -338,7 +359,7 @@ const gitUnavailable = (resource: "project" | "workspace"): Response =>
  * workspace's Artifacts remote on success, or a `Response` to return as-is.
  */
 async function authorizeWorkspace(
-  c: { req: { header(name: string): string | undefined; param(name: string): string }; env: Env },
+  c: GitAuthContext & { req: { param(name: string): string } },
   scope: "read" | "write",
   logger: ReturnType<typeof createLogger>,
 ): Promise<{ remote: string; workspace: WorkspaceEntry; project: ProjectEntry } | Response> {

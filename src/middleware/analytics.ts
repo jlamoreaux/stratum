@@ -33,6 +33,16 @@ export const analyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (
     agentId,
   });
 
+  // Honor the caller's opt-out (#257). Deliberately placed after the debug log
+  // above: that log stays in the operator's own Workers logs and never leaves
+  // the instance, whereas this gate governs export to a third party.
+  //
+  // Every path that authenticates a caller publishes the preference alongside
+  // the identity: authMiddleware for the API and UI, and git-http's own
+  // `authenticate` for the smart-HTTP surface it owns. Note the latter sets the
+  // preference WITHOUT a userId, so this must not be gated on attribution.
+  if (c.get("telemetryOptOut") === true) return;
+
   const distinctId = userId ?? agentId ?? "server";
   const client = createPostHogClient(c.env);
   const capture = client.capture({
