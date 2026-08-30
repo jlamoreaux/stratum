@@ -1,5 +1,5 @@
 import git, { Errors as GitErrors } from "isomorphic-git";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { blobObject, commitObject, treeObject } from "../src/storage/git-objects";
 import {
   type DeepenFetch,
@@ -7,6 +7,7 @@ import {
   type NodeFS,
   artifactsRepoNameFromRemote,
   buildUnifiedDiff,
+  cloneRepo,
   extractTokenSecret,
   freshRepoToken,
   getDiffBetweenRepos,
@@ -17,6 +18,7 @@ import {
   scanForSubmoduleContent,
   submoduleUnsupportedError,
   walkDir,
+  withTimeout,
 } from "../src/storage/git-ops";
 import { MemoryFS } from "../src/storage/memory-fs";
 import { type FsLike, placeLooseObject } from "../src/storage/object-loader";
@@ -35,6 +37,7 @@ vi.mock("isomorphic-git", async (importActual) => {
       clone: vi.fn(),
       addRemote: vi.fn(),
       fetch: vi.fn(),
+      getRemoteInfo: vi.fn(),
       resolveRef: vi.fn(),
       merge: vi.fn(),
       push: vi.fn(),
@@ -402,6 +405,27 @@ describe("readTreeAtCommit", () => {
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error.message).toContain(`Failed to read tree at commit ${missing}`);
+  });
+
+  it("fails closed once the running total exceeds the byte cap, without reading the rest of the tree (#333)", async () => {
+    const { fs, first } = await makeRepo();
+    const dir = "/";
+    // package.json (14 bytes) + src/math.ts (22 bytes) already exist on
+    // `first`; a cap smaller than their combined size trips on the second
+    // file without needing a large fixture.
+    const result = await readTreeAtCommit(fs, dir, first, noopLogger, 20);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toContain(`Commit ${first}'s tree exceeds the 20-byte`);
+  });
+
+  it("succeeds when the tree fits within the byte cap", async () => {
+    const { fs, first } = await makeRepo();
+    const dir = "/";
+    const result = await readTreeAtCommit(fs, dir, first, noopLogger, 1_000_000);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect([...result.data.keys()].sort()).toEqual(["package.json", "src/math.ts"]);
   });
 });
 
@@ -777,6 +801,130 @@ describe("readRepoFiles pinned-commit deepening — production wiring (#246)", (
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error.message).toContain("Failed to deepen repository history");
+  });
+});
+
+describe("withTimeout (#332)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves with the underlying value when it settles before the timeout", async () => {
+    const resultPromise = withTimeout(Promise.resolve("done"), 1000, "test op");
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(resultPromise).resolves.toBe("done");
+  });
+
+  it("propagates the underlying rejection unchanged when it fails before the timeout", async () => {
+    // No intervening await before this: Promise.race (inside withTimeout)
+    // subscribes to both promises synchronously, so asserting immediately
+    // — rather than yielding via advanceTimersByTimeAsync first — attaches
+    // a handler before Node's unhandled-rejection check ever runs.
+    await expect(withTimeout(Promise.reject(new Error("boom")), 1000, "test op")).rejects.toThrow(
+      "boom",
+    );
+  });
+
+  it("rejects with a timeout error naming the operation and budget when the promise never settles", async () => {
+    const neverSettles = new Promise<string>(() => {});
+    const resultPromise = withTimeout(neverSettles, 1000, "test op");
+    const assertion = expect(resultPromise).rejects.toThrow("test op timed out after 1000ms");
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+  });
+
+  it("clears its timer once the promise settles, leaving nothing pending", async () => {
+    await withTimeout(Promise.resolve("done"), 1000, "test op");
+    // If the timer weren't cleared, this would still have one pending timer
+    // (the timeout callback) even though the operation already finished.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("cloneRepo timeout (#332)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(git.clone).mockReset();
+    vi.mocked(git.fetch).mockReset();
+    vi.mocked(git.getRemoteInfo).mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("times out a stalling git.clone at the default 30s budget instead of hanging indefinitely", async () => {
+    vi.mocked(git.clone).mockImplementation(() => new Promise(() => {}));
+
+    const resultPromise = cloneRepo("https://example.com/repo.git", "token", noopLogger);
+    const assertion = resultPromise.then((result) => {
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.message).toContain("Failed to clone repository");
+      expect(String(result.error.context?.cause)).toContain(
+        "cloneRepo: git.clone timed out after 30000ms",
+      );
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await assertion;
+  });
+
+  it("honors a custom timeoutMs override instead of the default", async () => {
+    vi.mocked(git.clone).mockImplementation(() => new Promise(() => {}));
+
+    const resultPromise = cloneRepo("https://example.com/repo.git", "token", noopLogger, {
+      timeoutMs: 5_000,
+    });
+    const assertion = resultPromise.then((result) => {
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(String(result.error.context?.cause)).toContain(
+        "cloneRepo: git.clone timed out after 5000ms",
+      );
+    });
+    // Well short of the 30s default: proves the override actually took effect
+    // rather than the default silently still applying.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertion;
+  });
+
+  it("also applies a custom timeoutMs to each per-tag fetch, not just the main clone", async () => {
+    // A bare no-op clone (like the "readRepoFiles clone depth" tests use):
+    // git.getRemoteInfo and git.fetch are mocked below and never actually
+    // read the local fs, so nothing here needs a real, browsable repo — only
+    // that the clone step itself resolves so the includeTags branch runs.
+    vi.mocked(git.clone).mockResolvedValue(undefined);
+    vi.mocked(git.getRemoteInfo).mockResolvedValue({
+      capabilities: [],
+      refs: { tags: { "v1.0.0": "a".repeat(40) } },
+    } as unknown as Awaited<ReturnType<typeof git.getRemoteInfo>>);
+    // Never resolves: proves the tag fetch itself is timed out, not the
+    // (already-succeeded) clone or getRemoteInfo calls.
+    vi.mocked(git.fetch).mockImplementation(() => new Promise(() => {}));
+
+    const resultPromise = cloneRepo("https://example.com/repo.git", "token", noopLogger, {
+      includeTags: true,
+      timeoutMs: 300_000,
+    });
+    // Past TAG_FETCH_TIMEOUT_MS's 15s default: if the override weren't
+    // reaching the tag loop, this alone would already have failed it.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(vi.mocked(git.fetch)).toHaveBeenCalledTimes(1);
+
+    const assertion = resultPromise.then((result) => {
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.message).toContain("Failed to fetch tag: v1.0.0");
+      expect(String(result.error.context?.cause)).toContain(
+        "cloneRepo: git.fetch tag v1.0.0 timed out after 300000ms",
+      );
+    });
+    await vi.advanceTimersByTimeAsync(285_000);
+    await assertion;
   });
 });
 

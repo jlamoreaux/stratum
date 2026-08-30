@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   history into memory: `readRepoFiles` now clones shallow and grows the fetch window only
   as far as needed to reach the pinned commit, capped at 500 commits, instead of an
   unbounded full-history clone (#246).
+- Every `git clone`/`git fetch` call in `src/storage/git-ops.ts` (clone, tag fetches,
+  workspace merge fetches, pinned-commit deepening, GitHub sync) now has a wall-clock
+  timeout, so a stalling remote can no longer hold a request open indefinitely (#332).
+- `readTreeAtCommit` now caps the total bytes it will materialize across a commit's tree
+  at 50 MB, on top of the existing 10 MB per-file cap — bounds tree *size*, independent of
+  the history-depth bound #246 already added (#333).
 
 ## [0.2.0] - 2026-08-29
 

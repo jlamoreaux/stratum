@@ -92,6 +92,75 @@ const http = createHttpClient();
 
 const DIR = "/";
 
+/**
+ * Races `promise` against a timer, rejecting with an error naming `what` and
+ * `timeoutMs` if the timer wins (#332). isomorphic-git's clone/fetch calls
+ * have no cancellation support of their own — the `signal` option in its
+ * types is documented as "reserved for future use" as of the pinned 1.37.x —
+ * so this is the only bound available on a stalling remote. It stops this
+ * file WAITING on the call, not the call itself: the underlying request keeps
+ * running in the background until it settles or the Worker's execution ends,
+ * since there is no way to actually abort it. Still worth doing — without
+ * this, a stalling remote holds the calling request open indefinitely, with
+ * no bound at all.
+ *
+ * Always clears its timer, so a `promise` that settles well within `timeoutMs`
+ * never leaks a pending `setTimeout` past the call.
+ */
+export async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  what: string,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`${what} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+/**
+ * Default budget for {@link cloneRepo}'s own `git.clone` call. Sized for the
+ * common case — a synchronous request path (browse, diff, merge, sandbox
+ * eval) waiting on a shallow clone of a Stratum-native or GitHub remote — not
+ * for `fullHistory: true` callers on a large repo, which should pass a larger
+ * explicit `timeoutMs` (see the backup caller in `src/backup/repo-snapshot.ts`).
+ */
+const CLONE_TIMEOUT_MS = 30_000;
+
+/** Default budget for one tag's fetch inside {@link cloneRepo}'s
+ * `includeTags` loop, when the caller didn't pass `opts.timeoutMs` (which
+ * governs both the main clone and each tag fetch — see its doc comment).
+ * Smaller than {@link CLONE_TIMEOUT_MS} deliberately: a stalling remote fails
+ * the FIRST tag fetch and aborts the whole clone, so the realistic worst case
+ * is one timeout, not one per tag (up to {@link MAX_TAGS}). */
+const TAG_FETCH_TIMEOUT_MS = 15_000;
+
+/** Budget for a workspace fetch inside the merge request path
+ * (`mergeWorkspaceIntoProject`, `batchMergeWorkspaces`) — synchronous and
+ * user-facing, so kept tight. */
+const MERGE_FETCH_TIMEOUT_MS = 30_000;
+
+/** Budget for one deepening round in {@link readRepoFiles}'s pinned-commit
+ * read (#246). Small deliberately: each round fetches a bounded increment
+ * against the remote just cloned from moments earlier, and up to 4 rounds
+ * can run in a single synchronous evaluation request (see
+ * `PINNED_COMMIT_MAX_FETCH_DEPTH`'s own latency accounting). */
+const DEEPEN_FETCH_TIMEOUT_MS = 15_000;
+
+/** Budget for each of {@link syncFromGitHub}'s three fetches (the initial
+ * source fetch and its two deepening callbacks). Larger than the
+ * request-path budgets above: sync runs as a background/scheduled job, where
+ * added latency is cheap — the same tradeoff `SYNC_MAX_FETCH_DEPTH`'s own
+ * rationale already makes for that function. */
+const SYNC_FETCH_TIMEOUT_MS = 60_000;
+
 // Node.js-compatible FS interface (returned by MemoryFS.toNodeFS())
 export interface NodeFS {
   promises: {
@@ -588,7 +657,20 @@ export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  opts: { fullHistory?: boolean; ref?: string; includeTags?: boolean; depth?: number } = {},
+  opts: {
+    fullHistory?: boolean;
+    ref?: string;
+    includeTags?: boolean;
+    depth?: number;
+    /** Overrides {@link CLONE_TIMEOUT_MS} for the main clone AND
+     * {@link TAG_FETCH_TIMEOUT_MS} for each tag fetch when `includeTags` is
+     * set — pass a larger value for a `fullHistory: true` clone of a repo
+     * expected to be large (#332). Applies per-operation, not as an
+     * aggregate budget across the whole call: a caller with `includeTags`
+     * set is saying "any single network operation this clone makes may take
+     * this long", the same statement the main clone already makes one of. */
+    timeoutMs?: number;
+  } = {},
   httpClient: HttpClient = http,
 ): Promise<
   Result<{ fs: NodeFS; dir: string; tagsTruncated?: boolean; totalTagCount?: number }, AppError>
@@ -597,30 +679,34 @@ export async function cloneRepo(
 
   const fs = new MemoryFS().toNodeFS();
   const cloneResult = await fromPromise(
-    git.clone({
-      fs,
-      http: httpClient,
-      dir: DIR,
-      url: remote,
-      // The repo's default branch: "main" for Stratum-native repos, but imported
-      // repos keep their source branch name (master/trunk/…) — see
-      // projectDefaultBranch in ../types.
-      ref: opts.ref ?? "main",
-      singleBranch: true,
-      // Merges only need recent history (fast shallow clone). Backup needs the FULL
-      // reachable history so the resulting pack is reachability-closed and restores
-      // to the true tip — a 50-commit shallow clone silently drops older ancestors,
-      // producing a snapshot that can't be restored past commit 50.
-      //
-      // `depth` is overridable because a caller that deepens afterwards has to
-      // start both sides at the SAME window. `syncFromGitHub` fetches the source
-      // at its own `depth`; if this clone stayed pinned at 50 while that was
-      // larger, the project side would sit shallower than the retry loop's
-      // starting window believes, and a merge base the source already has could
-      // be reported as SYNC_DIVERGED without the project ever being deepened.
-      ...(opts.fullHistory ? {} : { depth: opts.depth ?? DEFAULT_SHALLOW_DEPTH }),
-      onAuth: makeAuth(token),
-    }),
+    withTimeout(
+      git.clone({
+        fs,
+        http: httpClient,
+        dir: DIR,
+        url: remote,
+        // The repo's default branch: "main" for Stratum-native repos, but imported
+        // repos keep their source branch name (master/trunk/…) — see
+        // projectDefaultBranch in ../types.
+        ref: opts.ref ?? "main",
+        singleBranch: true,
+        // Merges only need recent history (fast shallow clone). Backup needs the FULL
+        // reachable history so the resulting pack is reachability-closed and restores
+        // to the true tip — a 50-commit shallow clone silently drops older ancestors,
+        // producing a snapshot that can't be restored past commit 50.
+        //
+        // `depth` is overridable because a caller that deepens afterwards has to
+        // start both sides at the SAME window. `syncFromGitHub` fetches the source
+        // at its own `depth`; if this clone stayed pinned at 50 while that was
+        // larger, the project side would sit shallower than the retry loop's
+        // starting window believes, and a merge base the source already has could
+        // be reported as SYNC_DIVERGED without the project ever being deepened.
+        ...(opts.fullHistory ? {} : { depth: opts.depth ?? DEFAULT_SHALLOW_DEPTH }),
+        onAuth: makeAuth(token),
+      }),
+      opts.timeoutMs ?? CLONE_TIMEOUT_MS,
+      "cloneRepo: git.clone",
+    ),
   );
 
   if (!cloneResult.success) {
@@ -689,17 +775,29 @@ export async function cloneRepo(
 
     for (const name of tagNamesToFetch) {
       const tagFetch = await fromPromise(
-        git.fetch({
-          fs,
-          http: httpClient,
-          dir: DIR,
-          url: remote,
-          singleBranch: true,
-          remoteRef: `refs/tags/${name}`,
-          tags: true,
-          ...(opts.fullHistory ? {} : { depth: 50 }),
-          onAuth: makeAuth(token),
-        }),
+        withTimeout(
+          git.fetch({
+            fs,
+            http: httpClient,
+            dir: DIR,
+            url: remote,
+            singleBranch: true,
+            remoteRef: `refs/tags/${name}`,
+            tags: true,
+            ...(opts.fullHistory ? {} : { depth: 50 }),
+            onAuth: makeAuth(token),
+          }),
+          // A caller's timeoutMs override (e.g. backup's 300s) is a
+          // statement about how long ANY single network operation in this
+          // clone may take, not just the main one — a full-history clone
+          // with `includeTags: true` also drops each tag fetch's own depth
+          // limit above, so leaving this on the smaller default would have
+          // let a large/old-tagged repo's backup keep failing via a
+          // 15s-capped tag fetch despite the override existing precisely to
+          // give this clone more room (#332).
+          opts.timeoutMs ?? TAG_FETCH_TIMEOUT_MS,
+          `cloneRepo: git.fetch tag ${name}`,
+        ),
       );
       if (!tagFetch.success) {
         logger.error("Failed to fetch tag", tagFetch.error, { remote, tag: name });
@@ -860,15 +958,19 @@ export async function mergeWorkspaceIntoProject(
 
   const fetchResult = await measure("workspaceFetchMs", () =>
     fromPromise(
-      git.fetch({
-        fs,
-        http,
-        dir,
-        remote: "workspace",
-        ref: branch,
-        singleBranch: true,
-        onAuth: makeAuth(workspaceToken),
-      }),
+      withTimeout(
+        git.fetch({
+          fs,
+          http,
+          dir,
+          remote: "workspace",
+          ref: branch,
+          singleBranch: true,
+          onAuth: makeAuth(workspaceToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "mergeWorkspaceIntoProject: git.fetch workspace",
+      ),
     ),
   );
   if (!fetchResult.success) {
@@ -1222,15 +1324,19 @@ export async function batchMergeWorkspaces(
   const fetched = await Promise.all(
     workspaces.map((ws, i) =>
       fromPromise(
-        git.fetch({
-          fs,
-          http,
-          dir,
-          remote: `ws${i}`,
-          ref: "main",
-          singleBranch: true,
-          onAuth: makeAuth(ws.token),
-        }),
+        withTimeout(
+          git.fetch({
+            fs,
+            http,
+            dir,
+            remote: `ws${i}`,
+            ref: "main",
+            singleBranch: true,
+            onAuth: makeAuth(ws.token),
+          }),
+          MERGE_FETCH_TIMEOUT_MS,
+          `batchMergeWorkspaces: git.fetch ws${i}`,
+        ),
       ),
     ),
   );
@@ -2381,17 +2487,21 @@ export async function readRepoFiles(
   if (ref !== undefined) {
     const deepen: DeepenFetch = async (increment) => {
       const result = await fromPromise(
-        git.fetch({
-          fs,
-          http,
-          dir,
-          remote: "origin",
-          ref: branch,
-          singleBranch: true,
-          depth: increment,
-          relative: true,
-          onAuth: makeAuth(token),
-        }),
+        withTimeout(
+          git.fetch({
+            fs,
+            http,
+            dir,
+            remote: "origin",
+            ref: branch,
+            singleBranch: true,
+            depth: increment,
+            relative: true,
+            onAuth: makeAuth(token),
+          }),
+          DEEPEN_FETCH_TIMEOUT_MS,
+          "readRepoFiles: git.fetch deepen",
+        ),
       );
       if (!result.success) {
         logger.error(
@@ -2438,12 +2548,39 @@ export async function readRepoFiles(
   return ok(contents);
 }
 
+/**
+ * Aggregate cap on the bytes {@link readTreeAtCommit} will materialize
+ * across one commit's entire tree (#333). `MAX_FILE_BYTES` (10 MB) already
+ * bounds any single blob, but that alone doesn't bound the TREE: a commit
+ * with many merely-large files (or a churny history among callers that read
+ * more than one commit) can still sum to far more than the sandbox
+ * evaluator's downstream base64 write boundary (`materializeTree`) can
+ * safely hold in the Worker's ~128 MB isolate alongside everything else the
+ * request needs. #246 bounded HISTORY depth for this same read path; this
+ * bounds tree SIZE — an independent dimension of the same memory-exhaustion
+ * concern, since even a single commit at depth 1 can carry an oversized tree.
+ *
+ * Sized the same as `MAX_GIT_BODY_BYTES` (`src/routes/git-http.ts`) — this
+ * codebase's existing precedent for how much raw git content is reasonable
+ * to buffer in memory for one operation.
+ *
+ * Checked DURING the read, as each blob lands, not after the whole tree is
+ * already in memory — a check applied only once everything is already
+ * materialized would be too late to bound anything, the same reasoning #246
+ * already applied to the clone step itself.
+ */
+const MAX_TREE_READ_BYTES = 50 * 1024 * 1024;
+
 /** Every file (path → raw bytes) in the tree of one commit. Exported for tests. */
 export async function readTreeAtCommit(
   fs: NodeFS,
   dir: string,
   commitSha: string,
   logger: Logger,
+  /** Overrides {@link MAX_TREE_READ_BYTES} — a parameter (rather than a bare
+   * reference to the constant) purely so tests can drive the boundary with a
+   * small tree instead of allocating tens of MB of fixture data. */
+  maxTotalBytes: number = MAX_TREE_READ_BYTES,
 ): Promise<Result<Map<string, Uint8Array>, AppError>> {
   const listResult = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
   if (!listResult.success) {
@@ -2458,6 +2595,7 @@ export async function readTreeAtCommit(
   }
 
   const contents = new Map<string, Uint8Array>();
+  let totalBytes = 0;
   for (const path of listResult.data) {
     const blobResult = await fromPromise(git.readBlob({ fs, dir, oid: commitSha, filepath: path }));
     if (!blobResult.success) {
@@ -2470,6 +2608,23 @@ export async function readTreeAtCommit(
           "Git",
           `Failed to read tree at commit ${commitSha}: unreadable object at ${path}`,
           blobResult.error,
+        ),
+      );
+    }
+
+    totalBytes += blobResult.data.blob.length;
+    if (totalBytes > maxTotalBytes) {
+      logger.error("Commit tree exceeds the max materializable size", undefined, {
+        commitSha,
+        path,
+        totalBytes,
+        maxTotalBytes,
+      });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Commit ${commitSha}'s tree exceeds the ${maxTotalBytes}-byte materialization cap ` +
+            `(stopped at ${path})`,
         ),
       );
     }
@@ -3186,15 +3341,19 @@ export async function syncFromGitHub(
   }
 
   const fetchResult = await fromPromise(
-    git.fetch({
-      fs,
-      http,
-      dir,
-      remote: "source",
-      ref: branch,
-      singleBranch: true,
-      depth: startDepth,
-    }),
+    withTimeout(
+      git.fetch({
+        fs,
+        http,
+        dir,
+        remote: "source",
+        ref: branch,
+        singleBranch: true,
+        depth: startDepth,
+      }),
+      SYNC_FETCH_TIMEOUT_MS,
+      "syncFromGitHub: git.fetch source",
+    ),
   );
   if (!fetchResult.success) {
     const cause = fetchResult.error.message;
@@ -3230,21 +3389,25 @@ export async function syncFromGitHub(
    */
   const deepenProject: DeepenFetch = async (increment) => {
     const result = await fromPromise(
-      git.fetch({
-        fs,
-        http,
-        dir,
-        remote: "origin",
-        // Follows the project's real default branch, not a hardcoded "main":
-        // the clone and push around it already do, and asking origin to deepen
-        // a ref the repo does not have would fail on any imported project whose
-        // default is master/trunk.
-        ref: branch,
-        singleBranch: true,
-        depth: increment,
-        relative: true,
-        onAuth: makeAuth(token),
-      }),
+      withTimeout(
+        git.fetch({
+          fs,
+          http,
+          dir,
+          remote: "origin",
+          // Follows the project's real default branch, not a hardcoded "main":
+          // the clone and push around it already do, and asking origin to deepen
+          // a ref the repo does not have would fail on any imported project whose
+          // default is master/trunk.
+          ref: branch,
+          singleBranch: true,
+          depth: increment,
+          relative: true,
+          onAuth: makeAuth(token),
+        }),
+        SYNC_FETCH_TIMEOUT_MS,
+        "syncFromGitHub: git.fetch deepenProject",
+      ),
     );
     if (!result.success) {
       logger.error("Failed to deepen Artifacts clone history", result.error, { remote, increment });
@@ -3263,16 +3426,20 @@ export async function syncFromGitHub(
    */
   const deepenSource: DeepenFetch = async (increment) => {
     const result = await fromPromise(
-      git.fetch({
-        fs,
-        http,
-        dir,
-        remote: "source",
-        ref: branch,
-        singleBranch: true,
-        depth: increment,
-        relative: true,
-      }),
+      withTimeout(
+        git.fetch({
+          fs,
+          http,
+          dir,
+          remote: "source",
+          ref: branch,
+          singleBranch: true,
+          depth: increment,
+          relative: true,
+        }),
+        SYNC_FETCH_TIMEOUT_MS,
+        "syncFromGitHub: git.fetch deepenSource",
+      ),
     );
     if (!result.success) {
       logger.error("Failed to deepen source history", result.error, {
