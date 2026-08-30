@@ -55,6 +55,12 @@ pass-through. Verify actuals in AI Gateway analytics after the first week.
   `/` (ordinary discussion comments never start a run): `/review`, `/describe`, `/improve`,
   `/ask <question>`. `/review` also works on fork PRs (comment events run with base-repo
   secrets).
+- **Comment-triggered runs use the workflow file from the default branch**, not from the PR
+  branch — `issue_comment` is not a `pull_request` event, so GitHub reads `main`'s copy. A PR
+  that edits this workflow therefore cannot be tested with a `/review` comment on itself: the
+  comment runs the old settings. Only the automatic on-open run uses the PR's own version.
+- The `-i` in `/review -i` is matched exactly (`pr_reviewer.py`, `arg == "-i"`). `/review -I`
+  is not an error — it silently runs a full review.
 - A PR event posts one artifact: the reviewer guide (up to 5 findings + quality score +
   effort/security labels). The walkthrough (`auto_describe`) and the code-suggestions table
   (`auto_improve`) are both off — comment `/describe` or `/improve` to request either on
@@ -105,8 +111,10 @@ review runs 10–14K tokens against a 32K cap. Revisit only if reviews start cli
 
 Two things need to be true first:
 
-1. **`/improve` completes at all.** Comment `/improve` on a real PR and confirm both calls
-   land inside 420s now that self-reflection runs on flash.
+1. **`/improve` completes at all.** Comment `/improve` on a real PR **after these settings are
+   on `main`** — comment runs read the default branch's workflow, so testing from a PR branch
+   silently measures the old config — and confirm both calls land inside 420s now that
+   self-reflection runs on flash.
 2. **The chain has a working last resort.** `openai/gpt-5.6-terra` currently returns
    `400 Chat completion bad format` from the gateway, immediately after PR-Agent logs
    `Using reasoning_effort='medium' for GPT-5 model`. 0.41.0 injects that parameter for any
