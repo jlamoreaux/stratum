@@ -136,11 +136,12 @@ jobs:
           # Ticket-compliance analysis emits a block per referenced issue, and our PRs
           # routinely cite several — a lot of output for a section nobody reads.
           pr_reviewer.require_ticket_analysis_review: "false"
-          # Packaging ("safe preset"): quality-score row, walkthrough posted as a
-          # comment (never edits the author's description).
-          # Committable ```suggestion blocks stay OFF by documented security
-          # decision — suggestions render in a table only.
+          # Packaging ("safe preset"): quality-score row on the review. Committable
+          # ```suggestion blocks stay OFF by documented security decision —
+          # suggestions render in a table only.
           pr_reviewer.require_score_review: "true"
+          # These govern /describe when it is invoked by comment; auto_describe is
+          # off, so they do not apply to the automatic run.
           pr_description.publish_description_as_comment: "true"
           # The walkthrough comment sits under the description — don't echo it back,
           # and keep it lean: no PR-type row, no mermaid diagram.
@@ -148,7 +149,10 @@ jobs:
           pr_description.enable_pr_type: "false"
           pr_description.enable_pr_diagram: "false"
           github_action_config.auto_review: "true"
-          github_action_config.auto_describe: "true"
+          # Off: the walkthrough comment restated the author's own description back
+          # at them plus a file-by-file table, on a repo where PR descriptions are
+          # written by hand. Available on demand as a /describe comment.
+          github_action_config.auto_describe: "false"
           # Off until long generations can clear the TTFB wall: both of /improve's
           # calls exceeded it on every run, so auto-improve cost ~2h of runner time
           # per PR and never posted a suggestion. Still available on demand as an

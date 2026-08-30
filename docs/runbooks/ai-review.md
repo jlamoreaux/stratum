@@ -55,11 +55,11 @@ pass-through. Verify actuals in AI Gateway analytics after the first week.
   `/` (ordinary discussion comments never start a run): `/review`, `/describe`, `/improve`,
   `/ask <question>`. `/review` also works on fork PRs (comment events run with base-repo
   secrets).
-- Each PR event posts two artifacts: the reviewer guide (up to 5 findings + quality score +
-  effort/security labels) and a walkthrough comment (`auto_describe`, as a comment — the bot
-  never edits the author's description). The code-suggestions table (`auto_improve`) is off by
-  default; comment `/improve` to request one. Committable ` ```suggestion ` blocks remain off
-  by security decision. Turn dials down if the bot gets noisy.
+- A PR event posts one artifact: the reviewer guide (up to 5 findings + quality score +
+  effort/security labels). The walkthrough (`auto_describe`) and the code-suggestions table
+  (`auto_improve`) are both off — comment `/describe` or `/improve` to request either on
+  demand. Committable ` ```suggestion ` blocks remain off by security decision. Turn dials
+  down if the bot gets noisy.
 - To change models, edit the workflow env — one line per model; no code involved.
 
 ## Timeouts
@@ -154,6 +154,10 @@ rate limits / spend caps on the Cloudflare gateway are the backstop.
   are silently reviewed by flash-tier — check gateway logs when reviews look shallow.
 - `auto_improve` is off; code suggestions are on-demand via an `/improve` comment. See
   [Timeouts](#timeouts).
+- `auto_describe` is off. Its walkthrough comment restated the author's own description plus a
+  file-by-file table, which is noise on a repo where descriptions are written by hand. It also
+  never edited the description, so nothing downstream depended on it. Run `/describe` when a
+  generated summary is genuinely wanted — the `pr_description.*` settings still govern it.
 - Draft PRs are skipped until marked ready for review.
 - A build-your-own alternative (a Cloudflare Worker reviewer with a custom rubric) was specced
   and shelved in favor of PR-Agent; revisit as a Stratum-native feature once the project
