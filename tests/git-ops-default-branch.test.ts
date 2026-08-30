@@ -109,6 +109,7 @@ vi.mock("isomorphic-git", async (importOriginal) => {
 
 import {
   batchMergeStagedTrees,
+  buildManualResolutionDiff,
   cloneRepo,
   commitAndPush,
   extractTreeObjects,
@@ -543,6 +544,40 @@ describe("getDiffBetweenRepos", () => {
       logger,
     );
     expect(result.success).toBe(false);
+  });
+});
+
+describe("buildManualResolutionDiff", () => {
+  it("pins baseSha to the tip its base content was read from (#274)", async () => {
+    // Two commits: the resolution must be diffed against -- and baseSha must
+    // name -- the tip, so the receiver told `baseSha` reconstructs the same
+    // comparison the gate ran.
+    h.servers.set("https://r/p.git", {
+      branch: "trunk",
+      commits: [{ "a.txt": "v1\n" }, { "a.txt": "v2\n" }],
+    });
+
+    const result = await buildManualResolutionDiff(
+      "https://r/p.git",
+      "ptok",
+      [{ file: "a.txt", content: "resolved\n" }],
+      "trunk",
+      logger,
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    const [, tip] = await precomputeShas({
+      branch: "trunk",
+      commits: [{ "a.txt": "v1\n" }, { "a.txt": "v2\n" }],
+    });
+    expect(result.data.baseSha).toBe(tip);
+    // The diff runs v2 -> resolved, so the base content really was read at the
+    // commit baseSha names -- not at an earlier revision, and not from a second
+    // clone that could have seen a different tip.
+    expect(result.data.diff).toContain("-v2");
+    expect(result.data.diff).toContain("+resolved");
+    expect(result.data.diff).not.toContain("-v1");
   });
 });
 
