@@ -107,6 +107,23 @@ const DIR = "/";
  * Always clears its timer, so a `promise` that settles well within `timeoutMs`
  * never leaks a pending `setTimeout` past the call.
  */
+/**
+ * Thrown by {@link withTimeout} when its timer wins the race. Distinguishable
+ * via `instanceof` from the underlying operation's own failures, because the
+ * two mean different things: `withTimeout` never actually cancels the
+ * underlying call (see its own doc comment), so a `TimeoutError` means "we
+ * gave up waiting — the real operation may still be running and could still
+ * land," not "this definitely did not happen." That distinction matters to
+ * any caller that would otherwise take a destructive action on the strength
+ * of a failure (e.g. backup restore's rollback — see `pushMain`/`pushTags`).
+ */
+export class TimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TimeoutError";
+  }
+}
+
 export async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -116,7 +133,7 @@ export async function withTimeout<T>(
   try {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutHandle = setTimeout(() => {
-        reject(new Error(`${what} timed out after ${timeoutMs}ms`));
+        reject(new TimeoutError(`${what} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     });
     return await Promise.race([promise, timeoutPromise]);
@@ -134,17 +151,20 @@ export async function withTimeout<T>(
  */
 const CLONE_TIMEOUT_MS = 30_000;
 
-/** Default budget for one tag's fetch inside {@link cloneRepo}'s
- * `includeTags` loop, when the caller didn't pass `opts.timeoutMs` (which
- * governs both the main clone and each tag fetch — see its doc comment).
- * Smaller than {@link CLONE_TIMEOUT_MS} deliberately: a stalling remote fails
- * the FIRST tag fetch and aborts the whole clone, so the realistic worst case
- * is one timeout, not one per tag (up to {@link MAX_TAGS}). */
+/** Default budget for one tag's fetch, and for the `git.getRemoteInfo` call
+ * that enumerates tag names before it, inside {@link cloneRepo}'s
+ * `includeTags` loop — used whenever the caller didn't pass `opts.timeoutMs`
+ * (which governs the main clone AND every network call in this loop — see
+ * its doc comment). Smaller than {@link CLONE_TIMEOUT_MS} deliberately: a
+ * stalling remote fails the FIRST such call and aborts the whole clone, so
+ * the realistic worst case is one timeout, not one per tag (up to
+ * {@link MAX_TAGS}). */
 const TAG_FETCH_TIMEOUT_MS = 15_000;
 
-/** Budget for a workspace fetch inside the merge request path
- * (`mergeWorkspaceIntoProject`, `batchMergeWorkspaces`) — synchronous and
- * user-facing, so kept tight. */
+/** Budget for a workspace fetch or push inside the merge request path
+ * (`mergeWorkspaceIntoProject`, `fastForwardMerge`, `batchMergeWorkspaces`,
+ * `mergeStagedCommits`, `batchMergeStagedTrees`, `squashMerge`,
+ * `revertToCommit`) — synchronous and user-facing, so kept tight. */
 const MERGE_FETCH_TIMEOUT_MS = 30_000;
 
 /** Budget for one deepening round in {@link readRepoFiles}'s pinned-commit
@@ -160,6 +180,21 @@ const DEEPEN_FETCH_TIMEOUT_MS = 15_000;
  * added latency is cheap — the same tradeoff `SYNC_MAX_FETCH_DEPTH`'s own
  * rationale already makes for that function. */
 const SYNC_FETCH_TIMEOUT_MS = 60_000;
+
+/** Budget for a `git.push` call on a synchronous, user-facing request path
+ * OUTSIDE the merge family (`pushBranchToRemote` — GitHub PR promotion,
+ * `initAndPush`, `commitAndPush`) — the merge/squash-merge/revert push sites
+ * use the separate-but-equal {@link MERGE_FETCH_TIMEOUT_MS} instead, kept
+ * distinct so each family can be retuned independently even though both
+ * start at the same 30s value (#332's push/getRemoteInfo follow-up, caught
+ * by review after the initial clone/fetch pass). */
+const PUSH_TIMEOUT_MS = 30_000;
+
+/** Budget for a `git.push` call inside {@link pushMain}/{@link pushTags} —
+ * used exclusively by backup restore (`src/backup/repo-restore.ts`), an
+ * infrequent, admin/cron-triggered operation, so kept generous like backup's
+ * own 300s clone override rather than the request-path default. */
+const RESTORE_TIMEOUT_MS = 300_000;
 
 // Node.js-compatible FS interface (returned by MemoryFS.toNodeFS())
 export interface NodeFS {
@@ -344,19 +379,38 @@ export async function pushMain(
 ): Promise<Result<void, AppError>> {
   const branch = opts?.branch ?? "main";
   const res = await fromPromise(
-    git.push({
-      fs,
-      dir,
-      http,
-      url: remote,
-      ref: branch,
-      remoteRef: branch,
-      onAuth: makeAuth(token),
-      force: opts?.force ?? false,
-    }),
+    withTimeout(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: remote,
+        ref: branch,
+        remoteRef: branch,
+        onAuth: makeAuth(token),
+        force: opts?.force ?? false,
+      }),
+      RESTORE_TIMEOUT_MS,
+      "pushMain: git.push",
+    ),
   );
   if (!res.success) {
     logger.error("Failed to push main during restore", res.error, { remote });
+    // A timeout is not a confirmed rejection — withTimeout never actually
+    // cancels the underlying push, so it may still land after this returns.
+    // Coded distinctly (not ExternalServiceError) so callers like
+    // restoreProjectRepo's rollback can tell "definitely failed, safe to
+    // clean up" apart from "unknown, don't destroy anything on this signal."
+    if (res.error instanceof TimeoutError) {
+      return err(
+        new AppError(
+          `Push during restore timed out: ${res.error.message}. The push may still be in progress and could still land — do not assume it failed.`,
+          "PUSH_TIMEOUT",
+          504,
+          { remote },
+        ),
+      );
+    }
     return err(new ExternalServiceError("Git", "Failed to push during restore", res.error));
   }
   return ok(undefined);
@@ -390,16 +444,20 @@ export async function pushTags(
   for (const [index, name] of tagNames.entries()) {
     const ref = `refs/tags/${name}`;
     const res = await fromPromise(
-      git.push({
-        fs,
-        dir,
-        http,
-        url: remote,
-        ref,
-        remoteRef: ref,
-        onAuth: makeAuth(token),
-        force: opts?.force ?? false,
-      }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: remote,
+          ref,
+          remoteRef: ref,
+          onAuth: makeAuth(token),
+          force: opts?.force ?? false,
+        }),
+        RESTORE_TIMEOUT_MS,
+        `pushTags: git.push ${ref}`,
+      ),
     );
     if (!res.success) {
       logger.error("Failed to push tag during restore", res.error, {
@@ -409,6 +467,21 @@ export async function pushTags(
         pushedTags,
         unpushedTags: tagNames.slice(index + 1),
       });
+      // Same distinction pushMain makes: a timeout on tag N doesn't mean tag
+      // N (or anything after it) definitely didn't land, and it says nothing
+      // about the tags already confirmed pushed — a caller must not treat
+      // this the same as a confirmed rejection when deciding what to do with
+      // that already-landed state (see restoreProjectRepo's rollback).
+      if (res.error instanceof TimeoutError) {
+        return err(
+          new AppError(
+            `Push of tag ${name} during restore timed out: ${res.error.message}. ${pushedTags.length}/${tagNames.length} tags were confirmed pushed before this; the timed-out tag may still land — do not assume it failed.`,
+            "PUSH_TIMEOUT",
+            504,
+            { remote, failedTag: name, pushedTags: [...pushedTags] },
+          ),
+        );
+      }
       return err(
         new ExternalServiceError(
           "Git",
@@ -447,16 +520,20 @@ export async function pushBranchToRemote(
   logger: Logger,
 ): Promise<Result<void, AppError>> {
   const res = await fromPromise(
-    git.push({
-      fs,
-      dir,
-      http,
-      url: opts.url,
-      ref: opts.localRef ?? "main",
-      remoteRef: opts.remoteRef,
-      onAuth: () => ({ username: "x-access-token", password: opts.token }),
-      force: opts.force ?? false,
-    }),
+    withTimeout(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: opts.url,
+        ref: opts.localRef ?? "main",
+        remoteRef: opts.remoteRef,
+        onAuth: () => ({ username: "x-access-token", password: opts.token }),
+        force: opts.force ?? false,
+      }),
+      PUSH_TIMEOUT_MS,
+      "pushBranchToRemote: git.push",
+    ),
   );
   if (!res.success) {
     const cause = res.error instanceof Error ? res.error.message : String(res.error);
@@ -564,7 +641,11 @@ export async function initAndPush(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir: DIR, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+    withTimeout(
+      git.push({ fs, dir: DIR, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+      PUSH_TIMEOUT_MS,
+      "initAndPush: git.push",
+    ),
   );
   if (!pushResult.success) {
     const cause =
@@ -732,7 +813,11 @@ export async function cloneRepo(
   let totalTagCount = 0;
   if (opts.includeTags) {
     const remoteInfoResult = await fromPromise(
-      git.getRemoteInfo({ http: httpClient, url: remote, onAuth: makeAuth(token) }),
+      withTimeout(
+        git.getRemoteInfo({ http: httpClient, url: remote, onAuth: makeAuth(token) }),
+        opts.timeoutMs ?? TAG_FETCH_TIMEOUT_MS,
+        "cloneRepo: git.getRemoteInfo",
+      ),
     );
     if (!remoteInfoResult.success) {
       logger.error("Failed to enumerate remote tags", remoteInfoResult.error, { remote });
@@ -874,7 +959,11 @@ export async function commitAndPush(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+      PUSH_TIMEOUT_MS,
+      "commitAndPush: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push to remote", pushResult.error, { remote });
@@ -1089,14 +1178,18 @@ export async function mergeWorkspaceIntoProject(
 
   const pushResult = await measure("pushMs", () =>
     fromPromise(
-      git.push({
-        fs,
-        dir,
-        http,
-        url: projectRemote,
-        ref: branch,
-        onAuth: makeAuth(projectToken),
-      }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: projectRemote,
+          ref: branch,
+          onAuth: makeAuth(projectToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "mergeWorkspaceIntoProject: git.push",
+      ),
     ),
   );
   if (!pushResult.success) {
@@ -1241,15 +1334,19 @@ export async function fastForwardMerge(
 
   const pushResult = await measure("pushMs", () =>
     fromPromise(
-      git.push({
-        fs,
-        dir,
-        http,
-        url: projectRemote,
-        ref: pushRef,
-        remoteRef: branch,
-        onAuth: makeAuth(projectToken),
-      }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: projectRemote,
+          ref: pushRef,
+          remoteRef: branch,
+          onAuth: makeAuth(projectToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "fastForwardMerge: git.push",
+      ),
     ),
   );
   if (!pushResult.success) {
@@ -1387,7 +1484,11 @@ export async function batchMergeWorkspaces(
 
   const pushStart = Date.now();
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "batchMergeWorkspaces: git.push",
+    ),
   );
   const pushMs = Date.now() - pushStart;
   if (!pushResult.success) {
@@ -1509,7 +1610,11 @@ export async function mergeStagedCommits(
   }
   const pushStart = Date.now();
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "mergeStagedCommits: git.push",
+    ),
   );
   const pushMs = Date.now() - pushStart;
   if (!pushResult.success) {
@@ -1746,7 +1851,18 @@ export async function batchMergeStagedTrees(
 
   if (results.some((r) => r.merged)) {
     const pushResult = await fromPromise(
-      git.push({ fs, dir, http, url: projectRemote, ref: branch, onAuth: makeAuth(projectToken) }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: projectRemote,
+          ref: branch,
+          onAuth: makeAuth(projectToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "batchMergeStagedTrees: git.push",
+      ),
     );
     if (!pushResult.success) {
       return err(new ExternalServiceError("Git", "Batch push failed", pushResult.error));
@@ -2011,14 +2127,18 @@ export async function squashMerge(
   }
 
   const pushResult = await fromPromise(
-    git.push({
-      fs: projectFs,
-      dir: projectDir,
-      http,
-      url: projectRemote,
-      ref: branch,
-      onAuth: makeAuth(projectToken),
-    }),
+    withTimeout(
+      git.push({
+        fs: projectFs,
+        dir: projectDir,
+        http,
+        url: projectRemote,
+        ref: branch,
+        onAuth: makeAuth(projectToken),
+      }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "squashMerge: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push squash merge", pushResult.error, { projectRemote });
@@ -2721,7 +2841,11 @@ export async function revertToCommit(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "revertToCommit: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push revert commit", pushResult.error, { remote });
@@ -3494,15 +3618,19 @@ export async function syncFromGitHub(
   // Non-force push: a concurrent native merge racing this sync is rejected by
   // the remote instead of being overwritten; the sync can simply be retried.
   const pushResult = await fromPromise(
-    git.push({
-      fs,
-      dir,
-      http,
-      url: remote,
-      ref: branch,
-      remoteRef: branch,
-      onAuth: makeAuth(token),
-    }),
+    withTimeout(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: remote,
+        ref: branch,
+        remoteRef: branch,
+        onAuth: makeAuth(token),
+      }),
+      SYNC_FETCH_TIMEOUT_MS,
+      "syncFromGitHub: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push synced history", pushResult.error, { remote });

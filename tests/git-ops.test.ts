@@ -12,6 +12,9 @@ import {
   freshRepoToken,
   getDiffBetweenRepos,
   mergeWorkspaceIntoProject,
+  pushBranchToRemote,
+  pushMain,
+  pushTags,
   readRepoFiles,
   readTreeAtCommit,
   readTreeAtCommitWithDeepening,
@@ -851,6 +854,7 @@ describe("cloneRepo timeout (#332)", () => {
     vi.mocked(git.clone).mockReset();
     vi.mocked(git.fetch).mockReset();
     vi.mocked(git.getRemoteInfo).mockReset();
+    vi.mocked(git.push).mockReset();
   });
 
   afterEach(() => {
@@ -924,6 +928,95 @@ describe("cloneRepo timeout (#332)", () => {
       );
     });
     await vi.advanceTimersByTimeAsync(285_000);
+    await assertion;
+  });
+
+  it("times out a stalling git.getRemoteInfo during tag enumeration, not just the tag fetches after it", async () => {
+    vi.mocked(git.clone).mockResolvedValue(undefined);
+    vi.mocked(git.getRemoteInfo).mockImplementation(() => new Promise(() => {}));
+
+    const resultPromise = cloneRepo("https://example.com/repo.git", "token", noopLogger, {
+      includeTags: true,
+    });
+    const assertion = resultPromise.then((result) => {
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.message).toContain("Failed to enumerate remote tags");
+      expect(String(result.error.context?.cause)).toContain(
+        // Default TAG_FETCH_TIMEOUT_MS (15s), same as an unset-override tag
+        // fetch — getRemoteInfo is part of the same tag-enumeration step.
+        "cloneRepo: git.getRemoteInfo timed out after 15000ms",
+      );
+    });
+    await vi.advanceTimersByTimeAsync(15_000);
+    await assertion;
+    // git.fetch (the per-tag step) must never be reached: getRemoteInfo
+    // never resolved, so there's no tag list to iterate over.
+    expect(vi.mocked(git.fetch)).not.toHaveBeenCalled();
+  });
+
+  it("times out a stalling git.push instead of hanging indefinitely (representative of every push call site added by #332's follow-up)", async () => {
+    vi.mocked(git.push).mockImplementation(() => new Promise(() => {}));
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+
+    const resultPromise = pushBranchToRemote(
+      fs,
+      "/",
+      {
+        url: "https://github.com/acme/widgets.git",
+        remoteRef: "refs/heads/stratum/chg_1",
+        token: "gh-token",
+      },
+      noopLogger,
+    );
+    const assertion = expect(resultPromise).resolves.toEqual(
+      expect.objectContaining({ success: false }),
+    );
+    // PUSH_TIMEOUT_MS's 30s default.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await assertion;
+  });
+
+  it("pushMain returns a distinctly-coded PUSH_TIMEOUT error, not a generic ExternalServiceError, when git.push times out", async () => {
+    vi.mocked(git.push).mockImplementation(() => new Promise(() => {}));
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+
+    const resultPromise = pushMain("https://example.com/repo.git", "token", fs, "/", noopLogger);
+    const assertion = resultPromise.then((result) => {
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      // Distinct from a genuine rejection's ExternalServiceError/EXTERNAL_SERVICE_ERROR
+      // code — a caller (repo-restore.ts's rollback) needs to tell the two apart.
+      expect(result.error.code).toBe("PUSH_TIMEOUT");
+      expect(result.error.message).toContain("may still be in progress");
+    });
+    // RESTORE_TIMEOUT_MS's 300s budget.
+    await vi.advanceTimersByTimeAsync(300_000);
+    await assertion;
+  });
+
+  it("pushTags returns a distinctly-coded PUSH_TIMEOUT error naming which tag stalled and how many landed first", async () => {
+    vi.mocked(git.push)
+      .mockResolvedValueOnce({} as never)
+      .mockImplementation(() => new Promise(() => {}));
+    const fs = new MemoryFS().toNodeFS() as unknown as NodeFS;
+
+    const resultPromise = pushTags(
+      "https://example.com/repo.git",
+      "token",
+      fs,
+      "/",
+      ["v1.0.0", "v2.0.0"],
+      noopLogger,
+    );
+    const assertion = resultPromise.then((result) => {
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.code).toBe("PUSH_TIMEOUT");
+      expect(result.error.message).toContain("v2.0.0");
+      expect(result.error.message).toContain("1/2 tags were confirmed pushed");
+    });
+    await vi.advanceTimersByTimeAsync(300_000);
     await assertion;
   });
 });
