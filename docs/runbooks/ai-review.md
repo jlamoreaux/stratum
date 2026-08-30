@@ -55,10 +55,10 @@ pass-through. Verify actuals in AI Gateway analytics after the first week.
   `/` (ordinary discussion comments never start a run): `/review`, `/describe`, `/improve`,
   `/ask <question>`. `/review` also works on fork PRs (comment events run with base-repo
   secrets).
-- **Comment-triggered runs use the workflow file from the default branch**, not from the PR
-  branch — `issue_comment` is not a `pull_request` event, so GitHub reads `main`'s copy. A PR
-  that edits this workflow therefore cannot be tested with a `/review` comment on itself: the
-  comment runs the old settings. Only the automatic on-open run uses the PR's own version.
+- **Workflow version depends on the trigger:** automatic `pull_request` runs use the workflow
+  file from the PR's merge ref, while comment-triggered `issue_comment` runs use the default
+  branch's workflow file. A PR that edits this workflow therefore cannot test those edits with a
+  `/review` comment on itself: the comment runs the old settings.
 - The `-i` in `/review -i` is matched exactly (`pr_reviewer.py`, `arg == "-i"`). `/review -I`
   is not an error — it silently runs a full review.
 - A PR event posts one artifact: the reviewer guide (up to 5 findings + quality score +
