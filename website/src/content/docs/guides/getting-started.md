@@ -97,34 +97,38 @@ repository. Commit it like any other file. Here is a realistic policy for a
 TypeScript service:
 
 ```yaml
-evaluation:
-  evaluators:
-    # Bound the blast radius of any single change.
-    - type: diff
-      maxFiles: 30
-      maxLines: 1000
-      forbiddenPatterns:
-        - "console.log("
-        - "TODO: remove"
+# Evaluators live at the TOP level — not nested under any other key.
+evaluators:
+  # Bound the blast radius of any single change. Patterns match FILE PATHS
+  # in the diff, not file contents.
+  - type: diff
+    maxFiles: 30
+    maxLines: 1000
+    forbiddenPatterns:
+      - "*.lock"
+      - "node_modules/"
+      - ".env"
 
-    # Call your existing CI system.
-    - type: webhook
-      url: "https://ci.example.com/evaluate"
-      secret: "${CI_WEBHOOK_SECRET}"
-      timeoutMs: 300000
+  # Call your existing CI system. The secret is used literally — there is
+  # no environment-variable interpolation in this file — and timeoutMs is
+  # capped at 120000 (2 minutes).
+  - type: webhook
+    url: "https://ci.example.com/evaluate"
+    secret: "a-long-random-string-you-generated"
+    timeoutMs: 120000
 
-    # Run the test suite in a Cloudflare Sandbox.
-    - type: sandbox
-      command: "npm test"
-      timeoutMs: 120000
-      totalBudgetMs: 150000
-      allowInstallScripts: false
+  # Run the test suite in a Cloudflare Sandbox.
+  - type: sandbox
+    command: "npm test"
+    timeoutMs: 120000
+    totalBudgetMs: 150000
+    allowInstallScripts: false
 
-    # AI review of the diff, scored 0.0-1.0.
-    - type: llm
-      model: "claude-sonnet-4-20250514"
-      threshold: 0.7
-      maxDiffChars: 100000
+  # AI review of the diff via the Workers AI binding, scored 0.0-1.0.
+  # Omitting `model` uses the default (@cf/meta/llama-3.1-8b-instruct);
+  # a model id Workers AI doesn't serve makes this evaluator fail closed.
+  - type: llm
+    threshold: 0.7
 
 merge:
   requiredApprovals: 1
@@ -146,12 +150,17 @@ downgrade your governance.
   can't turn it off. Every change is scanned for API keys, tokens, and other
   credentials; a hit blocks the merge.
 - **`diff`** — pure analysis of the change, no code execution. Caps the number
-  of files (`maxFiles`) and lines (`maxLines`) changed, and can reject diffs
-  containing `forbiddenPatterns` or missing `requiredPatterns`. Cheap, fast, and
-  the first line of defense against runaway agent edits.
+  of files (`maxFiles`, default 20) and lines (`maxLines`, default 500)
+  changed, and can reject diffs touching `forbiddenPatterns` or missing
+  `requiredPatterns`. **Patterns match file paths, not file contents** — `*`
+  is a wildcard and anything else is a substring match, so `node_modules/`
+  works and `console.log(` matches nothing. Cheap, fast, and the first line
+  of defense against runaway agent edits.
 - **`webhook`** — POSTs the change to an external URL (your existing CI) and
-  waits up to `timeoutMs` for a verdict. `secret` signs the delivery so your CI
-  can verify it came from Stratum.
+  waits up to `timeoutMs` (default 10s, capped at 120s) for a verdict.
+  `secret` signs the delivery so your CI can verify it came from Stratum; the
+  value is used exactly as written, so generate a real secret rather than a
+  `${...}` placeholder — nothing interpolates it.
 - **`sandbox`** — clones the workspace into a Cloudflare Sandbox and runs
   `command` (default: the project's test command), passing or failing on exit
   code. Requires the Sandboxes binding on self-hosted instances; when the
@@ -166,10 +175,18 @@ downgrade your governance.
   them (native modules, a `prepare` step) — the usual symptom of leaving it off
   when you need it is *not* a failing install, but a native module that
   installs unbuilt and then fails when the test command loads it.
-- **`llm`** — sends the diff to an LLM (via the Workers AI binding) for review
-  against your criteria. `model` picks the reviewer, `threshold` is the minimum
-  passing score (0.0–1.0), and `maxDiffChars` bounds how much diff is sent.
-  Token usage is recorded on the change as a cost record.
+- **`llm`** — sends the diff to an LLM for review against your criteria.
+  `model` picks the reviewer and must be a model the **Workers AI binding**
+  serves (default: `@cf/meta/llama-3.1-8b-instruct`); `threshold` is the
+  minimum passing score (0.0–1.0); `maxDiffChars` bounds how much diff is
+  sent (default 24,000, max 100,000). An unavailable model or unparseable
+  verdict fails closed. Token usage is recorded on the change as a cost
+  record.
+
+Two top-level knobs sit alongside `evaluators`: `requireAll` (default `true`)
+makes the aggregate verdict demand every evaluator pass — set it to `false` to
+pass when any one does — and `minScore` (default `0.7`, clamped to 0–1) is the
+per-evaluator pass threshold the `diff` and `sandbox` evaluators score against.
 
 ### The merge protections
 
