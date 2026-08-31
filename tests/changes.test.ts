@@ -2233,7 +2233,7 @@ describe("POST /api/changes/:id/github-pr", () => {
       expect.anything(),
       // #181: the fork copies the parent's default branch under the same name,
       // so a `develop`-default project has no `main` for the clone to find.
-      { ref: "develop", fullHistory: true },
+      { ref: "develop", fullHistory: true, timeoutMs: 120_000 },
     );
     // …and its tip is pushed to the Stratum-owned head ref on GitHub. The
     // pushed LOCAL ref has to be the same branch the clone above asked for:
@@ -2393,7 +2393,7 @@ describe("POST /api/changes/:id/github-pr", () => {
         mockWorkspace.remote,
         "artifacts-token",
         expect.anything(),
-        { ref: "release-2026", fullHistory: true },
+        { ref: "release-2026", fullHistory: true, timeoutMs: 120_000 },
       );
       expect(resolveLocalTip).toHaveBeenCalledWith({}, "/", "release-2026");
     });
@@ -2445,7 +2445,7 @@ describe("POST /api/changes/:id/github-pr", () => {
       mockWorkspace.remote,
       "artifacts-token",
       expect.anything(),
-      { ref: "trunk", fullHistory: true },
+      { ref: "trunk", fullHistory: true, timeoutMs: 120_000 },
     );
   });
 
@@ -2466,7 +2466,7 @@ describe("POST /api/changes/:id/github-pr", () => {
       mockWorkspace.remote,
       "artifacts-token",
       expect.anything(),
-      { ref: "develop", fullHistory: true },
+      { ref: "develop", fullHistory: true, timeoutMs: 120_000 },
     );
     // `release/2026-08` is not in the fork, and neither is `main`.
     expect(pushBranchToRemote).toHaveBeenCalledWith(

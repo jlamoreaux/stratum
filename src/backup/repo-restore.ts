@@ -236,6 +236,20 @@ export async function restoreProjectRepo(
     branch,
   });
   if (!pushed.success) {
+    // A PUSH_TIMEOUT is not a confirmed failure — the underlying push is
+    // never actually cancelled, so it may still land after this returns.
+    // Deleting the repo on that ambiguous a signal risks destroying a
+    // restore that actually succeeded (or racing a delete against a push
+    // still in flight); leave it in place and say the outcome is unknown
+    // rather than assuming either "definitely restored" or "safe to clean up".
+    if (pushed.error.code === "PUSH_TIMEOUT") {
+      logger.error("Restore push timed out; outcome unknown, not rolling back", undefined, {
+        name,
+        repoExists,
+        detail: pushed.error.message,
+      });
+      return err(pushed.error);
+    }
     await rollbackIfCreated();
     return err(pushed.error);
   }
@@ -254,6 +268,18 @@ export async function restoreProjectRepo(
       { force: repoExists },
     );
     if (!tagsPushed.success) {
+      // Same ambiguity as pushMain's own PUSH_TIMEOUT check: the timed-out
+      // tag (and everything after it) may still land, and rolling back would
+      // also destroy main plus every tag already confirmed pushed on the
+      // strength of a signal that isn't a confirmed failure.
+      if (tagsPushed.error.code === "PUSH_TIMEOUT") {
+        logger.error("Restore tag push timed out; outcome unknown, not rolling back", undefined, {
+          name,
+          repoExists,
+          detail: tagsPushed.error.message,
+        });
+        return err(tagsPushed.error);
+      }
       // rollbackIfCreated is a no-op for a pre-existing repo, so a forced restore
       // that fails here leaves main pushed and only some tags present. Say so
       // explicitly: the caller's error alone cannot convey how far it got.
