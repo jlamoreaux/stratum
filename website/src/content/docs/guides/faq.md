@@ -1,6 +1,7 @@
 ---
 title: "FAQ"
 description: "Common questions about Stratum's merge gate, provenance, CI, limitations, and telemetry."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/faq.md"
 ---
 
 ## What is Stratum?

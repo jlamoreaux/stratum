@@ -75,14 +75,23 @@ function rewriteLinks(text, srcDir) {
  *  YAML mapping and fails the Astro build. */
 const yamlString = (s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 
-async function render(srcPath, srcDir, description) {
+async function render(srcPath, srcDir, description, canonicalPath) {
   const raw = await readFile(srcPath, "utf8");
   const lines = raw.split("\n");
   if (!lines[0].startsWith("# ")) throw new Error(`${srcPath}: expected a level-1 heading`);
   const title = lines[0].slice(2).trim();
   let body = rewriteLinks(lines.slice(1).join("\n").replace(/^\n+/, ""), srcDir);
   body = body.replace(SELF_HOST_PLACEHOLDER, HOSTED_ORIGIN);
-  return `---\ntitle: ${yamlString(title)}\ndescription: ${yamlString(description)}\n---\n\n${body}`;
+  // Starlight's default edit link is `editLink.baseUrl + entry.filePath`, which
+  // for these pages resolves to the generated copy under src/content/docs — so
+  // "Edit this page" would send a contributor to a file the next sync
+  // overwrites. A per-page editUrl overrides that and points at the canonical
+  // source. Pages actually authored in website/ keep the default.
+  const editUrl = `${REPO}/edit/main/${canonicalPath}`;
+  return (
+    `---\ntitle: ${yamlString(title)}\ndescription: ${yamlString(description)}\n` +
+    `editUrl: ${yamlString(editUrl)}\n---\n\n${body}`
+  );
 }
 
 const check = process.argv.includes("--check");
@@ -93,7 +102,10 @@ const targets = [
 
 const stale = [];
 for (const [srcPath, srcDir, destPath, description] of targets) {
-  const rendered = await render(srcPath, srcDir, description);
+  // srcPath is website-relative ("../docs/..."); the edit link needs it
+  // relative to the repository root.
+  const canonicalPath = srcPath.replace(/^\.\.\//, "");
+  const rendered = await render(srcPath, srcDir, description, canonicalPath);
   if (check) {
     const current = await readFile(destPath, "utf8").catch(() => null);
     if (current !== rendered) stale.push(`${destPath} is out of sync with ${srcPath}`);

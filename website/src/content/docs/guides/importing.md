@@ -1,6 +1,7 @@
 ---
 title: "Importing from GitHub"
 description: "Import a repository from GitHub, GitLab, or Bitbucket, track progress, and keep the project in sync with its source."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/importing.md"
 ---
 
 Stratum imports repositories from **GitHub, GitLab, and Bitbucket**. Imports run

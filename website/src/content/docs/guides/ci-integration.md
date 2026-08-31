@@ -1,6 +1,7 @@
 ---
 title: "CI Integration (Bring Your Own CI)"
 description: "Bring your own CI: run evaluations on your existing infrastructure and report verdicts back."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/ci-integration.md"
 ---
 
 Stratum has **no native CI runner** — there are no workflow files, no hosted

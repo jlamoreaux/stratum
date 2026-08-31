@@ -1,6 +1,7 @@
 ---
 title: "Authentication"
 description: "Named scoped API tokens, agent tokens, session cookies, anonymous access, and the admin API key."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/api/authentication.md"
 ---
 
 Most API endpoints accept a Stratum API token as an

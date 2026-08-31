@@ -1,6 +1,7 @@
 ---
 title: "Troubleshooting"
 description: "Symptoms and fixes for auth, imports, evaluation, merges, and access."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/troubleshooting.md"
 ---
 
 Symptoms grouped by where they surface. Machine-readable codes are listed in

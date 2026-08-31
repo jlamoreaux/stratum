@@ -1,6 +1,7 @@
 ---
 title: "Issues"
 description: "Open, triage, search, and link issues — and how a merged change closes them."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/issues.md"
 ---
 
 Stratum has a built-in issue tracker. It is deliberately small — issues exist

@@ -1,6 +1,7 @@
 ---
 title: "Getting started"
 description: "From sign-up to a merged, evaluation-gated change — policy, agent identity, and the change flow."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/getting-started.md"
 ---
 
 This guide walks a new team from zero to a merged, evaluation-gated change. By the

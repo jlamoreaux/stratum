@@ -1,6 +1,7 @@
 ---
 title: "Error Codes"
 description: "HTTP status codes and the machine-readable error codes Stratum returns."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/api/errors.md"
 ---
 
 Errors are returned as JSON: `{ "error": "<human-readable message>" }`, with a

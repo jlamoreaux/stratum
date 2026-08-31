@@ -1,6 +1,7 @@
 ---
 title: "Code Review"
 description: "Line-anchored comment threads, replies, resolve/unresolve, and the three review verdicts."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/code-review.md"
 ---
 
 Stratum's merge gate decides whether a change *may* land. Code review is how
