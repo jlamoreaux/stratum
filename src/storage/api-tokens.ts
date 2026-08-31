@@ -317,6 +317,7 @@ interface ResolvedTokenRow {
   user_token_hash: string;
   user_created_at: string;
   deleting_at: string | null;
+  telemetry_opt_out: number;
   token_id: string;
   token_scope: string;
   token_expires_at: string | null;
@@ -329,7 +330,8 @@ interface ResolvedTokenRow {
  *
  * One statement: the token joined to its owner, so a valid token costs a single
  * indexed read rather than a lookup plus an owner fetch. The owner's
- * `deleting_at` rides along for the same reason `getUserByToken` selects `*`.
+ * `deleting_at` rides along for the same reason `getUserByToken` selects `*`,
+ * as does `telemetry_opt_out` (#257).
  *
  * Returns `NOT_FOUND` when the plaintext names no scoped token — which is the
  * signal for the caller to try the legacy `users.token_hash` credential. Every
@@ -354,6 +356,7 @@ export async function resolveApiToken(
       .prepare(
         `SELECT u.id AS user_id, u.email, u.username, u.github_id, u.github_username,
                 u.token_hash AS user_token_hash, u.created_at AS user_created_at, u.deleting_at,
+                u.telemetry_opt_out,
                 t.id AS token_id, t.scope AS token_scope, t.expires_at AS token_expires_at,
                 t.last_used_at AS token_last_used_at, t.revoked_at AS token_revoked_at
            FROM api_tokens t JOIN users u ON u.id = t.user_id
@@ -382,6 +385,11 @@ export async function resolveApiToken(
   };
   if (row.github_id !== null) user.githubId = row.github_id;
   if (row.github_username !== null) user.githubUsername = row.github_username;
+  // Same rule as `rowToUser` in storage/users: compare against 1, so a read
+  // that omits the column means "opted in" rather than leaking `undefined`
+  // into a truthiness test. Selected here so a scoped-token caller carries the
+  // owner's analytics preference (#257) exactly as a legacy-token caller does.
+  if (row.telemetry_opt_out === 1) user.telemetryOptOut = true;
 
   const resolved: ResolvedApiToken = {
     user,

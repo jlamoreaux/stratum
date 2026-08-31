@@ -1,4 +1,5 @@
 import { createPostHogClient } from "../analytics/posthog";
+import { getAgent } from "../storage/agents";
 import {
   type EventRecord,
   getEvent,
@@ -8,6 +9,7 @@ import {
   markEventProcessed,
   setCompletedHandlers,
 } from "../storage/events";
+import { getUser } from "../storage/users";
 import type { Env, Message, MessageBatch } from "../types";
 import type { Logger } from "../utils/logger";
 import { createLogger } from "../utils/logger";
@@ -27,14 +29,93 @@ export interface EventHandler {
   handle(env: Env, event: EventRecord, logger: Logger): Promise<void>;
 }
 
+/**
+ * Resolve the event author's telemetry preference (#257).
+ *
+ * Unlike the request path — where the flag rides the `users` row the auth
+ * middleware already loaded — a queue consumer has no request and no auth
+ * context, so it must look the actor up. That costs one read for a user-authored
+ * event and two for an agent-authored one, against the 4+ D1 operations
+ * `consumeOne` already performs per message.
+ *
+ * Fails CLOSED: an unresolved lookup suppresses the event. A privacy control
+ * that exports whenever D1 hiccups is not a privacy control.
+ *
+ * Suppression is TERMINAL, not deferred. Returning normally lets `processEvent`
+ * record "analytics" in `completed_handlers`, so a later retry of the same
+ * message skips this handler rather than re-attempting the export. A transient
+ * D1 error therefore drops one analytics event permanently. That is the
+ * deliberate trade: analytics is best-effort, and retrying it would either
+ * re-run the export for a user who may have opted out in the meantime or block
+ * the webhook and issue-autoclose handlers that are not best-effort.
+ */
+async function actorOptedOutOfTelemetry(
+  env: Env,
+  event: EventRecord,
+  logger: Logger,
+): Promise<boolean> {
+  // A system-authored event has no person behind it, so there is no preference
+  // to honor and nothing person-identifying to suppress.
+  if (event.actorType === "system" || !event.actorId) return false;
+
+  let ownerId = event.actorId;
+  if (event.actorType === "agent") {
+    // An agent acts under its owner's account, so the owner's choice governs it.
+    const agent = await getAgent(env.DB, event.actorId, logger);
+    if (!agent.success) {
+      logger.warn("Agent lookup failed for telemetry preference; suppressing event", {
+        eventId: event.id,
+        actorId: event.actorId,
+      });
+      return true;
+    }
+    ownerId = agent.data.ownerId;
+  }
+
+  const owner = await getUser(env.DB, ownerId, logger);
+  if (!owner.success) {
+    logger.warn("User lookup failed for telemetry preference; suppressing event", {
+      eventId: event.id,
+      ownerId,
+    });
+    return true;
+  }
+  return owner.data.telemetryOptOut === true;
+}
+
 const analyticsHandler: EventHandler = {
   name: "analytics",
-  async handle(env, event) {
+  async handle(env, event, logger) {
+    // Suppression must not fail the message: analytics is best-effort, and
+    // throwing here would stop issue-autoclose and webhooks from ever running.
+    let optedOut: boolean;
+    try {
+      optedOut = await actorOptedOutOfTelemetry(env, event, logger);
+    } catch (error) {
+      logger.warn("Telemetry preference lookup threw; suppressing event", {
+        eventId: event.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    if (optedOut) return;
+
     const posthog = createPostHogClient(env);
     await posthog.capture({
       event: `stratum.${event.type}`,
       distinctId: event.actorId ?? "system",
-      properties: { project: event.project, actorType: event.actorType },
+      properties: {
+        // The concrete project name is never sent (#257): it identifies private
+        // source as surely as a repo slug in a URL does, which the request path
+        // already redacts. The opaque id groups just as well — except on rows
+        // written before dual-write, which have no projectId at all and so
+        // group under nothing rather than under a name.
+        ...(event.projectId !== undefined ? { projectId: event.projectId } : {}),
+        actorType: event.actorType,
+        // Unattributed events would otherwise accrete on a shared "system"
+        // person profile, the same way the request path guards "server".
+        ...(event.actorId === undefined ? { $process_person_profile: false } : {}),
+      },
     });
   },
 };

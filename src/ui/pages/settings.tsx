@@ -40,6 +40,8 @@ interface SettingsPageProps {
   notice?: SettingsNotice;
   /** Per-request CSP nonce for the copy-button script (only rendered with a fresh token). */
   nonce?: string;
+  /** True when the user has opted out of product analytics (#257). */
+  telemetryOptOut: boolean;
 }
 
 const SCOPE_LABEL: Record<ApiTokenScope, string> = {
@@ -129,6 +131,7 @@ export const SettingsPage: FC<SettingsPageProps> = ({
   freshToken,
   notice,
   nonce,
+  telemetryOptOut,
 }) => {
   const now = Date.now();
   // Mirrors the server-side cap in `createApiToken`: an expired row occupies no
@@ -189,6 +192,45 @@ export const SettingsPage: FC<SettingsPageProps> = ({
           <dt>Email</dt>
           <dd>{user.email}</dd>
         </dl>
+      </div>
+
+      <div class="card">
+        <h3 style={{ marginTop: 0 }}>Privacy</h3>
+        <p class="settings-help">
+          Stratum can send anonymous usage analytics. Two kinds of event are sent, and only these:
+        </p>
+        <ul class="settings-help">
+          <li>
+            One <code>api_request</code> per request, carrying the matched route pattern (e.g.{" "}
+            <code>/:namespace/:slug/files</code>), the method, the status, and the latency.
+          </li>
+          <li>
+            One event per repository activity (a change opening, a merge), carrying the event type
+            and an opaque project id.
+          </li>
+        </ul>
+        <p class="settings-help">
+          Concrete URLs, namespaces, repository names, file paths, diffs, and request payloads are
+          never sent. Turning this off stops future events for your account and for any agent token
+          you own; it does not delete events already sent.
+        </p>
+        <form method="post" action="/settings/telemetry">
+          <label>
+            {/*
+              The missing `value` is load-bearing: browsers submit a valueless
+              checked box as "on", and POST /settings/telemetry accepts only
+              that literal. Adding value="1" would opt every user out, because
+              the route reads an unrecognized value as an opt-out (it fails
+              toward privacy). The field is also the affirmative while the
+              stored column is the negative, hence the inversion here.
+            */}
+            <input type="checkbox" name="analytics" checked={!telemetryOptOut} />
+            Send anonymous usage analytics
+          </label>
+          <button type="submit" class="btn btn-primary">
+            Save preference
+          </button>
+        </form>
       </div>
 
       <div class="card">

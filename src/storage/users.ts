@@ -22,6 +22,10 @@ interface UserRow {
   // Added in migration 026; NULL on live accounts. `SELECT *` already fetches
   // it, so the auth hot path gets `deletingAt` without a second round-trip.
   deleting_at: string | null;
+  // Added in migration 041; 0 on accounts that never opted out. Rides the same
+  // `SELECT *` as deleting_at, so the auth hot path learns the telemetry
+  // preference without a second round-trip.
+  telemetry_opt_out: number;
 }
 
 function rowToUser(row: UserRow): User {
@@ -36,6 +40,10 @@ function rowToUser(row: UserRow): User {
   if (row.github_username !== null) user.githubUsername = row.github_username;
   // `deleting_at` may be absent when a stub/legacy read omits the column.
   if (row.deleting_at != null) user.deletingAt = row.deleting_at;
+  // Compare against 1 rather than coercing: a stub/legacy read that omits the
+  // column must mean "opted in" (today's behavior), never `undefined` leaking
+  // into a truthiness test downstream.
+  if (row.telemetry_opt_out === 1) user.telemetryOptOut = true;
   return user;
 }
 
@@ -183,6 +191,39 @@ export async function markUserDeleting(
       userId,
     });
     return err(new AppError("Failed to mark user deleting", "STORAGE_ERROR", 500, { userId }));
+  }
+}
+
+/**
+ * Set the user's product-analytics preference (#257). `true` stops PostHog
+ * export for their requests and for domain events they author, starting with
+ * the next request — it does not delete events already sent.
+ */
+export async function setUserTelemetryOptOut(
+  db: D1Database,
+  userId: string,
+  optOut: boolean,
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  try {
+    const result = await db
+      .prepare("UPDATE users SET telemetry_opt_out = ? WHERE id = ?")
+      .bind(optOut ? 1 : 0, userId)
+      .run();
+    if ((result.meta?.changes ?? 0) === 0) {
+      return err(new AppError(`User '${userId}' not found`, "NOT_FOUND", 404, { userId }));
+    }
+    logger.info("User telemetry preference updated", { userId, optOut });
+    return ok(undefined);
+  } catch (error) {
+    logger.error(
+      "Failed to update telemetry preference",
+      error instanceof Error ? error : undefined,
+      { userId },
+    );
+    return err(
+      new AppError("Failed to update telemetry preference", "STORAGE_ERROR", 500, { userId }),
+    );
   }
 }
 

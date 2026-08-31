@@ -26,6 +26,12 @@ declare module "hono" {
      * `tokenScope` cannot tell the two apart and anything that must treat them
      * differently has to key on this. */
     apiTokenId?: string;
+    /**
+     * The caller's product-analytics preference (#257), read from the same
+     * `users` row this middleware already loads. Absent for unauthenticated
+     * callers, who have no preference to honor.
+     */
+    telemetryOptOut?: boolean;
     logger: Logger;
   }
 }
@@ -167,6 +173,11 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       c.set("authVia", "token");
       c.set("tokenScope", scope);
       if (tokenId !== null) c.set("apiTokenId", tokenId);
+      // Read off `user`, which both branches above populate — the scoped-token
+      // join selects `telemetry_opt_out` for exactly this reason, so opting out
+      // is not defeated by authenticating with a scoped token instead of the
+      // legacy key.
+      c.set("telemetryOptOut", user.telemetryOptOut === true);
 
       // Off the response path, and debounced inside `touchApiTokenLastUsed` so
       // this is not a write per request. `getWaitUntil` rather than
@@ -219,6 +230,10 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       c.set("agentId", agentResult.data.id);
       c.set("agentOwnerId", agentResult.data.ownerId);
       c.set("authVia", "token");
+      // An agent acts under its owner's account, so the owner's telemetry
+      // choice governs it — otherwise opting out could be defeated by routing
+      // traffic through an agent. The owner row is already in hand.
+      c.set("telemetryOptOut", ownerResult.data.telemetryOptOut === true);
       logger.debug("Auth success - agent", {
         agentId: agentResult.data.id,
         ownerId: agentResult.data.ownerId,
@@ -266,6 +281,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
 
         c.set("userId", sessionResult.data.userId);
         c.set("authVia", "session");
+        c.set("telemetryOptOut", userResult.data.telemetryOptOut === true);
 
         // Generate username from email if missing (backward compatibility)
         const username =

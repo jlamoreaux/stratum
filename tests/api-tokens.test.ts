@@ -244,6 +244,44 @@ describe("resolveApiToken", () => {
     expect(resolved.data.user.id).toBe("usr_1");
   });
 
+  /**
+   * #257 stores the analytics opt-out on `users`, and this join is the only
+   * place a scoped-token caller's owner row is read. If the column is dropped
+   * from the SELECT, `authMiddleware` publishes "opted in" for someone who
+   * opted out — and every other scoped-token assertion still passes, so nothing
+   * else would go red. Hence a real-SQLite test on the query itself.
+   */
+  it("carries the owner's telemetry preference off the same join", async () => {
+    await seedUser();
+    raw.exec("UPDATE users SET telemetry_opt_out = 1 WHERE id = 'usr_1'");
+    const created = await createApiToken(db, logger, {
+      userId: "usr_1",
+      name: "ci",
+      scope: "read",
+    });
+    if (!created.success) throw new Error("create failed");
+
+    const resolved = await resolveApiToken(db, created.data.plaintext, logger);
+    expect(resolved.success).toBe(true);
+    if (!resolved.success) return;
+    expect(resolved.data.user.telemetryOptOut).toBe(true);
+  });
+
+  it("leaves the preference unset for an owner who has not opted out", async () => {
+    await seedUser();
+    const created = await createApiToken(db, logger, {
+      userId: "usr_1",
+      name: "ci",
+      scope: "read",
+    });
+    if (!created.success) throw new Error("create failed");
+
+    const resolved = await resolveApiToken(db, created.data.plaintext, logger);
+    expect(resolved.success).toBe(true);
+    if (!resolved.success) return;
+    expect(resolved.data.user.telemetryOptOut).toBeUndefined();
+  });
+
   it("rejects a revoked token", async () => {
     await seedUser();
     const created = await createApiToken(db, logger, {

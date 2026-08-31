@@ -38,7 +38,12 @@ import {
   listWorkspaces,
 } from "../storage/state";
 import { getProjectSourceUrl, getSyncStatus } from "../storage/sync";
-import { disableLegacyToken, getUser, rotateUserToken } from "../storage/users";
+import {
+  disableLegacyToken,
+  getUser,
+  rotateUserToken,
+  setUserTelemetryOptOut,
+} from "../storage/users";
 import { listDeliveries, listWebhooks } from "../storage/webhooks";
 import type { ApiTokenScope, Env, ProjectEntry } from "../types";
 import { projectDefaultBranch } from "../types";
@@ -203,6 +208,25 @@ async function loadAgentSummaries(
 
 type SettingsUser = { id: string; email: string; username: string };
 
+/**
+ * The settings page needs the telemetry preference (#257) on top of the page
+ * identity `getCurrentUser` returns. Both come off the same row, so this reads
+ * it once rather than widening `PageUser` — which is threaded through every
+ * page header — or paying a second lookup for one checkbox.
+ */
+async function getSettingsUser(
+  c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } },
+  logger: ReturnType<typeof createLogger>,
+): Promise<{ user: SettingsUser; telemetryOptOut: boolean } | null> {
+  const userId = c.get("userId");
+  if (!userId) return null;
+  const result = await getUser(c.env.DB, userId, logger);
+  if (!result.success) return null;
+
+  const { id, email, username, telemetryOptOut } = result.data;
+  return { user: { id, email, username }, telemetryOptOut: telemetryOptOut === true };
+}
+
 const sessionRequiredError = () => (
   <div style="padding:2rem;font-family:monospace;color:#f87171;">
     Settings require a signed-in browser session, not an API token.
@@ -224,14 +248,16 @@ const sessionRequiredError = () => (
 async function requireSettingsSession(
   c: Context<{ Bindings: Env }>,
   logger: ReturnType<typeof createLogger>,
-): Promise<{ user: SettingsUser } | { response: Response | Promise<Response> }> {
-  const user = await getCurrentUser(c, logger);
-  if (!user) return { response: c.redirect("/auth/email") };
+): Promise<
+  { user: SettingsUser; telemetryOptOut: boolean } | { response: Response | Promise<Response> }
+> {
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return { response: c.redirect("/auth/email") };
   if (c.get("authVia") !== "session") {
     logger.warn("Settings rejected - not a session caller", {});
     return { response: c.html(sessionRequiredError(), 403) };
   }
-  return { user };
+  return loaded;
 }
 
 /**
@@ -257,6 +283,7 @@ async function loadApiTokens(
 async function renderSettings(
   c: Context<{ Bindings: Env }>,
   user: SettingsUser,
+  telemetryOptOut: boolean,
   logger: ReturnType<typeof createLogger>,
   extras: { freshToken?: FreshCredential; notice?: SettingsNotice } = {},
 ) {
@@ -272,6 +299,7 @@ async function renderSettings(
       user={user}
       agents={agents}
       apiTokens={tokens.tokens}
+      telemetryOptOut={telemetryOptOut}
       // Threaded here rather than at each call site: this helper is the single
       // render path for the settings page, so the CSP nonce main added cannot
       // be forgotten by a future caller.
@@ -298,7 +326,7 @@ const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
   },
 };
 
-// GET /settings — Account, API token, and agent token management
+// GET /settings — Account, privacy, API token, and agent token management
 app.get("/settings", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const access = await requireSettingsSession(c, logger);
@@ -310,7 +338,7 @@ app.get("/settings", async (c) => {
   const notice = Object.hasOwn(SETTINGS_NOTICES, requestedNotice)
     ? SETTINGS_NOTICES[requestedNotice]
     : undefined;
-  const page = await renderSettings(c, access.user, logger, {
+  const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
     ...(notice !== undefined ? { notice } : {}),
   });
   return c.html(page);
@@ -356,7 +384,7 @@ app.post("/settings/tokens", async (c) => {
 
   const parsed = parseTokenForm(await c.req.parseBody());
   if ("error" in parsed) {
-    const page = await renderSettings(c, user, logger, {
+    const page = await renderSettings(c, user, access.telemetryOptOut, logger, {
       notice: { kind: "error", message: parsed.error },
     });
     return c.html(page, 400);
@@ -378,7 +406,7 @@ app.post("/settings/tokens", async (c) => {
         : createResult.error.statusCode === 400
           ? 400
           : 500;
-    const page = await renderSettings(c, user, logger, {
+    const page = await renderSettings(c, user, access.telemetryOptOut, logger, {
       notice: {
         kind: "error",
         message: status === 500 ? "Could not create the token." : createResult.error.message,
@@ -395,7 +423,7 @@ app.post("/settings/tokens", async (c) => {
     detail: { scope: createResult.data.token.scope },
   });
 
-  const page = await renderSettings(c, user, logger, {
+  const page = await renderSettings(c, user, access.telemetryOptOut, logger, {
     freshToken: {
       kind: "scoped-token",
       value: createResult.data.plaintext,
@@ -422,7 +450,7 @@ app.post("/settings/tokens/:id/revoke", async (c) => {
     // Another user's token id is indistinguishable from one that never existed.
     const status = revokeResult.error.statusCode === 404 ? 404 : 500;
     logger.warn("Failed to revoke API token", { tokenId: id, status });
-    const page = await renderSettings(c, access.user, logger, {
+    const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
       notice: {
         kind: "error",
         message: status === 404 ? "No such token." : "Could not revoke that token.",
@@ -451,7 +479,7 @@ app.post("/settings/legacy-token/disable", async (c) => {
   const disableResult = await disableLegacyToken(c.env.DB, access.user.id, logger);
   if (!disableResult.success) {
     logger.error("Failed to disable legacy token", disableResult.error);
-    const page = await renderSettings(c, access.user, logger, {
+    const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
       notice: { kind: "error", message: "Could not disable the legacy API key." },
     });
     return c.html(page, 500);
@@ -465,11 +493,57 @@ app.post("/settings/legacy-token/disable", async (c) => {
   return c.redirect("/settings?notice=legacy-disabled");
 });
 
+// POST /settings/telemetry — Set the per-user product-analytics preference
+//
+// Not behind `requireSettingsSession`: this changes the caller's own analytics
+// preference, it does not mint or revoke a credential, so the circularity that
+// makes the token routes session-only does not apply. A read-only token is
+// already refused on method by `authMiddleware`.
+app.post("/settings/telemetry", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return c.redirect("/auth/login");
+  const { user } = loaded;
+
+  const form = await c.req.parseBody();
+  // An unchecked checkbox is not submitted at all, so the field carries the
+  // affirmative and its absence is the opt-out. Any value that isn't exactly
+  // "on" — a stray type, an unexpected string — is read as an opt-out rather
+  // than guessed at, so a misread never turns export back on. (A body that
+  // cannot be parsed at all throws out of parseBody and is rejected without
+  // changing the preference; it never reaches this line.)
+  const optOut = !(typeof form.analytics === "string" && form.analytics === "on");
+
+  const saved = await setUserTelemetryOptOut(c.env.DB, user.id, optOut, logger);
+  if (!saved.success) {
+    logger.error("Failed to save telemetry preference", saved.error);
+    // Redirecting here would re-render Settings from the unchanged row, showing
+    // the old value as though the save had succeeded.
+    return c.html(issuePageError(500, user), 500);
+  }
+
+  // analyticsMiddleware wraps this request and reads the preference on the way
+  // out, from the value auth loaded BEFORE this write. Without this line, the
+  // last thing exported about someone who just opted out is the request in
+  // which they did it, attributed to them.
+  c.set("telemetryOptOut", optOut);
+
+  await recordAudit(c.env.DB, logger, {
+    action: "telemetry.preference_changed",
+    actorType: "user",
+    actorId: user.id,
+    detail: { optOut },
+  });
+
+  return c.redirect("/settings", 302);
+});
+
 // POST /settings/rotate-token — Rotate the API key; renders the new key once
 app.post("/settings/rotate-token", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/login");
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return c.redirect("/auth/login");
+  const { user, telemetryOptOut } = loaded;
 
   // Not `requireSettingsSession`: the legacy key must keep rotating for callers
   // that predate #254. Only a SCOPED token is refused, because the key it would
@@ -493,7 +567,7 @@ app.post("/settings/rotate-token", async (c) => {
 
   // Rendered in the POST response so the secret never lands in a URL or log,
   // and never in a cache either.
-  const page = await renderSettings(c, user, logger, {
+  const page = await renderSettings(c, user, telemetryOptOut, logger, {
     freshToken: { kind: "api-key", value: rotateResult.data },
   });
   return c.html(page, 200, { "Cache-Control": "no-store" });
@@ -502,8 +576,9 @@ app.post("/settings/rotate-token", async (c) => {
 // POST /settings/agents — Create an agent token; renders it once
 app.post("/settings/agents", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/login");
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return c.redirect("/auth/login");
+  const { user, telemetryOptOut } = loaded;
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
@@ -527,7 +602,7 @@ app.post("/settings/agents", async (c) => {
     detail: { name },
   });
 
-  const page = await renderSettings(c, user, logger, {
+  const page = await renderSettings(c, user, telemetryOptOut, logger, {
     freshToken: { kind: "agent", value: createResult.data.plaintext, agentName: name },
   });
   return c.html(page, 200, { "Cache-Control": "no-store" });
