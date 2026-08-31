@@ -116,6 +116,8 @@ evaluation:
     - type: sandbox
       command: "npm test"
       timeoutMs: 120000
+      totalBudgetMs: 150000
+      allowInstallScripts: false
 
     # AI review of the diff, scored 0.0-1.0.
     - type: llm
@@ -153,7 +155,16 @@ downgrade your governance.
   `command` (default: the project's test command), passing or failing on exit
   code. Requires the Sandboxes binding on self-hosted instances; when the
   binding is absent this evaluator **fails closed** rather than silently
-  passing.
+  passing. `timeoutMs` and `installTimeoutMs` bound the scored command and the
+  dependency install separately; `totalBudgetMs` (default 150s) bounds their
+  *sum* — each phase gets `min(configured, budget remaining)`, and running out
+  fails the evaluation instead of hanging. Dependency installs pass
+  `--ignore-scripts` by default, since the evaluated tree is untrusted code an
+  agent wrote and a `preinstall`/`postinstall` would otherwise run before any
+  human review; set `allowInstallScripts: true` if your build genuinely needs
+  them (native modules, a `prepare` step) — the usual symptom of leaving it off
+  when you need it is *not* a failing install, but a native module that
+  installs unbuilt and then fails when the test command loads it.
 - **`llm`** — sends the diff to an LLM (via the Workers AI binding) for review
   against your criteria. `model` picks the reviewer, `threshold` is the minimum
   passing score (0.0–1.0), and `maxDiffChars` bounds how much diff is sent.

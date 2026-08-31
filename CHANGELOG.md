@@ -49,6 +49,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off the single unnamed key accounts were given before scoped tokens existed.
   Named tokens are unaffected. Move anything still using the legacy credential
   onto a named token first — disabling cannot be undone.
+- **A total time budget for sandbox evaluation** (`totalBudgetMs`, default 150s). The per-phase
+  timeouts were independent, so nothing bounded their sum and an evaluation could hold a
+  synchronous request open past any client or proxy deadline. Each phase is now granted
+  `min(configured, budget remaining)`, and exhausting the budget returns a failing verdict whose
+  reason names the phase (`sandbox budget exceeded (install)`) instead of hanging. See
+  [ADR 007](docs/adr/007-sandbox-evaluator-threat-model.md), which also documents what the
+  Cloudflare Sandbox binding is and is not relied upon to isolate.
+- `allowInstallScripts` on the `sandbox` evaluator config.
+
+### Breaking
+- **The sandbox evaluator no longer runs npm lifecycle scripts.** Dependency installs now pass
+  `--ignore-scripts`, because the evaluated tree is untrusted and a `preinstall`/`postinstall`
+  would otherwise execute before any human review. Projects whose build genuinely needs them
+  (native modules, a `prepare` step) opt back in with `allowInstallScripts: true` on the
+  `sandbox` evaluator in `.stratum/policy.yaml`. Note the usual symptom is *not* a failing
+  install: a native module installs unbuilt and then fails when the test command loads it.
+- **The default sandbox install timeout drops from 120s to 90s**, so the per-phase defaults sum
+  to exactly the new total budget and an unconfigured project is never truncated.
+- Re-evaluating an existing change (`POST /changes/:id/evaluate`) runs under the new default, so
+  a change that passed before this release may fail on re-evaluation.
 
 ### Fixed
 - Approvals are dismissed when the evaluated **base** moves, not only when the
@@ -105,6 +125,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes the project id rather than its name, so a name-scoped lookup is not
   expressible at the call site, and `createWebhook` requires `projectId` so no
   new unstamped row can undo the backfill.
+- Policy files are now validated per evaluator, not just spread onto the defaults. `sandbox` and
+  `webhook` timeouts are clamped into range, `sandbox.command` is rejected if it is blank,
+  over-length, or contains a newline (which a shell would read as a second command), a `webhook`
+  entry without a `url` is dropped, and malformed `evaluators` entries are dropped instead of
+  crashing evaluator construction. An out-of-range value is clamped with a warning; it does not
+  block merges.
+- **`minScore` is clamped to `[0, 1]` and replaced when rejected.** Previously the raw value from
+  the policy file survived validation, so `minScore: -.inf` (or the string `"-5"`) made
+  `score >= minScore` true for every score — accepting changes whose evaluators had all scored 0.
+- A policy containing an unusable evaluator entry now fails the merge gate closed with a
+  `configError` rather than dropping that entry and proceeding on the survivors. Silently removing
+  one gate while its siblings remain would let a change through on the rest — a `webhook` whose
+  `url` was typo'd previously reached the evaluator and blocked. An unrecognised evaluator *type*
+  is unaffected; it is still passed through and rejected downstream.
+- A YAML alias cycle in a policy file no longer causes the whole file to be treated as absent.
+  Serializing a rejected entry for a log line could throw, and the fallback silently discarded the
+  file's `merge` protection — dropping `requiredApprovals` and re-enabling force-merge.
 - Sandbox evaluation of a pinned commit no longer clones a workspace's entire reachable
   history into memory: `readRepoFiles` now clones shallow and grows the fetch window only
   as far as needed to reach the pinned commit, capped at 500 commits, instead of an
