@@ -180,7 +180,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     ),
     tool(
       "stratum_review_change",
-      "Submit a review verdict on a change. Reviews are a human gate — the server refuses every verdict from an agent token, request_changes as much as approve, so this tool requires a user token with write access.",
+      "Submit a review verdict on a change. Reviews are a human gate — the server refuses every verdict from an agent token, including request_changes and approve, so this tool requires a user token with write access.",
       {
         change_id: z.string().describe("Change id"),
         verdict: z.enum(["approve", "request_changes"]).describe("Review verdict"),

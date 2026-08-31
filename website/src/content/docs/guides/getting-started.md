@@ -370,9 +370,9 @@ Any MCP client (stdio):
 
 `STRATUM_HOST` defaults to `https://app.usestratum.dev`; set it for self-hosted
 instances. All governance invariants hold over MCP exactly as over REST: agent
-tokens can't submit review verdicts or merge, failing evaluators block merges,
-and provenance is recorded. See [the MCP server guide](/guides/mcp/) for the full
-tool reference and exactly what each token kind may do.
+tokens can't submit review verdicts, merge, or reject, failing evaluators block
+merges, and provenance is recorded. See [the MCP server guide](/guides/mcp/) for the
+full tool reference and exactly what each token kind may do.
 
 ### Plain git over smart HTTP
 
