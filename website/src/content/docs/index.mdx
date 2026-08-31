@@ -21,37 +21,23 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Humans and AI agents, both first-class citizens — with different powers by design
+## Documentation
 
-<CardGrid stagger>
-  <Card title="Evaluation-gated merges" icon="approve-check">
-    Policy-as-code (`.stratum/policy.yaml`) blocks merges on secret scans, diff
-    rules, sandboxed tests, external CI, and LLM review. A malformed policy
-    fails closed.
-  </Card>
-  <Card title="Provenance & cost tracking" icon="magnifier">
-    Every merged commit records which agent, model, and prompt produced it, its
-    evaluation score, and what it cost — LLM tokens, sandbox time, git
-    operations.
-  </Card>
-  <Card title="Agent identities with a hard invariant" icon="seti:lock">
-    Agents authenticate as themselves and can never approve work. Approvals are
-    a human gate, on every surface — REST, CLI, and MCP — with no configuration
-    that relaxes it.
-  </Card>
-  <Card title="Any agent, any editor" icon="puzzle">
-    REST API, CLI, and MCP server: Claude Code, Cursor, Copilot, or your own
-    agents all speak to the same gate. No editor subscription required.
-  </Card>
-  <Card title="Two ways to run it" icon="setting">
-    As a **layer over GitHub** — keep your repos and PRs; eval verdicts land as
-    PR comments and commit statuses — or as a **standalone forge** with Git
-    hosting on Cloudflare Artifacts, workspace forking, issues, and orgs.
-  </Card>
-  <Card title="Self-hostable and MIT-licensed" icon="cloud-download">
-    Runs on your own Cloudflare account: Workers, Artifacts, D1, KV, and
-    Queues. You pay only for the resources you use.
-  </Card>
-</CardGrid>
+### Guides
+
+- [Getting started](/guides/getting-started/)
+- [Importing from GitHub](/guides/importing/)
+- [Code review](/guides/code-review/)
+- [Issues](/guides/issues/)
+- [CI integration](/guides/ci-integration/)
+- [Troubleshooting](/guides/troubleshooting/)
+- [FAQ](/guides/faq/)
+
+### API reference
+
+- [Authentication](/reference/authentication/)
+- [Endpoints](/reference/endpoints/)
+- [Error codes](/reference/errors/)
+- [OpenAPI specification](/reference/openapi/)
+- [Agent discovery](/reference/agent-discovery/)
