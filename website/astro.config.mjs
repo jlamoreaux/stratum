@@ -17,11 +17,16 @@ export default defineConfig({
     starlight({
       title: "Stratum",
       description: DESCRIPTION,
-      logo: {
-        src: "./src/assets/stratum-mark.svg",
-        alt: "Stratum",
+      // The header is the app's, not Starlight's — see src/components/Header.astro.
+      // It renders the wordmark itself, so no `logo` is configured here.
+      components: {
+        Header: "./src/components/Header.astro",
       },
-      customCss: ["./src/styles/theme.css"],
+      // header.css is generated from the app's stylesheet by
+      // scripts/mirror-header.mjs; theme.css maps the rest of the brand onto
+      // Starlight's own custom properties and adapts the header to the light
+      // theme, so it has to load second.
+      customCss: ["./src/styles/header.css", "./src/styles/theme.css"],
       plugins: [
         starlightLlmsTxt({
           projectName: "Stratum",

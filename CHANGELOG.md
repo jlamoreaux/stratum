@@ -134,6 +134,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand. Expired and revoked tokens now both free their slot.
 
 ### Changed
+- **The docs site and the app share one header.** `docs.usestratum.dev` was rendering
+  Starlight's default header — a different wordmark, typeface, height and link treatment from
+  the one at `app.usestratum.dev`, so the two halves of the product did not look related.
+  The docs site now renders the app's header: the same `stratum` wordmark, chrome and accent
+  links, with search, theme and GitHub controls sized to sit on it, plus a `sign in` link back
+  to the app. It is shared rather than copied — `src/ui/nav-css.ts` owns the rules and
+  `website/scripts/mirror-header.mjs` generates the site's `header.css` from them, with the
+  docs build and the test suite failing on a stale copy.
 - Repository-activity analytics events no longer carry `project`, the concrete project name; they
   carry the opaque `projectId` instead. Dashboards grouping on `project` must switch to
   `projectId` — old `project` references receive no new data. Events for projects created before
