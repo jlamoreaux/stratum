@@ -32,13 +32,20 @@ codes are in the [OpenAPI specification](/reference/openapi/).
 
 ## Machine-readable error codes
 
-- `AUTH_REQUIRED` — authentication needed
-- `PROJECT_NOT_FOUND` — project doesn't exist
-- `RATE_LIMITED` — too many requests
+- `AUTH_ERROR` — authentication failed or is missing. (Note: many `401`s from
+  the common helpers carry only an `error` message with no `code` field.)
+- `NOT_FOUND` — the resource doesn't exist, or you cannot see it (an
+  unauthorized private project is deliberately indistinguishable from a
+  missing one). There is no resource-specific `PROJECT_NOT_FOUND` code.
+- Rate limiting carries **no machine-readable code**: a `429` has
+  `{"error": "Too many requests"}` plus `Retry-After`, `X-RateLimit-Limit`,
+  and `X-RateLimit-Remaining` headers
 - `TOKEN_SCOPE_INSUFFICIENT` — a `read` token was used for a write. Returned
-  `403`, checked before routing on the HTTP method, and applied over git to the
-  resolved operation (so `git push` and its `git-receive-pack` advertisement are
-  refused too)
+  `403`, checked before routing on the HTTP method, on API routes. The git
+  smart-HTTP router enforces the same rule on the resolved operation (so
+  `git push` and its `git-receive-pack` advertisement are refused too) but
+  answers with its deliberate plain-text `404` — never this code — so an
+  unauthorized caller cannot distinguish "no permission" from "no such repo"
 - `TOKEN_LIMIT_REACHED` — `409`; the account already holds 20 active tokens.
   Revoked tokens do not count toward the limit
 - `SESSION_REQUIRED` — `403`; the endpoint accepts the browser session cookie

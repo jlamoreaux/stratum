@@ -119,14 +119,15 @@ The server accepts either token kind, but the API behind it does not treat
 them alike. With an **agent token**:
 
 - **Works:** all reading tools, `stratum_create_workspace`, `stratum_commit`,
-  `stratum_create_change`, and the issue tools — an agent can do everything up
-  to and including proposing a gated change and tracking its work.
-- **Always refused:** `stratum_merge_change`, `stratum_reject_change`, and
-  `stratum_review_change`. Merging and deciding are user actions, and review
-  verdicts are refused from agent tokens **entirely** — `request_changes` as
-  much as `approve`. An agent's feedback channel is
-  [change comments](code-review.md), which the REST API accepts from agents
-  but this server does not yet expose as a tool.
+  `stratum_create_change`, `stratum_create_issue`, and `stratum_list_issues` —
+  an agent can do everything up to and including proposing a gated change and
+  opening issues about its work.
+- **Always refused:** `stratum_merge_change`, `stratum_reject_change`,
+  `stratum_review_change`, and `stratum_update_issue`. Merging, deciding, and
+  issue triage are user actions, and review verdicts are refused from agent
+  tokens **entirely** — `request_changes` as much as `approve`. An agent's
+  feedback channel is [change comments](code-review.md), which the REST API
+  accepts from agents but this server does not yet expose as a tool.
 
 So an agent-token deployment is a *proposer*: it forks, commits, opens the
 change, and a human (over the UI, [CLI](cli.md), or their own MCP session with

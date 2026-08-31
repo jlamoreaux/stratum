@@ -4,7 +4,7 @@ Token management is covered in full — scopes, expiry, limits, and the legacy
 credential — in [Authentication](../authentication.md).
 
 ## Get Current User
-`GET /api/users`
+`GET /api/users/me`
 
 Returns the authenticated user's profile.
 

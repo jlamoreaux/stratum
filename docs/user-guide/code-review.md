@@ -126,8 +126,10 @@ Separately, the **change author's own approval never counts** toward
 `requiredApprovals` — otherwise a lone writer could open a change, approve it,
 and self-merge. For a change an agent created, the excluded author is the
 agent's owning user, so an operator cannot approve their own agent's work
-either. (Changes created before this rule exists carry no recorded author; on
-those, a required approval fails closed rather than being skipped.)
+either. (Changes created before authorship was recorded have no author to
+exclude, so on those every approval counts — including what may in fact be a
+self-approval. The strict fail-closed rule applies on the manual
+conflict-resolution path when the originating change is unknown.)
 
 ## Reviewing in GitHub instead
 

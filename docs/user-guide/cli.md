@@ -35,7 +35,7 @@ Run it with no flags to be prompted for both values. Two things to know:
   `/health` endpoint, which requires no authentication, so a mistyped key
   still "logs in" and only fails on the first real command. `stratum status`
   is the actual credential check — it calls the authenticated
-  `GET /api/users`:
+  `GET /api/users/me`:
 
 ```bash
 stratum status

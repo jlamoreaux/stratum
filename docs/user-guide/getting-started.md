@@ -224,11 +224,14 @@ know about its scope:
 - The token is **bounded by the owning user**: the agent inherits your project
   access (including org access) and nothing more. Agent tokens do **not**
   expire and carry no read/`read_write` scope of their own. Within that
-  inherited access an agent token is unrestricted, with two exceptions that no
-  token can cross: it cannot approve a change, and it cannot reach an endpoint
-  that requires a browser session (token management, account deletion). Revoke
-  one by deleting the agent from the settings UI (or `DELETE /api/agents/{id}`);
-  that is the only way to retire it.
+  inherited access an agent can read, fork workspaces, commit, open changes,
+  comment, and open issues — but the **deciding** endpoints require a user
+  identity and refuse an agent token outright: review verdicts (approve *and*
+  request changes), merge, reject, re-evaluate, GitHub PR promotion, and issue
+  triage (edit/close). Session-only endpoints (token management) are out of
+  reach for any token. Revoke an agent token by deleting the agent from the
+  settings UI (or `DELETE /api/agents/{id}`); that is the only way to retire
+  it.
 - All writes made with an agent token are attributed to the agent in
   **provenance** — merged changes record which agent and which model produced
   them, not just which human owned the token.
@@ -284,7 +287,8 @@ workspace  →  commit  →  change (evaluation runs)  →  review  →  merge
    stratum change review chg_xxxxx --verdict approve --comment "LGTM"
    ```
 
-5. **Merge.** Merges are **squash merges**, serialized per-project through a
+5. **Merge.** The default is a **true three-way merge commit** (`--squash` /
+   `strategy: "squash"` opts into a squash), serialized per-project through a
    Durable Object merge queue so there are no races. The merge is rejected if a
    required evaluator is failing, approvals are short, the base is stale
    (`requireFreshBase`), or the workspace moved since evaluation. If a

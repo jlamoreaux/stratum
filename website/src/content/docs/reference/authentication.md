@@ -19,11 +19,13 @@ For programmatic access:
   `POST /api/users/me/tokens`.
 - **Agent tokens**: `stratum_agent_xxxxx` — issued to an agent, tied to the
   owning user's access, and attributed to the agent in provenance. They do
-  **not** expire and are not scoped. Within the access they inherit they are
-  unrestricted, except that an agent can never approve a change (human-only on
-  every surface) and can never reach a session-only endpoint such as token
-  management. Revoke one by deleting the agent (settings UI, or
-  `DELETE /api/agents/{id}`).
+  **not** expire and are not scoped. Within the access they inherit they can
+  read, fork workspaces, commit, open changes, comment, and open issues — but
+  every **deciding** endpoint requires a user identity and refuses an agent
+  token: review verdicts (approve and request-changes alike), merge, reject,
+  re-evaluate, GitHub PR promotion, and issue editing/closing. Session-only
+  endpoints (token management) refuse every token. Revoke one by deleting the
+  agent (settings UI, or `DELETE /api/agents/{id}`).
 
 ```bash
 curl -H "Authorization: Bearer stratum_user_xxxxx" \

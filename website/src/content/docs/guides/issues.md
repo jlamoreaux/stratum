@@ -22,7 +22,9 @@ curl -X POST https://app.usestratum.dev/api/projects/acme/billing/issues \
 that means any authenticated user — the platform-wide per-identity rate limit
 (1,000 requests/minute authenticated) is what bounds abuse, not a per-issue
 quota. Editing, closing, and labelling all require **write** access on the
-project — a reader can raise a problem but cannot triage it.
+project *and a user identity* — a reader can raise a problem but cannot triage
+it, and an agent token can open and comment but never triage, whatever access
+its owner has.
 
 Project permission and credential scope are separate gates, and both apply.
 Opening an issue is a `POST`, so a `read`-scoped API token is refused with
@@ -70,8 +72,9 @@ curl -X PATCH https://app.usestratum.dev/api/projects/acme/billing/issues/42 \
 | `linkedChangeId` | Pass `null` to unlink. |
 
 `labels` is a **replace**, not a merge: send the full list you want the issue to
-end up with. `POST .../issues/{number}/close` is a convenience for the common
-case and takes no body.
+end up with. `POST .../issues/{number}/close` exists for the UI button and is a
+**toggle** — on an already-closed issue it reopens it, and it answers with a
+`302` redirect. Scripts should prefer the idempotent `PATCH {"status": "closed"}`.
 
 ## Finding issues
 
