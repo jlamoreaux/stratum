@@ -45,7 +45,8 @@ limitation recorded below.
 ## Auth & security
 
 - Magic-link email auth, GitHub OAuth, Google OAuth (email-identity model), and
-  API keys; short-lived agent tokens scoped to an owning user.
+  named API tokens (`read` or `read_write`, optionally expiring, individually
+  revocable); agent tokens bounded by an owning user's access.
 - CSRF protection (Origin/Referer enforcement for session-cookie mutations),
   API key rotation, settings UI for key + agent token management.
 - Append-only audit trail for sensitive operations with an admin query API;

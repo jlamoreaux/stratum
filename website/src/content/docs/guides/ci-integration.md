@@ -1,4 +1,8 @@
-# CI Integration (Bring Your Own CI)
+---
+title: "CI Integration (Bring Your Own CI)"
+description: "Bring your own CI: run evaluations on your existing infrastructure and report verdicts back."
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/ci-integration.md"
+---
 
 Stratum has **no native CI runner** — there are no workflow files, no hosted
 build agents, and no GitHub Actions replacement. What Stratum *does* run for
@@ -279,5 +283,5 @@ evaluator (for gating) or via GitHub sync in layer mode (for everything else).
 
 ## See also
 
-- [FAQ: Does Stratum replace GitHub Actions?](faq.md#does-stratum-replace-github-actions)
+- [FAQ: Does Stratum replace GitHub Actions?](/guides/faq/#does-stratum-replace-github-actions)
 - `docs/CURRENT_CAPABILITIES.md` — the authoritative current state

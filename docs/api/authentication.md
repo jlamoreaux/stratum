@@ -15,9 +15,11 @@ For programmatic access:
   `POST /api/users/me/tokens`.
 - **Agent tokens**: `stratum_agent_xxxxx` — issued to an agent, tied to the
   owning user's access, and attributed to the agent in provenance. They do
-  **not** expire and are not scoped: an agent token can do anything its owner
-  can, except approve a change — that is human-only on every surface. Revoke
-  one by deleting the agent (settings UI, or `DELETE /api/agents/{id}`).
+  **not** expire and are not scoped. Within the access they inherit they are
+  unrestricted, except that an agent can never approve a change (human-only on
+  every surface) and can never reach a session-only endpoint such as token
+  management. Revoke one by deleting the agent (settings UI, or
+  `DELETE /api/agents/{id}`).
 
 ```bash
 curl -H "Authorization: Bearer stratum_user_xxxxx" \

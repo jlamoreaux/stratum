@@ -7,6 +7,8 @@
   "type": "module",
   "scripts": {
     "sync:openapi": "node -e \"require('fs').copyFileSync('../docs/api/openapi.yml', 'public/openapi.yml')\"",
+    "sync:guides": "node scripts/mirror-docs.mjs",
+    "check:guides": "node scripts/mirror-docs.mjs --check",
     "sync:skills": "node scripts/emit-agent-skills.mjs",
     "predev": "npm run sync:openapi && npm run sync:skills",
     "dev": "astro dev",

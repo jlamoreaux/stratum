@@ -85,6 +85,25 @@ Releases are cut from the changelog with `npm run release:prepare` and published
 **Release** workflow. Maintainers: see
 [`docs/developer/releasing.md`](docs/developer/releasing.md).
 
+## Documentation
+
+User-facing and API docs live in [`docs/`](docs/). The public subset is also
+published at [docs.usestratum.dev](https://docs.usestratum.dev/) from
+[`website/`](website/) — but those pages are **generated**:
+`website/scripts/mirror-docs.mjs` renders them from `docs/user-guide/` and
+`docs/api/`. Edit the copy under `docs/`, then regenerate and commit the
+mirrors in the same PR; a direct edit under `website/src/content/docs/` is
+overwritten by the next sync.
+
+```bash
+cd website
+npm run sync:guides    # regenerate the mirrors, then commit them
+npm run check:guides   # exit 1 if they are stale — this is what CI runs
+```
+
+If your change alters behaviour a doc describes, update the doc in the same PR.
+See [`docs/README.md`](docs/README.md) for the full layout and conventions.
+
 ## Reporting bugs & requesting features
 
 Use the [issue templates](.github/ISSUE_TEMPLATE/). For anything security-related, **do not open a

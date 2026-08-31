@@ -29,7 +29,8 @@ repository's source of truth. The copy is gitignored — edit the spec only at
 Pages live in `src/content/docs/` as Markdown/MDX with Starlight frontmatter
 (`title`, `description`). The sidebar is configured in `astro.config.mjs`.
 
-- `guides/` — user-facing guides (getting started, importing, troubleshooting, FAQ)
+- `guides/` — user-facing guides (getting started, importing, code review, issues,
+  CI integration, troubleshooting, FAQ)
 - `reference/` — API reference (authentication, endpoints, errors, OpenAPI, agent discovery)
 
 Internal repo documentation (ADRs, runbooks, developer docs) intentionally stays
@@ -109,8 +110,9 @@ by hand at `public/index.md` because its source is `.mdx`.
 The site is a static build (`dist/`) served by a Cloudflare Worker
 (`stratum-docs`, configured in `wrangler.toml`) on the custom domain
 `docs.usestratum.dev`. It deploys automatically on every push to `main` that
-touches `website/` or the OpenAPI spec (`.github/workflows/docs.yml`; PRs get a
-build-only check). For an out-of-band redeploy, use the `Deploy Docs` workflow
+touches `website/` or `docs/` (`.github/workflows/docs.yml`; PRs get a
+build-only check, which also runs `npm run check:guides` to fail on a stale
+mirror). For an out-of-band redeploy, use the `Deploy Docs` workflow
 (`.github/workflows/deploy-docs.yml`, manual dispatch) or deploy by hand:
 
 ```bash

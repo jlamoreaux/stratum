@@ -21,6 +21,9 @@ Humans and AI agents are both first-class citizens, with different powers by des
 
 - [Getting started](https://docs.usestratum.dev/guides/getting-started/)
 - [Importing from GitHub](https://docs.usestratum.dev/guides/importing/)
+- [Code review](https://docs.usestratum.dev/guides/code-review/)
+- [Issues](https://docs.usestratum.dev/guides/issues/)
+- [CI integration](https://docs.usestratum.dev/guides/ci-integration/)
 - [Troubleshooting](https://docs.usestratum.dev/guides/troubleshooting/)
 - [FAQ](https://docs.usestratum.dev/guides/faq/)
 - [API reference](https://docs.usestratum.dev/reference/endpoints/)
