@@ -66,8 +66,8 @@ const projectArg = z
 /**
  * The full Stratum surface an agent needs to propose governed changes:
  * read a project, fork a workspace, commit, open an eval-gated change, and
- * follow it through review to merge. Approval stays a human gate — the
- * server rejects review approvals from agent tokens by design.
+ * follow it through review to merge. Review verdicts, merge, and reject stay
+ * human gates — the server refuses them from agent tokens by design.
  */
 export function buildTools(client: StratumClient): ToolDef[] {
   return [
@@ -180,7 +180,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     ),
     tool(
       "stratum_review_change",
-      "Submit a review verdict on a change. Note: approvals are a human gate — the server rejects ALL approve verdicts from agent tokens (not just on the agent's own changes); agents can only request changes.",
+      "Submit a review verdict on a change. Reviews are a human gate — the server refuses every verdict from an agent token, request_changes as much as approve, so this tool requires a user token with write access.",
       {
         change_id: z.string().describe("Change id"),
         verdict: z.enum(["approve", "request_changes"]).describe("Review verdict"),

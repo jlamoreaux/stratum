@@ -15,6 +15,7 @@ stratum login --host https://your-stratum-instance --key stratum_user_…
 stratum init <name> [--org <slug>] [--public]   # create a project
 stratum projects                                # list your projects
 stratum activity <ns/slug>                      # recent project activity
+stratum project delete <ns/slug> --confirm <ns/slug>   # irreversible, owner-only
 
 stratum workspace create <ns/slug> [--name x]   # fork a workspace
 stratum workspace list <ns/slug>
@@ -35,7 +36,11 @@ stratum issue list <ns/slug> [--status closed]
 stratum issue close <ns/slug> <number>
 
 stratum status                                  # who am I
+stratum account delete --confirm <username>     # irreversible account erasure
 ```
+
+Full guide: [docs/user-guide/cli.md](../docs/user-guide/cli.md), published at
+[docs.usestratum.dev/guides/cli/](https://docs.usestratum.dev/guides/cli/).
 
 ## Development
 

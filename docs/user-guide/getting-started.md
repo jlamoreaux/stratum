@@ -311,7 +311,8 @@ stratum status        # who am I
 stratum projects      # list your projects
 ```
 
-See [`cli/README.md`](../../cli/README.md) for the full command reference.
+See [the CLI guide](cli.md) for the full command reference, configuration, and
+the commit path's limits.
 
 ### MCP server — `@stratum/mcp`
 
@@ -344,8 +345,9 @@ Any MCP client (stdio):
 
 `STRATUM_HOST` defaults to `https://app.usestratum.dev`; set it for self-hosted
 instances. All governance invariants hold over MCP exactly as over REST: agent
-tokens can't approve their own work, failing evaluators block merges, and
-provenance is recorded.
+tokens can't submit review verdicts or merge, failing evaluators block merges,
+and provenance is recorded. See [the MCP server guide](mcp.md) for the full
+tool reference and exactly what each token kind may do.
 
 ### Plain git over smart HTTP
 

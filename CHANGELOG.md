@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CLI and MCP server guides.** Dedicated documentation for `@stratum/cli`
+  (`docs/user-guide/cli.md`) and `@stratum/mcp` (`docs/user-guide/mcp.md`),
+  published at `/guides/cli/` and `/guides/mcp/` — installation from source,
+  configuration, the full command/tool surface (including `project delete` and
+  `account delete`, which the package README omitted), the commit path's
+  2,000-file/25 MB caps and its inability to express deletions, and exactly
+  which MCP tools an agent token can use. Also corrects the `@stratum/mcp`
+  README and `stratum_review_change` tool description, which claimed agents
+  can submit `request_changes` verdicts: the server refuses every review
+  verdict from an agent token (`src/routes/reviews.ts` requires a user), so
+  an agent's feedback channel is change comments.
 - **Agent discovery metadata on the docs site.** `docs.usestratum.dev` now publishes an ARD
   capability manifest (`/.well-known/ai-catalog.json`), an Agent Skills Discovery v0.2.0 index
   with three `SKILL.md` artifacts and `sha256` digests, `/auth.md` describing the agent

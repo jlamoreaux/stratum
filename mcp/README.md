@@ -22,10 +22,11 @@ The full agent contribution loop:
    `stratum_whoami`
 
 Stratum's governance invariants hold over MCP exactly as they do over the REST
-API: **agent tokens cannot submit approve verdicts at all** (approvals are a
-human gate — an agent can only request changes, on anyone's change), merges are
-blocked by failing evaluators, and every merged change keeps its provenance and
-cost records.
+API: **agent tokens cannot submit review verdicts at all** — reviews are a
+human gate, and the server refuses `request_changes` from an agent token as
+much as `approve` (merge and reject are user-only too; an agent's feedback
+channel is change comments over the REST API). Merges are blocked by failing
+evaluators, and every merged change keeps its provenance and cost records.
 
 ## Setup
 
@@ -61,6 +62,9 @@ claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- node /path/to/stra
 
 (Once the package is on npm, `npm install -g @stratum/mcp` will provide a
 `stratum-mcp` binary to use as the command directly.)
+
+Full guide: [docs/user-guide/mcp.md](../docs/user-guide/mcp.md), published at
+[docs.usestratum.dev/guides/mcp/](https://docs.usestratum.dev/guides/mcp/).
 
 ## Development
 
