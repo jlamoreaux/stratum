@@ -29,7 +29,8 @@ repository's source of truth. The copy is gitignored — edit the spec only at
 Pages live in `src/content/docs/` as Markdown/MDX with Starlight frontmatter
 (`title`, `description`). The sidebar is configured in `astro.config.mjs`.
 
-- `guides/` — user-facing guides (getting started, importing, troubleshooting, FAQ)
+- `guides/` — user-facing guides (getting started, importing, code review, issues,
+  CI integration, troubleshooting, FAQ)
 - `reference/` — API reference (authentication, endpoints, errors, OpenAPI, agent discovery)
 
 Internal repo documentation (ADRs, runbooks, developer docs) intentionally stays

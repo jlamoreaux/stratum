@@ -214,7 +214,7 @@ headers and Markdown content negotiation; the pages themselves are static.
 Two workflows drive it:
 
 - `.github/workflows/docs.yml` — builds on every PR touching `website/**` or
-  `docs/api/openapi.yml`, and deploys on push to `main`.
+  `docs/**`, and deploys on push to `main`.
 - `.github/workflows/deploy-docs.yml` — a manual `workflow_dispatch` deploy,
   guarded to `main` and sharing a concurrency group with the above so the two
   cannot race.
