@@ -68,13 +68,22 @@ migrations_dir = "migrations"
 
 ### Automatic Deployment
 
-Staging is deployed from `main` only — every push to `main` deploys staging and
-then, after manual approval, production:
+Staging is deployed from `main` only, and not from every push to it: a push to
+`main` in `stratum-eng/stratum` deploys staging once the `test` job passes.
+Production then follows, gated on both the staging deploy and manual approval.
+Forks are skipped — they hold none of the secrets, so a deploy there could only
+fail, while the tests above still run and are still useful.
 
 ```yaml
 # .github/workflows/ci.yml
-- name: Deploy to Cloudflare Staging
-  run: npx wrangler deploy --env=staging
+deploy-staging:
+  needs: test
+  if: >
+    github.repository == 'stratum-eng/stratum' &&
+    github.event_name == 'push' && github.ref == 'refs/heads/main'
+  steps:
+    - name: Deploy to Cloudflare Staging
+      run: npx wrangler deploy --env=staging
 ```
 
 Pull requests get their own isolated `stratum-pr-<number>` Worker instead
@@ -96,6 +105,13 @@ publish. Refuse to deploy if the worktree has any modified, staged, or untracked
 files — including changes to `wrangler.toml` or migrations:
 
 ```bash
+# `origin` is whatever you configured it to be. Deploying a fork's main over
+# shared staging can advance its migration tag past canonical main, which is the
+# drift this whole procedure exists to avoid.
+git remote get-url origin | grep -qE '[/:]stratum-eng/stratum(\.git)?$' || {
+  echo "Refusing staging deployment: origin is not stratum-eng/stratum." >&2
+  exit 1
+}
 test -z "$(git status --porcelain)" || {
   echo "Refusing staging deployment: use a clean worktree or fresh clone." >&2
   exit 1
