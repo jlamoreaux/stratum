@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { setCookie } from "hono/cookie";
 import { admitUser, betaGateEnabled, validateInviteCode } from "../beta/gate";
 import { getInviteCodesEmail, getMagicLinkEmail } from "../email/templates";
 import { enforceSameOrigin } from "../middleware/csrf";
@@ -382,6 +382,18 @@ app.post("/send-login", async (c) => {
   }
 
   try {
+    // A disabled or deleting account gets the same enumeration-safe
+    // `login_link_sent` response as an unknown one, but no mail: a link would
+    // only lead to a hard `account_disabled` rejection at verify time, and
+    // refusing loudly here would leak which addresses have (disabled or
+    // mid-erasure) accounts.
+    if (existingUser.success && (existingUser.data.disabledAt || existingUser.data.deletingAt)) {
+      logger.info("Login requested for disabled or deleting account; skipping send", {
+        emailHash,
+      });
+      return emailAuthRedirect(c, "success", "login_link_sent", "/auth/login");
+    }
+
     if (existingUser.success) {
       // Generate secure magic link token
       const token = generateSecureToken();
@@ -471,6 +483,17 @@ app.post("/send", async (c) => {
   try {
     // Check if user exists to determine intent
     const existingUser = await getUserByEmail(c.env.DB, email, logger);
+
+    // Same silent refusal as /send-login: a disabled or deleting account gets
+    // the uniform success response but no mail (a link could only fail at
+    // verify time).
+    if (existingUser.success && (existingUser.data.disabledAt || existingUser.data.deletingAt)) {
+      logger.info("Legacy magic link requested for disabled or deleting account; skipping send", {
+        emailHash,
+      });
+      return emailAuthRedirect(c, "success", "email_sent");
+    }
+
     const intent = existingUser.success ? "login" : "signup";
     let username: string | undefined;
     if (!existingUser.success) {
@@ -615,7 +638,12 @@ app.post("/verify", async (c) => {
       const existingUserByEmail = await getUserByEmail(c.env.DB, email, logger);
       if (existingUserByEmail.success) {
         logger.warn("Email already exists during signup verification", { emailHash });
-        // User already exists, treat as login
+        // User already exists, treat as login — which a disabled (or deleting)
+        // account must not slip through (no session mint, no audit row).
+        if (existingUserByEmail.data.disabledAt || existingUserByEmail.data.deletingAt) {
+          logger.warn("Rejected signup-as-login for disabled account", { emailHash });
+          return emailAuthRedirect(c, "error", "account_disabled", "/auth/login");
+        }
         const userId = existingUserByEmail.data.id;
         return await createSessionAndRedirect(c, userId, emailHash, rememberMe, logger);
       }
@@ -665,6 +693,18 @@ app.post("/verify", async (c) => {
       if (!existingUser.success) {
         logger.warn("Email not found during login verification", { emailHash });
         return emailAuthRedirect(c, "error", "email_not_found", "/auth/login");
+      }
+
+      // A disabled (or deleting) account is hard-rejected here, BEFORE any
+      // session mint — send-login is enumeration-safe, so this is where the
+      // clear refusal lands (e.g. a link minted before the account was
+      // disabled).
+      if (existingUser.data.disabledAt || existingUser.data.deletingAt) {
+        logger.warn("Rejected login for disabled account", {
+          emailHash,
+          userId: existingUser.data.id,
+        });
+        return emailAuthRedirect(c, "error", "account_disabled", "/auth/login");
       }
 
       const userId = existingUser.data.id;
@@ -766,23 +806,7 @@ async function createSessionAndRedirect(
 
   sessionLogger.info("Session created, redirecting user");
 
-  // Validate redirect to prevent open redirects - only allow same-origin relative paths
-  const rawRedirect = getCookie(c, "redirect_after_login") ?? "";
-  let redirectTo = defaultRedirect;
-  try {
-    const candidate = new URL(rawRedirect, new URL(c.req.url).origin);
-    if (
-      candidate.origin === new URL(c.req.url).origin &&
-      /^\/[^/\\]/.test(rawRedirect) // disallow //, /\, etc.
-    ) {
-      redirectTo = candidate.pathname + candidate.search + candidate.hash;
-    }
-  } catch {
-    // ignore, use defaultRedirect
-  }
-  deleteCookie(c, "redirect_after_login", { path: "/" });
-
-  return c.redirect(redirectTo);
+  return c.redirect(defaultRedirect);
 }
 
 export { app as emailAuthRouter };

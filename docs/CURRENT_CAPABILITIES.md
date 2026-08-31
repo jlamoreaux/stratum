@@ -1,8 +1,8 @@
 # Stratum Current Capabilities
 
-Last updated: 2026-08-25 — reflects completion of the master-plan feature roadmap
-(Phases 0–3 plus the code-level Phase 4 hardening items), plus the Git LFS
-limitation recorded below.
+Last updated: 2026-08-28 — reflects completion of the master-plan feature roadmap
+(Phases 0–3 plus the code-level Phase 4 hardening items), enterprise OIDC SSO +
+SCIM provisioning (#253), plus the Git LFS limitation recorded below.
 
 ## Core platform
 
@@ -44,8 +44,24 @@ limitation recorded below.
 
 ## Auth & security
 
-- Magic-link email auth, GitHub OAuth, Google OAuth (email-identity model), and
-  API keys; short-lived agent tokens scoped to an owning user.
+- Magic-link email auth, GitHub OAuth, Google OAuth, and API keys; short-lived
+  agent tokens scoped to an owning user. OAuth logins persist a stable
+  (issuer, subject) identity per provider — GitHub links to an existing
+  account only via a verified email.
+- Enterprise SSO: one OIDC connection per org, configured by an org
+  admin/owner via `PUT/GET/DELETE /api/orgs/:slug/sso` (plus
+  `verify-domains`, `enable`/`disable`, and `scim-token` sub-endpoints).
+  Email domains must be DNS-TXT-verified (checked over DoH) before enabling.
+  Users sign in at `/auth/sso` (org slug or work email) via authorization-code
+  + PKCE; verified-domain emails are JIT-provisioned into the org. Requires
+  the `SSO_ENCRYPTION_SECRET` secret (endpoints 501 without it). No
+  enforcement toggle yet: magic-link login still works for corporate emails.
+- SCIM 2.0 Users provisioning at `/scim/v2` (per-connection
+  `stratum_scim_*` bearer): Users CRUD with userName/externalId eq filters,
+  adopt-existing-account semantics, and reversible deactivation
+  (`users.disabled_at`) enforced at every credential path — API tokens, agent
+  tokens, session cookies, git smart-HTTP, and all login flows — with session
+  purge on deactivation. SCIM Groups are not implemented.
 - CSRF protection (Origin/Referer enforcement for session-cookie mutations),
   API key rotation, settings UI for key + agent token management.
 - Append-only audit trail for sensitive operations with an admin query API;
@@ -76,7 +92,9 @@ limitation recorded below.
   but evaluation itself has no queue worker yet.
 - Team permissions are org-wide; per-project team grants are not implemented.
 - Phase 4 operational items remain: load testing at 1000+ concurrent workspaces,
-  D1 hot/cold rotation, SSO/SAML, multi-tenancy/billing for Stratum Cloud.
+  D1 hot/cold rotation, multi-tenancy/billing for Stratum Cloud. OIDC SSO +
+  SCIM shipped; SAML, SCIM Groups, an SSO enforcement toggle, and an SSO
+  management UI (API only today) remain.
 - Durability is covered: D1 and KV identity back up to R2 daily and on demand,
   along with the reachable history of a rotating slice of repos (coverage rotates
   across runs under a per-run cap), with a tested restore path

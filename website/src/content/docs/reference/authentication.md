@@ -18,6 +18,11 @@ For programmatic access:
 - **Agent tokens**: `stratum_agent_xxxxx` — short-lived, scoped to the owning
   user, and attributed to the agent in provenance. Agent tokens can never
   approve changes, on any surface.
+- **SCIM tokens**: `stratum_scim_xxxxx` — per-SSO-connection bearer accepted
+  only by the SCIM endpoints under `/scim/v2` (which accept no other
+  credential). Rotated by an org admin via
+  `POST /api/orgs/{slug}/sso/scim-token`; the plaintext is returned exactly
+  once.
 
 ```bash
 curl -H "Authorization: Bearer stratum_user_xxxxx" \
@@ -26,9 +31,10 @@ curl -H "Authorization: Bearer stratum_user_xxxxx" \
 
 ## Session cookies
 
-Signing in through the web UI (email magic link, GitHub OAuth, or Google
-OAuth) sets a `stratum_session` cookie, which authenticates browser requests
-to the same endpoints.
+Signing in through the web UI (email magic link, GitHub OAuth, Google OAuth,
+or single sign-on at `/auth/sso` for organizations with an enabled OIDC
+connection) sets a `stratum_session` cookie, which authenticates browser
+requests to the same endpoints.
 
 ## Anonymous access
 

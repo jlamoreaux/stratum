@@ -55,9 +55,21 @@ export async function generateApiKey(prefix: string): Promise<string> {
 }
 
 /**
- * Derive encryption key from environment secret using PBKDF2
+ * The historical hardcoded salt. It predates any second use of the AES-GCM
+ * helpers, so it stays the default: every existing GitHub-token ciphertext was
+ * produced under it and must keep decrypting byte-for-byte.
  */
-async function getEncryptionKey(secret: string): Promise<CryptoKey> {
+const GITHUB_TOKEN_SALT = "stratum-github-token-salt";
+
+/** PBKDF2 salt for SSO client-secret encryption (keyed off SSO_ENCRYPTION_SECRET). */
+export const SSO_SECRET_SALT = "stratum-sso-secret-salt";
+
+/**
+ * Derive encryption key from environment secret using PBKDF2. The salt
+ * partitions key material per use-case so two subsystems sharing this helper
+ * can never decrypt each other's ciphertexts even under a reused env secret.
+ */
+async function getEncryptionKey(secret: string, salt: string): Promise<CryptoKey> {
   const encoder = new TextEncoder();
   const keyData = encoder.encode(secret);
 
@@ -69,7 +81,7 @@ async function getEncryptionKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt: encoder.encode("stratum-github-token-salt"),
+      salt: encoder.encode(salt),
       iterations: 100000,
       hash: "SHA-256",
     },
@@ -81,10 +93,14 @@ async function getEncryptionKey(secret: string): Promise<CryptoKey> {
 }
 
 /**
- * Encrypt a GitHub token using AES-GCM
+ * Encrypt a secret using AES-GCM (GitHub-token salt by default).
  */
-export async function encryptToken(plaintext: string, secret: string): Promise<string> {
-  const key = await getEncryptionKey(secret);
+export async function encryptToken(
+  plaintext: string,
+  secret: string,
+  salt: string = GITHUB_TOKEN_SALT,
+): Promise<string> {
+  const key = await getEncryptionKey(secret, salt);
   const encoder = new TextEncoder();
   const iv = crypto.getRandomValues(new Uint8Array(12));
 
@@ -102,11 +118,15 @@ export async function encryptToken(plaintext: string, secret: string): Promise<s
 }
 
 /**
- * Decrypt a GitHub token
+ * Decrypt a secret encrypted by `encryptToken` (same salt required).
  */
-export async function decryptToken(ciphertext: string, secret: string): Promise<string | null> {
+export async function decryptToken(
+  ciphertext: string,
+  secret: string,
+  salt: string = GITHUB_TOKEN_SALT,
+): Promise<string | null> {
   try {
-    const key = await getEncryptionKey(secret);
+    const key = await getEncryptionKey(secret, salt);
 
     const combined = new Uint8Array(
       atob(ciphertext)

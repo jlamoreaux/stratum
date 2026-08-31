@@ -2,9 +2,19 @@ import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { betaGateEnabled } from "../beta/gate";
 import { recordAudit } from "../storage/audit";
+import { getIdentityByIssuerSubject, upsertIdentity } from "../storage/identities";
 import { createSession, deleteSession, getSession } from "../storage/sessions";
-import { createUser, getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
+import {
+  createUser,
+  getUser,
+  getUserByEmail,
+  getUserByGitHubId,
+  upsertGitHubUser,
+} from "../storage/users";
 import type { Env } from "../types";
+import { constantTimeEqual } from "../utils/crypto";
+import { NotFoundError } from "../utils/errors";
+import type { Logger } from "../utils/logger";
 import { createLogger } from "../utils/logger";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -12,14 +22,38 @@ const app = new Hono<{ Bindings: Env }>();
 const OAUTH_STATE_COOKIE = "stratum_oauth_state";
 const OAUTH_STATE_TTL_SECONDS = 600;
 
-/** Constant-time string equality — OAuth state values are attacker-influenced. */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+// Canonical issuer values for the identities table (see src/storage/identities.ts).
+// RESERVED: the OIDC connection-registration flow (org SSO) must reject these
+// issuers — an org-supplied connection claiming either could re-point rows in
+// the GitHub/Google identity namespace via upsertIdentity's ON CONFLICT.
+const GITHUB_ISSUER = "https://github.com";
+const GOOGLE_ISSUER = "https://accounts.google.com";
+
+/**
+ * Record the external identity for a completed OAuth sign-in. Non-fatal by
+ * design: identity rows are forward-provisioning for SSO (backfilled lazily at
+ * login), while GitHub login is still keyed off users.github_id and Google
+ * falls back to email match — so a storage blip here must not lock anyone out.
+ * The next successful login retries the upsert.
+ */
+async function recordOAuthIdentity(
+  db: D1Database,
+  logger: Logger,
+  input: {
+    userId: string;
+    provider: "github" | "google";
+    issuer: string;
+    subject: string;
+    email: string;
+  },
+): Promise<void> {
+  const result = await upsertIdentity(db, logger, input);
+  if (!result.success) {
+    logger.error("Failed to upsert OAuth identity; continuing login", result.error, {
+      provider: input.provider,
+      userId: input.userId,
+    });
   }
-  return diff === 0;
 }
 
 /**
@@ -52,7 +86,7 @@ async function consumeOAuthState(
   state: string,
 ): Promise<boolean> {
   const cookieState = getCookie(c, OAUTH_STATE_COOKIE);
-  if (!cookieState || !timingSafeEqual(cookieState, state)) {
+  if (!cookieState || !constantTimeEqual(cookieState, state)) {
     return false;
   }
   deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/auth" });
@@ -108,7 +142,7 @@ app.get("/github/callback", async (c) => {
     return c.json({ error: "GitHub OAuth is not configured" }, 501);
   }
 
-  const { code, state, next } = c.req.query();
+  const { code, state } = c.req.query();
 
   if (!state) {
     logger.warn("Missing state parameter");
@@ -178,14 +212,35 @@ app.get("/github/callback", async (c) => {
   }
 
   const githubUser = await userRes.json<{ id: number; login: string }>();
-  const emails = await emailsRes.json<{ email: string; primary: boolean; verified: boolean }[]>();
+  const emailsBody = await emailsRes.json<unknown>();
+  // A 200 with a non-array body (proxy error page, API drift) must not throw —
+  // the empty list already has correct semantics on every path below.
+  const emails = (Array.isArray(emailsBody) ? emailsBody : []) as {
+    email: string;
+    primary: boolean;
+    verified: boolean;
+  }[];
 
-  const primaryEmail =
-    emails.find((e) => e.primary && e.verified)?.email ??
-    emails.find((e) => e.verified)?.email ??
-    emails[0]?.email;
+  // A returning linked user's credential is the GitHub account id itself, so
+  // resolve by github_id before any email requirement applies.
+  const byGithub = await getUserByGitHubId(c.env.DB, String(githubUser.id), logger);
 
-  if (!primaryEmail) {
+  // Email match and account creation trust GitHub emails only when GitHub has
+  // verified them — an unverified address is attacker-claimable and would let
+  // someone link onto (or squat) another person's account. Lowercased so the
+  // match hits accounts stored via the magic-link flow, which normalizes.
+  const verifiedEmail = (
+    emails.find((e) => e.primary && e.verified)?.email ?? emails.find((e) => e.verified)?.email
+  )
+    ?.trim()
+    .toLowerCase();
+
+  let primaryEmail: string;
+  if (verifiedEmail) {
+    primaryEmail = verifiedEmail;
+  } else if (byGithub.success) {
+    primaryEmail = byGithub.data.email;
+  } else {
     logger.warn("No verified email found on GitHub account", { githubId: githubUser.id });
     return c.json({ error: "No verified email found on GitHub account" }, 422);
   }
@@ -193,20 +248,28 @@ app.get("/github/callback", async (c) => {
   const emailPrefix = primaryEmail.split("@")[0];
   logger.info("Upserting GitHub user", { githubId: githubUser.id, emailPrefix });
 
+  const byPrimaryEmail = await getUserByEmail(c.env.DB, primaryEmail, logger);
+
   // Closed beta: OAuth is login-only. A brand-new account (no match by GitHub id
-  // or email) must be created through the invite-gated magic-link flow first.
-  if (betaGateEnabled(c.env)) {
-    const byGithub = await getUserByGitHubId(c.env.DB, String(githubUser.id), logger);
-    // Match an existing account only by a *verified* email — never the unverified
-    // fallback used for primaryEmail, which could be attacker-controlled and let
-    // someone slip past the gate by claiming a beta user's address.
-    const verifiedEmail =
-      emails.find((e) => e.primary && e.verified)?.email ?? emails.find((e) => e.verified)?.email;
-    const byEmail = verifiedEmail ? await getUserByEmail(c.env.DB, verifiedEmail, logger) : null;
-    if (!byGithub.success && !byEmail?.success) {
-      logger.warn("Blocked GitHub signup — closed beta", { githubId: githubUser.id });
-      return c.redirect("/auth/signup?error=invite_required");
-    }
+  // or verified email) must be created through the invite-gated magic-link flow.
+  if (betaGateEnabled(c.env) && !byGithub.success && !byPrimaryEmail.success) {
+    logger.warn("Blocked GitHub signup — closed beta", { githubId: githubUser.id });
+    return c.redirect("/auth/signup?error=invite_required");
+  }
+
+  // A disabled (or deleting) account must not sign in — and the refusal must
+  // come BEFORE upsertGitHubUser, which would otherwise link github_id onto
+  // the frozen row and hand it a working login credential at re-enable time.
+  // Check the same account upsertGitHubUser would match: by GitHub id, else by
+  // primaryEmail.
+  const existingAccount = byGithub.success
+    ? byGithub.data
+    : byPrimaryEmail.success
+      ? byPrimaryEmail.data
+      : null;
+  if (existingAccount && (existingAccount.disabledAt || existingAccount.deletingAt)) {
+    logger.warn("Blocked GitHub sign-in — account disabled", { userId: existingAccount.id });
+    return c.redirect("/auth/login?error=account_disabled");
   }
 
   const userResult = await upsertGitHubUser(
@@ -225,7 +288,16 @@ app.get("/github/callback", async (c) => {
   }
 
   const user = userResult.data;
+
   const sessionLogger = logger.child({ userId: user.id });
+
+  await recordOAuthIdentity(c.env.DB, sessionLogger, {
+    userId: user.id,
+    provider: "github",
+    issuer: GITHUB_ISSUER,
+    subject: String(githubUser.id),
+    email: primaryEmail,
+  });
 
   const sessionResult = await createSession(c.env.DB, user.id, sessionLogger);
   if (sessionResult.success) {
@@ -252,19 +324,7 @@ app.get("/github/callback", async (c) => {
 
   sessionLogger.info("GitHub OAuth successful, session created");
 
-  let redirectTo = "/";
-  if (next && typeof next === "string") {
-    try {
-      const url = new URL(next, "http://localhost");
-      if (url.hostname === "localhost" || url.hostname === "") {
-        redirectTo = url.pathname + url.search;
-      }
-    } catch {
-      // invalid next param — fall back to /
-    }
-  }
-
-  return c.redirect(redirectTo);
+  return c.redirect("/");
 });
 
 app.get("/google", async (c) => {
@@ -359,36 +419,110 @@ app.get("/google/callback", async (c) => {
   }
 
   const googleUser = await userRes.json<{
-    sub: string;
+    sub?: string;
     email?: string;
     email_verified?: boolean;
   }>();
 
-  if (!googleUser.email || googleUser.email_verified !== true) {
-    logger.warn("Google account has no verified email");
-    return c.json({ error: "No verified email on Google account" }, 422);
+  if (!googleUser.sub) {
+    logger.error("Google userinfo response missing sub");
+    return c.json({ error: "Failed to fetch Google user data" }, 502);
   }
 
-  // Google identity maps onto the email-based account model: an existing
-  // account with this email is reused, otherwise one is created — the same
-  // semantics as magic-link sign-in.
-  const existing = await getUserByEmail(c.env.DB, googleUser.email, logger);
-  let userId: string;
-  if (existing.success) {
-    userId = existing.data.id;
-  } else {
-    // Closed beta: OAuth is login-only — new accounts require an invite code.
-    if (betaGateEnabled(c.env)) {
-      logger.warn("Blocked Google signup — closed beta");
-      return c.redirect("/auth/signup?error=invite_required");
-    }
-    const createdResult = await createUser(c.env.DB, googleUser.email, logger);
-    if (!createdResult.success) {
-      logger.error("Failed to create user from Google sign-in", createdResult.error);
-      return c.json({ error: "Failed to create user" }, 500);
-    }
-    userId = createdResult.data.user.id;
+  // Lowercased so matching hits accounts stored via the magic-link flow, which
+  // normalizes; identities.email is normalized the same way in storage.
+  const googleEmail = googleUser.email?.trim().toLowerCase();
+
+  // Resolve by the stable (issuer, sub) pair first — the identity persisted at
+  // a prior login. The sub, not the email, is the credential for a returning
+  // linked user (mirroring github_id-first above), so the verified-email
+  // requirement applies only to the email-match/create paths below. Only
+  // NotFound falls through to email matching; a storage failure fails the
+  // login closed, because falling through could email-match (or JIT-create) a
+  // duplicate account for an already-linked subject.
+  const identityLookup = await getIdentityByIssuerSubject(
+    c.env.DB,
+    logger,
+    GOOGLE_ISSUER,
+    googleUser.sub,
+  );
+  if (!identityLookup.success && !(identityLookup.error instanceof NotFoundError)) {
+    logger.error("Google identity lookup failed", identityLookup.error);
+    return c.json({ error: "Failed to sign in" }, 500);
   }
+
+  let userId: string;
+  let identityEmail: string;
+  if (identityLookup.success) {
+    // An identity row must point at a live user (account deletion cascades
+    // through deleteIdentitiesForUser) — treat a dangling row as an error, not
+    // as license to fall through and mint a duplicate account.
+    const identityUser = await getUser(c.env.DB, identityLookup.data.userId, logger);
+    if (!identityUser.success) {
+      logger.error("Google identity points at a missing user", identityUser.error, {
+        identityId: identityLookup.data.id,
+      });
+      return c.json({ error: "Failed to sign in" }, 500);
+    }
+    // A disabled (or deleting) account must not sign in: refuse BEFORE minting
+    // a session, so no stratum_session cookie and no session.created audit row
+    // exist for it.
+    if (identityUser.data.disabledAt || identityUser.data.deletingAt) {
+      logger.warn("Blocked Google sign-in — account disabled", { userId: identityUser.data.id });
+      return c.redirect("/auth/login?error=account_disabled");
+    }
+    userId = identityUser.data.id;
+    // Refresh the identity email only from a verified claim; otherwise keep
+    // the account's stored email.
+    identityEmail =
+      googleEmail && googleUser.email_verified === true ? googleEmail : identityUser.data.email;
+  } else {
+    // Email match and account creation trust the Google email only when
+    // verified — an unverified address is attacker-claimable.
+    if (!googleEmail || googleUser.email_verified !== true) {
+      logger.warn("Google account has no verified email");
+      return c.json({ error: "No verified email on Google account" }, 422);
+    }
+    identityEmail = googleEmail;
+    // Unlinked Google identity maps onto the email-based account model: an
+    // existing account with this (verified) email is reused, otherwise one is
+    // created — the same semantics as magic-link sign-in.
+    const existing = await getUserByEmail(c.env.DB, googleEmail, logger);
+    if (existing.success) {
+      if (existing.data.disabledAt || existing.data.deletingAt) {
+        logger.warn("Blocked Google sign-in — account disabled", { userId: existing.data.id });
+        return c.redirect("/auth/login?error=account_disabled");
+      }
+      userId = existing.data.id;
+    } else {
+      // Closed beta: OAuth is login-only — new accounts require an invite code.
+      if (betaGateEnabled(c.env)) {
+        logger.warn("Blocked Google signup — closed beta");
+        return c.redirect("/auth/signup?error=invite_required");
+      }
+      const createdResult = await createUser(c.env.DB, googleEmail, logger);
+      if (createdResult.success) {
+        userId = createdResult.data.user.id;
+      } else {
+        // Two concurrent first logins race on users.email UNIQUE; the loser's
+        // account exists now — sign it in instead of surfacing a raw 500.
+        const raced = await getUserByEmail(c.env.DB, googleEmail, logger);
+        if (!raced.success || raced.data.disabledAt || raced.data.deletingAt) {
+          logger.error("Failed to create user from Google sign-in", createdResult.error);
+          return c.json({ error: "Failed to create user" }, 500);
+        }
+        userId = raced.data.id;
+      }
+    }
+  }
+
+  await recordOAuthIdentity(c.env.DB, logger.child({ userId }), {
+    userId,
+    provider: "google",
+    issuer: GOOGLE_ISSUER,
+    subject: googleUser.sub,
+    email: identityEmail,
+  });
 
   const sessionLogger = logger.child({ userId });
   const sessionResult = await createSession(c.env.DB, userId, sessionLogger);

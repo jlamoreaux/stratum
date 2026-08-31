@@ -150,6 +150,7 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # GOOGLE_CLIENT_SECRET =
 # EMAIL_FROM_ADDRESS = "noreply@yourdomain.com"  # for magic link emails
 # REFERRAL_SERVICE_SECRET =  # closed-beta gate shared secret (must match the referral service)
+# SSO_ENCRYPTION_SECRET =  # encrypts org SSO client secrets at rest; unset → SSO endpoints 501
 
 # =============================================================================
 # [env.production] — the maintainer's hosted instance (app.usestratum.dev).

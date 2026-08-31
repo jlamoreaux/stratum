@@ -3,8 +3,10 @@ import { getCookie } from "hono/cookie";
 import { isGitHttpPath } from "../routes/git-http";
 import { getAgentByToken } from "../storage/agents";
 import { deleteSession, getSession } from "../storage/sessions";
+import { getSsoConnectionByScimTokenHash } from "../storage/sso";
 import { getUser, getUserByToken } from "../storage/users";
 import type { Env } from "../types";
+import { hashToken } from "../utils/crypto";
 import { type Logger, createLogger } from "../utils/logger";
 
 declare module "hono" {
@@ -13,6 +15,13 @@ declare module "hono" {
     username: string;
     agentId?: string;
     agentOwnerId?: string;
+    /**
+     * Set ONLY for a valid `stratum_scim_*` bearer (an enabled,
+     * domain-verified connection). A SCIM caller is the org's IdP, not a
+     * user — userId is never set alongside this. The SCIM router re-loads
+     * the connection row per request, so only the id is carried here.
+     */
+    scimConnectionId?: string;
     /** How the caller authenticated — CSRF checks apply to "session" only. */
     authVia?: "token" | "session";
     logger: Logger;
@@ -76,8 +85,9 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       // A soft-`deleting` account's credentials stop working immediately — the
       // deleting_at flag rides on the same user row (no second round-trip) and
       // we reject BEFORE setting any context so nothing downstream trusts it.
-      if (userResult.data.deletingAt) {
-        logger.warn("Auth rejected - user is deleting", {
+      // A disabled (SCIM-deprovisioned, reversible) account is equally inert.
+      if (userResult.data.deletingAt || userResult.data.disabledAt) {
+        logger.warn("Auth rejected - user is deleting or disabled", {
           path: c.req.path,
           userId: userResult.data.id,
         });
@@ -103,12 +113,12 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
         });
         return c.json({ error: "Invalid token" }, 401);
       }
-      // An agent inherits its owner's access, so a deleting owner's agent must
-      // stop working too — otherwise it's an authenticated write channel that
-      // re-creates rows the account cascade is erasing. Fail CLOSED on the
-      // owner lookup: an unresolved lookup or a deleting owner rejects the
-      // agent token. getUser can reject on a D1 error, so catch it rather
-      // than letting it propagate past this middleware.
+      // An agent inherits its owner's access, so a deleting or disabled
+      // owner's agent must stop working too — otherwise it's an authenticated
+      // write channel that outlives the account's access. Fail CLOSED on the
+      // owner lookup: an unresolved lookup or a deleting/disabled owner
+      // rejects the agent token. getUser can reject on a D1 error, so catch
+      // it rather than letting it propagate past this middleware.
       let ownerResult: Awaited<ReturnType<typeof getUser>>;
       try {
         ownerResult = await getUser(c.env.DB, agentResult.data.ownerId, logger);
@@ -119,8 +129,10 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
         });
         return c.json({ error: "Invalid token" }, 401);
       }
-      if (!ownerResult.success || ownerResult.data.deletingAt) {
-        logger.warn("Auth failed - agent owner is deleting", { path: c.req.path });
+      if (!ownerResult.success || ownerResult.data.deletingAt || ownerResult.data.disabledAt) {
+        logger.warn("Auth failed - agent owner is missing, deleting, or disabled", {
+          path: c.req.path,
+        });
         return c.json({ error: "Invalid token" }, 401);
       }
       c.set("agentId", agentResult.data.id);
@@ -129,6 +141,43 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       logger.debug("Auth success - agent", {
         agentId: agentResult.data.id,
         ownerId: agentResult.data.ownerId,
+      });
+      await next();
+      return;
+    }
+
+    if (token.startsWith("stratum_scim_")) {
+      // Only the token's hash is stored; the lookup itself enforces
+      // enabled=1 AND verified domains, so a rotated, disabled, or
+      // unverified connection's token 401s exactly like any invalid token.
+      const connectionResult = await getSsoConnectionByScimTokenHash(
+        c.env.DB,
+        logger,
+        await hashToken(token),
+      );
+      if (!connectionResult.success) {
+        logger.warn("Auth failed - invalid SCIM token", {
+          path: c.req.path,
+          tokenHint: sanitizeToken(token),
+        });
+        // A stratum_scim_ bearer identifies an IdP caller, so answer in the
+        // SCIM Error schema (RFC 7644 §3.12) rather than the repo's plain
+        // {error} JSON — this branch only; other token classes keep theirs.
+        return c.json(
+          {
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+            status: "401",
+            detail: "Invalid token",
+          },
+          401,
+          { "Content-Type": "application/scim+json" },
+        );
+      }
+      c.set("scimConnectionId", connectionResult.data.id);
+      c.set("authVia", "token");
+      logger.debug("Auth success - SCIM connection", {
+        connectionId: connectionResult.data.id,
+        orgId: connectionResult.data.orgId,
       });
       await next();
       return;
@@ -150,12 +199,12 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
         logger.debug("Session expired, deleting", { userId });
         await deleteSession(c.env.DB, sessionId, userId, logger);
       } else {
-        // Fetch the user row FIRST so a soft-`deleting` account is rejected
-        // before any auth context is set (the deleting_at flag rides on the
+        // Fetch the user row FIRST so a soft-`deleting` or disabled account
+        // is rejected before any auth context is set (both flags ride on the
         // same row, so this is not an extra round-trip beyond the username
         // lookup this path already did). Fail CLOSED: an unresolved lookup
         // (missing row, or getUser rejecting on a D1 error) must not end up
-        // authenticated any more than a deleting account should.
+        // authenticated any more than a deleting or disabled account should.
         let userResult: Awaited<ReturnType<typeof getUser>>;
         try {
           userResult = await getUser(c.env.DB, sessionResult.data.userId, logger);
@@ -166,8 +215,8 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
           });
           return c.json({ error: "Unauthorized" }, 401);
         }
-        if (!userResult.success || userResult.data.deletingAt) {
-          logger.warn("Auth rejected - session user missing or deleting", { userId });
+        if (!userResult.success || userResult.data.deletingAt || userResult.data.disabledAt) {
+          logger.warn("Auth rejected - session user missing, deleting, or disabled", { userId });
           return c.json({ error: "Unauthorized" }, 401);
         }
 

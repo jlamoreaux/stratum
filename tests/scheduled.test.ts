@@ -11,6 +11,7 @@ const noopRunners: JobRunners = {
   backup: () => Promise.resolve(),
   "ttl-sweep": () => Promise.resolve(),
   "project-sync": () => Promise.resolve(),
+  "oidc-state-purge": () => Promise.resolve(),
 };
 
 describe("jobsForCron", () => {
@@ -22,7 +23,7 @@ describe("jobsForCron", () => {
 
   it("runs housekeeping (no backup) on the 0 6 trigger", () => {
     const jobs = jobsForCron("0 6 * * *");
-    expect(jobs).toEqual(["ttl-sweep", "project-sync"]);
+    expect(jobs).toEqual(["ttl-sweep", "project-sync", "oidc-state-purge"]);
     expect(jobs).not.toContain("backup");
   });
 
@@ -47,9 +48,9 @@ describe("runScheduledJobs", () => {
   });
 
   it("registers a SEPARATE waitUntil per job (not one batched Promise.all)", () => {
-    // The 06:00 cron has two jobs; each must be its own waitUntil so one failing
-    // job can't reject the other — a single Promise.all would show up as length 1.
-    expect(collect("0 6 * * *")).toHaveLength(2);
+    // The 06:00 cron has three jobs; each must be its own waitUntil so one failing
+    // job can't reject the others — a single Promise.all would show up as length 1.
+    expect(collect("0 6 * * *")).toHaveLength(3);
   });
 
   it("registers nothing for an unknown cron", () => {
