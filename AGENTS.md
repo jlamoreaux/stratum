@@ -70,10 +70,13 @@ Mirror lint → typecheck → test locally before pushing.
   PR, under a Keep a Changelog group. That text ships verbatim as the release notes; the release
   tooling infers the version bump from which groups are present (`docs/developer/releasing.md`).
 - **A change to user-facing config, API shape, or evaluator/policy behavior also updates the public
-  docs** (`website/src/content/docs/`, `docs.usestratum.dev`) in the same PR — not just
-  `CHANGELOG.md`. `docs/` is internal (developer, API reference, ADRs, runbooks); `website/` is what
-  a self-hoster or agent operator actually reads to configure `.stratum/policy.yaml` or use the API,
-  and it goes stale silently since nothing fails a build over it.
+  docs** (`docs.usestratum.dev`) in the same PR — not just `CHANGELOG.md`. What a self-hoster or
+  agent operator reads to configure `.stratum/policy.yaml` or use the API is what must not go
+  stale. The published pages are **generated**, so edit the canonical copy under `docs/user-guide/`
+  or `docs/api/`, then `cd website && npm run sync:guides` and commit the regenerated mirrors —
+  a direct edit to `website/src/content/docs/` is overwritten by the next sync. The rest of `docs/`
+  (`developer/`, `adr/`, `runbooks/`) stays internal. This no longer goes stale silently:
+  `docs.yml` watches `docs/**` and fails CI on drift via `npm run check:guides`.
 - Highlight.js / type gotchas and the full ship flow live in `docs/developer/`.
 
 ## Operational rules (do not violate)

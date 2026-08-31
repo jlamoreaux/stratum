@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually ship today (scoped-token refusals, wedged imports, sandbox budget
   exhaustion, `--ignore-scripts`, dismissed approvals); and the token, branch,
   and sync error codes added to the error reference.
+- **The contributor rule from #344 now names the generated-docs workflow.** That PR
+  required user-facing changes to update the public docs in the same PR, pointing
+  contributors at `website/src/content/docs/`. Those pages are now generated, so
+  AGENTS.md and the PR template say to edit the canonical page under `docs/user-guide/`
+  or `docs/api/` and run `sync:guides` instead. Its "goes stale silently since nothing
+  fails a build over it" caveat no longer applies — `check:guides` fails CI on drift.
 - **The docs site now publishes the CI integration guide, and the guide and
   reference pages are generated from `docs/` rather than hand-mirrored.**
   `website/scripts/mirror-docs.mjs` renders them (with `npm run check:guides` to
