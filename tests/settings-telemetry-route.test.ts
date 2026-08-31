@@ -13,7 +13,17 @@ import { AppError } from "../src/utils/errors";
 vi.mock("../src/storage/users", () => ({
   getUser: vi.fn(),
   rotateUserToken: vi.fn(),
+  disableLegacyToken: vi.fn(),
   setUserTelemetryOptOut: vi.fn(),
+}));
+// Spread the real module and override only what touches D1. Listing the
+// exports by hand silently drops any added later — `isExpired`, which the page
+// calls to count active tokens, would arrive as undefined and 500 the render.
+vi.mock("../src/storage/api-tokens", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/storage/api-tokens")>()),
+  createApiToken: vi.fn(),
+  listApiTokens: vi.fn(async () => ({ success: true, data: [] })),
+  revokeApiToken: vi.fn(),
 }));
 vi.mock("../src/storage/audit", () => ({ recordAudit: vi.fn(async () => ({ success: true })) }));
 vi.mock("../src/storage/agents", () => ({
@@ -41,13 +51,23 @@ const env = {
   DB: {} as D1Database,
 } as Env;
 
-/** Mounts the UI router behind a stub that supplies an authenticated userId. */
+/**
+ * Mounts the UI router behind a stub that supplies an authenticated userId.
+ *
+ * `authVia` is part of the stub because #254 made `GET /settings` session-only:
+ * the page lists token metadata, so an API token that could render it would be
+ * a weaker second door to what the JSON routes already refuse it. `via` is
+ * separate from `userId` so a test can authenticate as a token caller.
+ */
 // `null`, not `undefined`, marks the anonymous case: `undefined` would trigger
 // the default parameter and silently authenticate the request.
-function makeApp(userId: string | null = "usr_1") {
+function makeApp(userId: string | null = "usr_1", via: "session" | "token" = "session") {
   const app = new Hono<{ Bindings: Env }>();
   app.use("*", async (c, next) => {
-    if (userId) c.set("userId", userId);
+    if (userId) {
+      c.set("userId", userId);
+      c.set("authVia", via);
+    }
     await next();
   });
   app.route("/", uiRouter);

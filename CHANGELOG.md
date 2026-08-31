@@ -12,12 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   analytics for your account, alongside a plain-language disclosure of exactly what is sent.
   An agent inherits its owner's choice. Telemetry remains on by default; the existing
   instance-wide `STRATUM_TELEMETRY_DISABLED` still overrides every account's preference.
+- **Named, scoped, expiring API tokens.** Mint any number of named tokens from
+  Settings, each `read` or `read_write`, each with an optional 1-365 day expiry,
+  each revocable on its own and each showing when it was last used. A read-only
+  token still clones over git but is refused on every write — enforced before
+  routing on the HTTP method, and on the resolved scope at all four git write
+  entry points, so a route added later inherits the rule.
+- **`POST /api/users/me/legacy-token/disable`** (and a button in Settings) turns
+  off the single unnamed key accounts were given before scoped tokens existed.
+  Named tokens are unaffected. Move anything still using the legacy credential
+  onto a named token first — disabling cannot be undone.
 
 ### Fixed
 - `STRATUM_TELEMETRY_DISABLED` had no effect on `deploy:production` or `deploy:staging`. It was
   declared only under top-level `[vars]`, which named wrangler environments replace rather than
   inherit, so self-hosters who set it were still sending telemetry. It is now declared per
   environment.
+- The active-token cap counted expired tokens, so a user whose tokens had all
+  lapsed could not create a replacement without first revoking each dead row by
+  hand. Expired and revoked tokens now both free their slot.
 
 ### Changed
 - Repository-activity analytics events no longer carry `project`, the concrete project name; they
@@ -43,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   push, so it could still land after the timeout fired, and deleting on that ambiguous a
   signal risked destroying already-landed `main`/tags. `pushMain`/`pushTags` now surface a
   distinctly-coded `PUSH_TIMEOUT` error so the caller can tell the two cases apart (#332).
+- **A scoped token can no longer mint a credential that outlives its own
+  revocation.** `POST /settings/rotate-token` and `POST /api/users/me/rotate-token`
+  refuse a scoped token, because the legacy key they mint never expires and cannot
+  be revoked individually. Browser sessions and the legacy credential itself still
+  rotate, so existing automation is unaffected.
+- **Token management requires a browser session, not an API token.** A
+  `read_write` token that could mint siblings and revoke them would make
+  revocation circular. `GET /settings` requires a session too — it previously
+  rendered token metadata to a caller the JSON routes refused.
 
 ## [0.2.0] - 2026-08-29
 

@@ -1,5 +1,15 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { isScopedTokenCaller } from "../middleware/auth";
 import { createAgent, deleteAgent, getAgent, listAgents } from "../storage/agents";
+import {
+  type ApiTokenSummary,
+  MAX_TOKEN_EXPIRY_DAYS,
+  MIN_TOKEN_EXPIRY_DAYS,
+  createApiToken,
+  listApiTokens,
+  revokeApiToken,
+} from "../storage/api-tokens";
 import { recordAudit } from "../storage/audit";
 import { listComments, listReviews } from "../storage/change-reviews";
 import { getChange, listChanges } from "../storage/changes";
@@ -28,9 +38,14 @@ import {
   listWorkspaces,
 } from "../storage/state";
 import { getProjectSourceUrl, getSyncStatus } from "../storage/sync";
-import { getUser, rotateUserToken, setUserTelemetryOptOut } from "../storage/users";
+import {
+  disableLegacyToken,
+  getUser,
+  rotateUserToken,
+  setUserTelemetryOptOut,
+} from "../storage/users";
 import { listDeliveries, listWebhooks } from "../storage/webhooks";
-import type { Env, ProjectEntry } from "../types";
+import type { ApiTokenScope, Env, ProjectEntry } from "../types";
 import { projectDefaultBranch } from "../types";
 import { parseUnifiedDiff } from "../ui/components/diff-view";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
@@ -44,7 +59,7 @@ import { IssueDetailPage, IssuesPage, NewIssuePage } from "../ui/pages/issues";
 import { NewProjectPage } from "../ui/pages/new-project";
 import { ProjectSettingsPage } from "../ui/pages/project-settings";
 import { RepoPage } from "../ui/pages/repo";
-import { SettingsPage } from "../ui/pages/settings";
+import { type FreshCredential, type SettingsNotice, SettingsPage } from "../ui/pages/settings";
 import { SyncPage } from "../ui/pages/sync";
 import { TagsPage } from "../ui/pages/tags";
 import { WebhooksPage } from "../ui/pages/webhooks";
@@ -191,6 +206,8 @@ async function loadAgentSummaries(
   }));
 }
 
+type SettingsUser = { id: string; email: string; username: string };
+
 /**
  * The settings page needs the telemetry preference (#257) on top of the page
  * identity `getCurrentUser` returns. Both come off the same row, so this reads
@@ -200,10 +217,7 @@ async function loadAgentSummaries(
 async function getSettingsUser(
   c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } },
   logger: ReturnType<typeof createLogger>,
-): Promise<{
-  user: { id: string; email: string; username: string };
-  telemetryOptOut: boolean;
-} | null> {
+): Promise<{ user: SettingsUser; telemetryOptOut: boolean } | null> {
   const userId = c.get("userId");
   if (!userId) return null;
   const result = await getUser(c.env.DB, userId, logger);
@@ -213,18 +227,278 @@ async function getSettingsUser(
   return { user: { id, email, username }, telemetryOptOut: telemetryOptOut === true };
 }
 
-// GET /settings — Account, privacy, API key, and agent token management
+const sessionRequiredError = () => (
+  <div style="padding:2rem;font-family:monospace;color:#f87171;">
+    Settings require a signed-in browser session, not an API token.
+  </div>
+);
+
+/**
+ * Resolves the settings caller, insisting on a browser SESSION (#254).
+ *
+ * These pages mint, revoke, and disable credentials, so the rule the JSON
+ * routes enforce (`requireSession` in `routes/users.ts`) has to hold here too:
+ * a `read_write` token that could open `/settings` and post its forms would be
+ * able to mint siblings and turn off the legacy key, and "revoke the lost
+ * laptop" would be worthless because the laptop could issue itself a
+ * replacement. A read-only token never reaches the POSTs — `authMiddleware`
+ * refuses it on method — but it could still read this listing, so the check is
+ * on the session, not on the scope.
+ */
+async function requireSettingsSession(
+  c: Context<{ Bindings: Env }>,
+  logger: ReturnType<typeof createLogger>,
+): Promise<
+  { user: SettingsUser; telemetryOptOut: boolean } | { response: Response | Promise<Response> }
+> {
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return { response: c.redirect("/auth/email") };
+  if (c.get("authVia") !== "session") {
+    logger.warn("Settings rejected - not a session caller", {});
+    return { response: c.html(sessionRequiredError(), 403) };
+  }
+  return loaded;
+}
+
+/**
+ * The caller's scoped tokens, plus a notice when they could not be read.
+ *
+ * An empty list and a failed lookup must not look the same: rendering "no
+ * tokens yet" over a D1 error would tell someone their credentials are gone.
+ */
+async function loadApiTokens(
+  db: D1Database,
+  userId: string,
+  logger: ReturnType<typeof createLogger>,
+): Promise<{ tokens: ApiTokenSummary[]; notice?: SettingsNotice }> {
+  const result = await listApiTokens(db, logger, userId);
+  if (result.success) return { tokens: result.data };
+  return {
+    tokens: [],
+    notice: { kind: "error", message: "Your API tokens could not be loaded. Try again shortly." },
+  };
+}
+
+/** The settings page plus everything it lists, in one round of loads. */
+async function renderSettings(
+  c: Context<{ Bindings: Env }>,
+  user: SettingsUser,
+  telemetryOptOut: boolean,
+  logger: ReturnType<typeof createLogger>,
+  extras: { freshToken?: FreshCredential; notice?: SettingsNotice } = {},
+) {
+  const [agents, tokens] = await Promise.all([
+    loadAgentSummaries(c.env.DB, user.id, logger),
+    loadApiTokens(c.env.DB, user.id, logger),
+  ]);
+  // A notice about the action just taken outranks the listing's own failure —
+  // the caller needs to know what their POST did first.
+  const notice = extras.notice ?? tokens.notice;
+  return (
+    <SettingsPage
+      user={user}
+      agents={agents}
+      apiTokens={tokens.tokens}
+      telemetryOptOut={telemetryOptOut}
+      // Threaded here rather than at each call site: this helper is the single
+      // render path for the settings page, so the CSP nonce main added cannot
+      // be forgotten by a future caller.
+      nonce={c.get("cspNonce") ?? ""}
+      {...(extras.freshToken !== undefined ? { freshToken: extras.freshToken } : {})}
+      {...(notice !== undefined ? { notice } : {})}
+    />
+  );
+}
+
+/**
+ * Notices carried across the redirect that follows a successful settings POST.
+ *
+ * A closed vocabulary, not a message in the URL: the query string is
+ * attacker-controlled, and rendering arbitrary text from it would make the
+ * settings page a phishing surface.
+ */
+const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
+  "token-revoked": { kind: "success", message: "That API token has been revoked." },
+  "legacy-disabled": {
+    kind: "success",
+    message:
+      "The legacy API key has been disabled. Anything still using it must switch to a named API token; your existing tokens keep working.",
+  },
+};
+
+// GET /settings — Account, privacy, API token, and agent token management
 app.get("/settings", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const loaded = await getSettingsUser(c, logger);
-  if (!loaded) return c.redirect("/auth/login");
-  const { user, telemetryOptOut } = loaded;
+  const access = await requireSettingsSession(c, logger);
+  if ("response" in access) return access.response;
 
-  const agents = await loadAgentSummaries(c.env.DB, user.id, logger);
-  return c.html(<SettingsPage user={user} agents={agents} telemetryOptOut={telemetryOptOut} />);
+  // Own keys only: a bare index lookup would resolve `?notice=constructor`
+  // (and every other Object.prototype name) to something that is not a notice.
+  const requestedNotice = c.req.query("notice") ?? "";
+  const notice = Object.hasOwn(SETTINGS_NOTICES, requestedNotice)
+    ? SETTINGS_NOTICES[requestedNotice]
+    : undefined;
+  const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
+    ...(notice !== undefined ? { notice } : {}),
+  });
+  return c.html(page);
+});
+
+/** Same bounds as `POST /api/users/me/tokens`, applied to form fields. */
+function parseTokenForm(
+  form: Record<string, string | File>,
+): { name: string; scope: ApiTokenScope; expiresInDays?: number } | { error: string } {
+  const rawName = typeof form.name === "string" ? form.name.trim() : "";
+  if (rawName.length === 0 || rawName.length > 100) {
+    return { error: "Give the token a name of 1 to 100 characters." };
+  }
+
+  const rawScope = typeof form.scope === "string" ? form.scope : "read";
+  if (rawScope !== "read" && rawScope !== "read_write") {
+    return { error: "Scope must be read-only or read & write." };
+  }
+
+  const rawExpiry = typeof form.expiresInDays === "string" ? form.expiresInDays.trim() : "";
+  if (rawExpiry.length === 0) return { name: rawName, scope: rawScope };
+  // Digits only: `Number("1e3")` and `Number(" 5 ")` are both integers, and
+  // neither is what a user typed into a day count.
+  const expiresInDays = /^\d+$/.test(rawExpiry) ? Number(rawExpiry) : Number.NaN;
+  if (
+    !Number.isInteger(expiresInDays) ||
+    expiresInDays < MIN_TOKEN_EXPIRY_DAYS ||
+    expiresInDays > MAX_TOKEN_EXPIRY_DAYS
+  ) {
+    return {
+      error: `Expiry must be a whole number of days between ${MIN_TOKEN_EXPIRY_DAYS} and ${MAX_TOKEN_EXPIRY_DAYS}, or blank for no expiry.`,
+    };
+  }
+  return { name: rawName, scope: rawScope, expiresInDays };
+}
+
+// POST /settings/tokens — Mint a named API token; renders the plaintext once
+app.post("/settings/tokens", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireSettingsSession(c, logger);
+  if ("response" in access) return access.response;
+  const user = access.user;
+
+  const parsed = parseTokenForm(await c.req.parseBody());
+  if ("error" in parsed) {
+    const page = await renderSettings(c, user, access.telemetryOptOut, logger, {
+      notice: { kind: "error", message: parsed.error },
+    });
+    return c.html(page, 400);
+  }
+
+  const createResult = await createApiToken(c.env.DB, logger, {
+    userId: user.id,
+    name: parsed.name,
+    scope: parsed.scope,
+    ...(parsed.expiresInDays !== undefined ? { expiresInDays: parsed.expiresInDays } : {}),
+  });
+  if (!createResult.success) {
+    logger.error("Failed to create API token", createResult.error);
+    // The cap (409) and a rejected expiry (400) are the caller's to fix, so they
+    // are shown as written; anything else is ours and is not.
+    const status =
+      createResult.error.statusCode === 409
+        ? 409
+        : createResult.error.statusCode === 400
+          ? 400
+          : 500;
+    const page = await renderSettings(c, user, access.telemetryOptOut, logger, {
+      notice: {
+        kind: "error",
+        message: status === 500 ? "Could not create the token." : createResult.error.message,
+      },
+    });
+    return c.html(page, status);
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "token.created",
+    actorType: "user",
+    actorId: user.id,
+    subject: createResult.data.token.id,
+    detail: { scope: createResult.data.token.scope },
+  });
+
+  const page = await renderSettings(c, user, access.telemetryOptOut, logger, {
+    freshToken: {
+      kind: "scoped-token",
+      value: createResult.data.plaintext,
+      tokenName: createResult.data.token.name,
+    },
+  });
+  // The plaintext exists nowhere else after this response: it must not be held
+  // by a shared cache, nor re-served from the browser's back-forward cache.
+  return c.html(page, 200, { "Cache-Control": "no-store" });
+});
+
+// POST /settings/tokens/:id/revoke — Revoke one of the caller's own tokens
+app.post("/settings/tokens/:id/revoke", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireSettingsSession(c, logger);
+  if ("response" in access) return access.response;
+
+  const { id } = c.req.param();
+  const revokeResult = await revokeApiToken(c.env.DB, logger, {
+    userId: access.user.id,
+    tokenId: id,
+  });
+  if (!revokeResult.success) {
+    // Another user's token id is indistinguishable from one that never existed.
+    const status = revokeResult.error.statusCode === 404 ? 404 : 500;
+    logger.warn("Failed to revoke API token", { tokenId: id, status });
+    const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
+      notice: {
+        kind: "error",
+        message: status === 404 ? "No such token." : "Could not revoke that token.",
+      },
+    });
+    return c.html(page, status);
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "token.revoked",
+    actorType: "user",
+    actorId: access.user.id,
+    subject: id,
+  });
+  // Redirect rather than render, so a refresh re-runs the listing and not the
+  // revocation.
+  return c.redirect("/settings?notice=token-revoked");
+});
+
+// POST /settings/legacy-token/disable — Turn off the pre-scopes credential
+app.post("/settings/legacy-token/disable", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireSettingsSession(c, logger);
+  if ("response" in access) return access.response;
+
+  const disableResult = await disableLegacyToken(c.env.DB, access.user.id, logger);
+  if (!disableResult.success) {
+    logger.error("Failed to disable legacy token", disableResult.error);
+    const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
+      notice: { kind: "error", message: "Could not disable the legacy API key." },
+    });
+    return c.html(page, 500);
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "token.legacy_disabled",
+    actorType: "user",
+    actorId: access.user.id,
+  });
+  return c.redirect("/settings?notice=legacy-disabled");
 });
 
 // POST /settings/telemetry — Set the per-user product-analytics preference
+//
+// Not behind `requireSettingsSession`: this changes the caller's own analytics
+// preference, it does not mint or revoke a credential, so the circularity that
+// makes the token routes session-only does not apply. A read-only token is
+// already refused on method by `authMiddleware`.
 app.post("/settings/telemetry", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
   const loaded = await getSettingsUser(c, logger);
@@ -271,6 +545,14 @@ app.post("/settings/rotate-token", async (c) => {
   if (!loaded) return c.redirect("/auth/login");
   const { user, telemetryOptOut } = loaded;
 
+  // Not `requireSettingsSession`: the legacy key must keep rotating for callers
+  // that predate #254. Only a SCOPED token is refused, because the key it would
+  // mint never expires and survives revocation of the token that minted it.
+  if (isScopedTokenCaller(c)) {
+    logger.warn("Rotate rejected - scoped token cannot mint the legacy credential", {});
+    return c.html(sessionRequiredError(), 403);
+  }
+
   const rotateResult = await rotateUserToken(c.env.DB, user.id, logger);
   if (!rotateResult.success) {
     logger.error("Failed to rotate API key", rotateResult.error);
@@ -283,17 +565,12 @@ app.post("/settings/rotate-token", async (c) => {
     actorId: user.id,
   });
 
-  const agents = await loadAgentSummaries(c.env.DB, user.id, logger);
-  // Rendered in the POST response so the secret never lands in a URL or log.
-  return c.html(
-    <SettingsPage
-      user={user}
-      agents={agents}
-      telemetryOptOut={telemetryOptOut}
-      freshToken={{ kind: "api-key", value: rotateResult.data }}
-      nonce={c.get("cspNonce") ?? ""}
-    />,
-  );
+  // Rendered in the POST response so the secret never lands in a URL or log,
+  // and never in a cache either.
+  const page = await renderSettings(c, user, telemetryOptOut, logger, {
+    freshToken: { kind: "api-key", value: rotateResult.data },
+  });
+  return c.html(page, 200, { "Cache-Control": "no-store" });
 });
 
 // POST /settings/agents — Create an agent token; renders it once
@@ -325,16 +602,10 @@ app.post("/settings/agents", async (c) => {
     detail: { name },
   });
 
-  const agents = await loadAgentSummaries(c.env.DB, user.id, logger);
-  return c.html(
-    <SettingsPage
-      user={user}
-      agents={agents}
-      telemetryOptOut={telemetryOptOut}
-      freshToken={{ kind: "agent", value: createResult.data.plaintext, agentName: name }}
-      nonce={c.get("cspNonce") ?? ""}
-    />,
-  );
+  const page = await renderSettings(c, user, telemetryOptOut, logger, {
+    freshToken: { kind: "agent", value: createResult.data.plaintext, agentName: name },
+  });
+  return c.html(page, 200, { "Cache-Control": "no-store" });
 });
 
 // POST /settings/agents/:id/delete — Revoke an agent token

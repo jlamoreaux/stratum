@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import type { Env } from "../src/types";
+import { NotFoundError } from "../src/utils/errors";
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
@@ -14,8 +15,17 @@ vi.mock("../src/storage/sessions", () => ({
   getSession: vi.fn(),
   deleteSession: vi.fn(),
 }));
+// Spread the real module and override only what touches D1, so an export added
+// later cannot arrive as undefined. `resolveApiToken` defaults to a miss, which
+// is what sends every non-scoped case down the legacy path below.
+vi.mock("../src/storage/api-tokens", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/storage/api-tokens")>()),
+  resolveApiToken: vi.fn(),
+  touchApiTokenLastUsed: vi.fn(async () => undefined),
+}));
 
 import { getAgentByToken } from "../src/storage/agents";
+import { resolveApiToken } from "../src/storage/api-tokens";
 import { getSession } from "../src/storage/sessions";
 import { getUser, getUserByToken } from "../src/storage/users";
 
@@ -70,7 +80,15 @@ function cookie(sessionId: string): Request {
  * hot path" guarantee in the #257 PRD has quietly been lost.
  */
 describe("telemetry preference in the auth context", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no scoped token matches, so each case below exercises the
+    // credential it is actually about.
+    vi.mocked(resolveApiToken).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Token", "by-token"),
+    });
+  });
 
   describe("user token", () => {
     it("carries the flag through without a second user lookup", async () => {
@@ -86,6 +104,39 @@ describe("telemetry preference in the auth context", () => {
 
     it("reports opted in as false, never undefined", async () => {
       vi.mocked(getUserByToken).mockResolvedValue({ success: true, data: liveUser });
+
+      expect(await optOutFor(bearer("stratum_user_abc"))).toBe(false);
+    });
+  });
+
+  describe("scoped token (#254)", () => {
+    /**
+     * The scoped-token path resolves its own owner row, so the preference has
+     * to be selected by that join. Without it, opting out would be defeated by
+     * authenticating with a scoped token instead of the legacy key — silently,
+     * because every other scoped-token behaviour would still be correct.
+     */
+    it("carries the owner's opt-out from the token's own join", async () => {
+      vi.mocked(resolveApiToken).mockResolvedValue({
+        success: true,
+        data: {
+          user: { ...liveUser, telemetryOptOut: true },
+          scope: "read_write",
+          tokenId: "tok_1",
+        },
+      });
+
+      expect(await optOutFor(bearer("stratum_user_abc"))).toBe(true);
+      // The legacy fallback must not run: the scoped token already answered.
+      expect(getUserByToken).not.toHaveBeenCalled();
+      expect(getUser).not.toHaveBeenCalled();
+    });
+
+    it("reports opted in as false, never undefined", async () => {
+      vi.mocked(resolveApiToken).mockResolvedValue({
+        success: true,
+        data: { user: liveUser, scope: "read", tokenId: "tok_1" },
+      });
 
       expect(await optOutFor(bearer("stratum_user_abc"))).toBe(false);
     });

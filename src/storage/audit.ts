@@ -7,6 +7,9 @@ import { type Result, err, ok } from "../utils/result";
 export type AuditAction =
   | "session.created"
   | "token.rotated"
+  | "token.created"
+  | "token.revoked"
+  | "token.legacy_disabled"
   | "agent.created"
   | "agent.revoked"
   | "webhook.created"

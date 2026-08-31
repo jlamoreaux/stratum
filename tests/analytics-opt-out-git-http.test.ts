@@ -10,12 +10,20 @@ import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { analyticsMiddleware } from "../src/middleware/analytics";
 import type { Env } from "../src/types";
+import { NotFoundError } from "../src/utils/errors";
 
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
   getUser: vi.fn(),
 }));
 vi.mock("../src/storage/agents", () => ({ getAgentByToken: vi.fn() }));
+// The scoped-token lookup runs before the legacy one, so it has to be stubbed
+// or it would reach the `{}` D1 binding. Spread the real module: listing the
+// exports by hand drops any added later.
+vi.mock("../src/storage/api-tokens", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/storage/api-tokens")>()),
+  resolveApiToken: vi.fn(),
+}));
 // A public project so the request gets past the no-leak 404 truth table:
 // analyticsMiddleware deliberately skips 404s, so a missing project would
 // capture nothing regardless of the preference and prove nothing.
@@ -43,6 +51,7 @@ vi.mock("../src/storage/git-ops", async (importActual) => ({
 
 import { gitHttpRouter } from "../src/routes/git-http";
 import { getAgentByToken } from "../src/storage/agents";
+import { resolveApiToken } from "../src/storage/api-tokens";
 import { getUser, getUserByToken } from "../src/storage/users";
 
 interface CapturedEvent {
@@ -91,7 +100,15 @@ function cloneRequest(token: string): Request {
 }
 
 describe("telemetry opt-out — git smart-HTTP", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: no scoped token matches, so the cases below exercise the
+    // credential each is actually about.
+    vi.mocked(resolveApiToken).mockResolvedValue({
+      success: false,
+      error: new NotFoundError("Token", "by-token"),
+    });
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("sends nothing for a clone by a user who has opted out", async () => {
@@ -131,6 +148,61 @@ describe("telemetry opt-out — git smart-HTTP", () => {
     await flushCapture();
 
     expect(captured).toHaveLength(1);
+  });
+
+  /**
+   * A scoped token (#254) resolves through its own join, not `getUserByToken`,
+   * so it needs the preference published on that branch too — otherwise the
+   * one credential this feature exists for (CI) is exactly the one whose clones
+   * keep being exported after its owner opts out.
+   */
+  it("sends nothing for a clone by a scoped token whose owner has opted out", async () => {
+    vi.mocked(resolveApiToken).mockResolvedValue({
+      success: true,
+      data: {
+        user: {
+          id: "usr_1",
+          email: "a@b.com",
+          username: "alice",
+          tokenHash: "h",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          telemetryOptOut: true,
+        },
+        scope: "read",
+        tokenId: "tok_1",
+      },
+    });
+    const captured = stubCapture();
+
+    await makeApp().fetch(cloneRequest(OWNER_TOKEN), env);
+    await flushCapture();
+
+    expect(captured).toEqual([]);
+    // The legacy fallback must not run: the scoped token already answered.
+    expect(getUserByToken).not.toHaveBeenCalled();
+  });
+
+  it("still sends for a clone by a scoped token whose owner has not opted out", async () => {
+    vi.mocked(resolveApiToken).mockResolvedValue({
+      success: true,
+      data: {
+        user: {
+          id: "usr_1",
+          email: "a@b.com",
+          username: "alice",
+          tokenHash: "h",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        scope: "read",
+        tokenId: "tok_1",
+      },
+    });
+    const captured = stubCapture();
+
+    await makeApp().fetch(cloneRequest(OWNER_TOKEN), env);
+    await flushCapture();
+
+    expect(captured.length).toBeGreaterThan(0);
   });
 
   it("suppresses an agent's git traffic when its owner has opted out", async () => {

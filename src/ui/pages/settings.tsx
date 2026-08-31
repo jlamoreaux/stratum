@@ -1,4 +1,12 @@
 import type { FC } from "hono/jsx";
+import {
+  type ApiTokenSummary,
+  MAX_ACTIVE_TOKENS_PER_USER,
+  MAX_TOKEN_EXPIRY_DAYS,
+  MIN_TOKEN_EXPIRY_DAYS,
+  isExpired,
+} from "../../storage/api-tokens";
+import type { ApiTokenScope } from "../../types";
 import { Layout } from "../layout";
 
 interface AgentSummary {
@@ -8,15 +16,55 @@ interface AgentSummary {
   createdAt: string;
 }
 
+/**
+ * A credential rendered exactly once, in the POST response that created it.
+ * A union rather than a bag of optional fields so that, for instance, a scoped
+ * token can never be displayed without the name its owner gave it.
+ */
+export type FreshCredential =
+  | { kind: "api-key"; value: string }
+  | { kind: "agent"; value: string; agentName?: string }
+  | { kind: "scoped-token"; value: string; tokenName: string };
+
+/** A one-off message about the action that just ran. */
+export interface SettingsNotice {
+  kind: "success" | "error";
+  message: string;
+}
+
 interface SettingsPageProps {
   user: { id: string; email: string; username: string };
   agents: AgentSummary[];
-  /** Freshly created credential, shown exactly once after a rotate/create POST. */
-  freshToken?: { kind: "api-key" | "agent"; value: string; agentName?: string };
+  apiTokens: ApiTokenSummary[];
+  freshToken?: FreshCredential;
+  notice?: SettingsNotice;
   /** Per-request CSP nonce for the copy-button script (only rendered with a fresh token). */
   nonce?: string;
   /** True when the user has opted out of product analytics (#257). */
   telemetryOptOut: boolean;
+}
+
+const SCOPE_LABEL: Record<ApiTokenScope, string> = {
+  read: "Read-only",
+  read_write: "Read & write",
+};
+
+function formatDate(iso: string): string {
+  const parsed = new Date(iso);
+  // A timestamp we cannot parse is shown verbatim rather than as "Invalid Date":
+  // the raw value is at least evidence of what is stored.
+  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleDateString();
+}
+
+/** Revoked beats expired: an explicitly revoked token stays revoked in the
+ * listing even once its expiry has also passed. */
+function tokenStatus(token: ApiTokenSummary, now: number): "Revoked" | "Expired" | "Active" {
+  if (token.revokedAt !== undefined) return "Revoked";
+  if (token.expiresAt !== undefined) {
+    const expiresAt = Date.parse(token.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) return "Expired";
+  }
+  return "Active";
 }
 
 /** Clipboard needs script; the value is read from the DOM, never re-serialized. */
@@ -49,25 +97,74 @@ const COPY_TOKEN_SCRIPT = `
 })();
 `;
 
+const ApiTokenRow: FC<{ token: ApiTokenSummary; now: number }> = ({ token, now }) => {
+  const status = tokenStatus(token, now);
+  return (
+    <tr>
+      <td>{token.name}</td>
+      <td>
+        <code>{token.tokenPrefix}…</code>
+      </td>
+      <td>{SCOPE_LABEL[token.scope]}</td>
+      <td>{token.expiresAt === undefined ? "Never" : formatDate(token.expiresAt)}</td>
+      <td>{token.lastUsedAt === undefined ? "Never used" : formatDate(token.lastUsedAt)}</td>
+      <td>{status}</td>
+      <td>
+        {status === "Revoked" ? (
+          "—"
+        ) : (
+          <form method="post" action={`/settings/tokens/${token.id}/revoke`}>
+            <button type="submit" class="btn btn-small btn-danger">
+              Revoke
+            </button>
+          </form>
+        )}
+      </td>
+    </tr>
+  );
+};
+
 export const SettingsPage: FC<SettingsPageProps> = ({
   user,
   agents,
+  apiTokens,
   freshToken,
+  notice,
   nonce,
   telemetryOptOut,
 }) => {
+  const now = Date.now();
+  // Mirrors the server-side cap in `createApiToken`: an expired row occupies no
+  // slot, so showing it as active would tell a user they are full when they can
+  // still create a token.
+  const activeTokens = apiTokens.filter(
+    (token) => token.revokedAt === undefined && !isExpired(token.expiresAt ?? null),
+  ).length;
   return (
     <Layout title="Settings" user={user}>
       <div class="page-header">
         <h1>Settings</h1>
       </div>
 
+      {notice && (
+        <div class="card" style={notice.kind === "error" ? { borderColor: "#f87171" } : undefined}>
+          <p
+            class="settings-help"
+            style={notice.kind === "error" ? { color: "#f87171" } : undefined}
+          >
+            {notice.message}
+          </p>
+        </div>
+      )}
+
       {freshToken && (
         <div class="card settings-token-reveal">
           <h3 style={{ marginTop: 0 }}>
             {freshToken.kind === "api-key"
               ? "Your new API key"
-              : `Token for agent ${freshToken.agentName ?? ""}`}
+              : freshToken.kind === "agent"
+                ? `Token for agent ${freshToken.agentName ?? ""}`
+                : `Token “${freshToken.tokenName}”`}
           </h3>
           <p class="settings-help">
             Copy it now — it is shown only once.{" "}
@@ -137,14 +234,95 @@ export const SettingsPage: FC<SettingsPageProps> = ({
       </div>
 
       <div class="card">
-        <h3 style={{ marginTop: 0 }}>API key</h3>
+        <h3 style={{ marginTop: 0 }}>API tokens</h3>
         <p class="settings-help">
-          Used as <code>Authorization: Bearer stratum_user_…</code> for the API and CLI. Rotating
-          invalidates the current key immediately.
+          Named tokens for the API, the CLI, and git over HTTPS, sent as{" "}
+          <code>Authorization: Bearer stratum_user_…</code>. A read-only token can <code>GET</code>{" "}
+          and <code>git clone</code>, and is refused on every write — so a leaked CI credential
+          cannot push, merge, or delete. Each token can be revoked on its own without disturbing the
+          others. Managing tokens requires a signed-in session; a token can never mint or revoke
+          another.
+        </p>
+        {apiTokens.length === 0 ? (
+          <p class="settings-help">
+            No API tokens yet. Create one below — you will see its value only once.
+          </p>
+        ) : (
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Token</th>
+                <th>Scope</th>
+                <th>Expires</th>
+                <th>Last used</th>
+                <th>Status</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {apiTokens.map((token) => (
+                <ApiTokenRow key={token.id} token={token} now={now} />
+              ))}
+            </tbody>
+          </table>
+        )}
+        <form method="post" action="/settings/tokens" class="settings-agent-form">
+          <label>
+            Token name
+            <input type="text" name="name" required maxlength={100} placeholder="buildkite" />
+          </label>
+          <label>
+            Scope
+            {/* Read-only is the default: a token created without a deliberate
+                choice must not be able to write. */}
+            <select name="scope">
+              <option value="read" selected>
+                Read-only — GET/HEAD and git clone
+              </option>
+              <option value="read_write">Read &amp; write — everything you can do</option>
+            </select>
+          </label>
+          <label>
+            Expires in days (optional — blank never expires)
+            <input
+              type="number"
+              name="expiresInDays"
+              min={MIN_TOKEN_EXPIRY_DAYS}
+              max={MAX_TOKEN_EXPIRY_DAYS}
+              placeholder="90"
+            />
+          </label>
+          <button type="submit" class="btn btn-primary">
+            Create token
+          </button>
+        </form>
+        <p class="settings-help">
+          {activeTokens} of {MAX_ACTIVE_TOKENS_PER_USER} active tokens used. Revoked and expired
+          tokens do not count towards the limit.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3 style={{ marginTop: 0 }}>Legacy API key</h3>
+        <p class="settings-help">
+          The single unnamed key every account was given before API tokens existed. It never
+          expires, carries full read &amp; write access, and cannot be told apart from your other
+          credentials in a log. Rotating replaces it; disabling makes it unusable for good. Your
+          named API tokens above are unaffected either way.
         </p>
         <form method="post" action="/settings/rotate-token">
           <button type="submit" class="btn btn-danger">
             Rotate API key
+          </button>
+        </form>
+        <form
+          method="post"
+          action="/settings/legacy-token/disable"
+          style={{ marginTop: "0.75rem" }}
+        >
+          <button type="submit" class="btn btn-danger">
+            Disable legacy API key
           </button>
         </form>
       </div>

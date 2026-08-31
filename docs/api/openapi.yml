@@ -20,6 +20,12 @@ info:
     with `visibility: public` also accept anonymous requests. Admin endpoints
     additionally accept an `X-Admin-API-Key` header.
 
+    Token scopes: a user token carries either `read` or `read_write`. A `read`
+    token is refused, before routing, on anything that is not a GET or HEAD —
+    `403` with code `TOKEN_SCOPE_INSUFFICIENT` — so every non-GET/HEAD endpoint
+    below can return it. Sessions and agent tokens are unaffected. Token
+    management (`/api/users/me/tokens*`) is session-only.
+
     Several form-friendly endpoints return a `302` redirect instead of JSON when
     the request body is form-encoded rather than `application/json`; this spec
     documents the JSON behaviour.
@@ -2438,7 +2444,16 @@ paths:
       operationId: rotateToken
       tags: [users]
       summary: Rotate the caller's API token
-      description: The old token is invalid as of this response; the new one is shown once.
+      description: >
+        The old token is invalid as of this response; the new one is shown once.
+        This rotates the single legacy `users.token_hash` credential, not a named
+        API token — prefer `POST /api/users/me/tokens`.
+
+
+        Callable with a browser session or the legacy credential itself. A
+        SCOPED API token is refused with `SESSION_REQUIRED`: the key this mints
+        never expires and cannot be revoked individually, so a scoped token able
+        to rotate it would outlive its own revocation.
       responses:
         "200":
           description: New API token
@@ -2451,6 +2466,171 @@ paths:
                   token: { type: string }
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/TokenScopeInsufficient"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/users/me/tokens:
+    get:
+      operationId: listApiTokens
+      tags: [users]
+      summary: List the caller's API tokens
+      description: >
+        Never returns a token hash or plaintext — only the non-secret prefix,
+        which is enough to recognise a credential already deployed somewhere.
+        Requires a browser session; an API token is refused with SESSION_REQUIRED.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The caller's tokens, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tokens]
+                properties:
+                  tokens:
+                    type: array
+                    items: { $ref: "#/components/schemas/ApiToken" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createApiToken
+      tags: [users]
+      summary: Mint a named API token
+      description: >
+        The plaintext is returned exactly once, in this response, and is never
+        stored — only its hash is. The response carries `Cache-Control: no-store`.
+        Requires a browser session; an API token is refused with SESSION_REQUIRED,
+        so a token can never mint another.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  maxLength: 100
+                  description: A label. Not unique; uniqueness is on the hash.
+                scope:
+                  type: string
+                  enum: [read, read_write]
+                  default: read
+                  description: >
+                    `read` permits GET/HEAD and `git clone`/`fetch` only; every
+                    other method is refused with TOKEN_SCOPE_INSUFFICIENT.
+                expiresInDays:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+                  description: Omit for a token that never expires.
+      responses:
+        "201":
+          description: The token, plus its plaintext (shown only here)
+          headers:
+            Cache-Control:
+              schema: { type: string }
+              description: Always `no-store`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, plaintext]
+                properties:
+                  token: { $ref: "#/components/schemas/ApiToken" }
+                  plaintext:
+                    type: string
+                    description: The `stratum_user_…` credential. Shown once, never again.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "409":
+          description: >
+            The caller already holds the maximum of 20 active tokens
+            (code TOKEN_LIMIT_REACHED). Revoked tokens do not count.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/users/me/tokens/{id}:
+    delete:
+      operationId: revokeApiToken
+      tags: [users]
+      summary: Revoke one of the caller's API tokens
+      description: >
+        A soft revoke: the row is kept for the audit trail and stops
+        authenticating immediately. Scoped by owner, so another user's token id
+        is indistinguishable from one that does not exist. Requires a browser
+        session.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+          description: Token id
+      responses:
+        "200":
+          description: Revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/users/me/legacy-token/disable:
+    post:
+      operationId: disableLegacyToken
+      tags: [users]
+      summary: Disable the legacy (pre-scopes) API token
+      description: >
+        Rotates `users.token_hash` to a value that is never returned to anyone,
+        making the single unnamed, never-expiring credential minted by
+        `POST /api/users/me/rotate-token` permanently unusable. Named API tokens
+        are unaffected. Requires a browser session.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The legacy token no longer authenticates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [disabled]
+                properties:
+                  disabled: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -3135,6 +3315,14 @@ components:
       in: header
       name: X-Admin-API-Key
       description: Admin API key for administrator endpoints
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: stratum_session
+      description: >
+        Browser session cookie, set by signing in through the web UI. Endpoints
+        that declare only this scheme are session-only: they reject API tokens,
+        so a token can never manage tokens.
 
   parameters:
     Namespace:
@@ -3194,6 +3382,21 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    SessionRequired:
+      description: >
+        The caller authenticated with an API token, but this endpoint requires a
+        signed-in browser session (code SESSION_REQUIRED)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TokenScopeInsufficient:
+      description: >
+        The request was authenticated by a `read` API token and is not a GET or
+        HEAD (code TOKEN_SCOPE_INSUFFICIENT). Enforced before routing, so it can
+        be returned by any non-GET/HEAD endpoint that accepts a bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     InternalError:
       description: Internal server error
       content:
@@ -3213,7 +3416,40 @@ components:
           description: >
             Machine-readable code present on some errors (e.g. TARGET_DELETING,
             STALE_BASE, STALE_WORKSPACE, WORKSPACE_UNVERIFIABLE, MERGE_CONFLICT,
-            PROTECTION_BLOCKED, NOT_REDRIVABLE, GONE, INVALID_PATH)
+            PROTECTION_BLOCKED, NOT_REDRIVABLE, GONE, INVALID_PATH,
+            TOKEN_SCOPE_INSUFFICIENT, TOKEN_LIMIT_REACHED, SESSION_REQUIRED)
+
+    ApiToken:
+      type: object
+      description: A token as listed to its owner. Deliberately carries no hash.
+      required: [id, name, tokenPrefix, scope, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        tokenPrefix:
+          type: string
+          description: >
+            The credential's leading, non-secret characters (e.g.
+            "stratum_user_1a2b3c4d") — enough to recognise a token already
+            deployed somewhere, never enough to use one.
+        scope:
+          type: string
+          enum: [read, read_write]
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absent when the token never expires
+        lastUsedAt:
+          type: string
+          format: date-time
+          description: >
+            Absent until first use. Written at most hourly, and not at all on
+            the git smart-HTTP path, which has no execution context.
+        createdAt: { type: string, format: date-time }
+        revokedAt:
+          type: string
+          format: date-time
+          description: Present on a revoked token; the row is kept for the audit trail
 
     Project:
       type: object

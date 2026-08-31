@@ -10,6 +10,11 @@ import { type Result, err, ok } from "../utils/result";
  */
 export const BACKUP_TABLES: readonly string[] = [
   "users",
+  // After `users`: the list is FK-ordered and api_tokens.user_id references it.
+  // Included rather than excluded (unlike `magic_links`) because a restore that
+  // silently invalidated every API credential is a worse failure than holding
+  // token hashes a backup already carries on `users.token_hash`.
+  "api_tokens",
   "orgs",
   "agents",
   "teams",

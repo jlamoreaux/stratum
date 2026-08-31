@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { type EventActor, emitEvent } from "../queue/events";
 import { createChangeWithEvaluation, createWorkspaceFork } from "../services/change-flow";
 import { getAgentByToken } from "../storage/agents";
+import { resolveApiToken } from "../storage/api-tokens";
 import { updateChangeStatus } from "../storage/changes";
 import { isTargetDeleting } from "../storage/deletion";
 import {
@@ -11,7 +12,7 @@ import {
 } from "../storage/git-ops";
 import { deleteWorkspace, getProjectByPath, getWorkspace } from "../storage/state";
 import { getUser, getUserByToken } from "../storage/users";
-import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
+import type { ApiTokenScope, Env, ProjectEntry, WorkspaceEntry } from "../types";
 import { projectDefaultBranch } from "../types";
 import { canReadProject, canWriteProject, canWriteWorkspace } from "../utils/authz";
 import { getWaitUntil } from "../utils/execution-ctx";
@@ -148,6 +149,9 @@ interface Identity {
   userId?: string;
   agentId?: string;
   agentOwnerId?: string;
+  /** What the authenticating API token may do (#254). Absent for an anonymous
+   * caller and for an agent token, neither of which is scope-limited. */
+  tokenScope?: ApiTokenScope;
 }
 
 /**
@@ -180,6 +184,15 @@ async function authenticate(
   if (!token) return null;
 
   if (token.startsWith("stratum_user_")) {
+    // Scoped tokens first, then the legacy credential — the same order and the
+    // same reasoning as `authMiddleware`. A scoped token that resolves is
+    // answered here; a miss or a storage failure falls through to the legacy
+    // lookup, which the caller still has to satisfy on its own hash.
+    const scoped = await resolveApiToken(c.env.DB, token, logger);
+    if (scoped.success) {
+      c.set?.("telemetryOptOut", scoped.data.user.telemetryOptOut === true);
+      return { userId: scoped.data.user.id, tokenScope: scoped.data.scope };
+    }
     const result = await getUserByToken(c.env.DB, token, logger);
     // A soft-deleting account's credentials stop working immediately over git
     // too — the HTTP middleware rejects it, but git smart-HTTP owns its own auth
@@ -187,7 +200,8 @@ async function authenticate(
     // access until the cascade lands.
     if (!result.success || result.data.deletingAt) return null;
     c.set?.("telemetryOptOut", result.data.telemetryOptOut === true);
-    return { userId: result.data.id };
+    // The legacy credential predates scopes and carries full account power.
+    return { userId: result.data.id, tokenScope: "read_write" };
   }
   const result = await getAgentByToken(c.env.DB, token, logger);
   if (!result.success) return null;
@@ -301,6 +315,33 @@ function normalizeSlug(slug: string): string {
  * applying the no-leak truth table. Returns the project on success, or a
  * `Response` to return as-is.
  */
+/**
+ * Refuses a read-only API token on a write-scoped git request (#254).
+ *
+ * Keyed on the SCOPE the caller already resolved, not on the request path — and
+ * that distinction is the whole point. `GET /info/refs?service=git-receive-pack`
+ * is a *write*: it authorizes with `canWriteProject` and proxies with a
+ * write-scoped Artifacts token, so a path rule that allowed "info/refs" would
+ * hand a read-only token a write authorization and a minted write credential.
+ *
+ * Checking the resolved scope instead covers all four write entry points in this
+ * router — project and workspace `git-receive-pack`, and both of their
+ * advertisements — and a fifth added later inherits it for free.
+ *
+ * The refusal is `gitNotFound`, matching every other authorization failure here:
+ * a token that cannot write must not be able to distinguish "no permission" from
+ * "no such repository" any more than an unauthorized user can.
+ */
+function refuseReadOnlyToken(
+  scope: "read" | "write",
+  identity: Identity | null,
+  logger: ReturnType<typeof createLogger>,
+): Response | null {
+  if (scope !== "write" || identity?.tokenScope !== "read") return null;
+  logger.warn("Refusing write git request from a read-only token", { userId: identity.userId });
+  return gitNotFound();
+}
+
 async function authorizeProject(
   c: GitAuthContext & { req: { param(name: string): string } },
   scope: "read" | "write",
@@ -334,6 +375,8 @@ async function authorizeProject(
   if (!allowed) {
     return isAnonymous ? authChallenge() : gitNotFound();
   }
+  const scopeRefusal = refuseReadOnlyToken(scope, identity, logger);
+  if (scopeRefusal) return scopeRefusal;
 
   if (!artifactsRepoNameFromRemote(project.remote)) {
     logger.warn("Git proxy requested for non-Artifacts remote", {
@@ -385,6 +428,8 @@ async function authorizeWorkspace(
       ? await canWriteProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId)
       : await canReadProject(c.env.DB, project, identity?.userId, identity?.agentOwnerId);
   if (!allowed) return isAnonymous ? authChallenge() : gitNotFound();
+  const scopeRefusal = refuseReadOnlyToken(scope, identity, logger);
+  if (scopeRefusal) return scopeRefusal;
 
   const workspaceResult = await getWorkspace(c.env.STATE, project.id, workspaceName, logger);
   if (!workspaceResult.success) {
