@@ -5,7 +5,7 @@ import { AppError, ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { PhaseTimer } from "../utils/phase-timer";
 import { type Result, err, fromPromise, ok } from "../utils/result";
-import { isTraversalPath } from "../utils/validation";
+import { isTraversalPath, isValidRefName } from "../utils/validation";
 import { commitObject } from "./git-objects";
 import { MODE_SYMLINK, MemoryFS } from "./memory-fs";
 import { packObjects, placeLooseObject, unpackObjects } from "./object-loader";
@@ -491,6 +491,67 @@ export async function pushTags(
       );
     }
     pushedTags.push(name);
+  }
+  return ok(undefined);
+}
+
+/**
+ * Pushes local `refs/heads/*` to an **Artifacts** remote.
+ *
+ * Distinct from {@link pushBranchToRemote}, which exists for GitHub and
+ * authenticates as `x-access-token` with the token verbatim. Artifacts tokens
+ * are `<secret>?expires=<timestamp>` and every Artifacts push strips the suffix
+ * (see {@link extractTokenSecret}); handing one to the GitHub helper sends the
+ * whole string as the password and the remote refuses it. Restore is the only
+ * caller, and it pushes to Artifacts, so it needs this one.
+ *
+ * Reports partial progress exactly as {@link pushTags} does, and for the same
+ * reason: refs go one at a time and a forced restore is not rolled back.
+ *
+ * @param branchNames - Branch names (without the `refs/heads/` prefix) to push.
+ * @param opts - Whether an existing remote ref may be replaced.
+ */
+export async function pushBranches(
+  remote: string,
+  token: string,
+  fs: NodeFS,
+  dir: string,
+  branchNames: string[],
+  logger: Logger,
+  opts?: { force?: boolean },
+): Promise<Result<void, AppError>> {
+  const pushedBranches: string[] = [];
+  for (const [index, name] of branchNames.entries()) {
+    const ref = `refs/heads/${name}`;
+    const res = await fromPromise(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: remote,
+        ref,
+        remoteRef: ref,
+        onAuth: makeAuth(token),
+        force: opts?.force ?? false,
+      }),
+    );
+    if (!res.success) {
+      logger.error("Failed to push branch during restore", res.error, {
+        remote,
+        ref,
+        failedBranch: name,
+        pushedBranches,
+        unpushedBranches: branchNames.slice(index + 1),
+      });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Failed to push branch ${name} during restore (${pushedBranches.length}/${branchNames.length} branches pushed before the failure)`,
+          res.error,
+        ),
+      );
+    }
+    pushedBranches.push(name);
   }
   return ok(undefined);
 }
@@ -3711,7 +3772,18 @@ export async function getDiffBetweenRepos(
   branch = "main",
 ): Promise<
   Result<
-    { diff: string; workspaceOid: string; workspaceTreeOid: string; workspaceSha: string },
+    {
+      diff: string;
+      workspaceOid: string;
+      workspaceTreeOid: string;
+      workspaceSha: string;
+      /** The base commit the diff was computed against, resolved from the same
+       * clone that produced it. Callers forward this to evaluators so a
+       * receiver can reproduce the exact tree the diff applies to (#274);
+       * re-resolving the project head separately would name a commit the diff
+       * may not have been built from. */
+      baseOid: string;
+    },
     AppError
   >
 > {
@@ -3810,7 +3882,7 @@ export async function getDiffBetweenRepos(
 
   const diff = buildUnifiedDiff(baseContent, workspaceContent);
   logger.info("Successfully generated diff between repos", { baseRemote, workspaceRemote });
-  return ok({ diff, workspaceOid, workspaceTreeOid, workspaceSha });
+  return ok({ diff, workspaceOid, workspaceTreeOid, workspaceSha, baseOid });
 }
 
 export function buildUnifiedDiff(
@@ -4065,4 +4137,489 @@ export async function listRepoTags(
     truncated,
   });
   return ok({ tags: collected.data, truncated, totalTagCount });
+}
+
+/**
+ * Hard cap on how many branches a listing returns.
+ *
+ * Unlike {@link MAX_TAGS} this is not a subrequest budget: branch listing reads
+ * the ref advertisement and nothing else (see {@link listRepoBranches}), so a
+ * repo with ten thousand branches costs the same two subrequests as one with
+ * three. The cap bounds the RESPONSE — the JSON body, the `<select>` the UI
+ * renders from it, and the manifest a backup records — rather than the request
+ * count. Truncation is reported, never silent.
+ */
+export const MAX_BRANCHES = 200;
+
+/** One entry in a branch listing: the branch name and the commit it points at.
+ *
+ * There is deliberately no `unresolvable` flag, unlike {@link RepoTagEntry}. A
+ * tag can be unresolvable because it peels to a target outside a shallow
+ * clone's window; a branch tip read from the ref advertisement IS the oid the
+ * remote holds, so the state cannot arise. */
+export interface RepoBranchEntry {
+  name: string;
+  oid: string;
+}
+
+/** Result of {@link listRepoBranches}. */
+export interface ListRepoBranchesResult {
+  /** The branches listed, ascending by name, capped at {@link MAX_BRANCHES}. */
+  branches: RepoBranchEntry[];
+  /** True when the remote advertised more than {@link MAX_BRANCHES} branches
+   * and the listing was capped — reported so callers show it rather than
+   * presenting a quietly-partial list as complete. */
+  truncated: boolean;
+  /** Total branches the remote advertised, independent of how many are listed. */
+  totalBranchCount: number;
+}
+
+/** Branch and tag names a remote currently advertises, from one handshake. */
+interface AdvertisedRefs {
+  branches: Record<string, string>;
+  /** Tag name -> the oid `refs/tags/<name>` points at. For an annotated tag
+   * that is the TAG OBJECT, not the commit — see {@link AdvertisedRefs.peeledTags}. */
+  tags: Record<string, string>;
+  /** Tag name -> the commit an annotated tag peels to, from the remote's own
+   * `<name>^{}` advertisement. Absent for a lightweight tag, whose `tags` entry
+   * is already the commit. */
+  peeledTags: Record<string, string>;
+}
+
+/**
+ * Reads a remote's advertised `refs/heads/*` and `refs/tags/*` in a single
+ * handshake — two subrequests, no object data, nothing written to memory.
+ *
+ * This is the whole read path for branches. Listing them by CLONING, the way
+ * tags are listed, does not work: isomorphic-git translates fetched head refs
+ * through the remote's refspec into `refs/remotes/origin/*`, so a clone's
+ * `refs/heads/` holds exactly one branch — the one it checked out — no matter
+ * how many were fetched. The advertisement already carries every branch name
+ * and its tip oid, which is all a listing needs.
+ */
+async function readAdvertisedRefs(
+  remote: string,
+  token: string,
+  logger: Logger,
+  httpClient: HttpClient = http,
+): Promise<Result<AdvertisedRefs, AppError>> {
+  const infoResult = await fromPromise(
+    git.getRemoteInfo({ http: httpClient, url: remote, onAuth: makeAuth(token) }),
+  );
+  if (!infoResult.success) {
+    logger.error("Failed to read remote ref advertisement", infoResult.error, { remote });
+    return err(new ExternalServiceError("Git", "Failed to read remote refs", infoResult.error));
+  }
+
+  const refs = infoResult.data.refs as { heads?: RemoteRefTree; tags?: RemoteRefTree } | undefined;
+  // `<name>^{}` is the remote advertising an annotated tag's PEELED commit
+  // alongside the tag object itself. It is not a ref name, so it never enters
+  // `tags` — but it is exactly what a branch must point at when someone
+  // branches from an annotated tag, so it is kept separately rather than
+  // discarded.
+  const tags: Record<string, string> = {};
+  const peeledTags: Record<string, string> = {};
+  for (const [name, oid] of Object.entries(flattenRefTree(refs?.tags))) {
+    if (name.endsWith("^{}")) {
+      peeledTags[name.slice(0, -3)] = oid;
+    } else {
+      tags[name] = oid;
+    }
+  }
+  return ok({ branches: flattenRefTree(refs?.heads), tags, peeledTags });
+}
+
+/**
+ * Whether `name` may be used as a branch name on a project repo.
+ *
+ * Git's own ref rules ({@link isValidRefName}) plus one Stratum restriction:
+ * `HEAD` is refused. Git would accept `refs/heads/HEAD`, but it collides with
+ * the symbolic ref every client resolves to find the default branch, and a
+ * repository carrying it misbehaves in ways that are not this product's to
+ * explain. Tags keep accepting it — a backup holding one must stay restorable.
+ */
+export function isValidBranchName(name: unknown): name is string {
+  return isValidRefName(name) && name !== "HEAD";
+}
+
+/**
+ * Lists a repository's branches, newest advertisement, no clone.
+ *
+ * @param defaultBranch - The project's resolved default branch. Used only to
+ * decide what survives truncation: it is always retained, because a listing
+ * that dropped the one branch every other operation resolves would be worse
+ * than useless. The rest are taken in ascending name order — unlike tags there
+ * is no version ordering to exploit, so any stable rule is arbitrary and this
+ * one is at least predictable.
+ */
+export async function listRepoBranches(
+  remote: string,
+  token: string,
+  logger: Logger,
+  defaultBranch: string,
+  httpClient: HttpClient = http,
+): Promise<Result<ListRepoBranchesResult, AppError>> {
+  logger.debug("Listing repo branches", { remote });
+
+  const advertised = await readAdvertisedRefs(remote, token, logger, httpClient);
+  if (!advertised.success) return err(advertised.error);
+
+  const entries = Object.entries(advertised.data.branches)
+    .map(([name, oid]) => ({ name, oid }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const totalBranchCount = entries.length;
+  const truncated = totalBranchCount > MAX_BRANCHES;
+  let branches = entries;
+  if (truncated) {
+    const isDefault = (entry: RepoBranchEntry): boolean => entry.name === defaultBranch;
+    const defaultEntry = entries.find(isDefault);
+    const rest = entries.filter((entry) => !isDefault(entry));
+    branches = defaultEntry
+      ? [defaultEntry, ...rest.slice(0, MAX_BRANCHES - 1)].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        )
+      : rest.slice(0, MAX_BRANCHES);
+    logger.warn("Remote branch count exceeds MAX_BRANCHES; truncating listing", {
+      remote,
+      totalBranchCount,
+      returnedBranchCount: branches.length,
+      maxBranches: MAX_BRANCHES,
+    });
+  }
+
+  logger.info("Successfully listed repo branches", {
+    remote,
+    branchCount: branches.length,
+    truncated,
+  });
+  return ok({ branches, truncated, totalBranchCount });
+}
+
+/** How a requested `?ref=` failed to resolve to exactly one branch. */
+export type RefResolutionFailure =
+  | { kind: "invalid"; name: string }
+  | { kind: "not-found"; name: string }
+  | { kind: "ambiguous"; name: string };
+
+/**
+ * Resolves a caller-supplied ref to a branch that exists on the remote.
+ *
+ * Ambiguity is REJECTED, not resolved. `cloneRepo` hands `ref` to `git.clone`,
+ * which walks isomorphic-git's `refpaths` — and that list checks
+ * `refs/tags/<ref>` BEFORE `refs/heads/<ref>`. A repo holding both
+ * `refs/tags/v1` and `refs/heads/v1` would pass a branch-name check and then
+ * clone the TAG, serving one tree under a URL that names the other. The same
+ * advertisement already carries both namespaces, so the collision is detectable
+ * for free and is reported rather than silently picked.
+ */
+export async function resolveBranchRef(
+  remote: string,
+  token: string,
+  logger: Logger,
+  name: string,
+  httpClient: HttpClient = http,
+): Promise<Result<RepoBranchEntry, RefResolutionFailure | AppError>> {
+  if (!isValidBranchName(name)) return err({ kind: "invalid", name } as const);
+
+  const advertised = await readAdvertisedRefs(remote, token, logger, httpClient);
+  if (!advertised.success) return err(advertised.error);
+
+  const oid = advertised.data.branches[name];
+  if (oid === undefined) return err({ kind: "not-found", name } as const);
+  if (advertised.data.tags[name] !== undefined) {
+    logger.warn("Refusing an ambiguous ref that names both a branch and a tag", { remote, name });
+    return err({ kind: "ambiguous", name } as const);
+  }
+  return ok({ name, oid });
+}
+
+/** Why {@link createBranchRef} or {@link deleteBranchRef} refused. */
+export type BranchWriteFailure =
+  | { kind: "invalid-name"; name: string }
+  | { kind: "exists"; name: string }
+  | { kind: "conflicts-with"; name: string; existing: string }
+  | { kind: "not-found"; name: string }
+  | { kind: "default-branch"; name: string }
+  | { kind: "no-default-branch"; name: string }
+  | { kind: "bad-start-point"; startPoint: string };
+
+/**
+ * Creates `refs/heads/<name>` on a project remote, pointing at an object the
+ * repository ALREADY holds.
+ *
+ * That restriction is the security property, not a convenience: a branch push
+ * here goes straight to the Artifacts remote with a minted write token and
+ * never passes through `src/routes/git-http.ts`, so the change gate cannot
+ * vet it. Because the ref can only ever be aimed at an existing object, there
+ * is nothing for it to smuggle in — no unevaluated content enters, and the
+ * gate's guarantee is untouched. Enforcement is this function; there is no
+ * second line of defence behind it.
+ *
+ * It is also what keeps backup whole. Every reachable start point — the default
+ * tip, another branch's tip (inductively), a tag's tip, or a commit in the
+ * default branch's history — is already inside the object set `walkRepoObjects`
+ * packs, so a created branch never needs objects the snapshot does not have.
+ *
+ * The existence pre-check is load-bearing and cannot be replaced by the push:
+ * a non-forced `git.push` does NOT reject an existing branch when the new oid
+ * is a descendant of its tip — it fast-forwards it, and reports success. The
+ * push is only the backstop for a branch created between the check and the
+ * write.
+ *
+ * @param opts.startPoint - A branch name or a full 40-hex commit sha. Omitted
+ * means the default branch's tip. A TAG NAME is refused — see
+ * `resolveStartPoint` for why (a tag can point at a blob, its peel is not
+ * advertised by receive-pack, and it may sit outside both the default branch's
+ * history and a backup's capped tag fetch). A short sha is refused too: it
+ * would have to be resolved against history this function has not fetched, and
+ * guessing is exactly what the invariant above forbids.
+ */
+export async function createBranchRef(
+  remote: string,
+  token: string,
+  logger: Logger,
+  opts: { name: string; startPoint?: string; defaultBranch: string },
+  httpClient: HttpClient = http,
+): Promise<Result<RepoBranchEntry, BranchWriteFailure | AppError>> {
+  const { name, startPoint, defaultBranch } = opts;
+  if (!isValidBranchName(name)) return err({ kind: "invalid-name", name } as const);
+
+  const advertised = await readAdvertisedRefs(remote, token, logger, httpClient);
+  if (!advertised.success) return err(advertised.error);
+  if (advertised.data.branches[name] !== undefined) {
+    return err({ kind: "exists", name } as const);
+  }
+  // Refs are files in a directory tree, so `feature` and `feature/x` cannot
+  // both exist — one would have to be a file and a directory at once. The
+  // remote refuses the second, and isomorphic-git surfaces that as a
+  // `GitPushError` the caller would see as an opaque 502. The advertisement
+  // already in hand answers it for free, and with the name that collides.
+  const collision = Object.keys(advertised.data.branches).find(
+    (existing) => existing.startsWith(`${name}/`) || name.startsWith(`${existing}/`),
+  );
+  if (collision !== undefined) {
+    return err({ kind: "conflicts-with", name, existing: collision } as const);
+  }
+
+  const resolved = await resolveStartPoint(
+    remote,
+    token,
+    logger,
+    { startPoint, defaultBranch, advertised: advertised.data },
+    httpClient,
+  );
+  if (!resolved.success) return err(resolved.error);
+  const { oid, fs, dir } = resolved.data;
+
+  const ref = `refs/heads/${name}`;
+  const written = await fromPromise(git.writeRef({ fs, dir, ref, value: oid, force: true }));
+  if (!written.success) {
+    logger.error("Failed to write local branch ref", written.error, { remote, name });
+    return err(new ExternalServiceError("Git", "Failed to write branch ref", written.error));
+  }
+
+  const pushed = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http: httpClient,
+      url: remote,
+      ref,
+      remoteRef: ref,
+      // Never forced. The branch did not exist a moment ago; if it does now,
+      // another writer won the race and must not be overwritten.
+      force: false,
+      onAuth: makeAuth(token),
+    }),
+  );
+  if (!pushed.success) {
+    // A rejection means the remote refused the ref update — the branch was
+    // created between the pre-check above and this push, and a non-forced push
+    // will not clobber it. Anything else (network, auth, a broken remote) is
+    // NOT a conflict, and reporting it as one would tell a caller to pick a
+    // different name for a problem a different name cannot fix.
+    // Two different rejections mean the same thing to a caller. isomorphic-git
+    // throws `PushRejectedError` from its own pre-flight check, and
+    // `GitPushError` when the REMOTE answers `ng <ref>` — matching only the
+    // first reports a refused ref update as a 502.
+    if (
+      matchesGitError(pushed.error, GitErrors.PushRejectedError) ||
+      matchesGitError(pushed.error, GitErrors.GitPushError)
+    ) {
+      logger.warn("Remote refused the branch ref update", { remote, name });
+      return err({ kind: "exists", name } as const);
+    }
+    logger.error("Failed to push new branch", pushed.error, { remote, name, oid });
+    return err(new ExternalServiceError("Git", "Failed to create branch", pushed.error));
+  }
+
+  logger.info("Created branch", { remote, name, oid });
+  return ok({ name, oid });
+}
+
+/**
+ * Resolves a create request's start point to an oid already in the repository,
+ * and hands back the clone the push must be made from.
+ *
+ * The clone comes back with the oid rather than being made separately, and the
+ * depth is not incidental. `git.push` sends a ref update alone when the target
+ * oid is one the remote already advertises; when it is not — a historical
+ * commit — it walks the local object graph from that oid down to something the
+ * remote knows, and that walk fails if the commit sits outside the clone's
+ * window. Verifying a sha against full history and then pushing from a
+ * SHALLOW clone would therefore pass every check and fail at the push, on
+ * exactly the old commits this option exists to branch from.
+ *
+ * So: a start point named in the advertisement is already a remote-known tip
+ * and needs no objects, which a shallow clone satisfies. A raw sha needs full
+ * history, and is verified in the same clone it will be pushed from.
+ *
+ * KNOWN NARROWNESS, deliberate: `cloneRepo` is `singleBranch`, so `fullHistory`
+ * means the complete history OF THE DEFAULT BRANCH. A raw sha reachable only
+ * from some other branch is therefore reported `bad-start-point` even though
+ * the repository holds it. That direction is the safe one — the check fails
+ * closed, never admitting an object the repo lacks — and no path here can
+ * currently produce such a commit: every branch this API creates points at the
+ * default tip, another branch's tip, or a sha already in default history, so
+ * branch tips stay reachable from the default branch by induction, and both
+ * import and restore write a single branch's history. Widening the fetch to
+ * every advertised branch would multiply the clone (the whole tree lands in
+ * worker memory) against a ~1000-subrequest budget, to validate one sha. If a
+ * path ever does introduce divergent branch history — a force-push gate, or a
+ * default-branch switch — this becomes reachable and wants revisiting.
+ */
+async function resolveStartPoint(
+  remote: string,
+  token: string,
+  logger: Logger,
+  ctx: { startPoint?: string; defaultBranch: string; advertised: AdvertisedRefs },
+  httpClient: HttpClient,
+): Promise<Result<{ oid: string; fs: NodeFS; dir: string }, BranchWriteFailure | AppError>> {
+  const { startPoint, defaultBranch, advertised } = ctx;
+
+  // Nothing can be branched from a repository whose own default branch the
+  // remote does not advertise — an empty repo, or a project whose recorded
+  // `sourceDefaultBranch` has drifted from reality. Answered here, before any
+  // clone, so the caller gets a named refusal instead of the 502 a clone of a
+  // ref that isn't there would produce.
+  const defaultTip = advertised.branches[defaultBranch];
+  if (defaultTip === undefined) {
+    return err({ kind: "no-default-branch", name: defaultBranch } as const);
+  }
+
+  // A branch tip, and only a branch tip. Tags are deliberately NOT accepted as
+  // start points:
+  //
+  //  - A tag can point at a blob or a tree (git.git's own `junio-gpg-pub`
+  //    does), and `refs/heads/x` at a blob is a branch no client can check out.
+  //  - An annotated tag's peeled commit is advertised by upload-pack but NOT by
+  //    receive-pack, so `git.push` cannot tell the remote already has it and
+  //    walks the local object graph instead — which fails whenever that commit
+  //    lies outside the shallow window.
+  //  - The tag itself may sit outside the default branch's history, and may not
+  //    even be in a backup: the tag fetch is capped at MAX_TAGS. A branch
+  //    created there would vanish on restore.
+  //
+  // A full sha covers the real use (branch from an old commit) with none of
+  // this, because it is verified against history that is actually present.
+  const advertisedOid = startPoint === undefined ? defaultTip : advertised.branches[startPoint];
+
+  if (advertisedOid !== undefined) {
+    // Cheap path: the oid is a ref tip receive-pack advertises, so the push
+    // sends a ref update and no objects, and a shallow clone is enough.
+    const clone = await cloneRepo(remote, token, logger, { ref: defaultBranch }, httpClient);
+    if (!clone.success) return err(clone.error);
+    return ok({ oid: advertisedOid, fs: clone.data.fs, dir: clone.data.dir });
+  }
+
+  if (startPoint === undefined || !/^[0-9a-f]{40}$/.test(startPoint)) {
+    return err({ kind: "bad-start-point", startPoint: startPoint ?? defaultBranch } as const);
+  }
+
+  const clone = await cloneRepo(
+    remote,
+    token,
+    logger,
+    { ref: defaultBranch, fullHistory: true },
+    httpClient,
+  );
+  if (!clone.success) return err(clone.error);
+  const object = await fromPromise(
+    git.readObject({ fs: clone.data.fs, dir: clone.data.dir, oid: startPoint }),
+  );
+  if (!object.success || object.data.type !== "commit") {
+    logger.warn("Rejecting a start point that is not a commit in this repository", {
+      remote,
+      startPoint,
+    });
+    return err({ kind: "bad-start-point", startPoint } as const);
+  }
+  return ok({ oid: startPoint, fs: clone.data.fs, dir: clone.data.dir });
+}
+
+/**
+ * Deletes `refs/heads/<name>` from a project remote.
+ *
+ * The local `writeRef` before the push is required, not defensive: `git.push`
+ * calls `GitRefManager.expand` on the LOCAL ref before it looks at `delete`,
+ * and throws `NotFoundError` when that ref is absent. A clone of the default
+ * branch has no ref for the branch being deleted, so one is written at the oid
+ * the remote advertised. The oid is not sent — a delete pushes zeros — it only
+ * has to make the local ref resolvable.
+ */
+export async function deleteBranchRef(
+  remote: string,
+  token: string,
+  logger: Logger,
+  opts: { name: string; defaultBranch: string },
+  httpClient: HttpClient = http,
+): Promise<Result<void, BranchWriteFailure | AppError>> {
+  const { name, defaultBranch } = opts;
+  if (!isValidBranchName(name)) return err({ kind: "invalid-name", name } as const);
+  // Refused before the advertisement so the answer does not depend on a network
+  // call: every internal op resolves this ref, and deleting it would break
+  // browse, merge, sync and backup at once.
+  if (name === defaultBranch) return err({ kind: "default-branch", name } as const);
+
+  const advertised = await readAdvertisedRefs(remote, token, logger, httpClient);
+  if (!advertised.success) return err(advertised.error);
+  const oid = advertised.data.branches[name];
+  if (oid === undefined) return err({ kind: "not-found", name } as const);
+
+  // A delete needs no default-branch content — only a local ref for `_push`'s
+  // `expand` to resolve — so it clones the branch BEING DELETED rather than the
+  // default. That keeps a project whose recorded default branch has drifted
+  // from the remote able to clean up its branches instead of getting a 502 on
+  // a clone of a ref that is not there.
+  const clone = await cloneRepo(remote, token, logger, { ref: name }, httpClient);
+  if (!clone.success) return err(clone.error);
+  const { fs, dir } = clone.data;
+
+  const ref = `refs/heads/${name}`;
+  const written = await fromPromise(git.writeRef({ fs, dir, ref, value: oid, force: true }));
+  if (!written.success) {
+    logger.error("Failed to write local branch ref before delete", written.error, { remote, name });
+    return err(new ExternalServiceError("Git", "Failed to prepare branch delete", written.error));
+  }
+
+  const pushed = await fromPromise(
+    git.push({
+      fs,
+      dir,
+      http: httpClient,
+      url: remote,
+      ref,
+      remoteRef: ref,
+      delete: true,
+      onAuth: makeAuth(token),
+    }),
+  );
+  if (!pushed.success) {
+    logger.error("Failed to delete branch", pushed.error, { remote, name });
+    return err(new ExternalServiceError("Git", "Failed to delete branch", pushed.error));
+  }
+
+  logger.info("Deleted branch", { remote, name, oid });
+  return ok(undefined);
 }

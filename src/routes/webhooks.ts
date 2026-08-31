@@ -232,9 +232,7 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
   if ("response" in access) return access.response;
   const { project } = access;
 
-  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name, {
-    projectId: project.id,
-  });
+  const webhooksResult = await listWebhooks(c.env.DB, logger, project.id);
   if (!webhooksResult.success) {
     return internalError(webhooksResult.error.message);
   }

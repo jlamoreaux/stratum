@@ -11,8 +11,32 @@ export interface EvalResult {
   costs?: Array<{ kind: "llm_tokens" | "sandbox_ms"; quantity: number; estimated?: boolean }>;
 }
 
+/**
+ * What the diff is a diff *of*. A diff alone does not identify the tree it
+ * applies to, so an evaluator that reproduces the change out-of-process (the
+ * webhook evaluator) cannot tell which base it should apply the hunks to
+ * (#274).
+ */
+export interface EvaluationContext {
+  /**
+   * The base commit the diff was computed against, resolved from the same
+   * clone that produced it.
+   *
+   * Absent only where the caller genuinely has no base to name. It is never a
+   * best-guess re-resolution of the project head: `main` can advance between
+   * diff generation and delivery, and a receiver that checked out the newer
+   * commit would report a verdict for a combination the change never proposed.
+   */
+  baseSha?: string;
+}
+
 export interface Evaluator {
-  evaluate(diff: string, policy: EvalPolicy, logger: Logger): Promise<Result<EvalResult, AppError>>;
+  evaluate(
+    diff: string,
+    policy: EvalPolicy,
+    logger: Logger,
+    context?: EvaluationContext,
+  ): Promise<Result<EvalResult, AppError>>;
 }
 
 export interface EvalPolicy {

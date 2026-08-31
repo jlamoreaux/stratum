@@ -382,6 +382,7 @@ describe("POST /api/projects/:name/changes", () => {
         workspaceOid: "ws_tip_sha",
         workspaceTreeOid: "ws_tree_oid",
         workspaceSha: "ws_tip_sha",
+        baseOid: "base_sha_from_diff_clone",
       },
     });
     vi.mocked(updateChangeStatus).mockResolvedValue({
@@ -3328,6 +3329,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
         workspaceOid: "new_sha",
         workspaceTreeOid: "new_tree",
         workspaceSha: "new_sha",
+        baseOid: "base_sha_from_diff_clone",
       },
     });
     vi.mocked(updateChangeStatus).mockResolvedValue({ success: true, data: undefined });
@@ -3388,6 +3390,10 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
         dismissedReviewerIds: ["user_1", "user_2"],
         previousEvaluatedSha: "old_sha",
         evaluatedSha: "new_sha",
+        // The fixture change carries no baseSha, so only the tip moved here.
+        previousBaseSha: undefined,
+        baseSha: "base_sha_from_diff_clone",
+        dismissedFor: "tip",
       },
     });
     // The audit entry is only recorded once the batch itself has succeeded.
@@ -3432,6 +3438,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
         workspaceOid: "new_sha",
         workspaceTreeOid: "new_tree",
         workspaceSha: "new_sha",
+        baseOid: "base_sha_from_diff_clone",
       },
     });
     vi.mocked(diffTouchesProtectedConfig).mockReturnValue(true);
@@ -3454,6 +3461,26 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
       "chg_abc123",
       expect.any(String),
       expect.objectContaining({ touchesProtectedConfig: true }),
+    );
+  });
+
+  it("#274: re-pins the recorded base to the one the re-evaluation ran against", async () => {
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // Without this the merge gate keeps comparing `change.baseSha` — the base at
+    // CREATION — against the current project head, so a change whose base moved
+    // stays STALE_BASE no matter how often it is re-evaluated, and re-evaluation
+    // (the documented remedy) reports a fresh pass that can never be merged.
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ baseSha: "base_sha_from_diff_clone" }),
     );
   });
 
@@ -3487,6 +3514,7 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
         workspaceOid: "old_sha",
         workspaceTreeOid: "old_tree",
         workspaceSha: "old_sha",
+        baseOid: "base_sha_from_diff_clone",
       },
     });
 
@@ -3498,6 +3526,84 @@ describe("POST /api/changes/:id/evaluate — stale approval dismissal (#193)", (
     expect(dismissApprovalsAndUpdateStatus).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
     // No approvals at risk here, so the plain single-write path is used.
+    expect(updateChangeStatus).toHaveBeenCalled();
+  });
+
+  it("dismisses approvals when the BASE moved even though the tip did not", async () => {
+    // The bypass this closes is one this PR opened. `baseSha` used to be frozen
+    // at creation, so a change whose base advanced stayed permanently
+    // STALE_BASE and could not merge on an old approval at all. Re-pinning the
+    // base (#274) makes re-evaluation the remedy for staleness — and without
+    // this, an unchanged workspace tip would clear the merge gate carrying
+    // approvals given for a diff against the OLD base. Reviewers approve a
+    // diff, not a tip, so either endpoint moving invalidates the verdict.
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...evaluatedChange, baseSha: "base_at_creation" },
+    });
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: {
+        diff: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+        workspaceOid: "old_sha",
+        workspaceTreeOid: "old_tree",
+        workspaceSha: "old_sha",
+        baseOid: "base_sha_from_diff_clone",
+      },
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(dismissApprovalsAndUpdateStatus).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      "chg_abc123",
+      expect.any(String),
+      expect.objectContaining({ baseSha: "base_sha_from_diff_clone" }),
+    );
+    expect(recordAudit).toHaveBeenCalledWith(
+      env.DB,
+      expect.anything(),
+      expect.objectContaining({
+        action: "review.approvals_dismissed",
+        // The audit has to name WHICH endpoint moved: a reader otherwise
+        // cannot tell a re-push from a base advance, and the causes differ.
+        detail: expect.objectContaining({
+          dismissedFor: "base",
+          previousBaseSha: "base_at_creation",
+          baseSha: "base_sha_from_diff_clone",
+        }),
+      }),
+    );
+  });
+
+  it("keeps approvals when neither the tip nor the base moved", async () => {
+    // The paired negative: without it, the test above would also pass against
+    // an implementation that dismissed on every re-evaluation.
+    vi.mocked(getChange).mockResolvedValue({
+      success: true,
+      data: { ...evaluatedChange, baseSha: "base_sha_from_diff_clone" },
+    });
+    vi.mocked(getDiffBetweenRepos).mockResolvedValue({
+      success: true,
+      data: {
+        diff: "diff --git a/src/index.ts b/src/index.ts\n+new line",
+        workspaceOid: "old_sha",
+        workspaceTreeOid: "old_tree",
+        workspaceSha: "old_sha",
+        baseOid: "base_sha_from_diff_clone",
+      },
+    });
+
+    const res = await app.fetch(
+      request("POST", "/api/changes/chg_abc123/evaluate", {}, USER_AUTH),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(dismissApprovalsAndUpdateStatus).not.toHaveBeenCalled();
     expect(updateChangeStatus).toHaveBeenCalled();
   });
 

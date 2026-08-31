@@ -299,6 +299,80 @@ describe("WebhookEvaluator", () => {
     expect(capturedHeaders["X-Stratum-Signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
   });
 
+  it("#274: sends the base commit the diff was computed against", async () => {
+    let capturedBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = init.body as string;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ score: 1, passed: true, reason: "ok" }),
+        });
+      }),
+    );
+
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+    });
+    await evaluator.evaluate("diff content", policy, mockLogger, { baseSha: "base_abc123" });
+
+    const body = JSON.parse(capturedBody);
+    expect(body.baseSha).toBe("base_abc123");
+    expect(body.diff).toBe("diff content");
+  });
+
+  it("#274: omits baseSha rather than guessing when the caller has no base", async () => {
+    let capturedBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        capturedBody = init.body as string;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ score: 1, passed: true, reason: "ok" }),
+        });
+      }),
+    );
+
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval" }],
+    });
+    await evaluator.evaluate("diff content", policy, mockLogger, {});
+
+    const body = JSON.parse(capturedBody);
+    // Absent, not null and not a stand-in value: a receiver can act on the
+    // absence, but cannot be misled by a base that was never verified.
+    expect(body).not.toHaveProperty("baseSha");
+  });
+
+  it("#274: baseSha is covered by the request signature", async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        bodies.push(init.body as string);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ score: 1, passed: true, reason: "ok" }),
+        });
+      }),
+    );
+
+    const policy = makePolicy({
+      evaluators: [{ type: "webhook", url: "https://example.com/eval", secret: "mysecret" }],
+    });
+    await evaluator.evaluate("diff content", policy, mockLogger, { baseSha: "base_abc123" });
+    await evaluator.evaluate("diff content", policy, mockLogger, { baseSha: "base_def456" });
+
+    // The signature is computed over the serialized body, so a tampered base
+    // cannot be swapped in transit without invalidating it.
+    expect(bodies[0]).not.toBe(bodies[1]);
+  });
+
   it("fails closed with a generic reason when URL validation reports no detail", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);

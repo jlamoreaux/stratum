@@ -123,6 +123,22 @@ vi.mock("../src/storage/sync", async (importOriginal) => {
 // ---------------------------------------------------------------------------
 
 vi.mock("../src/storage/git-ops", () => ({
+  // The repo view mints one read token for ref resolution, the branch listing
+  // behind the switcher, and the clone fallback, so all three must be stubbed
+  // here or the page 500s before it reaches the props under test.
+  freshRepoToken: vi.fn(async () => ({ success: true, data: "mock-read-token" })),
+  listRepoBranches: vi.fn(async () => ({
+    success: true,
+    data: {
+      branches: [{ name: "main", oid: "abc1234" }],
+      truncated: false,
+      totalBranchCount: 1,
+    },
+  })),
+  resolveBranchRef: vi.fn(async () => ({
+    success: true,
+    data: { name: "main", oid: "abc1234" },
+  })),
   initAndPush: vi.fn(async () => ({ success: true, data: "sha_init" })),
   cloneRepo: vi.fn(async () => ({ fs: {}, dir: "/" })),
   commitAndPush: vi.fn(async () => "sha_commit"),

@@ -1367,6 +1367,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     workspaceOid: evaluatedSha,
     workspaceTreeOid: evaluatedTreeOid,
     workspaceSha: workspaceHeadSha,
+    baseOid,
   } = diffResult.data;
 
   const evaluators = buildEvaluators(c.env, policy, change.project, logger, {
@@ -1374,7 +1375,12 @@ app.post("/changes/:id/evaluate", async (c) => {
     token: workspaceReadToken.data,
     ref: evaluatedSha,
   });
-  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger);
+  // The base this re-evaluation's diff was built against — not `change.baseSha`,
+  // which records the base at creation and is exactly the value that has gone
+  // stale by the time a change is re-evaluated (#274).
+  const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
+    baseSha: baseOid,
+  });
 
   const recordResult = await recordEvalRuns(c.env.DB, logger, id, evalRuns);
   if (!recordResult.success) {
@@ -1405,6 +1411,12 @@ app.post("/changes/:id/evaluate", async (c) => {
     evalReason: evalResult.reason,
     evaluatedSha,
     evaluatedTreeOid,
+    // Re-pin the base as well as the tip. `change.baseSha` is what the merge
+    // gate compares against the project head under `merge.requireFreshBase`;
+    // left at its creation-time value, a change whose base advanced could never
+    // be un-staled, and re-evaluating it — the documented remedy — would report
+    // a fresh pass while the merge kept returning STALE_BASE.
+    baseSha: baseOid,
     // Re-pin to the commit this re-evaluation actually ran against (#115).
     ...(workspaceHeadSha ? { workspaceHeadSha } : {}),
     // Recompute the protected-config flag from the diff this run actually saw
@@ -1423,6 +1435,15 @@ app.post("/changes/:id/evaluate", async (c) => {
   // the same sha (including legacy changes with no recorded sha) keeps
   // approvals.
   //
+  // A changed BASE dismisses for the same reason, and this PR is what makes
+  // that reachable. `baseSha` used to be frozen at creation, so a change whose
+  // base advanced stayed permanently STALE_BASE and could not merge on an old
+  // approval at all. Now that re-evaluation re-pins it (above), an unchanged
+  // workspace tip against a moved base would clear the merge gate while
+  // carrying approvals given for `diff(oldBase..tip)` — a different diff than
+  // the one that would merge. Reviewers approve a diff, not a tip, so either
+  // endpoint moving invalidates the verdict.
+  //
   // The dismissal and the evaluatedSha/status re-pin run as ONE D1 batch
   // (#238): dismissApprovals (DELETE on change_reviews) and updateChangeStatus
   // (UPDATE on changes) used to be two separate writes, so a transient D1
@@ -1431,7 +1452,11 @@ app.post("/changes/:id/evaluate", async (c) => {
   // still-pinned sha found none left to lose. Batching them makes the two
   // writes all-or-nothing, and the review.approvals_dismissed audit entry is
   // only recorded once the batch itself has actually succeeded.
-  if (change.evaluatedSha !== undefined && change.evaluatedSha !== evaluatedSha) {
+  // Absent on legacy rows; absence keeps approvals rather than dismissing on
+  // every re-evaluation of a change that predates the field.
+  const tipChanged = change.evaluatedSha !== undefined && change.evaluatedSha !== evaluatedSha;
+  const baseChanged = change.baseSha !== undefined && change.baseSha !== baseOid;
+  if (tipChanged || baseChanged) {
     const batchResult = await dismissApprovalsAndUpdateStatus(
       c.env.DB,
       logger,
@@ -1459,6 +1484,11 @@ app.post("/changes/:id/evaluate", async (c) => {
           dismissedReviewerIds,
           previousEvaluatedSha: change.evaluatedSha,
           evaluatedSha,
+          // Which endpoint moved — an audit reader otherwise cannot tell a
+          // re-push from a base advance, and the two have different causes.
+          previousBaseSha: change.baseSha,
+          baseSha: baseOid,
+          dismissedFor: tipChanged && baseChanged ? "tip+base" : tipChanged ? "tip" : "base",
         },
       });
       if (!auditResult.success) {

@@ -7,6 +7,7 @@ import { ImportProgressCard } from "../components/import-progress";
 import { ProjectHeader } from "../components/project-header";
 import { buildFileTree } from "../file-tree";
 import { Layout } from "../layout";
+import { BranchSwitcher } from "./branches";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -103,6 +104,16 @@ interface RepoProps {
   canWrite?: boolean;
   /** Per-request CSP nonce, threaded to every script-rendering child. */
   nonce: string;
+  /** Branch this tree and log were read from, or `undefined` for the default
+   * branch — whose links stay bare, see `refQuery`. Threaded into every file
+   * link so browsing does not silently drop back to the default branch. */
+  refName?: string;
+  /** The project's default branch, so the switcher can show what `refName:
+   * undefined` actually means. */
+  defaultBranch?: string;
+  /** Branch names for the switcher. Empty hides it — the listing is best-effort
+   * and its failure must not take the repo page down. */
+  branchNames?: string[];
 }
 
 function getProviderIcon(provider?: GitProvider): string {
@@ -152,6 +163,16 @@ function truncateCommit(sha?: string): string {
   return sha.slice(0, 7);
 }
 
+/**
+ * The project overview: file tree, recent commits, README, and the import and
+ * sync cards.
+ *
+ * Branch-aware (#181): `refName` names the branch being browsed and is absent
+ * on the default branch, so the common URL is unchanged. `branchNames` feeds
+ * the switcher and may hold only the current branch — the listing is
+ * best-effort and is deliberately skipped when the page was served from the KV
+ * snapshot, which is the path that must stay free of git work.
+ */
 export const RepoPage: FC<RepoProps> = ({
   project,
   files,
@@ -164,8 +185,12 @@ export const RepoPage: FC<RepoProps> = ({
   isOwner,
   canWrite,
   nonce,
+  refName,
+  defaultBranch,
+  branchNames = [],
 }) => {
   const hasSource = !!project.sourceUrl;
+  const currentRef = refName ?? defaultBranch;
   const isSyncing = project.lastSyncStatus === "in_progress";
   const hasUpdates = syncStatus?.hasUpdates;
   const syncFailed = project.lastSyncStatus === "failed";
@@ -200,6 +225,13 @@ export const RepoPage: FC<RepoProps> = ({
               )}
             </button>
           </form>
+        )}
+        {currentRef !== undefined && (
+          <BranchSwitcher
+            action={`/${project.namespace}/${project.slug}`}
+            branchNames={branchNames}
+            currentRef={currentRef}
+          />
         )}
       </ProjectHeader>
 
@@ -323,6 +355,7 @@ export const RepoPage: FC<RepoProps> = ({
               namespace={project.namespace}
               slug={project.slug}
               nonce={nonce}
+              refName={refName}
             />
           </div>
         </div>
