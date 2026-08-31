@@ -32,11 +32,15 @@ codes are in the [OpenAPI specification](/reference/openapi/).
 
 ## Machine-readable error codes
 
-- `AUTH_ERROR` — authentication failed or is missing. (Note: many `401`s from
-  the common helpers carry only an `error` message with no `code` field.)
-- `NOT_FOUND` — the resource doesn't exist, or you cannot see it (an
+- Caller authentication failures carry **no machine-readable code**: a `401`
+  is `{"error": "Invalid token"}` (or similar) with no `code` field. Branch on
+  the status, not a code. (`AUTH_ERROR` exists internally but surfaces only
+  when the *instance's* outbound GitHub credential fails during a sync push —
+  it never describes your own authentication.)
+- `404`s likewise usually carry no code — `{"error": "..."}` only — and an
   unauthorized private project is deliberately indistinguishable from a
-  missing one). There is no resource-specific `PROJECT_NOT_FOUND` code.
+  missing one. There is no `PROJECT_NOT_FOUND` code; where a code does
+  appear on a 404 it is the generic `NOT_FOUND`.
 - Rate limiting carries **no machine-readable code**: a `429` has
   `{"error": "Too many requests"}` plus `Retry-After`, `X-RateLimit-Limit`,
   and `X-RateLimit-Remaining` headers

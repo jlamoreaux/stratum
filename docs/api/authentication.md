@@ -20,8 +20,9 @@ For programmatic access:
   every **deciding** endpoint requires a user identity and refuses an agent
   token: review verdicts (approve and request-changes alike), merge, reject,
   re-evaluate, GitHub PR promotion, and issue editing/closing. Session-only
-  endpoints (token management) refuse every token. Revoke one by deleting the
-  agent (settings UI, or `DELETE /api/agents/{id}`).
+  endpoints (token management) refuse agent and scoped tokens alike — the one
+  exception is `rotate-token`, [below](#the-legacy-token). Revoke one by
+  deleting the agent (settings UI, or `DELETE /api/agents/{id}`).
 
 ```bash
 curl -H "Authorization: Bearer stratum_user_xxxxx" \

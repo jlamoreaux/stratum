@@ -35,11 +35,11 @@ Run it with no flags to be prompted for both values. Two things to know:
   that file like the token itself. In CI, skip the file entirely and set
   `STRATUM_HOST` and `STRATUM_API_KEY` — the environment variables override
   the config file, each independently.
-- **`login` verifies connectivity, not the key.** It checks the host's
-  `/health` endpoint, which requires no authentication, so a mistyped key
-  still "logs in" and only fails on the first real command. `stratum status`
-  is the actual credential check — it calls the authenticated
-  `GET /api/users/me`:
+- **`login` verifies the key exists, not what it can do.** It calls the
+  host's `/health` endpoint with your key, and an invalid or mistyped key
+  fails there with `HTTP 401` before anything is saved. What login does *not*
+  check is **scope**: a `read`-scoped token logs in fine and only fails on
+  the first write. `stratum status` confirms which account you are:
 
 ```bash
 stratum status
@@ -153,9 +153,12 @@ command returns; the deletion itself runs as a background job.
 
 ## Errors and scripting
 
-Every failure prints a single `Error: ...` line to stderr and exits non-zero,
-so the CLI composes with `&&` and `set -e`. API failures carry the server's
-message; the machine-readable codes behind them are catalogued in the
+Every failure exits non-zero, so the CLI composes with `&&` and `set -e`. API
+failures print an `Error: ...` line to stderr carrying the server's message —
+plus the server's `reasons` as indented bullet lines when there are several,
+as on a `PROTECTION_BLOCKED` merge. (Bad arguments are reported by the option
+parser in its own `error: ...` format before any request is made.) The
+machine-readable codes behind API errors are catalogued in the
 [error reference](/reference/errors/).
 
 ## Reference

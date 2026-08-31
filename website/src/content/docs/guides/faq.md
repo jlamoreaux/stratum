@@ -85,9 +85,12 @@ configuration that relaxes it. An agent cannot trigger the *merge* either —
 `POST /api/changes/{id}/merge` (and merge-batch) requires a user identity, so
 a merge call with an agent token is refused with `401` regardless of policy.
 The human in the loop presses merge; what `merge.requiredApprovals` controls is
-how many *additional* humans must have approved before that press succeeds —
-set it to 1 or more on anything you care about, so no single person can both
-own the agent and wave its work through unreviewed.
+how many approvals from humans *other than the change's author* must exist
+before that press succeeds. The merger themselves can be one of those
+approvers — the only excluded identity is the author (for an agent-created
+change, the agent's owning user). Set it to 1 or more on anything you care
+about, so no single person can both own the agent and wave its work through
+unreviewed.
 
 ## What does provenance actually record?
 

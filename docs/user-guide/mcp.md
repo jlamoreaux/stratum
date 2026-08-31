@@ -73,8 +73,8 @@ Eighteen tools cover the full contribution loop. Project arguments take a
 
 | Tool | What it does |
 |---|---|
-| `stratum_whoami` | Identify the authenticated user or agent. |
-| `stratum_list_projects` | List projects visible to the caller. |
+| `stratum_whoami` | Identify the authenticated **user** (calls `GET /api/users/me`, which refuses agent tokens). |
+| `stratum_list_projects` | List projects in the caller's **own namespace** — org-namespace projects are not included, and an agent token gets an empty list. |
 | `stratum_get_project` | Project metadata — id, namespace, visibility, git remote. |
 | `stratum_list_files` | File paths at the HEAD of the default branch. |
 | `stratum_get_file` | One file's content at HEAD. |
@@ -85,7 +85,7 @@ Eighteen tools cover the full contribution loop. Project arguments take a
 | Tool | What it does |
 |---|---|
 | `stratum_create_workspace` | Fork an isolated workspace; returns its name and git remote. |
-| `stratum_list_workspaces` | List a project's open workspaces. |
+| `stratum_list_workspaces` | List a project's workspaces — all of them; there is no status filter, so workspaces whose changes already merged still appear. |
 | `stratum_commit` | Commit a map of repo-relative paths to **complete file contents**. |
 
 `stratum_commit` takes the `project_id` from `stratum_get_project`, not the
@@ -118,10 +118,13 @@ git remote instead.
 The server accepts either token kind, but the API behind it does not treat
 them alike. With an **agent token**:
 
-- **Works:** all reading tools, `stratum_create_workspace`, `stratum_commit`,
+- **Works:** the project reading tools (`get_project`, `list_files`,
+  `get_file`, `get_activity`), `stratum_create_workspace`, `stratum_commit`,
   `stratum_create_change`, `stratum_create_issue`, and `stratum_list_issues` —
   an agent can do everything up to and including proposing a gated change and
-  opening issues about its work.
+  opening issues about its work. Address projects by `namespace/slug`
+  directly: `stratum_list_projects` returns an **empty list** on an agent
+  token rather than the owner's projects, and `stratum_whoami` returns a 401.
 - **Always refused:** `stratum_merge_change`, `stratum_reject_change`,
   `stratum_review_change`, and `stratum_update_issue`. Merging, deciding, and
   issue triage are user actions, and review verdicts are refused from agent
@@ -141,9 +144,13 @@ a user token) reviews and merges.
   `Stratum API error:` — or `Invalid arguments:` for a schema violation, so a
   calling agent knows whether to fix its input or its expectations.
 - Evaluation runs inside `stratum_create_change`, so on a project with a slow
-  sandbox evaluator that call legitimately takes as long as the
-  [evaluation budget](troubleshooting.md#sandbox-budget-exceeded-install-or-command)
-  allows.
+  sandbox evaluator that call legitimately runs long — but note the client
+  aborts every request at a fixed **120 seconds**, which is *less* than the
+  default 150s
+  [evaluation budget](troubleshooting.md#sandbox-budget-exceeded-install-or-command).
+  A timeout on this tool does not mean the evaluation failed: it continues
+  server-side, so follow up with `stratum_list_changes` /
+  `stratum_get_change` rather than re-submitting.
 
 ## Reference
 

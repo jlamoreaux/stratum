@@ -154,8 +154,12 @@ downgrade your governance.
   changed, and can reject diffs touching `forbiddenPatterns` or missing
   `requiredPatterns`. **Patterns match file paths, not file contents** — `*`
   is a wildcard and anything else is a substring match, so `node_modules/`
-  works and `console.log(` matches nothing. Cheap, fast, and the first line
-  of defense against runaway agent edits.
+  works and `console.log(` matches nothing. The verdict is **scored, not
+  binary**: each violation costs 0.25 off a 1.0 score, and the evaluator
+  passes at `minScore` — so under the default 0.7, a *single* violation
+  (0.75) still passes and it takes two to fail. Set `minScore` above 0.75 if
+  any one violation should block. Cheap, fast, and the first line of defense
+  against runaway agent edits.
 - **`webhook`** — POSTs the change to an external URL (your existing CI) and
   waits up to `timeoutMs` (default 10s, capped at 120s) for a verdict.
   `secret` signs the delivery so your CI can verify it came from Stratum; the
@@ -232,8 +236,11 @@ know about its scope:
   comment, and open issues — but the **deciding** endpoints require a user
   identity and refuse an agent token outright: review verdicts (approve *and*
   request changes), merge, reject, re-evaluate, GitHub PR promotion, and issue
-  triage (edit/close). Session-only endpoints (token management) are out of
-  reach for any token. Revoke an agent token by deleting the agent from the
+  triage (edit/close). Session-only endpoints (creating and revoking tokens)
+  are out of reach for agent tokens as for scoped ones — the lone exception,
+  `rotate-token` accepting the legacy credential, is covered in the
+  [authentication reference](/reference/authentication/). Revoke an agent token
+  by deleting the agent from the
   settings UI (or `DELETE /api/agents/{id}`); that is the only way to retire
   it.
 - All writes made with an agent token are attributed to the agent in

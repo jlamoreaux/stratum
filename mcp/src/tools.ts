@@ -73,7 +73,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
   return [
     tool(
       "stratum_whoami",
-      "Identify the authenticated Stratum user or agent for the configured API key.",
+      "Identify the authenticated Stratum user for the configured API key. User tokens only — with an agent token this returns a 401; agents should already know who they are.",
       {},
       () => client.me(),
     ),
@@ -81,7 +81,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     // ── Projects ──────────────────────────────────────────────────────────
     tool(
       "stratum_list_projects",
-      "List Stratum projects visible to the authenticated identity.",
+      "List Stratum projects in the caller's own namespace. Org-namespace projects are not included, and an agent token gets an empty list — address a known project by namespace/slug instead.",
       {},
       () => client.listProjects(),
     ),
@@ -119,7 +119,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     ),
     tool(
       "stratum_list_workspaces",
-      "List open workspaces for a Stratum project.",
+      "List all workspaces for a Stratum project (no status filter — workspaces whose changes already merged still appear).",
       { project: projectArg },
       (a) => client.listWorkspaces(parseProjectRef(a.project)),
     ),
