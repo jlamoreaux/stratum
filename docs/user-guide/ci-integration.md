@@ -18,9 +18,37 @@ the **full workspace tree at the evaluated commit** — the same tree the merge
 would land — into a fresh Cloudflare Sandbox and runs a command there (default
 `npm test`, default timeout 60s, configurable via `command` and `timeoutMs`).
 If the tree carries a `package.json` it installs first, using `npm ci` when a
-lockfile is present and `npm install` otherwise. Exit code 0 scores 1.0;
-otherwise the test output is parsed for `N passed / M failed` counts to derive
-a partial score.
+lockfile is present and `npm install` otherwise, and passing `--ignore-scripts`
+unless the policy opts in (see below). Exit code 0 scores 1.0; otherwise the
+test output is parsed for `N passed / M failed` counts to derive a partial
+score.
+
+**npm lifecycle scripts are disabled by default.** The evaluated tree is
+authored by an agent or by anyone who can push to the workspace, so its
+`package.json` could declare `preinstall`/`install`/`postinstall` — which would
+run before any human has reviewed the change. Installs therefore pass
+`--ignore-scripts`. If your build genuinely needs them (native modules, a
+`prepare` step), opt back in:
+
+```yaml
+evaluators:
+  - type: sandbox
+    allowInstallScripts: true
+```
+
+Note that a native module will usually *install* fine with scripts ignored and
+then fail later, when the test command tries to load the unbuilt binary — so an
+opaque `.node` load error in your suite is the symptom to look for. Because
+`.stratum/policy.yaml` is a protected config file, flipping this flag requires
+a human approval and cannot be force-merged.
+
+**Every evaluation has a total time budget** (`totalBudgetMs`, default 150s)
+covering the tree read, dependency install, and the command. Each phase is
+granted whatever is left, and exhausting the budget returns a failing verdict
+whose reason names the phase — `sandbox budget exceeded (install)` — rather
+than hanging until your client times out. The per-phase defaults (90s install,
+60s command) sum to exactly the budget, so you only encounter it if you have
+raised a timeout or your repo is genuinely slower than the budget allows.
 
 It **requires the optional `SANDBOX` binding**. If a policy names a `sandbox`
 evaluator and the binding is absent, the evaluator does not silently

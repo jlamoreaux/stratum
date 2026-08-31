@@ -71,6 +71,34 @@ export interface MergePolicy {
   autoRevert?: boolean;
 }
 
+/**
+ * The `sandbox` evaluator's slice of `.stratum/policy.yaml`.
+ *
+ * Named rather than inlined into `EvaluatorConfig` because the evaluator needs
+ * to refer to exactly this shape when it narrows its own config out of the
+ * policy; an inline re-declaration there would silently drift from this one.
+ */
+export interface SandboxEvaluatorConfig {
+  type: "sandbox";
+  /** Scored command. Default `npm test`. */
+  command?: string;
+  /** Timeout for the scored command. */
+  timeoutMs?: number;
+  /** Timeout for dependency install and the in-sandbox binary decode step. */
+  installTimeoutMs?: number;
+  /**
+   * Total wall clock the whole evaluation may spend before failing closed.
+   * Bounds the sum of the phases, which the per-phase timeouts do not.
+   */
+  totalBudgetMs?: number;
+  /**
+   * Run npm lifecycle scripts (`preinstall`/`install`/`postinstall`) during
+   * dependency install. Default false — the evaluated tree is untrusted, so
+   * installs pass `--ignore-scripts` unless a project owner opts in.
+   */
+  allowInstallScripts?: boolean;
+}
+
 export type EvaluatorConfig =
   | {
       type: "diff";
@@ -80,5 +108,5 @@ export type EvaluatorConfig =
       requiredPatterns?: string[];
     }
   | { type: "webhook"; url: string; secret?: string; timeoutMs?: number }
-  | { type: "sandbox"; command?: string; timeoutMs?: number; installTimeoutMs?: number }
+  | SandboxEvaluatorConfig
   | { type: "llm"; model?: string; threshold?: number; maxDiffChars?: number };

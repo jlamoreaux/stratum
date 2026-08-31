@@ -47,7 +47,8 @@ docs/
 │   ├── 003-d1-for-import-state.md
 │   ├── 004-high-frequency-agent-commits.md
 │   ├── 005-git-smart-http-proxy.md
-│   └── 006-ssh-transport.md
+│   ├── 006-ssh-transport.md
+│   └── 007-sandbox-evaluator-threat-model.md
 ├── research/                           # Research notes
 │   ├── github-alternatives-pain-points.md
 │   ├── master-plan-alignment.md
@@ -118,6 +119,7 @@ docs/
 - [ADR 004: High-Frequency Agent Commits to a Shared Repo](adr/004-high-frequency-agent-commits.md)
 - [ADR 005: Native `git push` via a Smart-HTTP Proxy](adr/005-git-smart-http-proxy.md)
 - [ADR 006: SSH Transport for Git](adr/006-ssh-transport.md)
+- [ADR 007: Sandbox Evaluator Threat Model and Time Budget](adr/007-sandbox-evaluator-threat-model.md)
 
 **Historical Reference:**
 - [Archived Documents](archive/README.md) - Code reviews, audits, etc.

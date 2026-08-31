@@ -330,10 +330,34 @@ evaluators:
   - type: sandbox
     command: "npm test"        # default
     timeoutMs: 60000           # command timeout (default 60s)
-    installTimeoutMs: 120000   # dependency install timeout (default 120s)
+    installTimeoutMs: 90000    # dependency install timeout (default 90s)
+    totalBudgetMs: 150000      # whole-evaluation budget (default 150s)
+    allowInstallScripts: false # run npm lifecycle scripts (default false)
 # Pass/fail is decided by the policy-level `minScore` and `requireAll` fields,
 # not by a per-evaluator `required` flag.
 ```
+
+**Total budget:** the per-phase timeouts are independent, so nothing used to
+bound their sum — with the old defaults a single evaluation could occupy the
+request for 180s before the tree read was even counted. `totalBudgetMs` bounds
+the whole evaluation: each phase is granted `min(configured, budget remaining)`,
+and running out returns a *verdict* (score 0, reason
+`sandbox budget exceeded (<phase>)`) rather than hanging or erroring. The
+defaults are chosen to sum exactly to the budget, so an unconfigured project is
+never truncated.
+
+The budget bounds time spent awaiting the sandbox — the install and the scored
+command — which is what the per-phase timeouts failed to cap. It does **not**
+bound CPU-bound work inside the Worker (pack decompression, base64-encoding a
+large tree): Workers freeze `Date.now()` across pure-CPU spans (see
+`src/utils/phase-timer.ts`), so that work is constrained by workerd's own CPU
+limit instead. It is also not a request-level bound — the policy load and diff
+clones happen before evaluation starts. See
+`docs/adr/007-sandbox-evaluator-threat-model.md`.
+
+**Lifecycle scripts:** installs pass `--ignore-scripts` unless a project sets
+`allowInstallScripts: true`. The evaluated tree is untrusted, and a
+`postinstall` would otherwise execute before any human review.
 
 **Fail-closed when unavailable:** the `[[sandboxes]]` binding is commented out
 in `wrangler.toml` (beta feature; enabling it is an ops decision). While it is

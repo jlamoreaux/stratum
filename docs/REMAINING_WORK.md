@@ -64,6 +64,12 @@ latency includes the full evaluator suite (LLM, sandbox). Moving evaluation to
 a queue-backed worker keeps change creation fast and allows retries; fine at
 current scale.
 
+The sandbox evaluator's share is now bounded by a total budget (`totalBudgetMs`,
+default 150s — see ADR 007), so it can no longer run for the unbounded sum of
+its per-phase timeouts. The `llm` evaluator still has no timeout at all, so
+overall evaluation latency remains unbounded; that, and moving the whole suite
+off the request path, are what this item still covers.
+
 ### Per-project team permission grants
 
 Team write/admin grants are org-wide. Per-project grants allow finer-grained
