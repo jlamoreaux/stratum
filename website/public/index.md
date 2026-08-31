@@ -25,8 +25,18 @@ Humans and AI agents are both first-class citizens, with different powers by des
 - [FAQ](https://docs.usestratum.dev/guides/faq/)
 - [API reference](https://docs.usestratum.dev/reference/endpoints/)
 - [OpenAPI specification](https://docs.usestratum.dev/openapi.yml)
+- [Agent discovery](https://docs.usestratum.dev/reference/agent-discovery/)
 
 ## For language models
 
 - [/llms.txt](https://docs.usestratum.dev/llms.txt) — index of documentation sets
 - [/llms-full.txt](https://docs.usestratum.dev/llms-full.txt) — complete corpus
+
+## For agents
+
+- [/.well-known/ai-catalog.json](https://docs.usestratum.dev/.well-known/ai-catalog.json) — ARD capability manifest; start here
+- [/.well-known/agent-skills/index.json](https://docs.usestratum.dev/.well-known/agent-skills/index.json) — Agent Skills discovery index
+- [/.well-known/mcp/server-card.json](https://docs.usestratum.dev/.well-known/mcp/server-card.json) — MCP server card
+- [/auth.md](https://docs.usestratum.dev/auth.md) — how to obtain one
+
+Every page also returns its Markdown source for `Accept: text/markdown`.

@@ -30,7 +30,7 @@ Pages live in `src/content/docs/` as Markdown/MDX with Starlight frontmatter
 (`title`, `description`). The sidebar is configured in `astro.config.mjs`.
 
 - `guides/` — user-facing guides (getting started, importing, troubleshooting, FAQ)
-- `reference/` — API reference (authentication, endpoints, errors, OpenAPI)
+- `reference/` — API reference (authentication, endpoints, errors, OpenAPI, agent discovery)
 
 Internal repo documentation (ADRs, runbooks, developer docs) intentionally stays
 in `docs/` as plain Markdown and is not published here.
@@ -63,10 +63,40 @@ The docs are built to be readable by agents as well as people:
 | `/openapi.yml` | REST API contract |
 | `/.well-known/api-catalog` | RFC 9727 linkset pointing at the spec and reference |
 | `/.well-known/mcp/server-card.json` | Discovery card for the `@stratum/mcp` server |
-| `/robots.txt` | Crawl rules and content signals |
+| `/.well-known/ai-catalog.json` | ARD capability manifest — the entry point that names all the others |
+| `/.well-known/agent-skills/index.json` | Agent Skills Discovery v0.2.0 index, with a `sha256` per skill |
+| `/.well-known/agent-skills/<name>/SKILL.md` | The skill artifacts themselves |
+| `/auth.md` | How an agent obtains a Stratum credential, in prose |
+| `/webmcp.js` | WebMCP tools registered on page load |
+| `/robots.txt` | Crawl rules, content signals, and an `Agentmap:` pointer |
 
-`worker/index.js` adds the two things static assets cannot do alone: RFC 8288
-`Link` headers advertising those entry points, and Markdown content negotiation
+`dns/agents.zone` holds the DNS-AID SVCB records that point agents at this origin
+before any HTTP request. They are not applied by CI — see `dns/README.md` for how
+to publish and verify them, and to sign the zone with DNSSEC.
+
+**Stratum publishes no `/.well-known/openid-configuration` and no
+`/.well-known/oauth-authorization-server`.** It is not an OAuth authorization
+server — it issues opaque bearer tokens minted by a human account holder, with no
+`authorization_endpoint`, `token_endpoint`, or `jwks_uri` to name. Inventing those
+would send agents into a handshake that cannot complete, so `/auth.md` carries the
+registration flow instead. **Nor any `/.well-known/oauth-protected-resource`**:
+RFC 9728 has a client derive that URL from the protected resource's own origin,
+which is `app.usestratum.dev` — not this site — so a copy served here would be
+found only by agents that already knew where to look. It belongs on the API
+origin or nowhere. If Stratum ever grows a real authorization server, or the API
+origin starts serving its own RFC 9728 document, update
+`tests/agent-discovery-metadata.test.ts`, which currently asserts both are
+absent.
+
+The skills index is generated, never hand-edited: `scripts/emit-agent-skills.mjs`
+(wired into `predev`/`prebuild` as `sync:skills`) derives each entry from the
+`SKILL.md` front matter and hashes the file. `tests/agent-discovery-metadata.test.ts`
+fails if the committed index has drifted from the skills.
+
+`worker/index.js` adds the things static assets cannot do alone: RFC 8288
+`Link` headers advertising those entry points, `Access-Control-Allow-Origin: *`
+on the metadata documents (the ARD spec requires it, and a browser agent on
+another origin cannot read them otherwise), and Markdown content negotiation
 (`Accept: text/markdown` returns a page's Markdown source). Negotiation applies
 only to pages that have a Markdown twin — the Worker looks for the matching
 `.md` asset and falls through to the normal response when there isn't one, so a
