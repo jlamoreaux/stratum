@@ -144,8 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docs build and the test suite failing on a stale copy.
 - The docs landing page drops the six marketing feature cards for a plain index of the
   guides and API reference. The splash template hides the sidebar, so the page now links
-  where a reader actually wants to go instead of restating the pitch. `public/index.md`,
-  the hand-maintained Markdown twin agents read, matches.
+  where a reader actually wants to go instead of restating the pitch, and its second hero
+  action reads "View source code" rather than naming the host. `public/index.md`, the
+  hand-maintained Markdown twin agents read, matches.
 - Repository-activity analytics events no longer carry `project`, the concrete project name; they
   carry the opaque `projectId` instead. Dashboards grouping on `project` must switch to
   `projectId` — old `project` references receive no new data. Events for projects created before
