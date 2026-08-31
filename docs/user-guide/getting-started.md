@@ -113,6 +113,8 @@ evaluation:
     - type: sandbox
       command: "npm test"
       timeoutMs: 120000
+      totalBudgetMs: 150000
+      allowInstallScripts: false
 
     # AI review of the diff, scored 0.0-1.0.
     - type: llm
@@ -150,7 +152,16 @@ downgrade your governance.
   `command` (default: the project's test command), passing or failing on exit
   code. Requires the Sandboxes binding on self-hosted instances; when the
   binding is absent this evaluator **fails closed** rather than silently
-  passing.
+  passing. `timeoutMs` and `installTimeoutMs` bound the scored command and the
+  dependency install separately; `totalBudgetMs` (default 150s) bounds their
+  *sum* — each phase gets `min(configured, budget remaining)`, and running out
+  fails the evaluation instead of hanging. Dependency installs pass
+  `--ignore-scripts` by default, since the evaluated tree is untrusted code an
+  agent wrote and a `preinstall`/`postinstall` would otherwise run before any
+  human review; set `allowInstallScripts: true` if your build genuinely needs
+  them (native modules, a `prepare` step) — the usual symptom of leaving it off
+  when you need it is *not* a failing install, but a native module that
+  installs unbuilt and then fails when the test command loads it.
 - **`llm`** — sends the diff to an LLM (via the Workers AI binding) for review
   against your criteria. `model` picks the reviewer, `threshold` is the minimum
   passing score (0.0–1.0), and `maxDiffChars` bounds how much diff is sent.
@@ -190,12 +201,15 @@ curl -X POST https://app.usestratum.dev/api/agents \
   -d '{"name": "refactor-bot"}'
 ```
 
-This returns a **short-lived agent token** (`stratum_agent_...`). Two things to
+This returns an **agent token** (`stratum_agent_...`). Two things to
 know about its scope:
 
-- The token is **scoped to the owning user**: the agent inherits your project
-  access (including org access) and nothing more. Tokens are short-lived and
-  managed from the settings UI alongside your API keys.
+- The token is **bounded by the owning user**: the agent inherits your project
+  access (including org access) and nothing more. Agent tokens do **not**
+  expire and carry no read/`read_write` scope of their own — an agent token can
+  do anything its owner can, except approve a change. Revoke one by deleting
+  the agent from the settings UI (or `DELETE /api/agents/{id}`); that is the
+  only way to retire it.
 - All writes made with an agent token are attributed to the agent in
   **provenance** — merged changes record which agent and which model produced
   them, not just which human owned the token.
@@ -359,6 +373,9 @@ change whose id is streamed back in the push output. Otherwise, push to a
 
 ## Where to go next
 
+- [Code Review](code-review.md) — comment threads, line anchors, and verdicts
+- [Issues](issues.md) — the built-in tracker, and linking issues to changes
+- [CI Integration](ci-integration.md) — bring your own CI via the webhook evaluator
 - [FAQ](faq.md) — common questions, including honest current limitations
 - [Importing from GitHub](importing.md) — import and sync details
 - [Troubleshooting](troubleshooting.md) — common issues

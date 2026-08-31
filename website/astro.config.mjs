@@ -103,6 +103,9 @@ export default defineConfig({
           items: [
             { label: "Getting started", slug: "guides/getting-started" },
             { label: "Importing from GitHub", slug: "guides/importing" },
+            { label: "Code review", slug: "guides/code-review" },
+            { label: "Issues", slug: "guides/issues" },
+            { label: "CI integration", slug: "guides/ci-integration" },
             { label: "Troubleshooting", slug: "guides/troubleshooting" },
             { label: "FAQ", slug: "guides/faq" },
           ],

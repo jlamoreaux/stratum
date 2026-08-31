@@ -1,6 +1,6 @@
 ---
 title: Endpoints
-description: The Stratum REST API surface — projects, workspaces, changes, agents, users, and organizations.
+description: "The Stratum REST API surface — projects, branches, workspaces, changes, reviews, issues, agents, users, and organizations."
 ---
 
 An overview of the REST API by resource. The complete, authoritative surface —
@@ -25,6 +25,9 @@ request/response schemas included — is the
 
 `POST /api/projects/{namespace}/{slug}/import`
 
+See [Importing from GitHub](/guides/importing/) for options, progress
+tracking, and sync.
+
 ### Delete project
 
 `DELETE /api/projects/{namespace}/{slug}`
@@ -40,6 +43,49 @@ body must confirm the exact path:
 Returns `202 Accepted` with `{ "status": "deleting", "jobId": "del_…" }` — the
 cascade runs asynchronously and is idempotent/resumable. A mismatched `confirm`
 returns `400`; a non-owner returns `404`.
+
+## Branches
+
+### List branches
+
+`GET /api/projects/{namespace}/{slug}/branches`
+
+Returns `{ defaultBranch, branches: [{ name, oid }], truncated, totalBranchCount }`.
+Read from the remote's ref advertisement, so the cost does not grow with the
+branch count. Capped at 200 — `truncated` says so explicitly, and the default
+branch is never the entry dropped.
+
+### Create branch
+
+`POST /api/projects/{namespace}/{slug}/branches`
+
+```json
+{ "name": "release/2.x", "startPoint": "trunk" }
+```
+
+`startPoint` may be a branch name or a full 40-character commit sha, and
+defaults to the default branch's tip. Short shas and **tag names** are refused.
+The new ref can only point at an object the repository already holds, so branch
+creation cannot introduce content that has not passed the change gate.
+
+**Writers only** (a non-writer gets `404`). Three distinct `409`s:
+`BRANCH_EXISTS`, `BRANCH_NAME_CONFLICT` (a collision with an existing ref path —
+`release` when `release/2.x` exists), and `NO_DEFAULT_BRANCH`.
+
+### Delete branch
+
+`DELETE /api/projects/{namespace}/{slug}/branches/{name}`
+
+Hierarchical names are passed as real path segments
+(`.../branches/release/2.x`). **Writers only.** The default branch cannot be
+deleted — `409 DEFAULT_BRANCH_PROTECTED`.
+
+### Browsing a branch
+
+`GET .../files`, `.../content`, and `.../log` accept `?ref=<branch>`, defaulting
+to the project's default branch. Branch names only: an unknown ref is a `404`
+(never a silent fall back to the default), and a name that is both a branch and
+a tag is a `409 AMBIGUOUS_REF`. The response echoes the `ref` actually read.
 
 ## Workspaces
 
@@ -65,9 +111,120 @@ returns `400`; a non-owner returns `404`.
 
 `POST /api/projects/{name}/changes`
 
+Evaluation runs **synchronously** at creation.
+
+### Get change
+
+`GET /api/changes/{id}`
+
+### Re-evaluate
+
+`POST /api/changes/{id}/evaluate`
+
+Users only. Merged, rejected, and promoted changes cannot be re-evaluated.
+Re-evaluation runs under the current evaluator defaults, so a change that passed
+under older limits may fail.
+
+### Reject
+
+`POST /api/changes/{id}/reject`
+
+Users only. Merged changes cannot be rejected.
+
 ### Merge change
 
 `POST /api/changes/{id}/merge`
+
+Runs the full merge gate. See [Error codes](/reference/errors/) for
+`STALE_BASE`, `STALE_WORKSPACE`, `PROTECTION_BLOCKED`, and `MERGE_CONFLICT`.
+
+### Merge a batch
+
+`POST /api/projects/{name}/changes/merge-batch`
+
+Policy-gates every change, then merges the eligible ones with a single push. At
+most 80 per request; requires the RepoDO backend. `force` is deny-by-default.
+
+### Promote to a GitHub PR
+
+`POST /api/changes/{id}/github-pr`
+
+Users only. Creates a (draft by default) PR from `stratum/{changeId}` and marks
+the change `promoted`. The PR base is **always the project's own recorded
+default branch** and is not accepted from the request body, because this
+endpoint acts with the instance-wide GitHub token.
+
+## Reviews and comments
+
+See [Code review](/guides/code-review/) for the concepts.
+
+### Add a comment
+
+`POST /api/changes/{id}/comments`
+
+Read access is enough — users **and agents** may comment. Pass `file` + `line`
+together to anchor to a diff line (`side` and `commitSha` only alongside such an
+anchor), or `parentCommentId` to reply into a thread.
+
+### List comments
+
+`GET /api/changes/{id}/comments`
+
+### Resolve / unresolve a thread
+
+`POST /api/changes/{id}/comments/{commentId}/resolve`
+`POST /api/changes/{id}/comments/{commentId}/unresolve`
+
+Project writers or the comment's author. Only a thread **root** can be resolved.
+
+### Submit a review
+
+`POST /api/changes/{id}/reviews`
+
+**Users only** — agent tokens are refused on every surface. Requires write
+access. `verdict` is `approve`, `request_changes`, or `comment`; a `comment`
+verdict requires a `comment` body, never counts toward required approvals, and
+never replaces an existing verdict by the same reviewer.
+
+The **change author's own approval never counts** toward `requiredApprovals`.
+
+### List reviews
+
+`GET /api/changes/{id}/reviews`
+
+## Issues
+
+See [Issues](/guides/issues/) for the concepts.
+
+### Open an issue
+
+`POST /api/projects/{namespace}/{slug}/issues`
+
+Read access is enough to open one; editing, closing, and labelling require
+write access.
+
+### List issues
+
+`GET /api/projects/{namespace}/{slug}/issues`
+
+Filter with `status`, `label`, `assignee`, and `q` (case-insensitive substring
+over title + body). Paginate with `limit` (default 100, max 500) and `offset`.
+
+### Get / update / close an issue
+
+`GET /api/projects/{namespace}/{slug}/issues/{number}`
+`PATCH /api/projects/{namespace}/{slug}/issues/{number}`
+`POST /api/projects/{namespace}/{slug}/issues/{number}/close`
+
+`PATCH` accepts `title`, `body`, `status`, `assignee`, `labels`, and
+`linkedChangeId`. `labels` replaces the whole set.
+
+Issues linked to a change close **automatically** when that change merges.
+
+### Issue comments
+
+`POST /api/projects/{namespace}/{slug}/issues/{number}/comments`
+`GET /api/projects/{namespace}/{slug}/issues/{number}/comments`
 
 ## Agents
 
@@ -79,9 +236,18 @@ returns `400`; a non-owner returns `404`.
 
 `POST /api/agents`
 
+Returns the agent token once. Agent tokens do **not** expire — revoke one by
+deleting the agent.
+
 ### Get agent
 
 `GET /api/agents/{id}`
+
+### Delete agent
+
+`DELETE /api/agents/{id}`
+
+The only way to revoke an agent's token.
 
 ## Users
 
@@ -90,6 +256,18 @@ returns `400`; a non-owner returns `404`.
 `GET /api/users`
 
 Returns the authenticated user's profile.
+
+### API tokens
+
+`GET /api/users/me/tokens`
+`POST /api/users/me/tokens`
+`DELETE /api/users/me/tokens/{id}`
+`POST /api/users/me/legacy-token/disable`
+
+All accept the **browser session cookie only** — an API token calling them gets
+`403 SESSION_REQUIRED`, whatever its scope. Creating a token returns the
+plaintext exactly once. See [Authentication](/reference/authentication/) for
+scopes, expiry, and limits.
 
 ### Delete account
 
@@ -120,3 +298,7 @@ mismatched `confirm` returns `400`.
 ### Create organization
 
 `POST /api/orgs`
+
+Members and teams are managed under `/api/orgs/{slug}/members` and
+`/api/orgs/{slug}/teams` — see the
+[OpenAPI specification](/reference/openapi/).

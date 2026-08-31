@@ -57,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [ADR 007](docs/adr/007-sandbox-evaluator-threat-model.md), which also documents what the
   Cloudflare Sandbox binding is and is not relied upon to isolate.
 - `allowInstallScripts` on the `sandbox` evaluator config.
+- **Docs for the last few weeks of shipping.** New guides for
+  [code review](docs/user-guide/code-review.md) (line-anchored threads, replies,
+  resolve/unresolve, and the three review verdicts) and
+  [issues](docs/user-guide/issues.md) (triage, labels, assignee, search, and
+  auto-close on merge), neither of which was documented anywhere; API references
+  for both; a rewritten troubleshooting guide covering the failure modes that
+  actually ship today (scoped-token refusals, wedged imports, sandbox budget
+  exhaustion, `--ignore-scripts`, dismissed approvals); and the token, branch,
+  and sync error codes added to the error reference.
+- **The docs site now publishes the CI integration guide, and the guide and
+  reference pages are generated from `docs/` rather than hand-mirrored.**
+  `website/scripts/mirror-docs.mjs` renders them (with `npm run check:guides` to
+  detect drift) and runs in the site's `prebuild`. The two copies had drifted in
+  both directions: the published authentication page still described the
+  pre-scoped-token model, and the published FAQ and import guide were each
+  missing whole sections.
 
 ### Breaking
 - **The sandbox evaluator no longer runs npm lifecycle scripts.** Dependency installs now pass
@@ -167,6 +183,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `read_write` token that could mint siblings and revoke them would make
   revocation circular. `GET /settings` requires a session too — it previously
   rendered token metadata to a caller the JSON routes refused.
+- **Docs said agent tokens were "short-lived".** They are not: the `agents` table
+  has no expiry column and `getAgentByToken` performs no expiry check, so an
+  agent token is valid until the agent is deleted. The claim appeared in the
+  README, the getting-started guide, the FAQ, `CURRENT_CAPABILITIES.md`, and the
+  published authentication reference, and would have led an operator to assume a
+  leaked agent token lapsed on its own.
 
 ## [0.2.0] - 2026-08-29
 

@@ -271,8 +271,9 @@ outbound PR promotion) with conflict resolution · bulk import · queue-backed w
 resumable progress.
 
 **Identity and access**
-Magic-link email auth · GitHub OAuth · Google OAuth · API keys with rotation · agent
-identities with short-lived tokens scoped to an owning user · organizations, teams, and
+Magic-link email auth · GitHub OAuth · Google OAuth · named API tokens, each `read` or
+`read_write`, independently revocable and optionally expiring · agent identities with
+tokens bounded by an owning user · organizations, teams, and
 role-based project access · CSRF protection · rate limiting.
 
 **Collaboration**

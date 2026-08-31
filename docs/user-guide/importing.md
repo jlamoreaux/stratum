@@ -149,7 +149,8 @@ What import does **not** do yet:
   GitLab are not supported.
 
 Bidirectional GitHub sync — inbound webhooks and outbound PR promotion, i.e.
-**layer mode** — is covered in [Getting started](getting-started.md).
+**layer mode** — is covered in
+[Getting started](getting-started.md#choose-your-level-of-buy-in-layer-mode-vs-alternative-mode).
 
 ## Unsupported content
 
@@ -181,4 +182,4 @@ rather than fail loudly. Remove submodules (or flatten them into the repo)
 before importing, or push to a workspace remote for content that never
 touches the default branch. Full submodule support (recursive clone and
 browsing) is tracked for later; see
-[`CURRENT_CAPABILITIES.md`](https://github.com/stratum-eng/stratum/blob/main/docs/CURRENT_CAPABILITIES.md).
+[`CURRENT_CAPABILITIES.md`](../CURRENT_CAPABILITIES.md).

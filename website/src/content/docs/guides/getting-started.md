@@ -1,6 +1,6 @@
 ---
-title: Getting started
-description: From zero to a merged, evaluation-gated change — project, merge policy, agent identity, and connected tools.
+title: "Getting started"
+description: "From sign-up to a merged, evaluation-gated change — policy, agent identity, and the change flow."
 ---
 
 This guide walks a new team from zero to a merged, evaluation-gated change. By the
@@ -37,9 +37,8 @@ need Node.js 22.13+ and a Cloudflare account with Workers, **Artifacts (beta)**,
 D1, KV, Queues, Durable Objects, and R2; the Workers AI binding is optional and
 only needed for the LLM evaluator,
 and Sandboxes only for the sandbox evaluator. Follow the
-[Quick Start in the README](https://github.com/stratum-eng/stratum#quick-start) —
-everywhere this guide says `app.usestratum.dev`, substitute your own
-`https://your-instance.workers.dev`.
+[Quick Start in the README](https://github.com/stratum-eng/stratum/blob/main/README.md#quick-start) — everywhere this guide
+says `app.usestratum.dev`, substitute your own `https://app.usestratum.dev`.
 
 ## 2. Create or import a project
 
@@ -79,9 +78,10 @@ supports two modes:
 - **Layer mode (minimal buy-in).** Stratum sits between your agents and GitHub.
   Import a GitHub repo and enable **bidirectional GitHub sync**: inbound webhooks
   keep the Stratum project current with pushes and PRs, and outbound sync
-  promotes a Stratum change to a GitHub PR with evaluation results posted as a PR
-  comment and commit status. Agents work through Stratum's gates; your team keeps
-  reviewing in GitHub PRs.
+  promotes a Stratum change to a GitHub PR. Whenever a change with a linked PR
+  is evaluated, the verdict is posted to the PR as a comment (edited in place on
+  re-evaluation) and a `stratum/evaluation` commit status. Agents work through
+  Stratum's gates; your team keeps reviewing in GitHub PRs.
 - **Alternative mode (full buy-in).** Stratum is the source of truth for repos,
   workspaces, and changes. No GitHub required — email magic links mean no
   external accounts at all.
@@ -204,12 +204,15 @@ curl -X POST https://app.usestratum.dev/api/agents \
   -d '{"name": "refactor-bot"}'
 ```
 
-This returns a **short-lived agent token** (`stratum_agent_...`). Two things to
+This returns an **agent token** (`stratum_agent_...`). Two things to
 know about its scope:
 
-- The token is **scoped to the owning user**: the agent inherits your project
-  access (including org access) and nothing more. Tokens are short-lived and
-  managed from the settings UI alongside your API keys.
+- The token is **bounded by the owning user**: the agent inherits your project
+  access (including org access) and nothing more. Agent tokens do **not**
+  expire and carry no read/`read_write` scope of their own — an agent token can
+  do anything its owner can, except approve a change. Revoke one by deleting
+  the agent from the settings UI (or `DELETE /api/agents/{id}`); that is the
+  only way to retire it.
 - All writes made with an agent token are attributed to the agent in
   **provenance** — merged changes record which agent and which model produced
   them, not just which human owned the token.
@@ -222,11 +225,9 @@ surface (REST API, CLI, MCP): if your policy sets `requiredApprovals: 1`, a
 human must look at the change before it merges. There is no configuration that
 relaxes this.
 
-The reference agent in
-[`agent/`](https://github.com/stratum-eng/stratum/tree/main/agent) shows the
-intended shape: it creates its own identity, forks a workspace, asks Claude for
-edits, commits, and opens a change — then stops. Review and merge stay on the
-platform.
+The reference agent in [`agent/`](https://github.com/stratum-eng/stratum/blob/main/agent/README.md) shows the intended
+shape: it creates its own identity, forks a workspace, asks Claude for edits,
+commits, and opens a change — then stops. Review and merge stay on the platform.
 
 ## 5. The change flow
 
@@ -311,8 +312,7 @@ stratum status        # who am I
 stratum projects      # list your projects
 ```
 
-See [`cli/README.md`](https://github.com/stratum-eng/stratum/tree/main/cli) for
-the full command reference.
+See [`cli/README.md`](https://github.com/stratum-eng/stratum/blob/main/cli/README.md) for the full command reference.
 
 ### MCP server — `@stratum/mcp`
 
@@ -376,6 +376,9 @@ change whose id is streamed back in the push output. Otherwise, push to a
 
 ## Where to go next
 
+- [Code Review](/guides/code-review/) — comment threads, line anchors, and verdicts
+- [Issues](/guides/issues/) — the built-in tracker, and linking issues to changes
+- [CI Integration](/guides/ci-integration/) — bring your own CI via the webhook evaluator
 - [FAQ](/guides/faq/) — common questions, including honest current limitations
 - [Importing from GitHub](/guides/importing/) — import and sync details
 - [Troubleshooting](/guides/troubleshooting/) — common issues

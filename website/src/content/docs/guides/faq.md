@@ -1,6 +1,6 @@
 ---
-title: FAQ
-description: Common questions about Stratum — how it differs from GitHub branch protection, agent invariants, provenance, costs, and current limitations.
+title: "FAQ"
+description: "Common questions about Stratum's merge gate, provenance, CI, limitations, and telemetry."
 ---
 
 ## What is Stratum?
@@ -35,13 +35,28 @@ invariants GitHub doesn't have:
 - A malformed `.stratum/policy.yaml` **fails closed** (blocks merges) instead of
   silently falling back to defaults.
 
+## Does Stratum replace GitHub Actions?
+
+No. Stratum has no native CI runner — no workflows, hosted runners, matrix
+builds, artifacts, caching, scheduled jobs, CI secrets store, deployment
+environments, or status-check aggregation (it does not collect external CI
+check results the way a GitHub PR's checks tab does). Its code execution is
+limited to the evaluation pipeline: the
+sandbox evaluator (needs the optional `SANDBOX` binding; fails closed without
+it), the `webhook` evaluator (a synchronous call-out to CI *you* host, which
+must answer within the request timeout — default 10s), and the post-merge
+smoke command run in a sandbox. Bring your own CI and wire it in via the
+webhook evaluator, or use layer mode and keep running GitHub Actions on the
+promoted PRs. See [CI Integration](/guides/ci-integration/).
+
 ## Do I have to leave GitHub to use it?
 
 No. Stratum supports two modes with the same codebase. In **layer mode**,
 Stratum sits between your agents and GitHub: import the repo, enable
 bidirectional sync (inbound webhooks, outbound PR promotion), and agent work
 goes through Stratum's gates while your team keeps reviewing GitHub PRs —
-evaluation results are posted to the PR as comments and commit statuses. In
+each evaluation of a change with a linked PR posts the verdict to the PR as a
+comment and a `stratum/evaluation` commit status. In
 **alternative mode**, Stratum is the source of truth and GitHub isn't involved
 at all. You choose the level of buy-in, and you can start with layer mode.
 
@@ -78,7 +93,7 @@ the prompt snapshotted at change creation, and the evaluation score, per merged
 commit. Full per-evaluator evidence (scores, findings, durations) is linked by
 change. The schema also has room for model config, reasoning traces, and tool
 calls where the client supplies them. Agents authenticate with their own
-short-lived tokens (scoped to an owning user), so work is attributed to the
+tokens, bounded by an owning user's access, so work is attributed to the
 agent, not laundered through a human account.
 
 ## What does it cost, and what is metered?
@@ -112,17 +127,30 @@ Honestly, several:
   access.
 - **Evaluation runs synchronously** at change creation — there's no async
   evaluation queue yet, so very slow evaluators stretch the request.
+- **No Git LFS**: see
+  [Does Stratum support Git LFS?](#does-stratum-support-git-lfs) below.
 - **Git submodules are not supported.** A gitlink entry at any depth, or a
   root-level `.gitmodules` file, is rejected — with a clear error — whenever a
-  change is created, on a gated push and through the REST API alike, rather than risk a server-side merge
-  silently corrupting it. The same check runs on import, but there it is
-  best-effort: an import whose tree can't be read proceeds unscanned with a
-  warning. See
+  change is created, on a gated push and through the REST API alike, rather
+  than risk a server-side merge silently corrupting it. The same check runs on
+  import, but there it is best-effort: an import whose tree can't be read
+  proceeds unscanned with a warning. See
   [Importing from GitHub](/guides/importing/#unsupported-content).
 
-See
-[`docs/CURRENT_CAPABILITIES.md`](https://github.com/stratum-eng/stratum/blob/main/docs/CURRENT_CAPABILITIES.md)
-for the authoritative, current state.
+See [`docs/CURRENT_CAPABILITIES.md`](https://github.com/stratum-eng/stratum/blob/main/docs/CURRENT_CAPABILITIES.md) for the
+authoritative, current state.
+
+## Does Stratum support Git LFS?
+
+No. There is no LFS server: the git smart-HTTP router exposes only
+`info/refs`, `git-upload-pack`, and `git-receive-pack` — there is no
+`/info/lfs` route and no `objects/batch` endpoint, so `git lfs` clients get a
+`404 Not found` when they call the batch API and an LFS-enabled clone fails
+at that point. Combined with the 50 MB cap on git push request bodies,
+large-binary workflows are effectively blocked. Keep binaries out of
+Stratum-hosted repos, or keep LFS-dependent repos on GitHub and use layer
+mode. See [`docs/CURRENT_CAPABILITIES.md`](https://github.com/stratum-eng/stratum/blob/main/docs/CURRENT_CAPABILITIES.md) and the
+implementation sketch in [`docs/REMAINING_WORK.md`](https://github.com/stratum-eng/stratum/blob/main/docs/REMAINING_WORK.md).
 
 ## Can I use plain `git` with Stratum?
 
@@ -141,9 +169,9 @@ is in beta — you need access to it)**, D1, KV, Queues, and Durable Objects.
 Optional: the Workers AI binding for the LLM evaluator, Sandboxes for the
 sandbox evaluator (without the binding that evaluator fails closed), R2 for
 backups, and Cloudflare Email for magic links.
-The [README Quick Start](https://github.com/stratum-eng/stratum#quick-start)
-covers secrets, migrations, and deployment; keep production and staging in
-separate Artifacts namespaces.
+The [README Quick Start](https://github.com/stratum-eng/stratum/blob/main/README.md#quick-start) covers secrets,
+migrations, and deployment; keep production and staging in separate
+Artifacts namespaces.
 
 ## How do backups work?
 
@@ -162,11 +190,12 @@ Yes, at two levels.
 
 **Per account.** Open **Settings → Privacy** and clear *Send anonymous usage
 analytics*. That stops future events for your account and for any agent token
-you own — an agent inherits its owner's choice. The change takes effect on your
-next request. It is not retroactive: events already sent are not deleted.
+you own — an agent inherits its owner's choice, so routing traffic through an
+agent does not re-enable it. The change takes effect on your next request. It
+is not retroactive: events already sent are not deleted.
 
-**Per instance.** Analytics only runs at all if you set a `POSTHOG_API_KEY`, and
-self-hosted instances can set `STRATUM_TELEMETRY_DISABLED = "true"` in
+**Per instance.** Analytics only runs at all if you set a `POSTHOG_API_KEY`,
+and self-hosted instances can set `STRATUM_TELEMETRY_DISABLED = "true"` in
 `wrangler.toml` to switch it off for everyone. Declare it in **each**
 `[env.<name>.vars]` block you deploy — named environments do not inherit
 top-level `[vars]`, so a top-level-only setting never reaches
@@ -175,14 +204,21 @@ individual account's preference.
 
 Two kinds of event are sent, and only these:
 
-- **`api_request`**, one per request, carrying the matched route pattern (e.g.
-  `/:namespace/:slug/files`), method, status, and latency — never the concrete
-  URL, so namespaces, repo slugs, change ids, and file paths are not sent.
+- **`api_request`**, one per request. Its properties are limited to the matched
+  route pattern (e.g. `/:namespace/:slug/files`), method, status, and latency —
+  never the concrete URL, so namespaces, repo slugs, change ids, and file paths
+  are not sent to PostHog. A request that never reached a registered route is
+  captured with `route: "*"`; a 404 is excluded entirely rather than captured as
+  `"*"`.
 - **`stratum.<event type>`**, one per repository activity (a change opening, a
-  merge), carrying the event type, the actor type, and an opaque project id —
-  never the project's name.
+  merge). Its properties are limited to the event type, the actor type, and an
+  opaque project id — never the project's name.
 
 Neither carries diffs, file contents, or request payloads.
+
+Events also carry identity attribution: the `distinctId` is the acting user or
+agent id (or `server` for unattributed requests, which are marked personless) so
+usage can be counted per account.
 
 ## What if my policy file has a mistake in it?
 
@@ -193,8 +229,7 @@ Fix the YAML and re-evaluate.
 
 ## How do I get help?
 
-Open an issue on the
-[GitHub repository](https://github.com/stratum-eng/stratum/issues), or start
-with the [getting started guide](/guides/getting-started/),
+Open an issue on the GitHub repository, or start with the
+[getting started guide](/guides/getting-started/),
 [troubleshooting](/guides/troubleshooting/), and the
 [API reference](/reference/openapi/).

@@ -90,7 +90,7 @@ the prompt snapshotted at change creation, and the evaluation score, per merged
 commit. Full per-evaluator evidence (scores, findings, durations) is linked by
 change. The schema also has room for model config, reasoning traces, and tool
 calls where the client supplies them. Agents authenticate with their own
-short-lived tokens (scoped to an owning user), so work is attributed to the
+tokens, bounded by an owning user's access, so work is attributed to the
 agent, not laundered through a human account.
 
 ## What does it cost, and what is metered?
@@ -126,8 +126,16 @@ Honestly, several:
   evaluation queue yet, so very slow evaluators stretch the request.
 - **No Git LFS**: see
   [Does Stratum support Git LFS?](#does-stratum-support-git-lfs) below.
+- **Git submodules are not supported.** A gitlink entry at any depth, or a
+  root-level `.gitmodules` file, is rejected — with a clear error — whenever a
+  change is created, on a gated push and through the REST API alike, rather
+  than risk a server-side merge silently corrupting it. The same check runs on
+  import, but there it is best-effort: an import whose tree can't be read
+  proceeds unscanned with a warning. See
+  [Importing from GitHub](importing.md#unsupported-content).
 
-See `docs/CURRENT_CAPABILITIES.md` for the authoritative, current state.
+See [`docs/CURRENT_CAPABILITIES.md`](../CURRENT_CAPABILITIES.md) for the
+authoritative, current state.
 
 ## Does Stratum support Git LFS?
 
@@ -138,8 +146,8 @@ No. There is no LFS server: the git smart-HTTP router exposes only
 at that point. Combined with the 50 MB cap on git push request bodies,
 large-binary workflows are effectively blocked. Keep binaries out of
 Stratum-hosted repos, or keep LFS-dependent repos on GitHub and use layer
-mode. See `docs/CURRENT_CAPABILITIES.md` and the implementation sketch in
-`docs/REMAINING_WORK.md`.
+mode. See [`docs/CURRENT_CAPABILITIES.md`](../CURRENT_CAPABILITIES.md) and the
+implementation sketch in [`docs/REMAINING_WORK.md`](../REMAINING_WORK.md).
 
 ## Can I use plain `git` with Stratum?
 
@@ -158,8 +166,9 @@ is in beta — you need access to it)**, D1, KV, Queues, and Durable Objects.
 Optional: the Workers AI binding for the LLM evaluator, Sandboxes for the
 sandbox evaluator (without the binding that evaluator fails closed), R2 for
 backups, and Cloudflare Email for magic links.
-The README Quick Start covers secrets, migrations, and deployment; keep
-production and staging in separate Artifacts namespaces.
+The [README Quick Start](../../README.md#quick-start) covers secrets,
+migrations, and deployment; keep production and staging in separate
+Artifacts namespaces.
 
 ## How do backups work?
 
@@ -169,7 +178,8 @@ With R2 configured, D1 (changes, issues, events, costs, audit) and KV identity
 data back up daily and on demand, along with the reachable history of a
 rotating slice of repositories — coverage rotates across runs under a per-run
 cap, so every repo is covered over time rather than every run. There is a
-tested restore path, documented in `docs/runbooks/backup-restore.md`.
+tested restore path, documented in
+[`docs/runbooks/backup-restore.md`](../runbooks/backup-restore.md).
 
 ## Can I turn off telemetry?
 
@@ -218,5 +228,5 @@ Fix the YAML and re-evaluate.
 
 Open an issue on the GitHub repository, or start with the
 [getting started guide](getting-started.md),
-[troubleshooting](troubleshooting.md), and the API reference in
-`docs/api/openapi.yml`.
+[troubleshooting](troubleshooting.md), and the
+[API reference](../api/openapi.yml).

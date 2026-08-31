@@ -85,6 +85,22 @@ Releases are cut from the changelog with `npm run release:prepare` and published
 **Release** workflow. Maintainers: see
 [`docs/developer/releasing.md`](docs/developer/releasing.md).
 
+## Documentation
+
+User-facing and API docs live in [`docs/`](docs/). The public subset is also
+published at [docs.usestratum.dev](https://docs.usestratum.dev/) from
+[`website/`](website/) — but those pages are **generated**: `website/scripts/mirror-docs.mjs`
+renders them from `docs/user-guide/` and `docs/api/`, and it runs in the site's
+`prebuild`. Edit the copy under `docs/`; a direct edit under
+`website/src/content/docs/` is overwritten by the next build.
+
+```bash
+cd website && npm run check:guides   # exit 1 if the published mirrors are stale
+```
+
+If your change alters behaviour a doc describes, update the doc in the same PR.
+See [`docs/README.md`](docs/README.md) for the full layout and conventions.
+
 ## Reporting bugs & requesting features
 
 Use the [issue templates](.github/ISSUE_TEMPLATE/). For anything security-related, **do not open a
