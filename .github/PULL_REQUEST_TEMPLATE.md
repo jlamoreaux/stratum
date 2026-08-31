@@ -27,6 +27,8 @@
 ## Checklist
 
 - [ ] Tests added or updated for the change (coverage thresholds still pass)
-- [ ] Docs updated where the change makes them inaccurate
+- [ ] `CHANGELOG.md` updated (`## [Unreleased]`) if this is user-visible
+- [ ] Public docs (`website/src/content/docs/`) updated if this changes user-facing config, API
+      shape, or evaluator/policy behavior — internal `docs/` is not enough, see AGENTS.md
 - [ ] No secrets, tokens, or personal data committed
 - [ ] The web UI change (if any) stays server-rendered with no client-side JavaScript
