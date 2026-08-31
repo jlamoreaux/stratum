@@ -1701,6 +1701,12 @@ app.post("/changes/:id/github-pr", async (c) => {
   const cloneResult = await cloneRepo(workspaceRemote, repoTokenResult.data, logger, {
     ref: defaultBranch,
     fullHistory: true,
+    // Overrides cloneRepo's 30s default (#332): that budget is sized for a
+    // shallow clone, and this one is deliberately full-history (see above).
+    // Still a live request, not a background job, so this stays well under
+    // backup's 300s — 120s matches importFromGitHub's existing budget for a
+    // comparably-sized full clone elsewhere in this codebase.
+    timeoutMs: 120_000,
   });
   if (!cloneResult.success) return appError(cloneResult.error);
 

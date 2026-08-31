@@ -92,6 +92,110 @@ const http = createHttpClient();
 
 const DIR = "/";
 
+/**
+ * Races `promise` against a timer, rejecting with an error naming `what` and
+ * `timeoutMs` if the timer wins (#332). isomorphic-git's clone/fetch calls
+ * have no cancellation support of their own — the `signal` option in its
+ * types is documented as "reserved for future use" as of the pinned 1.37.x —
+ * so this is the only bound available on a stalling remote. It stops this
+ * file WAITING on the call, not the call itself: the underlying request keeps
+ * running in the background until it settles or the Worker's execution ends,
+ * since there is no way to actually abort it. Still worth doing — without
+ * this, a stalling remote holds the calling request open indefinitely, with
+ * no bound at all.
+ *
+ * Always clears its timer, so a `promise` that settles well within `timeoutMs`
+ * never leaks a pending `setTimeout` past the call.
+ */
+/**
+ * Thrown by {@link withTimeout} when its timer wins the race. Distinguishable
+ * via `instanceof` from the underlying operation's own failures, because the
+ * two mean different things: `withTimeout` never actually cancels the
+ * underlying call (see its own doc comment), so a `TimeoutError` means "we
+ * gave up waiting — the real operation may still be running and could still
+ * land," not "this definitely did not happen." That distinction matters to
+ * any caller that would otherwise take a destructive action on the strength
+ * of a failure (e.g. backup restore's rollback — see `pushMain`/`pushTags`).
+ */
+export class TimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TimeoutError";
+  }
+}
+
+export async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  what: string,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new TimeoutError(`${what} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+/**
+ * Default budget for {@link cloneRepo}'s own `git.clone` call. Sized for the
+ * common case — a synchronous request path (browse, diff, merge, sandbox
+ * eval) waiting on a shallow clone of a Stratum-native or GitHub remote — not
+ * for `fullHistory: true` callers on a large repo, which should pass a larger
+ * explicit `timeoutMs` (see the backup caller in `src/backup/repo-snapshot.ts`).
+ */
+const CLONE_TIMEOUT_MS = 30_000;
+
+/** Default budget for one tag's fetch, and for the `git.getRemoteInfo` call
+ * that enumerates tag names before it, inside {@link cloneRepo}'s
+ * `includeTags` loop — used whenever the caller didn't pass `opts.timeoutMs`
+ * (which governs the main clone AND every network call in this loop — see
+ * its doc comment). Smaller than {@link CLONE_TIMEOUT_MS} deliberately: a
+ * stalling remote fails the FIRST such call and aborts the whole clone, so
+ * the realistic worst case is one timeout, not one per tag (up to
+ * {@link MAX_TAGS}). */
+const TAG_FETCH_TIMEOUT_MS = 15_000;
+
+/** Budget for a workspace fetch or push inside the merge request path
+ * (`mergeWorkspaceIntoProject`, `fastForwardMerge`, `batchMergeWorkspaces`,
+ * `mergeStagedCommits`, `batchMergeStagedTrees`, `squashMerge`,
+ * `revertToCommit`) — synchronous and user-facing, so kept tight. */
+const MERGE_FETCH_TIMEOUT_MS = 30_000;
+
+/** Budget for one deepening round in {@link readRepoFiles}'s pinned-commit
+ * read (#246). Small deliberately: each round fetches a bounded increment
+ * against the remote just cloned from moments earlier, and up to 4 rounds
+ * can run in a single synchronous evaluation request (see
+ * `PINNED_COMMIT_MAX_FETCH_DEPTH`'s own latency accounting). */
+const DEEPEN_FETCH_TIMEOUT_MS = 15_000;
+
+/** Budget for each of {@link syncFromGitHub}'s three fetches (the initial
+ * source fetch and its two deepening callbacks). Larger than the
+ * request-path budgets above: sync runs as a background/scheduled job, where
+ * added latency is cheap — the same tradeoff `SYNC_MAX_FETCH_DEPTH`'s own
+ * rationale already makes for that function. */
+const SYNC_FETCH_TIMEOUT_MS = 60_000;
+
+/** Budget for a `git.push` call on a synchronous, user-facing request path
+ * OUTSIDE the merge family (`pushBranchToRemote` — GitHub PR promotion,
+ * `initAndPush`, `commitAndPush`) — the merge/squash-merge/revert push sites
+ * use the separate-but-equal {@link MERGE_FETCH_TIMEOUT_MS} instead, kept
+ * distinct so each family can be retuned independently even though both
+ * start at the same 30s value (#332's push/getRemoteInfo follow-up, caught
+ * by review after the initial clone/fetch pass). */
+const PUSH_TIMEOUT_MS = 30_000;
+
+/** Budget for a `git.push` call inside {@link pushMain}/{@link pushTags} —
+ * used exclusively by backup restore (`src/backup/repo-restore.ts`), an
+ * infrequent, admin/cron-triggered operation, so kept generous like backup's
+ * own 300s clone override rather than the request-path default. */
+const RESTORE_TIMEOUT_MS = 300_000;
+
 // Node.js-compatible FS interface (returned by MemoryFS.toNodeFS())
 export interface NodeFS {
   promises: {
@@ -275,19 +379,38 @@ export async function pushMain(
 ): Promise<Result<void, AppError>> {
   const branch = opts?.branch ?? "main";
   const res = await fromPromise(
-    git.push({
-      fs,
-      dir,
-      http,
-      url: remote,
-      ref: branch,
-      remoteRef: branch,
-      onAuth: makeAuth(token),
-      force: opts?.force ?? false,
-    }),
+    withTimeout(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: remote,
+        ref: branch,
+        remoteRef: branch,
+        onAuth: makeAuth(token),
+        force: opts?.force ?? false,
+      }),
+      RESTORE_TIMEOUT_MS,
+      "pushMain: git.push",
+    ),
   );
   if (!res.success) {
     logger.error("Failed to push main during restore", res.error, { remote });
+    // A timeout is not a confirmed rejection — withTimeout never actually
+    // cancels the underlying push, so it may still land after this returns.
+    // Coded distinctly (not ExternalServiceError) so callers like
+    // restoreProjectRepo's rollback can tell "definitely failed, safe to
+    // clean up" apart from "unknown, don't destroy anything on this signal."
+    if (res.error instanceof TimeoutError) {
+      return err(
+        new AppError(
+          `Push during restore timed out: ${res.error.message}. The push may still be in progress and could still land — do not assume it failed.`,
+          "PUSH_TIMEOUT",
+          504,
+          { remote },
+        ),
+      );
+    }
     return err(new ExternalServiceError("Git", "Failed to push during restore", res.error));
   }
   return ok(undefined);
@@ -321,16 +444,20 @@ export async function pushTags(
   for (const [index, name] of tagNames.entries()) {
     const ref = `refs/tags/${name}`;
     const res = await fromPromise(
-      git.push({
-        fs,
-        dir,
-        http,
-        url: remote,
-        ref,
-        remoteRef: ref,
-        onAuth: makeAuth(token),
-        force: opts?.force ?? false,
-      }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: remote,
+          ref,
+          remoteRef: ref,
+          onAuth: makeAuth(token),
+          force: opts?.force ?? false,
+        }),
+        RESTORE_TIMEOUT_MS,
+        `pushTags: git.push ${ref}`,
+      ),
     );
     if (!res.success) {
       logger.error("Failed to push tag during restore", res.error, {
@@ -340,6 +467,21 @@ export async function pushTags(
         pushedTags,
         unpushedTags: tagNames.slice(index + 1),
       });
+      // Same distinction pushMain makes: a timeout on tag N doesn't mean tag
+      // N (or anything after it) definitely didn't land, and it says nothing
+      // about the tags already confirmed pushed — a caller must not treat
+      // this the same as a confirmed rejection when deciding what to do with
+      // that already-landed state (see restoreProjectRepo's rollback).
+      if (res.error instanceof TimeoutError) {
+        return err(
+          new AppError(
+            `Push of tag ${name} during restore timed out: ${res.error.message}. ${pushedTags.length}/${tagNames.length} tags were confirmed pushed before this; the timed-out tag may still land — do not assume it failed.`,
+            "PUSH_TIMEOUT",
+            504,
+            { remote, failedTag: name, pushedTags: [...pushedTags] },
+          ),
+        );
+      }
       return err(
         new ExternalServiceError(
           "Git",
@@ -378,16 +520,20 @@ export async function pushBranchToRemote(
   logger: Logger,
 ): Promise<Result<void, AppError>> {
   const res = await fromPromise(
-    git.push({
-      fs,
-      dir,
-      http,
-      url: opts.url,
-      ref: opts.localRef ?? "main",
-      remoteRef: opts.remoteRef,
-      onAuth: () => ({ username: "x-access-token", password: opts.token }),
-      force: opts.force ?? false,
-    }),
+    withTimeout(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: opts.url,
+        ref: opts.localRef ?? "main",
+        remoteRef: opts.remoteRef,
+        onAuth: () => ({ username: "x-access-token", password: opts.token }),
+        force: opts.force ?? false,
+      }),
+      PUSH_TIMEOUT_MS,
+      "pushBranchToRemote: git.push",
+    ),
   );
   if (!res.success) {
     const cause = res.error instanceof Error ? res.error.message : String(res.error);
@@ -495,7 +641,11 @@ export async function initAndPush(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir: DIR, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+    withTimeout(
+      git.push({ fs, dir: DIR, http, url: remote, ref: "main", onAuth: makeAuth(token) }),
+      PUSH_TIMEOUT_MS,
+      "initAndPush: git.push",
+    ),
   );
   if (!pushResult.success) {
     const cause =
@@ -588,7 +738,20 @@ export async function cloneRepo(
   remote: string,
   token: string,
   logger: Logger,
-  opts: { fullHistory?: boolean; ref?: string; includeTags?: boolean; depth?: number } = {},
+  opts: {
+    fullHistory?: boolean;
+    ref?: string;
+    includeTags?: boolean;
+    depth?: number;
+    /** Overrides {@link CLONE_TIMEOUT_MS} for the main clone AND
+     * {@link TAG_FETCH_TIMEOUT_MS} for each tag fetch when `includeTags` is
+     * set — pass a larger value for a `fullHistory: true` clone of a repo
+     * expected to be large (#332). Applies per-operation, not as an
+     * aggregate budget across the whole call: a caller with `includeTags`
+     * set is saying "any single network operation this clone makes may take
+     * this long", the same statement the main clone already makes one of. */
+    timeoutMs?: number;
+  } = {},
   httpClient: HttpClient = http,
 ): Promise<
   Result<{ fs: NodeFS; dir: string; tagsTruncated?: boolean; totalTagCount?: number }, AppError>
@@ -597,30 +760,34 @@ export async function cloneRepo(
 
   const fs = new MemoryFS().toNodeFS();
   const cloneResult = await fromPromise(
-    git.clone({
-      fs,
-      http: httpClient,
-      dir: DIR,
-      url: remote,
-      // The repo's default branch: "main" for Stratum-native repos, but imported
-      // repos keep their source branch name (master/trunk/…) — see
-      // projectDefaultBranch in ../types.
-      ref: opts.ref ?? "main",
-      singleBranch: true,
-      // Merges only need recent history (fast shallow clone). Backup needs the FULL
-      // reachable history so the resulting pack is reachability-closed and restores
-      // to the true tip — a 50-commit shallow clone silently drops older ancestors,
-      // producing a snapshot that can't be restored past commit 50.
-      //
-      // `depth` is overridable because a caller that deepens afterwards has to
-      // start both sides at the SAME window. `syncFromGitHub` fetches the source
-      // at its own `depth`; if this clone stayed pinned at 50 while that was
-      // larger, the project side would sit shallower than the retry loop's
-      // starting window believes, and a merge base the source already has could
-      // be reported as SYNC_DIVERGED without the project ever being deepened.
-      ...(opts.fullHistory ? {} : { depth: opts.depth ?? DEFAULT_SHALLOW_DEPTH }),
-      onAuth: makeAuth(token),
-    }),
+    withTimeout(
+      git.clone({
+        fs,
+        http: httpClient,
+        dir: DIR,
+        url: remote,
+        // The repo's default branch: "main" for Stratum-native repos, but imported
+        // repos keep their source branch name (master/trunk/…) — see
+        // projectDefaultBranch in ../types.
+        ref: opts.ref ?? "main",
+        singleBranch: true,
+        // Merges only need recent history (fast shallow clone). Backup needs the FULL
+        // reachable history so the resulting pack is reachability-closed and restores
+        // to the true tip — a 50-commit shallow clone silently drops older ancestors,
+        // producing a snapshot that can't be restored past commit 50.
+        //
+        // `depth` is overridable because a caller that deepens afterwards has to
+        // start both sides at the SAME window. `syncFromGitHub` fetches the source
+        // at its own `depth`; if this clone stayed pinned at 50 while that was
+        // larger, the project side would sit shallower than the retry loop's
+        // starting window believes, and a merge base the source already has could
+        // be reported as SYNC_DIVERGED without the project ever being deepened.
+        ...(opts.fullHistory ? {} : { depth: opts.depth ?? DEFAULT_SHALLOW_DEPTH }),
+        onAuth: makeAuth(token),
+      }),
+      opts.timeoutMs ?? CLONE_TIMEOUT_MS,
+      "cloneRepo: git.clone",
+    ),
   );
 
   if (!cloneResult.success) {
@@ -646,7 +813,11 @@ export async function cloneRepo(
   let totalTagCount = 0;
   if (opts.includeTags) {
     const remoteInfoResult = await fromPromise(
-      git.getRemoteInfo({ http: httpClient, url: remote, onAuth: makeAuth(token) }),
+      withTimeout(
+        git.getRemoteInfo({ http: httpClient, url: remote, onAuth: makeAuth(token) }),
+        opts.timeoutMs ?? TAG_FETCH_TIMEOUT_MS,
+        "cloneRepo: git.getRemoteInfo",
+      ),
     );
     if (!remoteInfoResult.success) {
       logger.error("Failed to enumerate remote tags", remoteInfoResult.error, { remote });
@@ -689,17 +860,29 @@ export async function cloneRepo(
 
     for (const name of tagNamesToFetch) {
       const tagFetch = await fromPromise(
-        git.fetch({
-          fs,
-          http: httpClient,
-          dir: DIR,
-          url: remote,
-          singleBranch: true,
-          remoteRef: `refs/tags/${name}`,
-          tags: true,
-          ...(opts.fullHistory ? {} : { depth: 50 }),
-          onAuth: makeAuth(token),
-        }),
+        withTimeout(
+          git.fetch({
+            fs,
+            http: httpClient,
+            dir: DIR,
+            url: remote,
+            singleBranch: true,
+            remoteRef: `refs/tags/${name}`,
+            tags: true,
+            ...(opts.fullHistory ? {} : { depth: 50 }),
+            onAuth: makeAuth(token),
+          }),
+          // A caller's timeoutMs override (e.g. backup's 300s) is a
+          // statement about how long ANY single network operation in this
+          // clone may take, not just the main one — a full-history clone
+          // with `includeTags: true` also drops each tag fetch's own depth
+          // limit above, so leaving this on the smaller default would have
+          // let a large/old-tagged repo's backup keep failing via a
+          // 15s-capped tag fetch despite the override existing precisely to
+          // give this clone more room (#332).
+          opts.timeoutMs ?? TAG_FETCH_TIMEOUT_MS,
+          `cloneRepo: git.fetch tag ${name}`,
+        ),
       );
       if (!tagFetch.success) {
         logger.error("Failed to fetch tag", tagFetch.error, { remote, tag: name });
@@ -776,7 +959,11 @@ export async function commitAndPush(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+      PUSH_TIMEOUT_MS,
+      "commitAndPush: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push to remote", pushResult.error, { remote });
@@ -860,15 +1047,19 @@ export async function mergeWorkspaceIntoProject(
 
   const fetchResult = await measure("workspaceFetchMs", () =>
     fromPromise(
-      git.fetch({
-        fs,
-        http,
-        dir,
-        remote: "workspace",
-        ref: branch,
-        singleBranch: true,
-        onAuth: makeAuth(workspaceToken),
-      }),
+      withTimeout(
+        git.fetch({
+          fs,
+          http,
+          dir,
+          remote: "workspace",
+          ref: branch,
+          singleBranch: true,
+          onAuth: makeAuth(workspaceToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "mergeWorkspaceIntoProject: git.fetch workspace",
+      ),
     ),
   );
   if (!fetchResult.success) {
@@ -987,14 +1178,18 @@ export async function mergeWorkspaceIntoProject(
 
   const pushResult = await measure("pushMs", () =>
     fromPromise(
-      git.push({
-        fs,
-        dir,
-        http,
-        url: projectRemote,
-        ref: branch,
-        onAuth: makeAuth(projectToken),
-      }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: projectRemote,
+          ref: branch,
+          onAuth: makeAuth(projectToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "mergeWorkspaceIntoProject: git.push",
+      ),
     ),
   );
   if (!pushResult.success) {
@@ -1139,15 +1334,19 @@ export async function fastForwardMerge(
 
   const pushResult = await measure("pushMs", () =>
     fromPromise(
-      git.push({
-        fs,
-        dir,
-        http,
-        url: projectRemote,
-        ref: pushRef,
-        remoteRef: branch,
-        onAuth: makeAuth(projectToken),
-      }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: projectRemote,
+          ref: pushRef,
+          remoteRef: branch,
+          onAuth: makeAuth(projectToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "fastForwardMerge: git.push",
+      ),
     ),
   );
   if (!pushResult.success) {
@@ -1222,15 +1421,19 @@ export async function batchMergeWorkspaces(
   const fetched = await Promise.all(
     workspaces.map((ws, i) =>
       fromPromise(
-        git.fetch({
-          fs,
-          http,
-          dir,
-          remote: `ws${i}`,
-          ref: "main",
-          singleBranch: true,
-          onAuth: makeAuth(ws.token),
-        }),
+        withTimeout(
+          git.fetch({
+            fs,
+            http,
+            dir,
+            remote: `ws${i}`,
+            ref: "main",
+            singleBranch: true,
+            onAuth: makeAuth(ws.token),
+          }),
+          MERGE_FETCH_TIMEOUT_MS,
+          `batchMergeWorkspaces: git.fetch ws${i}`,
+        ),
       ),
     ),
   );
@@ -1281,7 +1484,11 @@ export async function batchMergeWorkspaces(
 
   const pushStart = Date.now();
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "batchMergeWorkspaces: git.push",
+    ),
   );
   const pushMs = Date.now() - pushStart;
   if (!pushResult.success) {
@@ -1403,7 +1610,11 @@ export async function mergeStagedCommits(
   }
   const pushStart = Date.now();
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: projectRemote, ref: "main", onAuth: makeAuth(projectToken) }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "mergeStagedCommits: git.push",
+    ),
   );
   const pushMs = Date.now() - pushStart;
   if (!pushResult.success) {
@@ -1640,7 +1851,18 @@ export async function batchMergeStagedTrees(
 
   if (results.some((r) => r.merged)) {
     const pushResult = await fromPromise(
-      git.push({ fs, dir, http, url: projectRemote, ref: branch, onAuth: makeAuth(projectToken) }),
+      withTimeout(
+        git.push({
+          fs,
+          dir,
+          http,
+          url: projectRemote,
+          ref: branch,
+          onAuth: makeAuth(projectToken),
+        }),
+        MERGE_FETCH_TIMEOUT_MS,
+        "batchMergeStagedTrees: git.push",
+      ),
     );
     if (!pushResult.success) {
       return err(new ExternalServiceError("Git", "Batch push failed", pushResult.error));
@@ -1905,14 +2127,18 @@ export async function squashMerge(
   }
 
   const pushResult = await fromPromise(
-    git.push({
-      fs: projectFs,
-      dir: projectDir,
-      http,
-      url: projectRemote,
-      ref: branch,
-      onAuth: makeAuth(projectToken),
-    }),
+    withTimeout(
+      git.push({
+        fs: projectFs,
+        dir: projectDir,
+        http,
+        url: projectRemote,
+        ref: branch,
+        onAuth: makeAuth(projectToken),
+      }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "squashMerge: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push squash merge", pushResult.error, { projectRemote });
@@ -2350,9 +2576,14 @@ export async function listFilesInRepo(
  * Read the full working tree (paths → raw bytes) in a single clone. Used by
  * the post-merge smoke check and the sandbox evaluator to populate a sandbox.
  * When `ref` (a commit sha) is given, the tree of that commit is read instead
- * of the clone's HEAD, so callers can pin the exact evaluated commit — cloned
- * in full, since a pinned sha can fall outside a shallow clone's depth
- * window; a ref still not reachable after that is an error, never a silent
+ * of the clone's HEAD, so callers can pin the exact evaluated commit.
+ *
+ * The pinned path clones shallow like the unpinned path, then grows the fetch
+ * window only as far as needed to reach `ref` — bounded by
+ * {@link PINNED_COMMIT_MAX_FETCH_DEPTH} — rather than cloning full history
+ * (#246: a repo with a large or deliberately inflated history could otherwise
+ * exhaust the Worker isolate before a single commit tree was even read). A
+ * ref still not reachable within the bound is an error, never a silent
  * fall-through to evaluating something else.
  *
  * Bytes are returned as-is (no UTF-8 decoding): a repo tree can contain
@@ -2369,15 +2600,52 @@ export async function readRepoFiles(
 ): Promise<Result<Map<string, Uint8Array>, AppError>> {
   logger.debug("Reading repo files", { remote, ref });
 
-  const cloneResult = await cloneRepo(remote, token, logger, {
-    ref: branch,
-    ...(ref !== undefined ? { fullHistory: true } : {}),
-  });
+  const cloneResult = await cloneRepo(remote, token, logger, { ref: branch });
   if (!cloneResult.success) return err(cloneResult.error);
   const { fs, dir } = cloneResult.data;
 
   if (ref !== undefined) {
-    return readTreeAtCommit(fs, dir, ref, logger);
+    const deepen: DeepenFetch = async (increment) => {
+      const result = await fromPromise(
+        withTimeout(
+          git.fetch({
+            fs,
+            http,
+            dir,
+            remote: "origin",
+            ref: branch,
+            singleBranch: true,
+            depth: increment,
+            relative: true,
+            onAuth: makeAuth(token),
+          }),
+          DEEPEN_FETCH_TIMEOUT_MS,
+          "readRepoFiles: git.fetch deepen",
+        ),
+      );
+      if (!result.success) {
+        logger.error(
+          "Failed to deepen repository history while searching for a pinned commit",
+          result.error,
+          { remote, ref },
+        );
+        return err(
+          new ExternalServiceError("Git", "Failed to deepen repository history", result.error),
+        );
+      }
+      return ok(undefined);
+    };
+
+    return readTreeAtCommitWithDeepening(
+      fs,
+      dir,
+      ref,
+      branch,
+      DEFAULT_SHALLOW_DEPTH,
+      PINNED_COMMIT_MAX_FETCH_DEPTH,
+      deepen,
+      logger,
+    );
   }
 
   const filesResult = await walkDir(fs, dir, "", logger);
@@ -2400,12 +2668,39 @@ export async function readRepoFiles(
   return ok(contents);
 }
 
+/**
+ * Aggregate cap on the bytes {@link readTreeAtCommit} will materialize
+ * across one commit's entire tree (#333). `MAX_FILE_BYTES` (10 MB) already
+ * bounds any single blob, but that alone doesn't bound the TREE: a commit
+ * with many merely-large files (or a churny history among callers that read
+ * more than one commit) can still sum to far more than the sandbox
+ * evaluator's downstream base64 write boundary (`materializeTree`) can
+ * safely hold in the Worker's ~128 MB isolate alongside everything else the
+ * request needs. #246 bounded HISTORY depth for this same read path; this
+ * bounds tree SIZE — an independent dimension of the same memory-exhaustion
+ * concern, since even a single commit at depth 1 can carry an oversized tree.
+ *
+ * Sized the same as `MAX_GIT_BODY_BYTES` (`src/routes/git-http.ts`) — this
+ * codebase's existing precedent for how much raw git content is reasonable
+ * to buffer in memory for one operation.
+ *
+ * Checked DURING the read, as each blob lands, not after the whole tree is
+ * already in memory — a check applied only once everything is already
+ * materialized would be too late to bound anything, the same reasoning #246
+ * already applied to the clone step itself.
+ */
+const MAX_TREE_READ_BYTES = 50 * 1024 * 1024;
+
 /** Every file (path → raw bytes) in the tree of one commit. Exported for tests. */
 export async function readTreeAtCommit(
   fs: NodeFS,
   dir: string,
   commitSha: string,
   logger: Logger,
+  /** Overrides {@link MAX_TREE_READ_BYTES} — a parameter (rather than a bare
+   * reference to the constant) purely so tests can drive the boundary with a
+   * small tree instead of allocating tens of MB of fixture data. */
+  maxTotalBytes: number = MAX_TREE_READ_BYTES,
 ): Promise<Result<Map<string, Uint8Array>, AppError>> {
   const listResult = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
   if (!listResult.success) {
@@ -2420,6 +2715,7 @@ export async function readTreeAtCommit(
   }
 
   const contents = new Map<string, Uint8Array>();
+  let totalBytes = 0;
   for (const path of listResult.data) {
     const blobResult = await fromPromise(git.readBlob({ fs, dir, oid: commitSha, filepath: path }));
     if (!blobResult.success) {
@@ -2432,6 +2728,23 @@ export async function readTreeAtCommit(
           "Git",
           `Failed to read tree at commit ${commitSha}: unreadable object at ${path}`,
           blobResult.error,
+        ),
+      );
+    }
+
+    totalBytes += blobResult.data.blob.length;
+    if (totalBytes > maxTotalBytes) {
+      logger.error("Commit tree exceeds the max materializable size", undefined, {
+        commitSha,
+        path,
+        totalBytes,
+        maxTotalBytes,
+      });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Commit ${commitSha}'s tree exceeds the ${maxTotalBytes}-byte materialization cap ` +
+            `(stopped at ${path})`,
         ),
       );
     }
@@ -2528,7 +2841,11 @@ export async function revertToCommit(
   }
 
   const pushResult = await fromPromise(
-    git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+    withTimeout(
+      git.push({ fs, dir, http, url: remote, ref: branch, onAuth: makeAuth(token) }),
+      MERGE_FETCH_TIMEOUT_MS,
+      "revertToCommit: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push revert commit", pushResult.error, { remote });
@@ -2980,6 +3297,99 @@ export async function applySourceUpdateWithDeepening(
 }
 
 /**
+ * Cap on the fetch window {@link readTreeAtCommitWithDeepening} will grow to
+ * while searching for a pinned commit that a shallow clone's initial window
+ * missed (#246). Set independently of {@link SYNC_MAX_FETCH_DEPTH} even
+ * though the value happens to match: that constant's rationale is a
+ * background/scheduled sync, where extra latency is cheap. This one bounds a
+ * pinned-commit tree read that runs synchronously inside a merge-gating
+ * evaluation request — worst case here is 4 doubling rounds (50 -> 100 -> 200
+ * -> 400 -> 500), i.e. 4 extra `git.fetch` calls against the remote just
+ * cloned from moments earlier, which is small next to the sandbox
+ * evaluator's own 60-180s install/test budget that follows this step. The
+ * realistic production case (the pinned sha is the branch tip fetched
+ * milliseconds earlier in the same request) needs zero deepening rounds.
+ */
+const PINNED_COMMIT_MAX_FETCH_DEPTH = 500;
+
+/**
+ * Reads the tree at `commitSha`, growing the shallow fetch window
+ * (doubling, like {@link applySourceUpdateWithDeepening}) only as far as
+ * needed to make the commit resolvable — never an unbounded full-history
+ * clone (#246).
+ *
+ * Gates the retry loop strictly on whether `commitSha` RESOLVES
+ * (`git.listFiles`, the same first step `readTreeAtCommit` takes) — never on
+ * `readTreeAtCommit`'s overall result. This keeps "do we have enough
+ * history" independent of "is the tree readable": a corrupted or dangling
+ * blob inside an already-resolved commit fails immediately via the delegated
+ * `readTreeAtCommit` call below, rather than being misread as "needs more
+ * history" and churning through deepen rounds that could never fix it.
+ *
+ * Network specifics are injected via `deepen` (same shape as
+ * {@link applySourceUpdateWithDeepening}'s `DeepenFetch`), so the retry/cap
+ * logic is testable against a real in-memory repo without a network mock —
+ * see {@link readRepoFiles} for the production wiring.
+ */
+export async function readTreeAtCommitWithDeepening(
+  fs: NodeFS,
+  dir: string,
+  commitSha: string,
+  branch: string,
+  startDepth: number,
+  maxDepth: number,
+  deepen: DeepenFetch,
+  logger: Logger,
+): Promise<Result<Map<string, Uint8Array>, AppError>> {
+  let resolved = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
+  // Same floor as applySourceUpdateWithDeepening, and for the same reason: a
+  // `startDepth` of 0 would make the first `increment` 0, so the window would
+  // never advance and a genuinely-shallow ref would loop until `maxDepth`
+  // without ever fetching anything.
+  let window = Math.max(1, startDepth);
+
+  while (!resolved.success) {
+    const stillShallow = await isRefShallow(fs, dir, branch);
+    if (!stillShallow) {
+      // Full local history for `branch` is already present and the commit
+      // still didn't resolve — it's not reachable from this branch at all.
+      // More fetching can't change that; let readTreeAtCommit produce its
+      // normal, specific error below.
+      break;
+    }
+    if (window >= maxDepth) {
+      logger.error("Pinned commit not found within the max fetch-depth bound", resolved.error, {
+        commitSha,
+        maxDepth,
+      });
+      return err(
+        new ExternalServiceError(
+          "Git",
+          `Pinned commit ${commitSha} was not found within the ${maxDepth}-commit history bound`,
+          resolved.error,
+        ),
+      );
+    }
+
+    const nextWindow = Math.min(window * 2, maxDepth);
+    const increment = nextWindow - window;
+    logger.warn("Pinned commit not found within the shallow window — deepening and retrying", {
+      commitSha,
+      window,
+      nextWindow,
+    });
+
+    const deepened = await deepen(increment);
+    if (!deepened.success) return err(deepened.error);
+
+    window = nextWindow;
+    resolved = await fromPromise(git.listFiles({ fs, dir, ref: commitSha }));
+  }
+
+  return readTreeAtCommit(fs, dir, commitSha, logger);
+}
+
+/**
  * Incremental sync of an EXISTING Artifacts project repo from its source git
  * URL — the non-destructive replacement for re-running the GitHub import (#190).
  *
@@ -3055,15 +3465,19 @@ export async function syncFromGitHub(
   }
 
   const fetchResult = await fromPromise(
-    git.fetch({
-      fs,
-      http,
-      dir,
-      remote: "source",
-      ref: branch,
-      singleBranch: true,
-      depth: startDepth,
-    }),
+    withTimeout(
+      git.fetch({
+        fs,
+        http,
+        dir,
+        remote: "source",
+        ref: branch,
+        singleBranch: true,
+        depth: startDepth,
+      }),
+      SYNC_FETCH_TIMEOUT_MS,
+      "syncFromGitHub: git.fetch source",
+    ),
   );
   if (!fetchResult.success) {
     const cause = fetchResult.error.message;
@@ -3099,21 +3513,25 @@ export async function syncFromGitHub(
    */
   const deepenProject: DeepenFetch = async (increment) => {
     const result = await fromPromise(
-      git.fetch({
-        fs,
-        http,
-        dir,
-        remote: "origin",
-        // Follows the project's real default branch, not a hardcoded "main":
-        // the clone and push around it already do, and asking origin to deepen
-        // a ref the repo does not have would fail on any imported project whose
-        // default is master/trunk.
-        ref: branch,
-        singleBranch: true,
-        depth: increment,
-        relative: true,
-        onAuth: makeAuth(token),
-      }),
+      withTimeout(
+        git.fetch({
+          fs,
+          http,
+          dir,
+          remote: "origin",
+          // Follows the project's real default branch, not a hardcoded "main":
+          // the clone and push around it already do, and asking origin to deepen
+          // a ref the repo does not have would fail on any imported project whose
+          // default is master/trunk.
+          ref: branch,
+          singleBranch: true,
+          depth: increment,
+          relative: true,
+          onAuth: makeAuth(token),
+        }),
+        SYNC_FETCH_TIMEOUT_MS,
+        "syncFromGitHub: git.fetch deepenProject",
+      ),
     );
     if (!result.success) {
       logger.error("Failed to deepen Artifacts clone history", result.error, { remote, increment });
@@ -3132,16 +3550,20 @@ export async function syncFromGitHub(
    */
   const deepenSource: DeepenFetch = async (increment) => {
     const result = await fromPromise(
-      git.fetch({
-        fs,
-        http,
-        dir,
-        remote: "source",
-        ref: branch,
-        singleBranch: true,
-        depth: increment,
-        relative: true,
-      }),
+      withTimeout(
+        git.fetch({
+          fs,
+          http,
+          dir,
+          remote: "source",
+          ref: branch,
+          singleBranch: true,
+          depth: increment,
+          relative: true,
+        }),
+        SYNC_FETCH_TIMEOUT_MS,
+        "syncFromGitHub: git.fetch deepenSource",
+      ),
     );
     if (!result.success) {
       logger.error("Failed to deepen source history", result.error, {
@@ -3196,15 +3618,19 @@ export async function syncFromGitHub(
   // Non-force push: a concurrent native merge racing this sync is rejected by
   // the remote instead of being overwritten; the sync can simply be retried.
   const pushResult = await fromPromise(
-    git.push({
-      fs,
-      dir,
-      http,
-      url: remote,
-      ref: branch,
-      remoteRef: branch,
-      onAuth: makeAuth(token),
-    }),
+    withTimeout(
+      git.push({
+        fs,
+        dir,
+        http,
+        url: remote,
+        ref: branch,
+        remoteRef: branch,
+        onAuth: makeAuth(token),
+      }),
+      SYNC_FETCH_TIMEOUT_MS,
+      "syncFromGitHub: git.push",
+    ),
   );
   if (!pushResult.success) {
     logger.error("Failed to push synced history", pushResult.error, { remote });

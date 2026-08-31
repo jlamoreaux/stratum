@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Sandbox evaluation of a pinned commit no longer clones a workspace's entire reachable
+  history into memory: `readRepoFiles` now clones shallow and grows the fetch window only
+  as far as needed to reach the pinned commit, capped at 500 commits, instead of an
+  unbounded full-history clone (#246).
+- Every network call in `src/storage/git-ops.ts` — `git clone`, `git fetch`, `git push`,
+  and `git getRemoteInfo` (clone, tag enumeration/fetches, workspace merge fetches and
+  pushes, pinned-commit deepening, GitHub sync, backup restore) — now has a wall-clock
+  timeout, so a stalling remote can no longer hold a request open indefinitely (#332).
+- `readTreeAtCommit` now caps the total bytes it will materialize across a commit's tree
+  at 50 MB, on top of the existing 10 MB per-file cap — bounds tree *size*, independent of
+  the history-depth bound #246 already added (#333).
+- Backup restore's rollback no longer deletes a freshly restored repo when a push merely
+  timed out rather than being confirmed rejected — a timeout doesn't cancel the underlying
+  push, so it could still land after the timeout fired, and deleting on that ambiguous a
+  signal risked destroying already-landed `main`/tags. `pushMain`/`pushTags` now surface a
+  distinctly-coded `PUSH_TIMEOUT` error so the caller can tell the two cases apart (#332).
+- **A scoped token can no longer mint a credential that outlives its own
+  revocation.** `POST /settings/rotate-token` and `POST /api/users/me/rotate-token`
+  refuse a scoped token, because the legacy key they mint never expires and cannot
+  be revoked individually. Browser sessions and the legacy credential itself still
+  rotate, so existing automation is unaffected.
+- **Token management requires a browser session, not an API token.** A
+  `read_write` token that could mint siblings and revoke them would make
+  revocation circular. `GET /settings` requires a session too — it previously
+  rendered token metadata to a caller the JSON routes refused.
+
 ### Added
 - **Named, scoped, expiring API tokens.** Mint any number of named tokens from
   Settings, each `read` or `read_write`, each with an optional 1-365 day expiry,
@@ -18,17 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off the single unnamed key accounts were given before scoped tokens existed.
   Named tokens are unaffected. Move anything still using the legacy credential
   onto a named token first — disabling cannot be undone.
-
-### Security
-- **A scoped token can no longer mint a credential that outlives its own
-  revocation.** `POST /settings/rotate-token` and `POST /api/users/me/rotate-token`
-  refuse a scoped token, because the legacy key they mint never expires and cannot
-  be revoked individually. Browser sessions and the legacy credential itself still
-  rotate, so existing automation is unaffected.
-- **Token management requires a browser session, not an API token.** A
-  `read_write` token that could mint siblings and revoke them would make
-  revocation circular. `GET /settings` requires a session too — it previously
-  rendered token metadata to a caller the JSON routes refused.
 
 ### Fixed
 - The active-token cap counted expired tokens, so a user whose tokens had all

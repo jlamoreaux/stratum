@@ -421,6 +421,11 @@ export async function snapshotRepo(
     fullHistory: true,
     ref: projectDefaultBranch(project),
     includeTags: true,
+    // Overrides cloneRepo's default 30s budget (#332): this runs as a
+    // scheduled background job, not a user-facing request, and a
+    // full-history + tags clone of a large repo legitimately needs more
+    // time than the request-path default allows.
+    timeoutMs: 300_000,
   });
   if (!clone.success) return err(clone.error);
 
