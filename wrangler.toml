@@ -141,9 +141,15 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # BETA_GATE = "1"
 # REFERRAL_SERVICE_URL = "https://your-referral-service.example.com"
 
+# Instance-wide telemetry kill switch. Not a secret — a plain var, listed here
+# next to POSTHOG_API_KEY because they are read together. Named envs do NOT
+# inherit top-level vars, so uncommenting this alone only affects a bare
+# `wrangler deploy`; to disable telemetry on a named env you MUST also uncomment
+# it in that env's own [env.<name>.vars] block below.
+# STRATUM_TELEMETRY_DISABLED = "true"
+
 # Secrets — set via: wrangler secret put <NAME>
 # POSTHOG_API_KEY =  # telemetry sends route patterns only, never concrete paths
-# STRATUM_TELEMETRY_DISABLED = "true"  # uncomment to disable telemetry for self-hosted
 # GITHUB_CLIENT_ID =
 # GITHUB_CLIENT_SECRET =
 # GOOGLE_CLIENT_ID =
@@ -242,6 +248,10 @@ name = "EMAIL"
 
 [env.production.vars]
 POSTHOG_HOST = "https://app.posthog.com"
+# Telemetry kill switch. Must be declared here, not only at top level — named
+# envs don't inherit top-level vars, so a top-level-only setting never reaches
+# `wrangler deploy --env=production`.
+# STRATUM_TELEMETRY_DISABLED = "true"
 # The /dev-login session backdoor is local-only. Declare it "false" explicitly
 # here (named envs don't inherit the top-level "true") so the route is provably
 # inert in production — and so wrangler stops warning about the missing override.
@@ -366,6 +376,8 @@ name = "EMAIL"
 
 [env.staging.vars]
 POSTHOG_HOST = "https://app.posthog.com"
+# Telemetry kill switch; must be declared per-env (see env.production.vars).
+# STRATUM_TELEMETRY_DISABLED = "true"
 # Local-only session backdoor; explicitly off on staging (see env.production.vars).
 DEV_LOGIN_ENABLED = "false"
 # RepoDO + R2 merge path (ADR 004). "true" on staging: workspace commits stage to

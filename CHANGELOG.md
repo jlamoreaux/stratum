@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Per-user telemetry opt-out.** Settings → Privacy now has a switch to stop sending product
+  analytics for your account, alongside a plain-language disclosure of exactly what is sent.
+  An agent inherits its owner's choice. Telemetry remains on by default; the existing
+  instance-wide `STRATUM_TELEMETRY_DISABLED` still overrides every account's preference.
+
+### Fixed
+- `STRATUM_TELEMETRY_DISABLED` had no effect on `deploy:production` or `deploy:staging`. It was
+  declared only under top-level `[vars]`, which named wrangler environments replace rather than
+  inherit, so self-hosters who set it were still sending telemetry. It is now declared per
+  environment.
+
+### Changed
+- Repository-activity analytics events no longer carry `project`, the concrete project name; they
+  carry the opaque `projectId` instead. Dashboards grouping on `project` must switch to
+  `projectId` — old `project` references receive no new data. Events for projects created before
+  `projectId` dual-write carry no project property at all, so they group under nothing rather
+  than under a name.
+
 ### Security
 - Sandbox evaluation of a pinned commit no longer clones a workspace's entire reachable
   history into memory: `readRepoFiles` now clones shallow and grows the fetch window only

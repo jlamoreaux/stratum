@@ -28,7 +28,7 @@ import {
   listWorkspaces,
 } from "../storage/state";
 import { getProjectSourceUrl, getSyncStatus } from "../storage/sync";
-import { getUser, rotateUserToken } from "../storage/users";
+import { getUser, rotateUserToken, setUserTelemetryOptOut } from "../storage/users";
 import { listDeliveries, listWebhooks } from "../storage/webhooks";
 import type { Env, ProjectEntry } from "../types";
 import { projectDefaultBranch } from "../types";
@@ -191,21 +191,85 @@ async function loadAgentSummaries(
   }));
 }
 
-// GET /settings — Account, API key, and agent token management
+/**
+ * The settings page needs the telemetry preference (#257) on top of the page
+ * identity `getCurrentUser` returns. Both come off the same row, so this reads
+ * it once rather than widening `PageUser` — which is threaded through every
+ * page header — or paying a second lookup for one checkbox.
+ */
+async function getSettingsUser(
+  c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } },
+  logger: ReturnType<typeof createLogger>,
+): Promise<{
+  user: { id: string; email: string; username: string };
+  telemetryOptOut: boolean;
+} | null> {
+  const userId = c.get("userId");
+  if (!userId) return null;
+  const result = await getUser(c.env.DB, userId, logger);
+  if (!result.success) return null;
+
+  const { id, email, username, telemetryOptOut } = result.data;
+  return { user: { id, email, username }, telemetryOptOut: telemetryOptOut === true };
+}
+
+// GET /settings — Account, privacy, API key, and agent token management
 app.get("/settings", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/login");
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return c.redirect("/auth/login");
+  const { user, telemetryOptOut } = loaded;
 
   const agents = await loadAgentSummaries(c.env.DB, user.id, logger);
-  return c.html(<SettingsPage user={user} agents={agents} />);
+  return c.html(<SettingsPage user={user} agents={agents} telemetryOptOut={telemetryOptOut} />);
+});
+
+// POST /settings/telemetry — Set the per-user product-analytics preference
+app.post("/settings/telemetry", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return c.redirect("/auth/login");
+  const { user } = loaded;
+
+  const form = await c.req.parseBody();
+  // An unchecked checkbox is not submitted at all, so the field carries the
+  // affirmative and its absence is the opt-out. Any value that isn't exactly
+  // "on" — a stray type, an unexpected string — is read as an opt-out rather
+  // than guessed at, so a misread never turns export back on. (A body that
+  // cannot be parsed at all throws out of parseBody and is rejected without
+  // changing the preference; it never reaches this line.)
+  const optOut = !(typeof form.analytics === "string" && form.analytics === "on");
+
+  const saved = await setUserTelemetryOptOut(c.env.DB, user.id, optOut, logger);
+  if (!saved.success) {
+    logger.error("Failed to save telemetry preference", saved.error);
+    // Redirecting here would re-render Settings from the unchanged row, showing
+    // the old value as though the save had succeeded.
+    return c.html(issuePageError(500, user), 500);
+  }
+
+  // analyticsMiddleware wraps this request and reads the preference on the way
+  // out, from the value auth loaded BEFORE this write. Without this line, the
+  // last thing exported about someone who just opted out is the request in
+  // which they did it, attributed to them.
+  c.set("telemetryOptOut", optOut);
+
+  await recordAudit(c.env.DB, logger, {
+    action: "telemetry.preference_changed",
+    actorType: "user",
+    actorId: user.id,
+    detail: { optOut },
+  });
+
+  return c.redirect("/settings", 302);
 });
 
 // POST /settings/rotate-token — Rotate the API key; renders the new key once
 app.post("/settings/rotate-token", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/login");
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return c.redirect("/auth/login");
+  const { user, telemetryOptOut } = loaded;
 
   const rotateResult = await rotateUserToken(c.env.DB, user.id, logger);
   if (!rotateResult.success) {
@@ -225,6 +289,7 @@ app.post("/settings/rotate-token", async (c) => {
     <SettingsPage
       user={user}
       agents={agents}
+      telemetryOptOut={telemetryOptOut}
       freshToken={{ kind: "api-key", value: rotateResult.data }}
       nonce={c.get("cspNonce") ?? ""}
     />,
@@ -234,8 +299,9 @@ app.post("/settings/rotate-token", async (c) => {
 // POST /settings/agents — Create an agent token; renders it once
 app.post("/settings/agents", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/login");
+  const loaded = await getSettingsUser(c, logger);
+  if (!loaded) return c.redirect("/auth/login");
+  const { user, telemetryOptOut } = loaded;
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
@@ -264,6 +330,7 @@ app.post("/settings/agents", async (c) => {
     <SettingsPage
       user={user}
       agents={agents}
+      telemetryOptOut={telemetryOptOut}
       freshToken={{ kind: "agent", value: createResult.data.plaintext, agentName: name }}
       nonce={c.get("cspNonce") ?? ""}
     />,

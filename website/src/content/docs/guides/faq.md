@@ -158,10 +158,31 @@ tested restore path, documented in
 
 ## Can I turn off telemetry?
 
-Yes. Analytics (PostHog) is optional — it only runs if you set a
-`POSTHOG_API_KEY`, and self-hosted instances can set
-`STRATUM_TELEMETRY_DISABLED = "true"` in `wrangler.toml` to switch it off
-entirely.
+Yes, at two levels.
+
+**Per account.** Open **Settings → Privacy** and clear *Send anonymous usage
+analytics*. That stops future events for your account and for any agent token
+you own — an agent inherits its owner's choice. The change takes effect on your
+next request. It is not retroactive: events already sent are not deleted.
+
+**Per instance.** Analytics only runs at all if you set a `POSTHOG_API_KEY`, and
+self-hosted instances can set `STRATUM_TELEMETRY_DISABLED = "true"` in
+`wrangler.toml` to switch it off for everyone. Declare it in **each**
+`[env.<name>.vars]` block you deploy — named environments do not inherit
+top-level `[vars]`, so a top-level-only setting never reaches
+`wrangler deploy --env=production`. The instance switch always wins over an
+individual account's preference.
+
+Two kinds of event are sent, and only these:
+
+- **`api_request`**, one per request, carrying the matched route pattern (e.g.
+  `/:namespace/:slug/files`), method, status, and latency — never the concrete
+  URL, so namespaces, repo slugs, change ids, and file paths are not sent.
+- **`stratum.<event type>`**, one per repository activity (a change opening, a
+  merge), carrying the event type, the actor type, and an opaque project id —
+  never the project's name.
+
+Neither carries diffs, file contents, or request payloads.
 
 ## What if my policy file has a mistake in it?
 

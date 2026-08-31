@@ -15,6 +15,12 @@ declare module "hono" {
     agentOwnerId?: string;
     /** How the caller authenticated — CSRF checks apply to "session" only. */
     authVia?: "token" | "session";
+    /**
+     * The caller's product-analytics preference (#257), read from the same
+     * `users` row this middleware already loads. Absent for unauthenticated
+     * callers, who have no preference to honor.
+     */
+    telemetryOptOut?: boolean;
     logger: Logger;
   }
 }
@@ -86,6 +92,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       c.set("userId", userResult.data.id);
       c.set("username", userResult.data.username);
       c.set("authVia", "token");
+      c.set("telemetryOptOut", userResult.data.telemetryOptOut === true);
       logger.debug("Auth success - user", {
         userId: userResult.data.id,
         username: userResult.data.username,
@@ -126,6 +133,10 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       c.set("agentId", agentResult.data.id);
       c.set("agentOwnerId", agentResult.data.ownerId);
       c.set("authVia", "token");
+      // An agent acts under its owner's account, so the owner's telemetry
+      // choice governs it — otherwise opting out could be defeated by routing
+      // traffic through an agent. The owner row is already in hand.
+      c.set("telemetryOptOut", ownerResult.data.telemetryOptOut === true);
       logger.debug("Auth success - agent", {
         agentId: agentResult.data.id,
         ownerId: agentResult.data.ownerId,
@@ -173,6 +184,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
 
         c.set("userId", sessionResult.data.userId);
         c.set("authVia", "session");
+        c.set("telemetryOptOut", userResult.data.telemetryOptOut === true);
 
         // Generate username from email if missing (backward compatibility)
         const username =

@@ -298,6 +298,16 @@ npx wrangler secret put EMAIL_FROM_ADDRESS
 # no person profile is created). Note: the event property was renamed
 # `path` -> `route`; dashboards and queries keyed on `path` must switch to
 # `route` — old `path` references receive no new data.
+#
+# A second stream, stratum.<event type>, is emitted per repository activity by
+# the queue consumer; it carries the event type, actor type, and an opaque
+# projectId. Note: it previously carried `project`, the concrete project NAME —
+# that property was removed (#257) because it identified private source the
+# request path already redacts. Dashboards grouping on `project` must switch to
+# `projectId`; old `project` references receive no new data.
+#
+# Both streams are suppressed for a user who has turned analytics off in
+# Settings → Privacy, and for agents whose owner has.
 npx wrangler secret put POSTHOG_API_KEY
 
 # Backups — encrypts backup blobs at rest (D1 dumps contain secrets).
@@ -497,6 +507,12 @@ STRATUM_TELEMETRY_DISABLED = "false"
 OAUTH_REDIRECT_URI = "https://your-instance-staging.workers.dev/auth/github/callback"
 STRATUM_TELEMETRY_DISABLED = "true"
 ```
+
+> **Named environments do not inherit top-level `[vars]` — they replace them.**
+> Setting `STRATUM_TELEMETRY_DISABLED` only under `[vars]` has no effect on
+> `wrangler deploy --env=production` or `--env=staging` (what `npm run
+> deploy:production` and `deploy:staging` run). Declare it in **each**
+> `[env.<name>.vars]` block you actually deploy, or the switch stays off.
 
 ### Per-Environment Configuration
 
