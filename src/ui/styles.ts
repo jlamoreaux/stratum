@@ -332,6 +332,7 @@ button.nav-auth-link {
 .badge-queued { background: var(--bg-raised); color: var(--text-muted); }
 .badge-cloning { background: var(--accent); color: var(--accent-text); }
 .badge-processing { background: var(--warning-surface); color: var(--warning-text); }
+.badge-syncing { background: var(--accent); color: var(--accent-text); }
 .badge-completed { background: var(--success-surface); color: var(--success-text); }
 .badge-failed { background: var(--danger-surface); color: var(--error-text); }
 .badge-cancelled { background: var(--bg-raised); color: var(--text-muted); }
@@ -518,6 +519,8 @@ button.nav-auth-link {
 .failed-actions { display: flex; gap: 0.5rem; }
 
 .retry-form { display: inline; }
+
+.delete-form { display: inline; }
 
 .technical-errors summary { color: var(--text-muted); cursor: pointer; padding: 0.5rem 0; font-size: 0.85rem; }
 

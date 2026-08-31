@@ -664,6 +664,9 @@ app.get("/p/:name", async (c) => {
   }
 
   let files: string[] = [];
+  // Distinguishes "this repo is empty" from "the listing failed": both leave
+  // `files` empty, but only the first should hide content-gated actions.
+  let filesUnavailable = false;
   let log: Array<{ sha: string; message: string; author: string; timestamp: number }> = [];
   let readme: string | null = null;
   let importProgress = null;
@@ -724,6 +727,7 @@ app.get("/p/:name", async (c) => {
       if (filesResult.success) {
         files = filesResult.data;
       } else {
+        filesUnavailable = true;
         logger.warn("Failed to list files in repo", { error: filesResult.error });
       }
 
@@ -749,6 +753,7 @@ app.get("/p/:name", async (c) => {
       }
     } catch (error) {
       // Repo may be empty or unreachable — render with empty data
+      filesUnavailable = true;
       logger.warn("Error loading repo data", {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -780,6 +785,7 @@ app.get("/p/:name", async (c) => {
         autoSyncEnabled: project.autoSyncEnabled,
       }}
       files={files}
+      filesUnavailable={filesUnavailable}
       log={log}
       readme={readme}
       user={userResult}
@@ -1917,6 +1923,9 @@ app.get("/:namespace/:slug", async (c) => {
   const isDefaultBranch = branch === defaultBranch;
 
   let files: string[] = [];
+  // Distinguishes "this repo is empty" from "the listing failed": both leave
+  // `files` empty, but only the first should hide content-gated actions.
+  let filesUnavailable = false;
   let log: Array<{ sha: string; message: string; author: string; timestamp: number }> = [];
   let readme: string | null = null;
   let importProgress = null;
@@ -1970,6 +1979,7 @@ app.get("/:namespace/:slug", async (c) => {
       if (filesResult.success) {
         files = filesResult.data;
       } else {
+        filesUnavailable = true;
         logger.warn("Failed to list files in repo", { error: filesResult.error });
       }
 
@@ -1995,6 +2005,7 @@ app.get("/:namespace/:slug", async (c) => {
       }
     } catch (error) {
       // Repo may be empty or unreachable — render with empty data
+      filesUnavailable = true;
       logger.warn("Error loading repo data", {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -2037,6 +2048,7 @@ app.get("/:namespace/:slug", async (c) => {
         autoSyncEnabled: project.autoSyncEnabled,
       }}
       files={files}
+      filesUnavailable={filesUnavailable}
       log={log}
       readme={readme}
       user={userResult}

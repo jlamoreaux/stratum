@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { importRateLimitMiddleware, releaseImportLock } from "../middleware/rate-limit";
+import {
+  importRateLimitMiddleware,
+  rateLimitMiddleware,
+  releaseImportLock,
+} from "../middleware/rate-limit";
 import { emitEvent } from "../queue/events";
 import { syncOrImportProject } from "../services/project-sync";
 import { recordAudit } from "../storage/audit";
@@ -23,9 +27,11 @@ import {
 import { buildAuthConfig, resolveDefaultBranch } from "../storage/git-providers";
 import { finalizeImportSnapshot } from "../storage/import-finalize";
 import {
+  STALLED_THRESHOLD_MS,
   cancelImportJob,
   createImportJob,
   deleteImportJob,
+  deleteImportJobById,
   getImportProgress,
   getLatestImportDepth,
   isImportCancelled,
@@ -45,7 +51,7 @@ import {
   updateProjectAfterSync,
   updateProjectSyncError,
 } from "../storage/sync";
-import type { ArtifactsCreateResult, Env, ProjectEntry } from "../types";
+import type { ArtifactsCreateResult, Env, ImportStatus, ProjectEntry } from "../types";
 import { getArtifactsRepoName, projectDefaultBranch } from "../types";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
 import {
@@ -1658,10 +1664,13 @@ app.get("/:namespace/:slug/import/status", async (c) => {
     return notFound("Import job", `${namespace}/${slug}`);
   }
 
-  // Check for stalled imports (5 minute threshold)
-  // Note: 'queued' is not included because it's a valid initial state that doesn't indicate progress
-  const STALLED_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
-  if (["cloning", "processing", "syncing"].includes(progressResult.data.status)) {
+  // Check for stalled imports. 'queued' is excluded here because it means the
+  // job has not been picked up yet rather than that it stopped progressing; the
+  // scheduled sweep covers it under a longer grace period. 'cancelling' IS
+  // included (#304): a cancel that the consumer never finished is the exact
+  // state that left projects showing a CANCELLING badge indefinitely, and
+  // `recoverStalledImport` already matches it in SQL — only this guard omitted it.
+  if (["cloning", "processing", "syncing", "cancelling"].includes(progressResult.data.status)) {
     const lastUpdatedAt = new Date(progressResult.data.updatedAt).getTime();
     const elapsedMs = Date.now() - lastUpdatedAt;
 
@@ -1921,6 +1930,90 @@ app.post(
       slug,
       status: "queued",
     });
+  },
+);
+
+/**
+ * Statuses a user may delete. Deliberately narrower than "terminal": a
+ * `completed` job is the record the next sync reads its clone depth from
+ * (`getLatestImportDepth`), so removing it would silently downgrade a
+ * full-history project to a shallow clone.
+ */
+const DELETABLE_IMPORT_STATUSES: readonly ImportStatus[] = ["failed", "cancelled"];
+
+// POST /projects/:namespace/:slug/import/delete - Discard a finished import job
+// so an abandoned failure stops rendering import chrome on the project page (#304).
+app.post(
+  "/:namespace/:slug/import/delete",
+  // A plain per-user limiter, NOT importRateLimitMiddleware: that one takes the
+  // per-project import lock and only the import paths release it, so deleting a
+  // dead job would 429 the user's next import for the lock's full duration —
+  // and clearing a failed import is exactly what someone does right before
+  // retrying. Deleting a terminal row starts no work worth serialising.
+  rateLimitMiddleware({ requestsPerMinute: 20 }),
+  async (c) => {
+    const logger = createLogger({
+      requestId: crypto.randomUUID(),
+      userId: c.get("userId"),
+      path: c.req.path,
+      method: c.req.method,
+    });
+
+    const userId = c.get("userId");
+    const username = c.get("username");
+    if (!userId || !username) return unauthorized("Authentication required");
+
+    const { namespace, slug } = c.req.param();
+    const userNamespace = getUserNamespace(username);
+
+    if (namespace !== userNamespace) {
+      return forbidden("You can only delete imports in your own namespace");
+    }
+
+    const progressResult = await getImportProgress(c.env.DB, namespace, slug, logger);
+    if (!progressResult.success) {
+      logger.error("Failed to get import progress", progressResult.error);
+      return internalError(progressResult.error.message);
+    }
+
+    if (!progressResult.data) {
+      return notFound("Import job", `${namespace}/${slug}`);
+    }
+
+    const existing = progressResult.data;
+
+    if (!DELETABLE_IMPORT_STATUSES.includes(existing.status)) {
+      // Removing a row the queue consumer still owns would orphan an in-flight
+      // import, so a live job must be cancelled before it can be discarded.
+      return c.json(
+        {
+          error: `Cannot delete an import with status: ${existing.status}. Cancel it first.`,
+        },
+        409,
+      );
+    }
+
+    // Scoped to this job's id, not to namespace+slug: a project accumulates a
+    // row per sync, and wiping them all would take the depth history with it.
+    const deleteResult = await deleteImportJobById(
+      c.env.DB,
+      existing.id,
+      DELETABLE_IMPORT_STATUSES,
+      logger,
+    );
+    if (!deleteResult.success) {
+      logger.error("Failed to delete import job", deleteResult.error);
+      return internalError(deleteResult.error.message);
+    }
+
+    if (!deleteResult.data) {
+      // Either another delete removed the row first, or a retry re-queued it
+      // between the status check above and the delete.
+      return notFound("Import job", `${namespace}/${slug}`);
+    }
+
+    logger.info("Import job deleted", { namespace, slug, importId: existing.id });
+    return ok({ message: "Import deleted", namespace, slug });
   },
 );
 

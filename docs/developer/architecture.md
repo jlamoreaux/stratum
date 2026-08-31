@@ -606,6 +606,7 @@ src/
 │   ├── events.ts            # Event definitions
 │   ├── group-commit.ts      # Grouped commit handling
 │   ├── import-queue.ts      # Import job processor
+│   ├── import-sweep.ts      # Reaps wedged import jobs to a terminal state
 │   ├── issue-autoclose.ts   # Auto-close issues on merge
 │   ├── merge-queue.ts       # Merge queue durable object
 │   ├── repo-do.ts           # Repository durable object

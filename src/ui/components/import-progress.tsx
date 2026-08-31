@@ -277,19 +277,29 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
   branch,
   nonce,
 }) => {
-  const isActive = ["queued", "cloning", "processing"].includes(status);
+  // 'syncing' belongs here: until migration 043 widened the status CHECK it
+  // could never be stored, so this list never had to account for it. Now that
+  // the consumer's sync-phase write actually lands, omitting it would render a
+  // running import with no spinner, no Cancel button, and — because the live
+  // refresh script is gated on this too — no way for the page to advance.
+  const isActive = ["queued", "cloning", "processing", "syncing"].includes(status);
   const isComplete = status === "completed";
   const isFailed = status === "failed";
   const isCancelled = status === "cancelled";
   const isCancelling = status === "cancelling";
 
+  // Coarse fallbacks for phases that report no file counts. 'syncing' runs
+  // after the file work, so it sits above 'processing' rather than dropping the
+  // bar back to empty.
   const percent = progress.totalFiles
     ? Math.round((progress.processedFiles / progress.totalFiles) * 100)
     : status === "cloning"
       ? 10
       : status === "processing"
         ? 50
-        : 0;
+        : status === "syncing"
+          ? 75
+          : 0;
 
   // Safely escape for interpolation into a quoted string inside an inline
   // <script> body — JSON.stringify alone doesn't escape "<", so a namespace
@@ -441,12 +451,50 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
               Retry import
             </button>
           </form>
+          {/*
+            Delete is offered only once the job has actually finished. While it
+            is still 'cancelling' the queue consumer may yet own the row, and
+            removing it there would orphan an in-flight import.
+          */}
+          {(isFailed || isCancelled) && (
+            <form
+              id="import-delete-form"
+              method="post"
+              action={`/api/projects/${namespace}/${slug}/import/delete`}
+              class="delete-form"
+            >
+              <button type="submit" class="btn btn-secondary">
+                Delete import
+              </button>
+            </form>
+          )}
           {isCancelling && (
             <p class="help-text">
               Cancelling can take a moment. If it stays stuck, Retry re-queues the import.
             </p>
           )}
         </div>
+      )}
+
+      {(isFailed || isCancelled) && (
+        <script
+          nonce={nonce}
+          dangerouslySetInnerHTML={{
+            __html: `
+            // Progressive enhancement only: discarding the job also discards its
+            // error log, and there is no undo. Without JS the form still posts.
+            (function () {
+              var deleteForm = document.getElementById('import-delete-form');
+              if (!deleteForm) return;
+              deleteForm.addEventListener('submit', function (event) {
+                if (!confirm('Delete this import record? Its logs and error details will be lost.')) {
+                  event.preventDefault();
+                }
+              });
+            })();
+          `,
+          }}
+        />
       )}
 
       {isFailed && errorInfo?.actionButton && (
@@ -497,7 +545,10 @@ export const ImportProgressCard: FC<ImportProgressProps> = ({
               // Update progress bar
               const percent = data.progress.totalFiles 
                 ? Math.round((data.progress.processedFiles / data.progress.totalFiles) * 100)
-                : data.status === 'cloning' ? 10 : data.status === 'processing' ? 50 : 0;
+                : data.status === 'cloning' ? 10
+                : data.status === 'processing' ? 50
+                : data.status === 'syncing' ? 75
+                : 0;
               
               const fill = document.querySelector('.progress-fill');
               if (fill) fill.style.width = percent + '%';
