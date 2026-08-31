@@ -1,40 +1,32 @@
 ---
 title: Stratum
 description: The governance layer for AI-written code — evaluation-gated merges, provenance, and agent identities, built on Cloudflare Workers.
-template: splash
 head:
   - tag: title
-    content: Stratum — governance for AI-written code
+    content: Stratum — documentation
   - tag: meta
     attrs:
       property: og:type
       content: website
-hero:
-  tagline: The governance layer for AI-written code — the control plane that decides what agent output is allowed to merge, wherever your code lives.
-  actions:
-    - text: Get started
-      link: /guides/getting-started/
-      icon: right-arrow
-    - text: View source code
-      link: https://github.com/stratum-eng/stratum
-      icon: external
-      variant: minimal
 ---
 
-## Guides
+The documentation for Stratum, the control plane that decides what agent output is
+allowed to merge. For what Stratum is and who it is for, see
+[usestratum.dev](https://usestratum.dev).
 
-- [Getting started](/guides/getting-started/)
-- [Importing from GitHub](/guides/importing/)
-- [Code review](/guides/code-review/)
-- [Issues](/guides/issues/)
-- [CI integration](/guides/ci-integration/)
-- [Troubleshooting](/guides/troubleshooting/)
-- [FAQ](/guides/faq/)
+## Start here
 
-## API reference
+- [Getting started](/guides/getting-started/) — from sign-up to a merged,
+  evaluation-gated change: policy, agent identity, and the change flow.
+- [Importing from GitHub](/guides/importing/) — bring an existing repository in and
+  keep it in sync with its source.
+- [CI integration](/guides/ci-integration/) — run evaluations on infrastructure you
+  already have and report verdicts back.
 
-- [Authentication](/reference/authentication/)
-- [Endpoints](/reference/endpoints/)
-- [Error codes](/reference/errors/)
-- [OpenAPI specification](/reference/openapi/)
-- [Agent discovery](/reference/agent-discovery/)
+## Reference
+
+- [Authentication](/reference/authentication/) — tokens, sessions, and the admin key.
+- [Endpoints](/reference/endpoints/) — the REST surface, with the
+  [OpenAPI specification](/reference/openapi/) as its contract.
+- [Agent discovery](/reference/agent-discovery/) — the metadata an agent reads before
+  its first request.

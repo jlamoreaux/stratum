@@ -103,6 +103,9 @@ export default defineConfig({
         baseUrl: "https://github.com/stratum-eng/stratum/edit/main/website/",
       },
       sidebar: [
+        // The home page is a normal doc page, not a splash, so it needs a sidebar
+        // entry of its own — the wordmark now leaves for the marketing site.
+        { label: "Overview", link: "/" },
         {
           label: "Guides",
           items: [

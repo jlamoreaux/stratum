@@ -1,7 +1,7 @@
 # Stratum
 
-> The governance layer for AI-written code — the control plane that decides what
-> agent output is allowed to merge, wherever your code lives.
+> The documentation for Stratum, the control plane that decides what agent output is
+> allowed to merge. For what Stratum is and who it is for, see https://usestratum.dev.
 
 ## Documentation
 

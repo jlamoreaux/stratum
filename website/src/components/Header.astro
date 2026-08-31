@@ -15,17 +15,19 @@ import Search from 'virtual:starlight/components/Search';
 import SocialIcons from 'virtual:starlight/components/SocialIcons';
 import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 
-const { siteTitleHref } = Astro.locals.starlightRoute;
-
 /** Matches Starlight's own Header: no search button when there is no search. */
 const shouldRenderSearch =
 	config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
 
 const APP_ORIGIN = 'https://app.usestratum.dev';
+// The wordmark is the product's, not this site's: it goes to the marketing site,
+// the way the app's own wordmark goes to the app. The docs home is reachable from
+// the sidebar's "Overview" entry.
+const SITE_ORIGIN = 'https://usestratum.dev';
 ---
 
 <nav class="nav">
-	<a class="nav-brand" href={siteTitleHref} translate="no">stratum</a>
+	<a class="nav-brand" href={SITE_ORIGIN} translate="no">stratum</a>
 	<div class="nav-auth">
 		{shouldRenderSearch && <div class="nav-search print:hidden"><Search /></div>}
 		<div class="nav-icons sl-hidden md:sl-flex print:hidden"><SocialIcons /></div>

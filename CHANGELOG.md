@@ -142,11 +142,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the app. It is shared rather than copied — `src/ui/nav-css.ts` owns the rules and
   `website/scripts/mirror-header.mjs` generates the site's `header.css` from them, with the
   docs build and the test suite failing on a stale copy.
-- The docs landing page drops the six marketing feature cards for a plain index of the
-  guides and API reference. The splash template hides the sidebar, so the page now links
-  where a reader actually wants to go instead of restating the pitch, and its second hero
-  action reads "View source code" rather than naming the host. `public/index.md`, the
-  hand-maintained Markdown twin agents read, matches.
+- **The docs home is a documentation page, not a second landing page.** It dropped the
+  six marketing feature cards, then the splash hero itself: `docs.usestratum.dev/` now
+  renders with the sidebar like every other page, opens with what the site is, and points
+  at the three guides and three reference pages a reader starts from — the pitch lives at
+  `usestratum.dev`, which the page links to. The header wordmark goes there too, the way
+  the app's wordmark goes to the app, and a new "Overview" sidebar entry keeps the docs
+  home reachable. `public/index.md`, the hand-maintained Markdown twin agents read, matches.
 - Repository-activity analytics events no longer carry `project`, the concrete project name; they
   carry the opaque `projectId` instead. Dashboards grouping on `project` must switch to
   `projectId` — old `project` references receive no new data. Events for projects created before
