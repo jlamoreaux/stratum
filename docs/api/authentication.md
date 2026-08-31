@@ -86,11 +86,15 @@ curl -X POST https://your-instance.workers.dev/api/users/me/tokens \
 
 ### The legacy token
 
-Accounts created before scoped tokens have a single unnamed credential stored on
-the user row, minted by `POST /api/users/me/rotate-token`. It still works, with
-`read_write` access, and it never expires. It is legacy for a reason: it has no
-name, no scope, no expiry, and no last-used record, and rotating it invalidates
-whatever else is using it.
+**Every** account carries a single unnamed credential on the user row — it is
+minted at signup, though the plaintext is discarded unseen, so on a new account
+it sits inert until `POST /api/users/me/rotate-token` mints and returns a fresh
+one. Only accounts from before scoped tokens may have seen theirs. The
+credential works with `read_write` access and never expires. It is legacy for a
+reason: it has no name, no scope, no expiry, and no last-used record, rotating
+it invalidates whatever else is using it — and any account can activate it, so
+"we predate scoped tokens" is not the only way to end up depending on one.
+Prefer named scoped tokens for everything.
 
 `POST /api/users/me/legacy-token/disable` (or the button in the settings UI)
 makes it permanently unusable, by rotating it to a value that is never returned

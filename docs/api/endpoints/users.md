@@ -43,9 +43,10 @@ count toward the 20-token limit.
 ### Disable the Legacy Token
 `POST /api/users/me/legacy-token/disable`
 
-Permanently disables the single unnamed credential accounts had before scoped
-tokens. Named tokens are unaffected. **Cannot be undone** — move anything still
-using it onto a named token first.
+Permanently disables the single unnamed credential every account carries on its
+user row (minted at signup; revealed only by `rotate-token`). Named tokens are
+unaffected. **Cannot be undone** — move anything still using it onto a named
+token first.
 
 ### Rotate the Legacy Token
 `POST /api/users/me/rotate-token`
