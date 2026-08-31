@@ -88,6 +88,12 @@ interface RepoProps {
     autoSyncEnabled?: boolean;
   };
   files: string[];
+  /**
+   * True when the repository listing could not be read (clone/auth/API failure)
+   * rather than genuinely being empty. Both cases arrive as `files: []`, but
+   * only the second means "this project has no content".
+   */
+  filesUnavailable?: boolean;
   log: Array<{ sha: string; message: string; author: string; timestamp: number }>;
   readme?: string | null;
   user?: { id: string; email: string; username: string } | null;
@@ -176,6 +182,7 @@ function truncateCommit(sha?: string): string {
 export const RepoPage: FC<RepoProps> = ({
   project,
   files,
+  filesUnavailable,
   log,
   readme,
   user,
@@ -191,6 +198,11 @@ export const RepoPage: FC<RepoProps> = ({
 }) => {
   const hasSource = !!project.sourceUrl;
   const currentRef = refName ?? defaultBranch;
+  // #304: an empty repo offered a live "Sync Now" button beside "Not synced"
+  // and an in-progress import badge — three claims that could not all be true.
+  // A failed listing also yields no files, but that is the one moment a user
+  // most needs Sync Now, so it must not be mistaken for an empty repo.
+  const hasContent = files.length > 0 || filesUnavailable === true;
   const isSyncing = project.lastSyncStatus === "in_progress";
   const hasUpdates = syncStatus?.hasUpdates;
   const syncFailed = project.lastSyncStatus === "failed";
@@ -198,7 +210,7 @@ export const RepoPage: FC<RepoProps> = ({
   return (
     <Layout title={project.name} user={user}>
       <ProjectHeader project={project} active="code" canWrite={canWrite ?? isOwner}>
-        {hasSource && canSync && (
+        {hasSource && canSync && hasContent && (
           <form
             method="post"
             action={`/api/projects/${project.namespace}/${project.slug}/sync`}

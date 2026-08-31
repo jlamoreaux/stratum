@@ -116,6 +116,7 @@ vi.mock("../src/storage/provenance", () => ({
 // Mock imports storage
 const mockImportProgress: Record<string, Record<string, unknown>> = {};
 vi.mock("../src/storage/imports", () => ({
+  STALLED_THRESHOLD_MS: 5 * 60 * 1000,
   getImportProgress: vi.fn(async (_kv, namespace: string, slug: string) => {
     const key = `${namespace}:${slug}`;
     if (mockImportProgress[key]) {

@@ -57,10 +57,6 @@ export const BACKUP_EXCLUDED_TABLES: readonly string[] = [
   // The backup orchestrator's own per-repo rotation cursor. It describes backup
   // progress, not user data; restoring it into a fresh DB would be meaningless.
   "backup_state",
-  // Transient rebuild alias from migration 037 (widening the verdict CHECK):
-  // renamed to change_reviews within the same migration, so it never exists in
-  // a live database. The real table is covered as change_reviews above.
-  "change_reviews_new",
 ];
 
 const PAGE_SIZE = 500;

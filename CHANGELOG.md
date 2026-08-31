@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `baseSha`, the commit the diff was actually taken against, so a receiver can
   apply the hunks to the right revision instead of guessing at whatever the
   default branch happened to be when the request landed.
+- **Delete import.** A failed or cancelled import can be dismissed from the project page, clearing
+  its import chrome. Only that job is removed, so the project's import history — and the clone
+  depth the next sync reads from it — is preserved.
+- Finished import jobs are now pruned after 30 days by the daily housekeeping cron. Nothing had
+  been pruning them. The most recent job per project is always kept, because that is the row the
+  next sync reads its clone depth from.
 - **Per-user telemetry opt-out.** Settings → Privacy now has a switch to stop sending product
   analytics for your account, alongside a plain-language disclosure of exactly what is sent.
   An agent inherits its owner's choice. Telemetry remains on by default; the existing
@@ -48,6 +54,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Approvals are dismissed when the evaluated **base** moves, not only when the
   tip does. A change re-evaluated against a newer base kept approvals that were
   granted against different code.
+- **Import jobs can no longer wedge forever.** A scheduled sweep now moves stalled imports to a
+  terminal state on its own — previously recovery only ran if somebody happened to open the
+  project's progress page, so an abandoned job could show "Import in Progress" with a `CANCELLING`
+  badge indefinitely. A cancel that never finished lands in `cancelled`; anything else that stopped
+  progressing becomes `failed` with an explanatory error. Jobs that were never picked up off the
+  queue are reaped too, under a longer grace period.
+- **Stall detection never actually fired.** Both the sweep and the existing on-demand recovery
+  compared `updated_at` against SQLite's `datetime('now', …)`, which formats timestamps with a
+  space, while every job row stores an ISO-8601 string. Compared as text, `'T'` sorts after `' '`,
+  so no row matched until the UTC date itself rolled over — silently delaying recovery by up to a
+  day. Both now compare ISO instants, and migration 043 normalises any legacy timestamps.
+- **The import status `syncing` was never actually saved.** It was missing from the `import_jobs`
+  status constraint, so the write the queue consumer makes when a sync begins failed silently on
+  every run and the job kept reading as `queued` long after it had started. The constraint now
+  admits every status the code can produce (migration 043), and the write reports failures instead
+  of discarding them.
+- A cancellation that the sweep finished is now recognised as cancelled by the queue consumer, which
+  previously treated it as a failure — emailing the user about a failure they never had and, on the
+  sync path, restarting the work they had cancelled.
+- An import in its sync phase now shows as in progress, with a spinner, a Cancel button and live
+  updates. Because `syncing` could never previously be stored, the progress card had no case for it
+  and would have rendered a running import as though nothing were happening.
+- On-demand stall recovery now updates the job it actually selected. It picked the stalest row but
+  wrote back by project, which resolves to the newest row — so on a project with more than one
+  import it could fail a healthy running job and leave the wedged one in place.
+- **"Sync Now" no longer appears on an empty repository**, where it sat next to "Not synced" and an
+  in-progress import badge — three claims that could not all be true at once. It still appears when
+  the file listing merely failed, which is when it is most needed.
 - `STRATUM_TELEMETRY_DISABLED` had no effect on `deploy:production` or `deploy:staging`. It was
   declared only under top-level `[vars]`, which named wrangler environments replace rather than
   inherit, so self-hosters who set it were still sending telemetry. It is now declared per
