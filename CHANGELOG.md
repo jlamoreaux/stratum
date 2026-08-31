@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Agent discovery metadata on the docs site.** `docs.usestratum.dev` now publishes an ARD
+  capability manifest (`/.well-known/ai-catalog.json`), an Agent Skills Discovery v0.2.0 index
+  with three `SKILL.md` artifacts and `sha256` digests, `/auth.md` describing the agent
+  registration contract, and WebMCP tools registered on page load. DNS-AID SVCB records live
+  in `website/dns/agents.zone` for the operator to publish.
+  No OAuth authorization-server, OIDC, or RFC 9728 protected-resource document is published:
+  Stratum issues opaque bearer tokens and has no `token_endpoint` or `jwks_uri`, and RFC 9728
+  metadata is resolved from the API origin, which these docs do not serve. Advertising either
+  would send agents to a URL that cannot answer them.
 - **Per-user telemetry opt-out.** Settings → Privacy now has a switch to stop sending product
   analytics for your account, alongside a plain-language disclosure of exactly what is sent.
   An agent inherits its owner's choice. Telemetry remains on by default; the existing

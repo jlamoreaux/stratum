@@ -67,6 +67,22 @@ export default defineConfig({
         { tag: "meta", attrs: { property: "og:image:height", content: "630" } },
         { tag: "meta", attrs: { property: "og:image:alt", content: "Stratum — documentation" } },
         { tag: "meta", attrs: { name: "twitter:image", content: `${SITE}/og.png` } },
+        // WebMCP: exposes docs search, page source, and the API contract as
+        // callable tools to an agent driving the browser. Deferred and
+        // self-disabling when `navigator.modelContext` is absent, which is every
+        // browser that has not enabled the origin trial.
+        { tag: "script", attrs: { src: "/webmcp.js", defer: true } },
+        // ARD manifest, advertised in-page as well as at the well-known path so
+        // an agent that already has the HTML does not need a second discovery
+        // round-trip.
+        {
+          tag: "link",
+          attrs: {
+            rel: "ai-catalog",
+            type: "application/json",
+            href: "/.well-known/ai-catalog.json",
+          },
+        },
         // Icons and browser chrome.
         { tag: "meta", attrs: { name: "theme-color", content: "#0a0a0a" } },
         { tag: "link", attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" } },
@@ -98,6 +114,7 @@ export default defineConfig({
             { label: "Endpoints", slug: "reference/endpoints" },
             { label: "Error codes", slug: "reference/errors" },
             { label: "OpenAPI specification", slug: "reference/openapi" },
+            { label: "Agent discovery", slug: "reference/agent-discovery" },
           ],
         },
       ],
