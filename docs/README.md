@@ -231,25 +231,29 @@ the website copies are mirrors that differ only in frontmatter and link style
 repo files the site does not publish).
 
 You do not mirror by hand. `website/scripts/mirror-docs.mjs` regenerates the
-website copies from these files, and it runs automatically in the site's
-`prebuild`/`predev` — so a normal `npm run build` in `website/` picks up whatever
-you changed here.
+website copies from these files:
 
 ```bash
 cd website
-npm run sync:guides    # regenerate the mirrors
+npm run sync:guides    # regenerate the mirrors, then commit them
 npm run check:guides   # exit 1 if any mirror is stale, without writing
 ```
 
 Edit the copy under `docs/`, never the one under `website/src/content/docs/` —
-a direct edit there is overwritten by the next build. To publish a **new** page,
-add it to `docs/user-guide/`, add a `[slug, description]` entry to `GUIDES` in
-`mirror-docs.mjs`, and add it to the `sidebar` in `website/astro.config.mjs`.
+the next `sync:guides` overwrites a direct edit there. Run `sync:guides` and
+commit the result in the same PR as the `docs/` change.
 
-`check:guides` is not yet wired into CI, so a PR that edits only `docs/` and
-forgets to rebuild will not fail — adding it to `.github/workflows/docs.yml`
-(alongside widening that workflow's `paths` to include `docs/**`) would close
-the loop.
+The mirrors are **committed, not generated at build time**: a build that wrote
+into tracked source files would leave every builder with a dirty tree. Instead
+`.github/workflows/docs.yml` watches `docs/**` and runs `check:guides` before it
+builds, so a `docs/` change that was not mirrored fails CI rather than deploying
+a silently stale page.
+
+To publish a **new** page: add it to `docs/user-guide/`, add a
+`[slug, description]` entry to `GUIDES` in `mirror-docs.mjs`, add it to the
+`sidebar` in `website/astro.config.mjs`, and add it to `PAGES` in
+`website/public/webmcp.js` (a test asserts that list covers every published
+page) and to the documentation list in `website/public/index.md`.
 
 ## Feedback
 

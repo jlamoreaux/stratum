@@ -10,9 +10,11 @@ Returns the authenticated user's profile.
 
 ## API tokens
 
-All four endpoints below accept the **browser session cookie only**. An API
-token calling them gets `403 SESSION_REQUIRED`, whatever its scope — a token
-that could mint or revoke tokens would make revocation meaningless.
+Listing, creating, revoking, and disabling the legacy token accept the
+**browser session cookie only**. An API token calling those gets
+`403 SESSION_REQUIRED`, whatever its scope — a token that could mint or revoke
+tokens would make revocation meaningless. `rotate-token` is the exception and
+has its own rule, described with it below.
 
 ### List Tokens
 `GET /api/users/me/tokens`
@@ -48,8 +50,11 @@ using it onto a named token first.
 ### Rotate the Legacy Token
 `POST /api/users/me/rotate-token`
 
-Accepts a browser session or the legacy credential itself, but refuses a
-**scoped** token with `SESSION_REQUIRED`.
+Accepts a browser session **or the legacy credential itself**, but refuses a
+**scoped** token with `SESSION_REQUIRED`. The key it mints never expires and
+cannot be revoked individually, so letting a scoped token rotate it would mean
+revoking that token contained nothing — it could have issued itself a permanent
+replacement on the way out.
 
 ## Delete Account
 `DELETE /api/users/me`

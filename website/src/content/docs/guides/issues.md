@@ -105,7 +105,7 @@ for line-anchored comments on a diff, see [Code Review](/guides/code-review/).
 A GitHub import brings **git data only**. Issues, pull requests, releases, and
 tags do not come across, so an imported project starts with an empty tracker
 and issue numbering starts at 1. See
-[Importing from GitHub](/guides/importing/#unsupported-content).
+[Importing from GitHub](/guides/importing/#current-limitations).
 
 ## Reference
 

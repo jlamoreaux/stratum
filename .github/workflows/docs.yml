@@ -5,13 +5,13 @@ on:
     branches: [main]
     paths:
       - "website/**"
-      - "docs/api/openapi.yml"
+      - "docs/**"
       - ".github/workflows/docs.yml"
   push:
     branches: [main]
     paths:
       - "website/**"
-      - "docs/api/openapi.yml"
+      - "docs/**"
       - ".github/workflows/docs.yml"
 
 concurrency:
@@ -36,11 +36,21 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install and build
+      - name: Install
         working-directory: website
-        run: |
-          npm ci
-          npm run build
+        run: npm ci
+
+      # The published guide and reference pages are generated from docs/ by
+      # scripts/mirror-docs.mjs. Nothing regenerates them at build time, so a
+      # change to docs/ that was not mirrored would otherwise deploy silently
+      # stale pages.
+      - name: Check the docs mirrors are current
+        working-directory: website
+        run: npm run check:guides
+
+      - name: Build
+        working-directory: website
+        run: npm run build
 
       - name: Deploy to Cloudflare
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

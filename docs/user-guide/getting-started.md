@@ -35,7 +35,7 @@ D1, KV, Queues, Durable Objects, and R2; the Workers AI binding is optional and
 only needed for the LLM evaluator,
 and Sandboxes only for the sandbox evaluator. Follow the
 [Quick Start in the README](../../README.md#quick-start) — everywhere this guide
-says `app.usestratum.dev`, substitute your own `https://your-instance.workers.dev`.
+says `app.usestratum.dev`, substitute your own instance's origin.
 
 ## 2. Create or import a project
 
@@ -206,10 +206,12 @@ know about its scope:
 
 - The token is **bounded by the owning user**: the agent inherits your project
   access (including org access) and nothing more. Agent tokens do **not**
-  expire and carry no read/`read_write` scope of their own — an agent token can
-  do anything its owner can, except approve a change. Revoke one by deleting
-  the agent from the settings UI (or `DELETE /api/agents/{id}`); that is the
-  only way to retire it.
+  expire and carry no read/`read_write` scope of their own. Within that
+  inherited access an agent token is unrestricted, with two exceptions that no
+  token can cross: it cannot approve a change, and it cannot reach an endpoint
+  that requires a browser session (token management, account deletion). Revoke
+  one by deleting the agent from the settings UI (or `DELETE /api/agents/{id}`);
+  that is the only way to retire it.
 - All writes made with an agent token are attributed to the agent in
   **provenance** — merged changes record which agent and which model produced
   them, not just which human owned the token.

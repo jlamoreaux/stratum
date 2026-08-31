@@ -59,10 +59,20 @@ progress page, so an abandoned job could claim to be running indefinitely.
 
 ### The import failed on submodules
 
-Git submodules are **not supported** and fail closed rather than silently
-importing a broken tree. A gitlink entry at any depth, or a root-level
-`.gitmodules`, stops the import. The same scan runs when a change is created,
-so a submodule added in a workspace is refused there too. See
+Git submodules are **not supported**. A gitlink entry at any depth, or a
+root-level `.gitmodules`, fails the import rather than silently importing a
+broken tree.
+
+On import the scan is **best-effort**: if the just-imported tree cannot be read
+at all (the read token cannot be minted, the clone fails, or the scan itself
+errors) the import proceeds with a warning and is left unscanned, rather than
+failing a healthy repository over an infrastructure hiccup. So a completed
+import is not on its own proof that a repository is submodule-free.
+
+The same scan runs whenever a change is created — on a gated push and through
+`POST /api/projects/{name}/changes` alike — and **there it is unconditional**: a
+change carrying submodule content is refused, and so is one whose scan could not
+run. That is the gate that keeps submodule content out of a merge. See
 [Unsupported content](importing.md#unsupported-content).
 
 ### The import failed on Git LFS
