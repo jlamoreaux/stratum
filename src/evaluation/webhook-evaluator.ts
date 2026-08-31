@@ -5,7 +5,7 @@ import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
 import { validateWebhookUrl } from "../utils/validation";
 import { sanitizePolicy } from "./sanitize-policy";
-import type { EvalPolicy, EvalResult, Evaluator } from "./types";
+import type { EvalPolicy, EvalResult, EvaluationContext, Evaluator } from "./types";
 
 async function computeHmacSha256(secret: string, body: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -27,6 +27,7 @@ export class WebhookEvaluator implements Evaluator {
     diff: string,
     policy: EvalPolicy,
     logger: Logger,
+    context?: EvaluationContext,
   ): Promise<Result<EvalResult, AppError>> {
     logger.debug("Starting webhook evaluation");
 
@@ -52,7 +53,19 @@ export class WebhookEvaluator implements Evaluator {
     const timeoutMs = config.timeoutMs ?? 10000;
     // The payload leaves the Worker, so strip credentials (webhook secrets)
     // from the policy first — the secret signs the request, it is not content.
-    const body = JSON.stringify({ diff, policy: sanitizePolicy(policy) });
+    //
+    // `baseSha` names the commit the diff was computed against (#274). Without
+    // it a receiver can only apply the hunks to whatever the default branch
+    // happens to be when the request lands: if the branch advanced in between,
+    // `git apply` still succeeds wherever the context lines survive, and the
+    // suite runs against a tree no change ever proposed. The key is omitted
+    // rather than guessed when the caller has no base to name, so its absence
+    // is a signal a receiver can act on instead of a plausible wrong answer.
+    const body = JSON.stringify({
+      diff,
+      policy: sanitizePolicy(policy),
+      ...(context?.baseSha !== undefined ? { baseSha: context.baseSha } : {}),
+    });
     const headers: Record<string, string> = { "Content-Type": "application/json" };
 
     if (config.secret) {

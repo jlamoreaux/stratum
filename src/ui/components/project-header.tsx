@@ -1,6 +1,13 @@
 import type { FC } from "hono/jsx";
 
-export type ProjectTab = "code" | "changes" | "issues" | "activity" | "tags" | "settings";
+export type ProjectTab =
+  | "code"
+  | "changes"
+  | "issues"
+  | "activity"
+  | "branches"
+  | "tags"
+  | "settings";
 
 export interface ProjectRef {
   name: string;
@@ -31,6 +38,9 @@ export const ProjectHeader: FC<ProjectHeaderProps> = ({ project, active, canWrit
     { key: "changes", label: "Changes", href: `${base}/changes` },
     { key: "issues", label: "Issues", href: `${base}/issues` },
     { key: "activity", label: "Activity", href: `${base}/activity` },
+    // Next to Tags: both list refs, and grouping them keeps the ref-shaped
+    // sections together rather than burying branches under Code.
+    { key: "branches", label: "Branches", href: `${base}/branches` },
     { key: "tags", label: "Tags", href: `${base}/tags` },
     ...(canWrite
       ? [{ key: "settings" as const, label: "Settings", href: `${base}/settings` }]

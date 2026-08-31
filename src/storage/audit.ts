@@ -25,6 +25,8 @@ export type AuditAction =
   | "deletion.incomplete"
   | "deletion.redrive"
   | "webhook.project_id_backfilled"
+  | "branch.created"
+  | "branch.deleted"
   | "telemetry.preference_changed";
 
 export interface AuditEntry {

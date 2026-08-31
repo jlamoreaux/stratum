@@ -16,13 +16,16 @@ import { getChange, listChanges } from "../storage/changes";
 import { getChangeCostSummary } from "../storage/costs";
 import { listEvalRuns } from "../storage/eval-runs";
 import { listProjectEvents } from "../storage/events";
+import type { RefResolutionFailure } from "../storage/git-ops";
 import {
   freshRepoToken,
   getCommitLog,
   getDiffBetweenRepos,
   listFilesInRepo,
+  listRepoBranches,
   listRepoTags,
   readFileFromRepo,
+  resolveBranchRef,
 } from "../storage/git-ops";
 import { getImportProgress } from "../storage/imports";
 import { listIssueComments } from "../storage/issue-comments";
@@ -50,6 +53,7 @@ import { projectDefaultBranch } from "../types";
 import { parseUnifiedDiff } from "../ui/components/diff-view";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
 import { ActivityPage } from "../ui/pages/activity";
+import { BranchesPage } from "../ui/pages/branches";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
 import { ChangesPage } from "../ui/pages/changes";
 import { ErrorPage } from "../ui/pages/error";
@@ -65,6 +69,8 @@ import { TagsPage } from "../ui/pages/tags";
 import { WebhooksPage } from "../ui/pages/webhooks";
 import { WorkspacesPage } from "../ui/pages/workspaces";
 import { canReadProject, canWriteProject, filterMemberProjects } from "../utils/authz";
+import type { AppError } from "../utils/errors";
+import type { Logger } from "../utils/logger";
 import { createLogger } from "../utils/logger";
 import { isValidNamespace, isValidSlug } from "../utils/validation";
 import { DEFAULT_COMMENTS_PAGE, DEFAULT_ISSUES_PAGE } from "./issues";
@@ -1167,6 +1173,167 @@ app.get("/:namespace/:slug/tags", async (c) => {
 });
 
 /**
+ * The hand-rolled error block the routes in this file already render inline.
+ * Kept as one helper so the ref-scoped views report failures on the same
+ * surface as their neighbours instead of inventing a second one.
+ */
+const uiErrorBody = (message: string) => (
+  <div style="padding:2rem;font-family:monospace;color:#f87171;">{message}</div>
+);
+
+const REF_LOAD_ERROR = "Error loading repository. Please try again.";
+
+/**
+ * `resolveBranchRef` reports a request-shaped refusal as a tagged object and a
+ * transport failure as an `AppError`; only the former carries a `kind`.
+ */
+function isRefResolutionFailure(
+  error: RefResolutionFailure | AppError,
+): error is RefResolutionFailure {
+  return "kind" in error;
+}
+
+/** How a UI view should answer a `?ref=` it could not honour. */
+function refFailureAnswer(failure: RefResolutionFailure): {
+  message: string;
+  status: 400 | 404 | 409;
+} {
+  switch (failure.kind) {
+    case "invalid":
+      return { message: `Invalid branch name '${failure.name}'.`, status: 400 };
+    case "not-found":
+      return {
+        message: `Branch '${failure.name}' not found in this repository.`,
+        status: 404,
+      };
+    case "ambiguous":
+      return {
+        message: `Ref '${failure.name}' is ambiguous: it names both refs/heads/${failure.name} and refs/tags/${failure.name}. Rename one of them, or browse by a name that is unique.`,
+        status: 409,
+      };
+  }
+}
+
+type UiRefResolution =
+  | { resolved: true; branch: string }
+  | { resolved: false; message: string; status: 400 | 404 | 409 | 500 };
+
+/**
+ * Resolves `?ref=` for a ref-scoped UI view.
+ *
+ * Absent means the project's default branch — the behaviour these views had
+ * before multi-branch support, unchanged. Present is checked against the
+ * remote's own advertisement and, if it does not name exactly one branch, the
+ * view says so: an unknown ref must never fall back to the default branch, or
+ * the page would show one tree under a URL naming another (PRD edge case 1).
+ */
+async function resolveUiRef(
+  requestedRef: string | undefined,
+  remote: string,
+  readToken: string | null,
+  defaultBranch: string,
+  logger: Logger,
+): Promise<UiRefResolution> {
+  // An empty `ref=` means "no preference", matching `resolveRequestedRef` in
+  // routes/projects.ts: a GET form submitted with nothing chosen sends exactly
+  // that, and answering a browser's default submission with a 400 would be a
+  // worse contract than reading it as unspecified.
+  if (requestedRef === undefined || requestedRef === "") {
+    return { resolved: true, branch: defaultBranch };
+  }
+  if (readToken === null) return { resolved: false, message: REF_LOAD_ERROR, status: 500 };
+
+  const resolved = await resolveBranchRef(remote, readToken, logger, requestedRef);
+  if (resolved.success) return { resolved: true, branch: resolved.data.name };
+  if (isRefResolutionFailure(resolved.error)) {
+    return { resolved: false, ...refFailureAnswer(resolved.error) };
+  }
+  logger.error("Failed to resolve requested ref", resolved.error, { ref: requestedRef });
+  return { resolved: false, message: REF_LOAD_ERROR, status: 500 };
+}
+
+/**
+ * Branch names for the switcher.
+ *
+ * Best-effort on purpose: a page that rendered before this feature existed must
+ * not start failing because a ref advertisement did. A failure is logged and
+ * yields no switcher, never an error page.
+ */
+async function loadSwitcherBranchNames(
+  remote: string,
+  readToken: string | null,
+  defaultBranch: string,
+  logger: Logger,
+): Promise<string[]> {
+  if (readToken === null) return [];
+  const result = await listRepoBranches(remote, readToken, logger, defaultBranch);
+  if (!result.success) {
+    logger.warn("Failed to list branches for the switcher", { error: result.error });
+    return [];
+  }
+  return result.data.branches.map((branch) => branch.name);
+}
+
+// GET /:namespace/:slug/branches — Branch listing (registered before the
+// catch-all repo view at the bottom of this file, which would otherwise swallow
+// it as a slug).
+app.get("/:namespace/:slug/branches", async (c) => {
+  const { namespace, slug } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const logger = createLogger({ path: c.req.path, userId });
+
+  if (!isValidNamespace(namespace) || !isValidSlug(slug)) {
+    return c.html(uiErrorBody("Invalid project path."), 400);
+  }
+
+  const [userResult, projectResult] = await Promise.all([
+    getCurrentUser(c, logger),
+    getProjectByPath(c.env.STATE, namespace, slug, logger),
+  ]);
+
+  if (!projectResult.success) {
+    return c.html(uiErrorBody(`Project '${namespace}/${slug}' not found.`), 404);
+  }
+  const project = projectResult.data;
+
+  // A private project must be indistinguishable from a missing one.
+  if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
+    return c.html(uiErrorBody(`Project '${namespace}/${slug}' not found.`), 404);
+  }
+
+  const branchesError = uiErrorBody("Error loading branches. Please try again.");
+  const readToken = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
+  if (!readToken.success) {
+    logger.error("Failed to mint read token for branches page", readToken.error);
+    return c.html(branchesError, 500);
+  }
+
+  const defaultBranch = projectDefaultBranch(project);
+  const branchesResult = await listRepoBranches(
+    project.remote,
+    readToken.data,
+    logger,
+    defaultBranch,
+  );
+  if (!branchesResult.success) {
+    logger.error("Failed to list branches", branchesResult.error);
+    return c.html(branchesError, 500);
+  }
+
+  return c.html(
+    <BranchesPage
+      project={{ name: project.name, namespace: project.namespace, slug: project.slug }}
+      branches={branchesResult.data.branches}
+      defaultBranch={defaultBranch}
+      truncated={branchesResult.data.truncated}
+      totalBranchCount={branchesResult.data.totalBranchCount}
+      user={userResult}
+    />,
+  );
+});
+
+/**
  * Three issue routes share the same preamble, and getting it wrong leaks
  * project existence. A private project must 404 rather than 403, so an
  * unreadable project is indistinguishable from a missing one — that is why
@@ -1397,9 +1564,7 @@ app.get("/:namespace/:slug/webhooks", async (c) => {
     return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
-  const webhooksResult = await listWebhooks(c.env.DB, logger, project.name, {
-    projectId: project.id,
-  });
+  const webhooksResult = await listWebhooks(c.env.DB, logger, project.id);
   if (!webhooksResult.success) {
     logger.error("Failed to list webhooks", webhooksResult.error);
     return c.html(errorPage(500, "Error loading webhooks. Please try again.", userResult), 500);
@@ -1619,12 +1784,28 @@ app.get("/:namespace/:slug/blob/*", async (c) => {
   if (!readToken.success) {
     return c.html(errorPage(500, "Error loading file.", userResult), 500);
   }
+
+  // Hono's getPath stops at "?", so the wildcard above never contains the query
+  // string — `?ref=` is read here, from the query, and nowhere else.
+  const defaultBranch = projectDefaultBranch(project);
+  const refResolution = await resolveUiRef(
+    c.req.query("ref"),
+    project.remote,
+    readToken.data,
+    defaultBranch,
+    logger,
+  );
+  if (!refResolution.resolved) {
+    return c.html(uiErrorBody(refResolution.message), refResolution.status);
+  }
+  const branch = refResolution.branch;
+
   const contentResult = await getFileContent(
     project.remote,
     readToken.data,
     filePath,
     logger,
-    projectDefaultBranch(project),
+    branch,
   );
   if (!contentResult.success) {
     return c.html(errorPage(500, "Error loading file.", userResult), 500);
@@ -1638,6 +1819,12 @@ app.get("/:namespace/:slug/blob/*", async (c) => {
     );
   }
 
+  const branchNames = await loadSwitcherBranchNames(
+    project.remote,
+    readToken.data,
+    defaultBranch,
+    logger,
+  );
   const canWrite = await canWriteProject(c.env.DB, project, userId);
   return c.html(
     <FileViewerPage
@@ -1646,6 +1833,9 @@ app.get("/:namespace/:slug/blob/*", async (c) => {
       content={content}
       canWrite={canWrite}
       user={userResult}
+      refName={branch === defaultBranch ? undefined : branch}
+      defaultBranch={defaultBranch}
+      branchNames={branchNames}
     />,
   );
 });
@@ -1689,6 +1879,43 @@ app.get("/:namespace/:slug", async (c) => {
     return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, userResult), 404);
   }
 
+  // Minted lazily and at most once. This is the highest-traffic page in the
+  // product and, served from the KV snapshot, it did no git work at all before
+  // multi-branch support: minting here unconditionally would add a fixed round
+  // trip to every view for the benefit of the minority that actually needs it.
+  // Best-effort, as before — an unreachable repo renders as an empty page
+  // rather than an error.
+  let readTokenLoaded = false;
+  let readToken: string | null = null;
+  const getReadToken = async (): Promise<string | null> => {
+    if (readTokenLoaded) return readToken;
+    readTokenLoaded = true;
+    const minted = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
+    if (!minted.success) {
+      logger.warn("Failed to mint read token for repo view", { error: minted.error.message });
+      return readToken;
+    }
+    readToken = minted.data;
+    return readToken;
+  };
+
+  const defaultBranch = projectDefaultBranch(project);
+  const requestedRef = c.req.query("ref");
+  // Only a request that actually names a ref pays for resolving it.
+  const hasRequestedRef = requestedRef !== undefined && requestedRef !== "";
+  const refResolution = await resolveUiRef(
+    requestedRef,
+    project.remote,
+    hasRequestedRef ? await getReadToken() : null,
+    defaultBranch,
+    logger,
+  );
+  if (!refResolution.resolved) {
+    return c.html(uiErrorBody(refResolution.message), refResolution.status);
+  }
+  const branch = refResolution.branch;
+  const isDefaultBranch = branch === defaultBranch;
+
   let files: string[] = [];
   let log: Array<{ sha: string; message: string; author: string; timestamp: number }> = [];
   let readme: string | null = null;
@@ -1716,21 +1943,28 @@ app.get("/:namespace/:slug", async (c) => {
   const canSync = !!getProjectSourceUrl(project) && isOwner && project.importCompleted !== false;
   const canWrite = await canWriteProject(c.env.DB, project, userId);
 
-  const snapshotResult2 = await readRepoSnapshot(c.env.STATE, project, logger);
-  if (snapshotResult2.success && snapshotResult2.data) {
+  // The snapshot is keyed `repo_snapshot:<ns>:<slug>` with no branch component
+  // and only ever describes the default branch, so a non-default ref must not
+  // read it at all — serving it would show the default branch's tree under a URL
+  // naming another branch (PRD edge case 15).
+  const snapshotResult2 = isDefaultBranch
+    ? await readRepoSnapshot(c.env.STATE, project, logger)
+    : null;
+  const snapshotServedThePage = Boolean(snapshotResult2?.success && snapshotResult2.data);
+  // Minted only when the snapshot cannot serve the page — a hit does no git work.
+  const cloneToken = snapshotServedThePage ? null : await getReadToken();
+  if (snapshotResult2?.success && snapshotResult2.data) {
     files = snapshotResult2.data.files;
     log = snapshotResult2.data.commits;
     readme = snapshotResult2.data.readme;
-  } else {
-    // Cache miss or corrupt entry — fall back to git clone
+  } else if (cloneToken !== null) {
+    // Cache miss, corrupt entry, or a non-default ref — fall back to git clone.
+    // A token that could not be minted was already warned about above and leaves
+    // the page rendering empty, exactly as it did before.
     try {
-      const tokenResult = await freshRepoToken(c.env.ARTIFACTS, project.remote, "read", logger);
-      if (!tokenResult.success) throw tokenResult.error;
-      const readToken = tokenResult.data;
-      const branch = projectDefaultBranch(project);
       const [filesResult, logResult] = await Promise.all([
-        listFilesInRepo(project.remote, readToken, logger, branch),
-        getCommitLog(project.remote, readToken, logger, 20, branch),
+        listFilesInRepo(project.remote, cloneToken, logger, branch),
+        getCommitLog(project.remote, cloneToken, logger, 20, branch),
       ]);
 
       if (filesResult.success) {
@@ -1750,7 +1984,7 @@ app.get("/:namespace/:slug", async (c) => {
       if (readmePath) {
         const readmeResult = await readFileFromRepo(
           project.remote,
-          readToken,
+          cloneToken,
           readmePath,
           logger,
           branch,
@@ -1767,9 +2001,19 @@ app.get("/:namespace/:slug", async (c) => {
     }
   }
 
+  // The switcher is a convenience, not the page. When the view was served from
+  // the snapshot and no ref was requested, this request has touched git zero
+  // times — so it offers just the branch being shown rather than spending a ref
+  // advertisement (two subrequests) on the product's busiest page. A reader who
+  // wants the full list is one click away on /branches.
+  const branchNames = readTokenLoaded
+    ? await loadSwitcherBranchNames(project.remote, readToken, defaultBranch, logger)
+    : [defaultBranch];
+
   logger.debug("Rendering project page", {
     namespace,
     slug,
+    branch,
     fileCount: files.length,
     hasImport: !!importProgress,
   });
@@ -1802,6 +2046,9 @@ app.get("/:namespace/:slug", async (c) => {
       isOwner={isOwner}
       canWrite={canWrite}
       nonce={c.get("cspNonce") ?? ""}
+      refName={isDefaultBranch ? undefined : branch}
+      defaultBranch={defaultBranch}
+      branchNames={branchNames}
     />,
   );
 });

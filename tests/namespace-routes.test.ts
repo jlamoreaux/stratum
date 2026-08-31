@@ -86,6 +86,16 @@ vi.mock("../src/storage/git-ops", () => ({
     success: true,
     data: "mock-token",
   })),
+  // The repo view reads the remote's branch advertisement for its branch
+  // switcher (#181). This factory replaces the module wholesale, so an export
+  // it omits throws on first access rather than being undefined — a repo view
+  // that only ever advertised `main` is what these fixtures represent.
+  listRepoBranches: vi.fn(
+    async (_remote: string, _token: string, _logger: unknown, ref: string) => ({
+      success: true,
+      data: { branches: [{ name: ref, oid: "abc123" }], truncated: false, totalBranchCount: 1 },
+    }),
+  ),
 }));
 
 // Mock changes storage

@@ -116,11 +116,24 @@ export async function deliverEventToWebhooks(
   event: EventRecord,
   logger: Logger,
 ): Promise<void> {
-  // Scope delivery by the canonical project_id when the event carries one, so a
-  // same-named project in another namespace never receives these events.
-  const webhooksResult = await listWebhooks(env.DB, logger, event.project, {
+  // Delivery is scoped by the canonical project_id only (#235). An outbox row
+  // that carries no project_id cannot be scoped to a tenant: resolving its
+  // free-form `project` name would deliver to whichever same-named project
+  // happened to match, across namespaces. Drop it loudly instead — every
+  // current emitter threads the id through `emitEvent`, so a row without one is
+  // legacy, and a missed delivery is recoverable where a cross-tenant one is
+  // not.
+  if (event.projectId === undefined) {
+    logger.warn("Skipping webhook delivery for an event with no project_id", {
+      eventId: event.id,
+      eventType: event.type,
+      project: event.project,
+    });
+    return;
+  }
+
+  const webhooksResult = await listWebhooks(env.DB, logger, event.projectId, {
     activeOnly: true,
-    ...(event.projectId !== undefined ? { projectId: event.projectId } : {}),
   });
   if (!webhooksResult.success) return;
 

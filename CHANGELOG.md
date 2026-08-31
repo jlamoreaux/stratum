@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stratum issues opaque bearer tokens and has no `token_endpoint` or `jwks_uri`, and RFC 9728
   metadata is resolved from the API origin, which these docs do not serve. Advertising either
   would send agents to a URL that cannot answer them.
+- **Multi-branch support (#181).** Create, list and delete branches on a project
+  (`GET/POST/DELETE /api/projects/:ns/:slug/branches`), browse any of them with
+  `?ref=` on the files, content and log endpoints and in the web UI, and switch
+  between them from a no-JavaScript branch switcher. Branch creation is the
+  enabling piece: no path previously put a second `refs/heads/*` on a project
+  repo, so there was nothing to list. A new branch can only start from a commit
+  the repository already holds, so creating one can never introduce content.
+  Backups now record branch refs and restore rebuilds them.
+- **The diff's base commit reaches CI (#274).** Evaluation webhooks now carry
+  `baseSha`, the commit the diff was actually taken against, so a receiver can
+  apply the hunks to the right revision instead of guessing at whatever the
+  default branch happened to be when the request landed.
 - **Per-user telemetry opt-out.** Settings → Privacy now has a switch to stop sending product
   analytics for your account, alongside a plain-language disclosure of exactly what is sent.
   An agent inherits its owner's choice. Telemetry remains on by default; the existing
@@ -33,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   onto a named token first — disabling cannot be undone.
 
 ### Fixed
+- Approvals are dismissed when the evaluated **base** moves, not only when the
+  tip does. A change re-evaluated against a newer base kept approvals that were
+  granted against different code.
 - `STRATUM_TELEMETRY_DISABLED` had no effect on `deploy:production` or `deploy:staging`. It was
   declared only under top-level `[vars]`, which named wrangler environments replace rather than
   inherit, so self-hosters who set it were still sending telemetry. It is now declared per
@@ -49,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than under a name.
 
 ### Security
+- **Webhooks are scoped on project id alone (#235).** `webhookBelongsToProject`
+  and `listWebhooks` still matched `project_id = ? OR (project_id IS NULL AND
+  project = ?)`, so a pre-migration-025 row could be read, modified and
+  delivered to by a same-named project in another namespace. `listWebhooks` now
+  takes the project id rather than its name, so a name-scoped lookup is not
+  expressible at the call site, and `createWebhook` requires `projectId` so no
+  new unstamped row can undo the backfill.
 - Sandbox evaluation of a pinned commit no longer clones a workspace's entire reachable
   history into memory: `readRepoFiles` now clones shallow and grows the fetch window only
   as far as needed to reach the pinned commit, capped at 500 commits, instead of an
