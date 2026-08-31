@@ -222,15 +222,15 @@ if (!signatureValid(rawBody, headers["x-stratum-signature"])) {
     // Nothing to reproduce against — a verdict here would describe a tree the
     // change never proposed. Fail loudly rather than guessing at a base.
     respond(400, { error: "payload carries no baseSha" });
-    return;
+  } else {
+    // `yourCi` must check out baseSha and apply the diff to THAT commit.
+    const verdict = await yourCi(diff, policy, baseSha);
+    respond(200, {
+      score: verdict.score,     // 0..1, as in the contract above
+      passed: verdict.passed,   // boolean — this is what gates the merge
+      reason: verdict.reason,   // shown in the change UI
+    });
   }
-  // `yourCi` must check out baseSha and apply the diff to THAT commit.
-  const verdict = await yourCi(diff, policy, baseSha);
-  respond(200, {
-    score: verdict.score,     // 0..1, as in the contract above
-    passed: verdict.passed,   // boolean — this is what gates the merge
-    reason: verdict.reason,   // shown in the change UI
-  });
 }
 ```
 

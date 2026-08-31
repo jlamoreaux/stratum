@@ -18,11 +18,16 @@ curl -X POST https://app.usestratum.dev/api/projects/acme/billing/issues \
        "body": "The client retries 429 without honouring Retry-After."}'
 ```
 
-**Anyone who can read the project may open an issue.** On a public project that
-means any authenticated user — the platform-wide per-identity rate limit
+**Read access to the project is enough to open an issue.** On a public project
+that means any authenticated user — the platform-wide per-identity rate limit
 (1,000 requests/minute authenticated) is what bounds abuse, not a per-issue
-quota. Editing, closing, and labelling all require **write** access — a reader
-can raise a problem but cannot triage it.
+quota. Editing, closing, and labelling all require **write** access on the
+project — a reader can raise a problem but cannot triage it.
+
+Project permission and credential scope are separate gates, and both apply.
+Opening an issue is a `POST`, so a `read`-scoped API token is refused with
+`403 TOKEN_SCOPE_INSUFFICIENT` however much project access its owner has. Use a
+`read_write` token or a browser session; the examples here assume one.
 
 Titles are capped at 200 characters and bodies at 20,000.
 
@@ -35,7 +40,10 @@ rather than by an opaque id.
 must belong to the same project — a link into another project is rejected.
 
 ```bash
--d '{"title": "...", "linkedChangeId": "chg_123"}'
+curl -X POST https://app.usestratum.dev/api/projects/acme/billing/issues \
+  -H "Authorization: Bearer stratum_user_xxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Retry storms on 429", "linkedChangeId": "chg_123"}'
 ```
 
 **When that change merges, every open issue linked to it closes automatically**,

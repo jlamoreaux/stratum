@@ -28,6 +28,7 @@ codes are in the [OpenAPI specification](/reference/openapi/).
 | 501 | Not Implemented |
 | 502 | Bad Gateway — an upstream provider call failed |
 | 503 | Service Unavailable |
+| 504 | Gateway Timeout — an operation exceeded its bound (see `PUSH_TIMEOUT`) |
 
 ## Machine-readable error codes
 

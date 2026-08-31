@@ -74,8 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails a build over it" caveat no longer applies — `check:guides` fails CI on drift.
 - **The docs site now publishes the CI integration guide, and the guide and
   reference pages are generated from `docs/` rather than hand-mirrored.**
-  `website/scripts/mirror-docs.mjs` renders them (with `npm run check:guides` to
-  detect drift) and runs in the site's `prebuild`. The two copies had drifted in
+  `website/scripts/mirror-docs.mjs` renders them; the mirrors are committed, and
+  CI runs `npm run check:guides` before the site build so drift fails rather
+  than deploying a stale page. The two copies had drifted in
   both directions: the published authentication page still described the
   pre-scoped-token model, and the published FAQ and import guide were each
   missing whole sections.

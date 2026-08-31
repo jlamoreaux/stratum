@@ -109,8 +109,9 @@ by hand at `public/index.md` because its source is `.mdx`.
 The site is a static build (`dist/`) served by a Cloudflare Worker
 (`stratum-docs`, configured in `wrangler.toml`) on the custom domain
 `docs.usestratum.dev`. It deploys automatically on every push to `main` that
-touches `website/` or the OpenAPI spec (`.github/workflows/docs.yml`; PRs get a
-build-only check). For an out-of-band redeploy, use the `Deploy Docs` workflow
+touches `website/` or `docs/` (`.github/workflows/docs.yml`; PRs get a
+build-only check, which also runs `npm run check:guides` to fail on a stale
+mirror). For an out-of-band redeploy, use the `Deploy Docs` workflow
 (`.github/workflows/deploy-docs.yml`, manual dispatch) or deploy by hand:
 
 ```bash

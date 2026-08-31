@@ -103,8 +103,9 @@ const targets = [
 const stale = [];
 for (const [srcPath, srcDir, destPath, description] of targets) {
   // srcPath is website-relative ("../docs/..."); the edit link needs it
-  // relative to the repository root.
-  const canonicalPath = srcPath.replace(/^\.\.\//, "");
+  // relative to the repository root. Normalize separators first: join() emits
+  // backslashes on Windows, which would survive into the URL.
+  const canonicalPath = srcPath.split("\\").join("/").replace(/^\.\.\//, "");
   const rendered = await render(srcPath, srcDir, description, canonicalPath);
   if (check) {
     const current = await readFile(destPath, "utf8").catch(() => null);

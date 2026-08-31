@@ -249,8 +249,11 @@ into tracked source files would leave every builder with a dirty tree. Instead
 builds, so a `docs/` change that was not mirrored fails CI rather than deploying
 a silently stale page.
 
-To publish a **new** page: add it to `docs/user-guide/`, add a
-`[slug, description]` entry to `GUIDES` in `mirror-docs.mjs`, add it to the
+To publish a **new** page: add the canonical file (`docs/user-guide/` for a
+guide, `docs/api/` for a reference page), add a `[slug, description]` entry to
+the matching list in `mirror-docs.mjs` — `GUIDES` for a guide, `REFERENCE` for
+an API reference page, since a page missing from both is simply not mirrored —
+then add it to the
 `sidebar` in `website/astro.config.mjs`, and add it to `PAGES` in
 `website/public/webmcp.js` (a test asserts that list covers every published
 page) and to the documentation list in `website/public/index.md`.
