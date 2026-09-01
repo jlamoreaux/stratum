@@ -29,6 +29,7 @@ export interface ToolDef {
   handler: (args: unknown) => Promise<ToolResult>;
 }
 
+/** A successful tool result: the API's JSON, pretty-printed for a reader. */
 function jsonResult(value: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
@@ -97,6 +98,15 @@ const projectArg = {
   description: 'Project reference as "namespace/slug", e.g. "@acme/api" or "acme/api"',
 } as const;
 
+/**
+ * The full Stratum surface an agent needs to propose governed changes: read a
+ * project, fork a workspace, commit, open an eval-gated change, and follow it
+ * through review to merge.
+ *
+ * Review verdicts, merge and reject stay human gates — the API behind them
+ * refuses an agent token, and the descriptions say so rather than letting a
+ * model discover it by retrying.
+ */
 export function buildTools(client: StratumClient): ToolDef[] {
   return [
     tool(

@@ -61,6 +61,8 @@ export interface JsonSchema {
   additionalProperties: false;
 }
 
+/** One field's JSON Schema fragment. Enums render as a `string` with an
+ * `enum` list, which is what clients display as a picker. */
 function fieldToJsonSchema(field: FieldSpec): Record<string, unknown> {
   switch (field.type) {
     case "string":
@@ -106,6 +108,8 @@ export type ValidationResult<S extends ToolSchema> =
   | { ok: true; value: SchemaArgs<S> }
   | { ok: false; errors: string[] };
 
+/** How a wrong value is named back to the model — "an array" and "null"
+ * rather than the bare `typeof`, which calls both of them "object". */
 function describeType(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return "an array";

@@ -173,6 +173,8 @@ interface OAuthClientRow {
   created_at: string;
 }
 
+/** Narrow a stored auth method to the union. Anything unrecognised is `none`,
+ * which requires PKCE and no secret — the safe direction for a bad row. */
 function narrowAuthMethod(value: string): OAuthClient["tokenEndpointAuthMethod"] {
   return value === "client_secret_post" || value === "client_secret_basic" ? value : "none";
 }
@@ -338,6 +340,9 @@ export async function registerClient(
   }
 }
 
+/** Load a registered client by its `client_id`. A lookup failure is reported
+ * as an error rather than as "no such client", so a D1 outage cannot read as a
+ * deregistration. */
 export async function getClient(
   db: D1Database,
   logger: Logger,
@@ -553,6 +558,8 @@ export async function verifyPkce(verifier: string, challenge: string): Promise<b
   return constantTimeEqual(computed, challenge);
 }
 
+/** base64url, per RFC 7636: the PKCE challenge is compared as an unpadded
+ * base64url string, so the padding and the two substitutions both matter. */
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);

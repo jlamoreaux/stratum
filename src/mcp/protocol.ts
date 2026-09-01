@@ -52,10 +52,13 @@ export interface JsonRpcResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 
+/** A JSON-RPC success response. */
 export function rpcResult(id: JsonRpcId, result: unknown): JsonRpcResponse {
   return { jsonrpc: "2.0", id, result };
 }
 
+/** A JSON-RPC error response. `data` is omitted rather than set to
+ * `undefined`, which would serialize as a present-but-null field. */
 export function rpcError(
   id: JsonRpcId,
   code: number,
@@ -96,6 +99,9 @@ interface InitializeParams {
   protocolVersion?: unknown;
 }
 
+/** Pick the protocol revision to answer with: the client's when we speak it,
+ * otherwise our newest. See `SUPPORTED_PROTOCOL_VERSIONS` for why answering
+ * with a version the client did not ask for is the right fallback. */
 function negotiateVersion(params: unknown): string {
   const requested = (params as InitializeParams | undefined)?.protocolVersion;
   if (typeof requested === "string") {

@@ -119,6 +119,8 @@ function oauthError(
   );
 }
 
+/** A JSON response that must never be cached: these bodies carry, or sit one
+ * step away from, credentials. */
 function jsonNoStore(body: unknown, status = 200): Response {
   return Response.json(body, {
     status,
@@ -704,6 +706,14 @@ app.post("/oauth/token", async (c) => {
   );
 });
 
+/**
+ * The `authorization_code` grant.
+ *
+ * Order is the security property here: the code is READ, then every binding it
+ * carries is checked (client, redirect URI, PKCE), and only then is it claimed.
+ * See `readAuthorizationCode` for why claiming first would let anyone who
+ * merely observed a code disrupt the client that rightfully holds it.
+ */
 async function handleCodeGrant(
   c: Context<{ Bindings: Env }>,
   logger: ReturnType<typeof createLogger>,
@@ -791,6 +801,15 @@ async function handleCodeGrant(
   });
 }
 
+/**
+ * The `refresh_token` grant.
+ *
+ * Rotation is mandatory and happens inside `rotateRefreshToken`, which also
+ * detects reuse of an already-retired token and revokes the grant when it sees
+ * one. Every failure is reported identically as `invalid_grant`: distinguishing
+ * "expired" from "revoked" from "reused" would tell a caller holding a stolen
+ * token which it is.
+ */
 async function handleRefreshGrant(
   c: Context<{ Bindings: Env }>,
   logger: ReturnType<typeof createLogger>,
