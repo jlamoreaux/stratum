@@ -74,7 +74,8 @@ scopes.
 
 `GET|POST /api/users/me/tokens`, `DELETE /api/users/me/tokens/{id}` and
 `POST /api/users/me/legacy-token/disable` accept the `stratum_session` cookie
-**only**. An API token calling them gets `403 SESSION_REQUIRED`, whatever its
+**only** — the cookie every web sign-in sets (magic link, GitHub, or Google
+OAuth). An API token calling them gets `403 SESSION_REQUIRED`, whatever its
 scope. A token that could mint tokens, revoke its siblings, or turn off the
 legacy credential would make revocation meaningless — a lost machine would
 simply issue itself a replacement.
@@ -148,12 +149,6 @@ applications**, and by the client itself at `POST /oauth/revoke`
 ([RFC 7009](https://datatracker.ietf.org/doc/html/rfc7009)). Revocation is
 immediate and covers both halves of the pair — revoking either the access token
 or the refresh token ends the grant.
-
-## Session cookies
-
-Signing in through the web UI (email magic link, GitHub OAuth, or Google
-OAuth) sets a `stratum_session` cookie, which authenticates browser requests
-to the same endpoints.
 
 ## Anonymous access
 
