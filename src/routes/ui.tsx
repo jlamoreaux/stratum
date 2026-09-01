@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { fetchInviteCodes, referralServiceConfigured } from "../beta/gate";
 import { isScopedTokenCaller } from "../middleware/auth";
 import { createAgent, deleteAgent, getAgent, listAgents } from "../storage/agents";
 import {
@@ -61,6 +62,7 @@ import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { IssueDetailPage, IssuesPage, NewIssuePage } from "../ui/pages/issues";
 import { NewProjectPage } from "../ui/pages/new-project";
+import { ProfilePage } from "../ui/pages/profile";
 import { ProjectSettingsPage } from "../ui/pages/project-settings";
 import { RepoPage } from "../ui/pages/repo";
 import { type FreshCredential, type SettingsNotice, SettingsPage } from "../ui/pages/settings";
@@ -212,35 +214,54 @@ async function loadAgentSummaries(
   }));
 }
 
-type SettingsUser = { id: string; email: string; username: string };
+/**
+ * The account pages need more of the user row than the page header does:
+ * `createdAt` and the linked GitHub handle for the profile, plus the telemetry
+ * preference (#257) for settings.
+ */
+type AccountUser = {
+  id: string;
+  email: string;
+  username: string;
+  createdAt: string;
+  githubUsername?: string;
+};
 
 /**
- * The settings page needs the telemetry preference (#257) on top of the page
- * identity `getCurrentUser` returns. Both come off the same row, so this reads
- * it once rather than widening `PageUser` — which is threaded through every
- * page header — or paying a second lookup for one checkbox.
+ * Every field above comes off the same row, so this reads it once rather than
+ * widening `PageUser` — which is threaded through every page header — or paying
+ * a second lookup per extra field.
  */
-async function getSettingsUser(
+async function getAccountUser(
   c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } },
   logger: ReturnType<typeof createLogger>,
-): Promise<{ user: SettingsUser; telemetryOptOut: boolean } | null> {
+): Promise<{ user: AccountUser; telemetryOptOut: boolean } | null> {
   const userId = c.get("userId");
   if (!userId) return null;
   const result = await getUser(c.env.DB, userId, logger);
   if (!result.success) return null;
 
-  const { id, email, username, telemetryOptOut } = result.data;
-  return { user: { id, email, username }, telemetryOptOut: telemetryOptOut === true };
+  const { id, email, username, createdAt, githubUsername, telemetryOptOut } = result.data;
+  return {
+    user: {
+      id,
+      email,
+      username,
+      createdAt,
+      ...(githubUsername !== undefined ? { githubUsername } : {}),
+    },
+    telemetryOptOut: telemetryOptOut === true,
+  };
 }
 
 const sessionRequiredError = () => (
   <div style="padding:2rem;font-family:monospace;color:#f87171;">
-    Settings require a signed-in browser session, not an API token.
+    Account pages require a signed-in browser session, not an API token.
   </div>
 );
 
 /**
- * Resolves the settings caller, insisting on a browser SESSION (#254).
+ * Resolves the caller of an account page, insisting on a browser SESSION (#254).
  *
  * These pages mint, revoke, and disable credentials, so the rule the JSON
  * routes enforce (`requireSession` in `routes/users.ts`) has to hold here too:
@@ -250,17 +271,20 @@ const sessionRequiredError = () => (
  * replacement. A read-only token never reaches the POSTs — `authMiddleware`
  * refuses it on method — but it could still read this listing, so the check is
  * on the session, not on the scope.
+ *
+ * `/profile` is behind the same guard: it lists shareable invite codes, and a
+ * leaked read-only token must not be able to enumerate and spend them.
  */
-async function requireSettingsSession(
+async function requireAccountSession(
   c: Context<{ Bindings: Env }>,
   logger: ReturnType<typeof createLogger>,
 ): Promise<
-  { user: SettingsUser; telemetryOptOut: boolean } | { response: Response | Promise<Response> }
+  { user: AccountUser; telemetryOptOut: boolean } | { response: Response | Promise<Response> }
 > {
-  const loaded = await getSettingsUser(c, logger);
+  const loaded = await getAccountUser(c, logger);
   if (!loaded) return { response: c.redirect("/auth/email") };
   if (c.get("authVia") !== "session") {
-    logger.warn("Settings rejected - not a session caller", {});
+    logger.warn("Account page rejected - not a session caller", {});
     return { response: c.html(sessionRequiredError(), 403) };
   }
   return loaded;
@@ -288,7 +312,7 @@ async function loadApiTokens(
 /** The settings page plus everything it lists, in one round of loads. */
 async function renderSettings(
   c: Context<{ Bindings: Env }>,
-  user: SettingsUser,
+  user: AccountUser,
   telemetryOptOut: boolean,
   logger: ReturnType<typeof createLogger>,
   extras: { freshToken?: FreshCredential; notice?: SettingsNotice } = {},
@@ -332,10 +356,35 @@ const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
   },
 };
 
+// GET /profile — Account identity and the caller's own invite codes
+app.get("/profile", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+
+  // Keyed off the service URL alone, not `betaGateEnabled`: codes minted while
+  // the gate was on stay redeemable after it is switched off, so gating the
+  // listing on the gate would hide real codes from the users holding them.
+  const invites = referralServiceConfigured(c.env)
+    ? await fetchInviteCodes(c.env, access.user.id, logger)
+    : undefined;
+
+  return c.html(
+    <ProfilePage
+      user={access.user}
+      {...(invites !== undefined ? { invites } : {})}
+      {...(c.env.REFERRAL_SERVICE_URL !== undefined
+        ? { shareBaseUrl: c.env.REFERRAL_SERVICE_URL }
+        : {})}
+      nonce={c.get("cspNonce") ?? ""}
+    />,
+  );
+});
+
 // GET /settings — Account, privacy, API token, and agent token management
 app.get("/settings", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const access = await requireSettingsSession(c, logger);
+  const access = await requireAccountSession(c, logger);
   if ("response" in access) return access.response;
 
   // Own keys only: a bare index lookup would resolve `?notice=constructor`
@@ -384,7 +433,7 @@ function parseTokenForm(
 // POST /settings/tokens — Mint a named API token; renders the plaintext once
 app.post("/settings/tokens", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const access = await requireSettingsSession(c, logger);
+  const access = await requireAccountSession(c, logger);
   if ("response" in access) return access.response;
   const user = access.user;
 
@@ -444,7 +493,7 @@ app.post("/settings/tokens", async (c) => {
 // POST /settings/tokens/:id/revoke — Revoke one of the caller's own tokens
 app.post("/settings/tokens/:id/revoke", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const access = await requireSettingsSession(c, logger);
+  const access = await requireAccountSession(c, logger);
   if ("response" in access) return access.response;
 
   const { id } = c.req.param();
@@ -479,7 +528,7 @@ app.post("/settings/tokens/:id/revoke", async (c) => {
 // POST /settings/legacy-token/disable — Turn off the pre-scopes credential
 app.post("/settings/legacy-token/disable", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const access = await requireSettingsSession(c, logger);
+  const access = await requireAccountSession(c, logger);
   if ("response" in access) return access.response;
 
   const disableResult = await disableLegacyToken(c.env.DB, access.user.id, logger);
@@ -501,13 +550,13 @@ app.post("/settings/legacy-token/disable", async (c) => {
 
 // POST /settings/telemetry — Set the per-user product-analytics preference
 //
-// Not behind `requireSettingsSession`: this changes the caller's own analytics
+// Not behind `requireAccountSession`: this changes the caller's own analytics
 // preference, it does not mint or revoke a credential, so the circularity that
 // makes the token routes session-only does not apply. A read-only token is
 // already refused on method by `authMiddleware`.
 app.post("/settings/telemetry", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const loaded = await getSettingsUser(c, logger);
+  const loaded = await getAccountUser(c, logger);
   if (!loaded) return c.redirect("/auth/login");
   const { user } = loaded;
 
@@ -547,11 +596,11 @@ app.post("/settings/telemetry", async (c) => {
 // POST /settings/rotate-token — Rotate the API key; renders the new key once
 app.post("/settings/rotate-token", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const loaded = await getSettingsUser(c, logger);
+  const loaded = await getAccountUser(c, logger);
   if (!loaded) return c.redirect("/auth/login");
   const { user, telemetryOptOut } = loaded;
 
-  // Not `requireSettingsSession`: the legacy key must keep rotating for callers
+  // Not `requireAccountSession`: the legacy key must keep rotating for callers
   // that predate #254. Only a SCOPED token is refused, because the key it would
   // mint never expires and survives revocation of the token that minted it.
   if (isScopedTokenCaller(c)) {
@@ -580,11 +629,18 @@ app.post("/settings/rotate-token", async (c) => {
 });
 
 // POST /settings/agents — Create an agent token; renders it once
+//
+// Behind `requireAccountSession` for the same reason as `/settings/tokens`: an
+// agent token is a long-lived credential that outlives the credential that
+// minted it, so letting a scoped `read_write` token mint one would leave
+// "revoke the lost laptop" incomplete. Note this closes the browser form only —
+// `POST /api/agents` still accepts any authenticated caller, so the capability
+// is not gone, just no longer reachable by two doors with different rules.
 app.post("/settings/agents", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const loaded = await getSettingsUser(c, logger);
-  if (!loaded) return c.redirect("/auth/login");
-  const { user, telemetryOptOut } = loaded;
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user, telemetryOptOut } = access;
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
@@ -615,10 +671,15 @@ app.post("/settings/agents", async (c) => {
 });
 
 // POST /settings/agents/:id/delete — Revoke an agent token
+//
+// Session-only alongside its create counterpart: revocation is half of the
+// same credential-management surface, and a token that could revoke its owner's
+// agents can lock them out of their own automation.
 app.post("/settings/agents/:id/delete", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/login");
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user } = access;
 
   const { id } = c.req.param();
   const agentResult = await getAgent(c.env.DB, id, logger);

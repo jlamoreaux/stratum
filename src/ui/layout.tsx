@@ -36,6 +36,9 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, children 
                 <a href="/new" class="nav-auth-link">
                   new project
                 </a>
+                <a href="/profile" class="nav-auth-link">
+                  profile
+                </a>
                 <a href="/settings" class="nav-auth-link">
                   settings
                 </a>

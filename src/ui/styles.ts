@@ -918,6 +918,10 @@ ${NAV_CSS}
 .token-reveal-row { display: flex; gap: 0.5rem; align-items: stretch; flex-wrap: wrap; }
 .token-reveal-row .settings-token { flex: 1; min-width: 240px; }
 
+/* Profile: invite codes. The share link is the long column, so it is the one
+   allowed to wrap; the code itself stays on one line to stay readable. */
+.invite-share-link { word-break: break-all; font-size: 0.8rem; color: var(--accent-text); }
+
 /* New project form: CSS-only mode toggle (script only re-points the action) */
 .mode-toggle { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
 .mode-toggle label {

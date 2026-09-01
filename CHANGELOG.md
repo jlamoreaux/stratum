@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Minting an agent token from the settings form requires a browser session.**
+  `POST /settings/agents` and `POST /settings/agents/:id/delete` loaded the user
+  but never checked *how* they authenticated, so a scoped `read_write` API token
+  could post to the form and receive a fresh agent token — a credential that
+  outlives the token that minted it, which is exactly the circularity #254 closed
+  for `/settings/tokens`. Both are now behind the same session-only guard.
+  This closes the browser form only: `POST /api/agents` and
+  `DELETE /api/agents/:id` still accept any authenticated caller, so the
+  capability is not gone. Closing that too is a breaking change for automation
+  that provisions agents with an API token, and is left as a deliberate decision
+  rather than folded into this change.
+
 ### Added
+- **A profile page, and invite codes you can actually find.** `/profile` (linked
+  from the header, next to settings) shows your account identity — username,
+  email, member since, and any linked GitHub account — plus the invite codes
+  issued to your account, each with a share link and whether it has been
+  redeemed. Codes previously existed only in the one email sent at signup, which
+  is best-effort and skipped entirely when the instance has no email binding
+  configured, so a lost or never-sent email meant unreachable codes; they can now
+  be read back from the referral service on demand. The listing keys off
+  `REFERRAL_SERVICE_URL` alone rather than `BETA_GATE`, so codes minted while the
+  gate was on stay visible to their owners after signups reopen, and an
+  unreachable service reports itself as such instead of rendering as "you have no
+  codes". Requires the referral service to serve
+  `GET /api/referral/codes?userId=…` (contract in `wrangler.toml`). On an
+  instance with no referral service — every ungated self-hosted deployment — the
+  page still renders its account details, just without the invite section. Like
+  `/settings`, it is session-only: an API token cannot enumerate your codes.
 - **CLI and MCP server guides.** Dedicated documentation for `@stratum/cli`
   (`docs/user-guide/cli.md`) and `@stratum/mcp` (`docs/user-guide/mcp.md`),
   published at `/guides/cli/` and `/guides/mcp/` — installation from source,
