@@ -13,14 +13,15 @@
     {
       "identifier": "urn:air:docs.usestratum.dev:mcp:stratum",
       "displayName": "Stratum MCP server",
-      "description": "MCP server exposing the full evaluation-gated change flow: read files, fork workspaces, commit, open changes with each gate's verdict returned, review, merge, and track issues.",
+      "description": "Remote MCP server at app.usestratum.dev/mcp, over streamable HTTP with OAuth 2.1 and dynamic client registration, exposing the full evaluation-gated change flow: read files, fork workspaces, commit, open changes with each gate's verdict returned, review, merge, and track issues.",
       "type": "application/mcp-server-card+json",
       "url": "https://docs.usestratum.dev/.well-known/mcp/server-card.json",
       "representativeQueries": [
         "connect my coding agent to Stratum over MCP",
         "which MCP tools can open and merge a Stratum change",
         "MCP server for evaluation-gated code review",
-        "let Claude commit to a Stratum workspace"
+        "let Claude commit to a Stratum workspace",
+        "authorize an MCP client against Stratum with OAuth"
       ]
     },
     {

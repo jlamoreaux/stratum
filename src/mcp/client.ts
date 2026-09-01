@@ -1,7 +1,21 @@
 /**
- * Typed client for the Stratum REST API, mirroring the Worker's routes.
- * Kept standalone (not shared with @stratum/cli) so each package publishes
- * without a workspace dependency.
+ * The Stratum API surface the MCP tools call.
+ *
+ * This is a port of the client the standalone stdio server used to carry, with
+ * one substitution: where that one issued `fetch` calls across the internet to
+ * `app.usestratum.dev`, this one hands the request to a dispatcher that runs
+ * the SAME Hono routers in-process. The paths, payloads and error mapping are
+ * unchanged, deliberately — the point of routing through the real handlers is
+ * that MCP callers get exactly the REST API's behaviour, including its
+ * authorization checks, its evaluation gates and its refusals, rather than a
+ * parallel implementation that has to be kept in agreement with it.
+ *
+ * There is no request timeout here, unlike the network client. A dispatched
+ * request never leaves the isolate, so there is no socket to hang: the bound is
+ * the Worker's own wall-clock limit, and an AbortController racing it would
+ * only turn a clean platform error into a confusing one. `stratum_create_change`
+ * is the long pole — it runs the whole evaluation suite synchronously — and it
+ * is precisely the call we do NOT want to cut short at an arbitrary deadline.
  */
 
 interface ApiErrorBody {
@@ -16,6 +30,22 @@ export interface ProjectRef {
 }
 
 /**
+ * A tool argument was malformed in a way the JSON Schema could not express.
+ *
+ * Its own type so `tools.ts` can label it as an ARGUMENT failure rather than an
+ * API failure. The distinction is the whole point of the two message prefixes:
+ * a model that reads "Stratum API error" for a malformed project reference
+ * retries the same reference, where "Invalid arguments" tells it to fix the
+ * value it sent.
+ */
+export class InvalidArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidArgumentError";
+  }
+}
+
+/**
  * Parse "ns/slug" or "@ns/slug" into a project reference. Exactly two
  * non-empty segments — extra segments are rejected rather than silently
  * dropped, so a tool can never operate on a different project than named.
@@ -24,125 +54,76 @@ export function parseProjectRef(ref: string): ProjectRef {
   const segments = ref.split("/");
   const [nsRaw, slug] = segments;
   if (segments.length !== 2 || !nsRaw || nsRaw === "@" || !slug) {
-    throw new Error(`Invalid project reference '${ref}' — expected namespace/slug`);
+    throw new InvalidArgumentError(`Invalid project reference '${ref}' — expected namespace/slug`);
   }
   return { namespace: nsRaw.startsWith("@") ? nsRaw : `@${nsRaw}`, slug };
 }
 
-export interface ProjectSummary {
-  id: string;
-  name: string;
-  namespace: string;
-  slug: string;
-  path?: string;
-  remote?: string;
-  visibility?: string;
-  createdAt?: string;
-}
-
-export interface Change {
-  id: string;
-  project: string;
-  workspace: string;
-  status: string;
-  evalScore?: number;
-  evalPassed?: boolean;
-  evalReason?: string;
-  baseSha?: string;
-  createdAt: string;
-  mergedAt?: string;
-}
-
-export interface EvalRun {
-  id: string;
-  evaluatorType: string;
-  score: number;
-  passed: boolean;
-  reason: string;
-}
-
-export interface Issue {
-  id: string;
-  project: string;
-  number: number;
-  title: string;
-  body?: string;
-  status: "open" | "closed";
-  linkedChangeId?: string;
-  createdAt: string;
-}
-
-export interface ActivityEvent {
-  id: string;
-  type: string;
-  actorType: string;
-  actorId?: string;
-  payload: Record<string, unknown>;
-  createdAt: string;
-}
-
-// Change creation runs the full evaluation suite synchronously server-side, so
-// the deadline must comfortably exceed a slow LLM + sandbox run.
-const DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * Runs one API request against the in-process routers.
+ *
+ * Supplied by `src/mcp/dispatch.ts`, which owns the middleware chain the
+ * sub-request passes through.
+ */
+export type ApiDispatch = (request: Request) => Promise<Response>;
 
 export class StratumClient {
+  /**
+   * @param origin  Absolute origin the sub-request URLs are built on. Taken
+   *   from the inbound MCP request so a self-hosted instance addresses itself,
+   *   never a hard-coded host.
+   * @param authorization  The verbatim `Authorization` header of the inbound
+   *   MCP request, replayed on every sub-request. The credential is therefore
+   *   re-resolved by the real auth middleware for each call, so a token revoked
+   *   mid-session stops working on the very next tool call rather than at the
+   *   end of the connection.
+   */
   constructor(
-    private host: string,
-    private apiKey: string,
-    private opts: { timeoutMs?: number } = {},
+    private origin: string,
+    private authorization: string,
+    private dispatch: ApiDispatch,
   ) {}
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const url = `${this.host.replace(/\/$/, "")}${path}`;
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-    };
+    const headers: Record<string, string> = { Authorization: this.authorization };
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(new Error("Stratum API request timed out")),
-      this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    );
-    // The timer stays armed through body parsing — the signal propagates into
-    // response.json(), so a server that stalls mid-body can't hang the request
-    // past the deadline.
-    try {
-      const response = await fetch(url, {
+    const response = await this.dispatch(
+      new Request(`${this.origin}${path}`, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
+      }),
+    );
 
-      if (!response.ok) {
-        let message = `HTTP ${response.status}`;
-        try {
-          const err = (await response.json()) as ApiErrorBody;
-          message = err.error ?? err.message ?? message;
-          if (err.reasons && err.reasons.length > 0) {
-            message += `\n  - ${err.reasons.join("\n  - ")}`;
-          }
-        } catch {
-          message = response.statusText || message;
+    if (!response.ok) {
+      // The API's error shapes, surfaced as the tool's error text. `reasons` is
+      // what a blocked merge returns — the gate verdicts — and losing it would
+      // reduce "these three evaluators failed" to "409".
+      let message = `HTTP ${response.status}`;
+      try {
+        const err = (await response.json()) as ApiErrorBody;
+        message = err.error ?? err.message ?? message;
+        if (err.reasons && err.reasons.length > 0) {
+          message += `\n  - ${err.reasons.join("\n  - ")}`;
         }
-        throw new Error(message);
+      } catch {
+        message = response.statusText || message;
       }
-
-      return (await response.json()) as T;
-    } finally {
-      clearTimeout(timer);
+      throw new Error(message);
     }
+
+    return (await response.json()) as T;
   }
 
   // ── Projects ────────────────────────────────────────────────────────────
 
   async listProjects() {
-    return this.request<{ projects: ProjectSummary[] }>("GET", "/api/projects");
+    return this.request<{ projects: unknown[] }>("GET", "/api/projects");
   }
 
   async getProject(ref: ProjectRef) {
-    return this.request<ProjectSummary>(
+    return this.request<unknown>(
       "GET",
       `/api/projects/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}`,
     );
@@ -163,7 +144,7 @@ export class StratumClient {
   }
 
   async getActivity(ref: ProjectRef) {
-    return this.request<{ events: ActivityEvent[] }>(
+    return this.request<{ events: unknown[] }>(
       "GET",
       `/api/projects/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}/activity`,
     );
@@ -180,7 +161,7 @@ export class StratumClient {
   }
 
   async listWorkspaces(ref: ProjectRef) {
-    return this.request<{ workspaces: Array<{ name: string; createdAt: string; path: string }> }>(
+    return this.request<{ workspaces: unknown[] }>(
       "GET",
       `/api/workspaces/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}/workspaces`,
     );
@@ -202,42 +183,34 @@ export class StratumClient {
   // ── Changes ─────────────────────────────────────────────────────────────
 
   async createChange(projectName: string, workspace: string) {
-    return this.request<{
-      change: Change;
-      eval: { score: number; passed: boolean; reason: string };
-      evalRuns: EvalRun[];
-    }>("POST", `/api/projects/${encodeURIComponent(projectName)}/changes`, { workspace });
+    return this.request<unknown>(
+      "POST",
+      `/api/projects/${encodeURIComponent(projectName)}/changes`,
+      {
+        workspace,
+      },
+    );
   }
 
   async listChanges(projectName: string, status?: string) {
     const query = status ? `?status=${encodeURIComponent(status)}` : "";
-    return this.request<{ changes: Change[] }>(
+    return this.request<{ changes: unknown[] }>(
       "GET",
       `/api/projects/${encodeURIComponent(projectName)}/changes${query}`,
     );
   }
 
   async getChange(id: string) {
-    return this.request<{
-      change: Change;
-      evalRuns: EvalRun[];
-      costs: Array<{ kind: string; total: number; estimated: boolean }>;
-    }>("GET", `/api/changes/${encodeURIComponent(id)}`);
+    return this.request<unknown>("GET", `/api/changes/${encodeURIComponent(id)}`);
   }
 
   async mergeChange(id: string, opts?: { force?: boolean; strategy?: "merge" | "squash" }) {
     const params = new URLSearchParams();
     if (opts?.force) params.set("force", "true");
     if (opts?.strategy) params.set("strategy", opts.strategy);
-    // params.size needs Node >= 18.16; the serialized string works on every
-    // release the engines field allows.
     const serialized = params.toString();
     const query = serialized ? `?${serialized}` : "";
-    return this.request<{
-      merged: boolean;
-      commit?: string;
-      postMerge?: { status: string; reason?: string };
-    }>("POST", `/api/changes/${encodeURIComponent(id)}/merge${query}`);
+    return this.request<unknown>("POST", `/api/changes/${encodeURIComponent(id)}/merge${query}`);
   }
 
   async rejectChange(id: string) {
@@ -248,17 +221,16 @@ export class StratumClient {
   }
 
   async reviewChange(id: string, verdict: "approve" | "request_changes", comment?: string) {
-    return this.request<{ review: { verdict: string }; changeStatus: string }>(
-      "POST",
-      `/api/changes/${encodeURIComponent(id)}/reviews`,
-      { verdict, ...(comment ? { comment } : {}) },
-    );
+    return this.request<unknown>("POST", `/api/changes/${encodeURIComponent(id)}/reviews`, {
+      verdict,
+      ...(comment ? { comment } : {}),
+    });
   }
 
   // ── Issues ──────────────────────────────────────────────────────────────
 
   async createIssue(ref: ProjectRef, title: string, body?: string, linkedChangeId?: string) {
-    return this.request<{ issue: Issue }>(
+    return this.request<unknown>(
       "POST",
       `/api/projects/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}/issues`,
       { title, ...(body ? { body } : {}), ...(linkedChangeId ? { linkedChangeId } : {}) },
@@ -267,7 +239,7 @@ export class StratumClient {
 
   async listIssues(ref: ProjectRef, status?: "open" | "closed") {
     const query = status ? `?status=${status}` : "";
-    return this.request<{ issues: Issue[] }>(
+    return this.request<{ issues: unknown[] }>(
       "GET",
       `/api/projects/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}/issues${query}`,
     );
@@ -278,7 +250,7 @@ export class StratumClient {
     number: number,
     updates: { status?: "open" | "closed"; title?: string; body?: string },
   ) {
-    return this.request<{ issue: Issue }>(
+    return this.request<unknown>(
       "PATCH",
       `/api/projects/${encodeURIComponent(ref.namespace)}/${encodeURIComponent(ref.slug)}/issues/${number}`,
       updates,

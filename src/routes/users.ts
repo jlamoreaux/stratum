@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { isScopedTokenCaller } from "../middleware/auth";
+import { cannotMintLegacyCredential } from "../middleware/auth";
 import {
   MAX_TOKEN_EXPIRY_DAYS,
   MIN_TOKEN_EXPIRY_DAYS,
@@ -77,13 +77,14 @@ app.post("/me/rotate-token", async (c) => {
   }
 
   // Sessions and the legacy key still rotate — that is the backward
-  // compatibility this route exists to keep. A SCOPED token may not, because
-  // the key it would mint outlives the revocation of the token that minted it.
-  if (isScopedTokenCaller(c)) {
-    logger.warn("Rotate rejected - scoped token cannot mint the legacy credential", { userId });
+  // compatibility this route exists to keep. A scoped token or an OAuth grant
+  // may not, because the key it would mint outlives the revocation of the
+  // credential that minted it.
+  if (cannotMintLegacyCredential(c)) {
+    logger.warn("Rotate rejected - delegated credential cannot mint the legacy key", { userId });
     return c.json(
       {
-        error: "A scoped API token cannot rotate the legacy API key",
+        error: "A scoped API token or OAuth grant cannot rotate the legacy API key",
         code: "SESSION_REQUIRED",
       },
       403,
@@ -118,7 +119,8 @@ const MAX_TOKEN_BODY_BYTES = 4 * 1024;
  * replacement. GitHub forbids PATs from managing PATs for the same reason.
  *
  * `POST /me/rotate-token` still accepts the LEGACY key, so existing automation
- * keeps working, but refuses a scoped token: see `isScopedTokenCaller`. The
+ * keeps working, but refuses a scoped token or an OAuth grant: see
+ * `cannotMintLegacyCredential`. The
  * backward-compatibility argument only ever covered credentials that predate
  * this feature, and a scoped token minting a permanent key would reopen exactly
  * the circularity this helper closes.

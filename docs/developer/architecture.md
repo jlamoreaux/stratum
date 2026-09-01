@@ -612,6 +612,12 @@ src/
 │   ├── client.ts            # GitHub API client
 │   ├── sync.ts              # Bidirectional sync logic
 │   └── webhooks.ts          # Webhook event handling
+├── mcp/
+│   ├── client.ts            # Stratum API client used by the tools
+│   ├── dispatch.ts          # Runs tool calls against the real routers, in-process
+│   ├── protocol.ts          # JSON-RPC 2.0 / MCP message layer
+│   ├── schema.ts            # Tool arg schemas: JSON Schema + validator
+│   └── tools.ts             # The eighteen tools
 ├── merge/
 │   ├── post-merge.ts        # Post-merge actions
 │   └── protection.ts        # Merge protection rules
@@ -650,6 +656,8 @@ src/
 │   ├── health.ts            # Health check endpoints
 │   ├── issues.ts            # Issue tracking
 │   ├── login.tsx            # Login page
+│   ├── mcp.ts               # Remote MCP endpoint (/mcp)
+│   ├── mcp-oauth.tsx        # OAuth 2.1 authorization server for /mcp
 │   ├── metrics.ts           # Admin metrics
 │   ├── orgs.ts              # Organization management
 │   ├── projects.ts          # Project CRUD
@@ -690,6 +698,7 @@ src/
 │   ├── memory-fs.ts
 │   ├── metrics.ts
 │   ├── object-loader.ts
+│   ├── oauth.ts             # MCP OAuth clients, codes, and grants
 │   ├── object-store.ts
 │   ├── orgs.ts
 │   ├── provenance.ts

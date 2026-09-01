@@ -1,68 +1,146 @@
 # The Stratum MCP server
 
-`@stratum/mcp` exposes Stratum's eval-gated change flow as an
-[MCP](https://modelcontextprotocol.io/) server over stdio, so any MCP-capable
-agent or editor — Claude Code, Cursor, Zed, Copilot, custom agents — can read a
-project, fork a workspace, commit, and propose governed changes without a
-Stratum-specific SDK.
+Stratum serves [MCP](https://modelcontextprotocol.io/) directly from the Worker
+at **`/mcp`**, so any MCP-capable agent or editor — Claude Code, Cursor, Zed,
+Copilot, custom agents — can read a project, fork a workspace, commit, and
+propose governed changes. There is nothing to install: you point your client at
+a URL and approve the connection in your browser.
 
 Stratum's governance invariants hold over MCP exactly as they do over the REST
-API: a change cannot merge past failing evaluators, review verdicts are a human
-gate, and every merged change keeps its provenance and cost records. The
-protocol is a doorway, not a bypass.
+API, because the tools call the same route handlers: a change cannot merge past
+failing evaluators, review verdicts are a human gate, and every merged change
+keeps its provenance and cost records. The protocol is a doorway, not a bypass.
 
 (This server is distinct from the docs site's own
 [agent discovery surface](https://docs.usestratum.dev/reference/agent-discovery/),
 which serves documentation to agents. This one operates on your projects.)
 
-## Installation
-
-Not yet published to npm — install from the `mcp/` directory of the repository
-(Node 18+):
-
-```bash
-git clone https://github.com/stratum-eng/stratum.git
-cd stratum/mcp
-npm install && npm run build     # binary at dist/index.js (bin name: stratum-mcp)
-```
-
-## Configuration
-
-Everything is environment variables — the server takes no flags:
-
-| Variable | Required | Meaning |
-|---|---|---|
-| `STRATUM_API_KEY` | yes | A user token (`stratum_user_...`) or agent token (`stratum_agent_...`). |
-| `STRATUM_HOST` | no | Defaults to `https://app.usestratum.dev`; set it for self-hosted instances. |
-
-The host is validated at startup and the server refuses to start rather than
-run misconfigured: it must be a URL with **no** embedded credentials, query
-string, or fragment, and it must be `https` — plain `http` is allowed only for
-loopback development hosts (`localhost`, `127.0.0.1`, `[::1]`), because the API
-key travels in a header on every request.
-
 ## Connecting a client
+
+The endpoint is `/mcp` on your own Stratum instance. The examples below use
+`https://app.usestratum.dev`, the maintainer's hosted instance — **if you
+self-host, substitute your own Worker's origin.** Pointing a client at someone
+else's instance sends your tool calls there, along with any credential you
+configure by hand.
+
+<!-- Do NOT reintroduce a `your-instance.workers.dev` placeholder into the
+     sentence above. `SELF_HOST_PLACEHOLDER` in website/scripts/mirror-docs.mjs
+     rewrites that string to the hosted origin for the published site, which
+     turns a sentence contrasting the two hosts into one naming the same host
+     twice — and tells a self-hoster to point their client at someone else's
+     instance. The wording above is correct in both copies. -->
 
 Claude Code:
 
 ```bash
-export STRATUM_API_KEY=stratum_user_xxxxx
-claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- node /path/to/stratum/mcp/dist/index.js
+claude mcp add --transport http stratum https://app.usestratum.dev/mcp
 ```
 
-Any MCP client (stdio):
+Any MCP client that supports remote servers:
 
 ```json
 {
   "mcpServers": {
     "stratum": {
-      "command": "node",
-      "args": ["/path/to/stratum/mcp/dist/index.js"],
-      "env": { "STRATUM_API_KEY": "stratum_user_..." }
+      "type": "http",
+      "url": "https://app.usestratum.dev/mcp"
     }
   }
 }
 ```
+
+The first tool call opens your browser, asks you to sign in if you are not
+already, and shows a consent screen naming the application and what it is asking
+for. Approve it once; the client stores the tokens and refreshes them on its
+own.
+
+You never paste a Stratum credential into your editor's configuration, and you
+can withdraw access at any time from **Settings → Connected applications**
+without touching the client.
+
+### Headless clients and CI
+
+An automation with no browser can present a Stratum credential directly instead
+of running the OAuth flow:
+
+```bash
+curl -X POST https://app.usestratum.dev/mcp \
+  -H "Authorization: Bearer $STRATUM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Both credential kinds work: a user token (`stratum_user_...`) or an agent token
+(`stratum_agent_...`). See
+[what an agent token can do](#what-an-agent-token-can--and-cannot--do) below —
+the difference matters.
+
+## How authorization works
+
+The endpoint is an OAuth 2.1 protected resource, and Stratum is the
+authorization server. A client bootstraps the whole flow from the URL alone:
+
+1. It calls `/mcp` with no credential. The `401` carries a `WWW-Authenticate`
+   header naming `/.well-known/oauth-protected-resource`.
+2. That document points at `/.well-known/oauth-authorization-server`.
+3. The client registers itself at `/oauth/register`
+   ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) dynamic client
+   registration) — no pre-shared client id, nothing configured in advance.
+4. It opens `/oauth/authorize` in your browser. You sign in and consent.
+5. It exchanges the resulting code at `/oauth/token`.
+
+Details worth knowing:
+
+| Property | Value |
+|---|---|
+| PKCE | **Required**, `S256` only. `plain` is not offered and cannot be stored. |
+| Authorization code lifetime | 60 seconds, single use. A replayed code revokes every token issued from it — but a redemption that merely *fails validation* (wrong client, wrong verifier, wrong redirect URI) leaves the code untouched, so observing one is not enough to disrupt the real client. |
+| Access token lifetime | 1 hour |
+| Refresh token lifetime | 30 days, **rotated** on every use |
+| Redirect URIs | Matched exactly against the registered list. `https`, or `http` on a loopback IP literal for native apps. |
+| Scopes | `mcp:read`, `mcp:write` |
+
+Every metadata document is built from the request's own origin, so a self-hosted
+instance advertises itself with nothing to configure.
+
+### Scopes
+
+| Scope | Grants |
+|---|---|
+| `mcp:read` | Read projects, files, changes, evaluations and issues. Exactly a read-only API token. |
+| `mcp:write` | The above, plus workspaces, commits, changes, merges, reviews and issue management. Exactly a read-write API token. |
+
+A client that asks for no scope gets `mcp:read`. A read-only grant is refused in
+the middleware, before routing, on any write request — so no route has to
+remember the rule.
+
+The one place the check is deferred is `/mcp` itself, and only because the HTTP
+method there says nothing about the operation: every MCP call is a POST,
+`tools/list` as much as `stratum_commit`, so refusing on the method would lock a
+read-only grant out of the endpoint rather than restrict it. Each tool call is
+re-dispatched internally as a real API request carrying the same credential, and
+*that* request meets the identical check against the method the operation
+actually uses. So `stratum_get_file` works on an `mcp:read` grant and
+`stratum_commit` does not.
+
+An OAuth grant is a *delegated* credential: it lives inside software you do not
+control. Two things it therefore cannot do, regardless of scope:
+
+- **Reach the admin API.** `/api/admin/*` is refused for OAuth grants even when
+  the account behind them is the instance administrator.
+- **Mint the legacy API key.** The key never expires and cannot be revoked
+  individually, so a credential that could mint one would outlive its own
+  revocation.
+
+### Disconnecting an application
+
+**Settings → Connected applications** lists every client you have authorized,
+with its self-declared name, its client id, the access you granted and when it
+was last used. Disconnecting is immediate: the access token and the ability to
+refresh both stop working at once.
+
+Application names are chosen by the application at registration and are not
+vetted by anyone. A name you do not recognise should be disconnected.
 
 ## The tools
 
@@ -89,10 +167,16 @@ Eighteen tools cover the full contribution loop. Project arguments take a
 | `stratum_commit` | Commit a map of repo-relative paths to **complete file contents**. |
 
 `stratum_commit` takes the `project_id` from `stratum_get_project`, not the
-`namespace/slug` reference. The file map is capped at 2,000 files and 25 MB per
-commit, and it cannot express a deletion or rename — only full contents of
-added or modified files. Larger or destructive edits go over the workspace's
-git remote instead.
+`namespace/slug` reference. The file map is capped at 2,000 files, and it cannot
+express a deletion or rename — only full contents of added or modified files.
+Larger or destructive edits go over the workspace's git remote instead.
+
+**The whole MCP request is capped at 8 MB**, below the REST API's 25 MB commit
+limit. A tool call is buffered, parsed, re-serialized into an internal request
+and parsed again, so a body near the REST limit would cost more than a Workers
+isolate's entire 128 MB budget — which is shared with every other request that
+isolate is serving. A commit that does not fit belongs on the git remote
+anyway.
 
 **The change flow**
 
@@ -133,29 +217,43 @@ them alike. With an **agent token**:
   accepts from agents but this server does not yet expose as a tool.
 
 So an agent-token deployment is a *proposer*: it forks, commits, opens the
-change, and a human (over the UI, [CLI](cli.md), or their own MCP session with
-a user token) reviews and merges.
+change, and a human (over the UI, [CLI](cli.md), or their own MCP session)
+reviews and merges.
+
+An **OAuth grant is a user credential**, not an agent identity: a human
+consented to it in a browser, so it carries the same authority a user token
+does, including review verdicts when `mcp:write` was granted. If you want an
+MCP client that can propose but never decide, connect it with an agent token
+rather than through OAuth.
 
 ## Operational notes
 
-- The server logs to **stderr only**; stdout carries the MCP stdio framing.
-  A startup line confirms the version and host.
+- The endpoint is **stateless**: no session to establish or resume, no
+  `Mcp-Session-Id`. Every request is self-contained and authenticated on its
+  own, so any edge location can answer any call and a reconnect loses nothing.
+- `GET /mcp` returns **405**. This server never initiates messages, so there is
+  no server-to-client stream to open; clients treat the 405 as "none offered".
+- Protocol versions accepted: `2025-06-18`, `2025-03-26`, `2024-11-05`. An
+  explicitly unsupported `Mcp-Protocol-Version` header is a 400; an absent one
+  is fine.
 - Tool failures come back as results marked as errors, prefixed
-  `Stratum API error:` — or `Invalid arguments:` for a schema violation, so a
-  calling agent knows whether to fix its input or its expectations.
+  `Stratum API error:` — or `Invalid arguments for <tool>:` for a schema
+  violation, so a calling agent knows whether to fix its input or its
+  expectations. Argument errors list **every** problem at once rather than the
+  first.
 - Evaluation runs inside `stratum_create_change`, so on a project with a slow
-  sandbox evaluator that call legitimately runs long — but note the client
-  aborts every request at a fixed **120 seconds**, which is *less* than the
-  default 150s
-  [evaluation budget](troubleshooting.md#sandbox-budget-exceeded-install-or-command).
-  A timeout on this tool does not mean the evaluation failed: it continues
-  server-side, so follow up with `stratum_list_changes` /
-  `stratum_get_change` rather than re-submitting.
+  sandbox evaluator that call legitimately runs long. There is no client-side
+  deadline cutting it short any more — the bound is the request's own budget.
+  If a call does fail mid-evaluation, the evaluation continues server-side:
+  follow up with `stratum_list_changes` / `stratum_get_change` rather than
+  re-submitting.
+- The credential is re-resolved on **every** tool call, not once per
+  connection. A token you revoke stops working on the next call.
 
 ## Reference
 
-- [`mcp/README.md`](../../mcp/README.md) — the package's own quick reference
 - [Getting started §6](getting-started.md#6-connect-your-tools) — where MCP
   fits in the end-to-end flow
+- [Authentication](../api/authentication.md) — the credential kinds
 - [CI integration](ci-integration.md) — evaluating changes on your own infra
 - [OpenAPI specification](../api/openapi.yml) — the API the tools wrap

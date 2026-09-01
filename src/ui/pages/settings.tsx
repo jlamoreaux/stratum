@@ -6,6 +6,7 @@ import {
   MIN_TOKEN_EXPIRY_DAYS,
   isExpired,
 } from "../../storage/api-tokens";
+import type { OAuthGrantSummary } from "../../storage/oauth";
 import type { ApiTokenScope } from "../../types";
 import { Layout } from "../layout";
 
@@ -36,6 +37,12 @@ interface SettingsPageProps {
   user: { id: string; email: string; username: string };
   agents: AgentSummary[];
   apiTokens: ApiTokenSummary[];
+  /** MCP clients the user has authorized over OAuth (#349). */
+  oauthGrants: OAuthGrantSummary[];
+  /** True when the listing could not be READ, as opposed to being empty.
+   * "No applications connected" is a reassurance, and it must not be shown to
+   * someone whose connection list we simply failed to load. */
+  oauthGrantsUnavailable: boolean;
   freshToken?: FreshCredential;
   notice?: SettingsNotice;
   /** Per-request CSP nonce for the copy-button script (only rendered with a fresh token). */
@@ -97,6 +104,33 @@ const COPY_TOKEN_SCRIPT = `
 })();
 `;
 
+/**
+ * One connected MCP client.
+ *
+ * `clientName` is self-asserted at registration by an anonymous caller, so it
+ * is rendered as a plain string (JSX escapes it) and never as a link — and the
+ * client_id is shown beside it, because that is the only part of the row the
+ * user did not have to take on trust.
+ */
+const OAuthGrantRow: FC<{ grant: OAuthGrantSummary }> = ({ grant }) => (
+  <tr>
+    <td>{grant.clientName}</td>
+    <td>
+      <code>{grant.clientId}</code>
+    </td>
+    <td>{grant.scope.includes("mcp:write") ? "Read & write" : "Read-only"}</td>
+    <td>{formatDate(grant.createdAt)}</td>
+    <td>{grant.lastUsedAt === undefined ? "Never used" : formatDate(grant.lastUsedAt)}</td>
+    <td>
+      <form method="post" action={`/settings/connections/${grant.id}/revoke`}>
+        <button type="submit" class="btn btn-small btn-danger">
+          Disconnect
+        </button>
+      </form>
+    </td>
+  </tr>
+);
+
 const ApiTokenRow: FC<{ token: ApiTokenSummary; now: number }> = ({ token, now }) => {
   const status = tokenStatus(token, now);
   return (
@@ -128,6 +162,8 @@ export const SettingsPage: FC<SettingsPageProps> = ({
   user,
   agents,
   apiTokens,
+  oauthGrants,
+  oauthGrantsUnavailable,
   freshToken,
   notice,
   nonce,
@@ -304,6 +340,49 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         <p class="settings-help">
           {activeTokens} of {MAX_ACTIVE_TOKENS_PER_USER} active tokens used. Revoked and expired
           tokens do not count towards the limit.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3 style={{ marginTop: 0 }}>Connected applications</h3>
+        <p class="settings-help">
+          Editors and agents you have authorized to reach Stratum over MCP at <code>/mcp</code>.
+          Each one acts as you, within the access you granted it. Disconnecting takes effect
+          immediately — the application&rsquo;s access token and its ability to refresh both stop
+          working at once.
+        </p>
+        {oauthGrantsUnavailable ? (
+          <p class="settings-help">
+            Your connected applications could not be loaded, so this list is not showing them.
+            Nothing has been disconnected &mdash; try again shortly.
+          </p>
+        ) : oauthGrants.length === 0 ? (
+          <p class="settings-help">
+            No applications connected. Point your editor&rsquo;s MCP client at <code>/mcp</code> on
+            this instance and it will ask for access.
+          </p>
+        ) : (
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Application</th>
+                <th>Client ID</th>
+                <th>Access</th>
+                <th>Connected</th>
+                <th>Last used</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {oauthGrants.map((grant) => (
+                <OAuthGrantRow key={grant.id} grant={grant} />
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p class="settings-help">
+          An application chooses its own display name when it registers, and nobody vets it. Treat a
+          name you do not recognise as untrusted and disconnect it.
         </p>
       </div>
 

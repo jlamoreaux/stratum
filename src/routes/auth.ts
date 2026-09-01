@@ -6,6 +6,7 @@ import { createSession, deleteSession, getSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
+import { consumePostLoginRedirect, isSafeRedirectTarget } from "../utils/post-login-redirect";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -252,19 +253,19 @@ app.get("/github/callback", async (c) => {
 
   sessionLogger.info("GitHub OAuth successful, session created");
 
-  let redirectTo = "/";
-  if (next && typeof next === "string") {
-    try {
-      const url = new URL(next, "http://localhost");
-      if (url.hostname === "localhost" || url.hostname === "") {
-        redirectTo = url.pathname + url.search;
-      }
-    } catch {
-      // invalid next param — fall back to /
-    }
+  // `next` (carried through GitHub's state parameter) still wins when present,
+  // so existing links keep behaving as they did. The cookie is the fallback,
+  // and it is what a flow that started somewhere else — the MCP consent screen,
+  // say — uses to get the user back to the request they interrupted.
+  let redirectTo: string | undefined;
+  if (next && typeof next === "string" && isSafeRedirectTarget(next, c.req.url)) {
+    const url = new URL(next, new URL(c.req.url).origin);
+    redirectTo = url.pathname + url.search + url.hash;
   }
-
-  return c.redirect(redirectTo);
+  // Consumed unconditionally, even when `next` won, so a stale destination is
+  // never left in the jar for the next sign-in to pick up.
+  const remembered = consumePostLoginRedirect(c, "/");
+  return c.redirect(redirectTo ?? remembered);
 });
 
 app.get("/google", async (c) => {
@@ -412,7 +413,7 @@ app.get("/google/callback", async (c) => {
   });
 
   sessionLogger.info("Google OAuth successful, session created");
-  return c.redirect("/");
+  return c.redirect(consumePostLoginRedirect(c, "/"));
 });
 
 // Logout is state-changing, so it happens on POST (the nav renders a form and

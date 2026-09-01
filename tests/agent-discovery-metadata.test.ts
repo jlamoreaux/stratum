@@ -39,6 +39,15 @@ const globbed = {
   ...import.meta.glob("../website/dns/*.zone", { query: "?raw", import: "default", eager: true }),
 } as Record<string, string>;
 
+/** The one authored (not mirrored) page whose prose this suite asserts on. */
+const AGENT_DISCOVERY_PAGE = Object.values(
+  import.meta.glob("../website/src/content/docs/reference/agent-discovery.md", {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  }),
+)[0] as string;
+
 /**
  * Every route Starlight publishes from `src/content/docs/`, as the trailing-slash
  * paths the site actually serves. Only the keys matter here, so the modules are
@@ -165,26 +174,65 @@ describe("agent skills discovery index", () => {
   });
 });
 
-describe("OAuth documents Stratum does not publish", () => {
-  it("publishes no authorization server or OIDC metadata, because it is not one", () => {
-    // Stratum issues opaque bearer tokens: no authorization_endpoint, no
-    // token_endpoint, no jwks_uri. Publishing either document would send agents
-    // into a handshake that cannot complete. If Stratum ever grows a real OAuth
-    // server, this expectation is the first thing to change.
+describe("OAuth metadata, which belongs on the API origin", () => {
+  // Stratum IS an OAuth 2.1 authorization server now (#349) — for `/mcp`, on
+  // `app.usestratum.dev`. What follows is about which ORIGIN serves the
+  // metadata, not whether it exists. The distinction is the whole point: these
+  // documents were absent before because there was nothing to describe, and are
+  // absent here because a client derives their URLs from an origin these docs
+  // do not serve.
+
+  it("serves no authorization-server or protected-resource metadata from the docs origin", () => {
+    // RFC 9728 §3 has a client derive the protected-resource URL from the
+    // resource's own origin, RFC 8414 §3 the AS URL from the issuer's. Both
+    // land on https://app.usestratum.dev. A copy here would be found only by
+    // agents that already knew to look, while every spec-compliant client got a
+    // 404 from the origin that matters.
     expect(() => read(".well-known/oauth-authorization-server")).toThrow();
+    expect(() => read(".well-known/oauth-protected-resource")).toThrow();
+
+    // A docs-origin LOCATOR is the failure mode, not the string: naming the
+    // API origin's document absolutely (as the server card does) is correct.
+    for (const file of [".well-known/ai-catalog.json", "webmcp.js"]) {
+      expect(read(file), file).not.toContain(`${SITE}/.well-known/oauth-`);
+    }
+  });
+
+  it("publishes no OIDC metadata, because Stratum is not an OIDC provider", () => {
+    // Opaque access tokens, checked against the database on the call that
+    // presents them. There is no jwks_uri and no ID token to validate offline.
     expect(() => read(".well-known/openid-configuration")).toThrow();
   });
 
-  it("publishes no protected-resource metadata from the docs origin", () => {
-    // RFC 9728 §3 has a client derive this URL from the protected resource's own
-    // origin. The resource is https://app.usestratum.dev, which these docs do not
-    // serve, so a copy here would be found only by agents that already knew where
-    // to look while every spec-compliant client got a 404 from the origin that
-    // matters. It belongs on the API origin or nowhere. /auth.md carries the
-    // credential contract meanwhile, and the ARD catalogue lists it.
-    expect(() => read(".well-known/oauth-protected-resource")).toThrow();
-    expect(read(".well-known/ai-catalog.json")).not.toContain("oauth-protected-resource");
-    expect(read("webmcp.js")).not.toContain("oauth-protected-resource");
+  it("names the protected resource and its issuer in the server card, so agents still find them", () => {
+    // The docs origin serving neither document is only defensible because the
+    // card carries the absolute URL of one and the issuer the other is derived
+    // from. Absent that, an agent walking the catalogue reaches a dead end.
+    const card = readJson(".well-known/mcp/server-card.json");
+
+    expect(card.authentication.type).toBe("oauth2");
+    expect(card.authentication.protected_resource_metadata).toBe(
+      "https://app.usestratum.dev/.well-known/oauth-protected-resource",
+    );
+    expect(card.authentication.authorization_servers).toContain("https://app.usestratum.dev");
+  });
+
+  it("no longer tells agents Stratum is not an authorization server", () => {
+    // Both documents said exactly that, in prose, until #349 made it false —
+    // and nothing failed when it did. An agent that believes it will not
+    // attempt the flow that now works.
+    // A renamed or moved page must fail here rather than vacuously pass.
+    expect(typeof AGENT_DISCOVERY_PAGE, "agent-discovery.md was not globbed").toBe("string");
+
+    for (const [name, text] of [
+      ["auth.md", read("auth.md")],
+      ["reference/agent-discovery.md", AGENT_DISCOVERY_PAGE],
+    ] as const) {
+      expect(text, name).not.toMatch(/not an OAuth authorization server/i);
+      expect(text, name).not.toMatch(
+        /no `?\/?\.well-known\/oauth-authorization-server`? document is/i,
+      );
+    }
   });
 });
 

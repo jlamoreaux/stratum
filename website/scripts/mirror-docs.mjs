@@ -24,7 +24,7 @@ const GUIDES = [
   ["issues", "Open, triage, search, and link issues — and how a merged change closes them."],
   ["ci-integration", "Bring your own CI: run evaluations on your existing infrastructure and report verdicts back."],
   ["cli", "Install and use @stratum/cli — projects, workspaces, commits, and the change flow from the terminal."],
-  ["mcp", "Install the MCP server and give any MCP-capable agent or editor the eval-gated change flow."],
+  ["mcp", "Connect any MCP-capable agent or editor to the evaluation-gated change flow over the hosted /mcp endpoint — OAuth 2.1, nothing to install."],
   ["troubleshooting", "Symptoms and fixes for auth, imports, evaluation, merges, and access."],
   ["faq", "Common questions about Stratum's merge gate, provenance, CI, limitations, and telemetry."],
 ];

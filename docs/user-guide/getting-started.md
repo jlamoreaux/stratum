@@ -342,40 +342,49 @@ stratum projects      # list your projects
 See [the CLI guide](cli.md) for the full command reference, configuration, and
 the commit path's limits.
 
-### MCP server — `@stratum/mcp`
+### MCP server — `/mcp`
 
-The MCP server gives **any** MCP-capable agent or editor (Claude Code, Cursor,
-Zed, Copilot, custom agents) the full eval-gated change flow: read files, fork
-workspaces, commit, create changes (with each gate's verdict returned), review,
-merge, and track issues. Like the CLI, it is not yet on npm — install from the
-`mcp/` directory.
+Stratum serves MCP from the Worker itself, so **any** MCP-capable agent or
+editor (Claude Code, Cursor, Zed, Copilot, custom agents) reaches the eval-gated
+change flow with nothing to install.
+
+How much of that flow depends on the credential. An OAuth grant with `mcp:write`
+— or a `stratum_user_` token with write access — gets all of it: read files,
+fork workspaces, commit, create changes (with each gate's verdict returned),
+review, merge, and track issues. An `mcp:read` grant reads only. An **agent
+token** can read, fork, commit and open a gated change, but never review, merge
+or reject: those are human decisions, and that is the point.
 
 Claude Code:
 
 ```bash
-export STRATUM_API_KEY=stratum_user_xxxxx
-claude mcp add stratum -e STRATUM_API_KEY=$STRATUM_API_KEY -- node /path/to/stratum/mcp/dist/index.js
+claude mcp add --transport http stratum https://app.usestratum.dev/mcp
 ```
 
-Any MCP client (stdio):
+Any MCP client that supports remote servers:
 
 ```json
 {
   "mcpServers": {
     "stratum": {
-      "command": "node",
-      "args": ["/path/to/stratum/mcp/dist/index.js"],
-      "env": { "STRATUM_API_KEY": "stratum_user_..." }
+      "type": "http",
+      "url": "https://app.usestratum.dev/mcp"
     }
   }
 }
 ```
 
-`STRATUM_HOST` defaults to `https://app.usestratum.dev`; set it for self-hosted
-instances. All governance invariants hold over MCP exactly as over REST: agent
-tokens can't submit review verdicts, merge, or reject, failing evaluators block
-merges, and provenance is recorded. See [the MCP server guide](mcp.md) for the
-full tool reference and exactly what each token kind may do.
+Replace the host with your own instance if you self-host. The first tool call
+opens your browser to sign in and approve a consent screen; the client registers
+itself and manages tokens from there, so no Stratum credential is ever pasted
+into an editor's config. Revoke access from **Settings → Connected
+applications**. A headless client with no browser can send a `stratum_user_` or
+`stratum_agent_` token as a bearer token instead.
+
+All governance invariants hold over MCP exactly as over REST: agent tokens can't
+submit review verdicts, merge, or reject, failing evaluators block merges, and
+provenance is recorded. See [the MCP server guide](mcp.md) for the full tool
+reference, the OAuth details, and exactly what each credential kind may do.
 
 ### Plain git over smart HTTP
 
