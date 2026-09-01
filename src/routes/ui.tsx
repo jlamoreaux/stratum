@@ -629,11 +629,18 @@ app.post("/settings/rotate-token", async (c) => {
 });
 
 // POST /settings/agents — Create an agent token; renders it once
+//
+// Behind `requireAccountSession` for the same reason as `/settings/tokens`: an
+// agent token is a long-lived credential that outlives the credential that
+// minted it, so letting a scoped `read_write` token mint one would leave
+// "revoke the lost laptop" incomplete. Note this closes the browser form only —
+// `POST /api/agents` still accepts any authenticated caller, so the capability
+// is not gone, just no longer reachable by two doors with different rules.
 app.post("/settings/agents", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const loaded = await getAccountUser(c, logger);
-  if (!loaded) return c.redirect("/auth/login");
-  const { user, telemetryOptOut } = loaded;
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user, telemetryOptOut } = access;
 
   const form = await c.req.parseBody();
   const name = typeof form.name === "string" ? form.name.trim().slice(0, 100) : "";
@@ -664,10 +671,15 @@ app.post("/settings/agents", async (c) => {
 });
 
 // POST /settings/agents/:id/delete — Revoke an agent token
+//
+// Session-only alongside its create counterpart: revocation is half of the
+// same credential-management surface, and a token that could revoke its owner's
+// agents can lock them out of their own automation.
 app.post("/settings/agents/:id/delete", async (c) => {
   const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const user = await getCurrentUser(c, logger);
-  if (!user) return c.redirect("/auth/login");
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user } = access;
 
   const { id } = c.req.param();
   const agentResult = await getAgent(c.env.DB, id, logger);

@@ -48,6 +48,7 @@ vi.mock("../src/storage/agents", () => ({
 }));
 
 import { uiRouter } from "../src/routes/ui";
+import { createAgent, deleteAgent, getAgent } from "../src/storage/agents";
 import { createApiToken, listApiTokens, revokeApiToken } from "../src/storage/api-tokens";
 import { recordAudit } from "../src/storage/audit";
 import { disableLegacyToken, rotateUserToken } from "../src/storage/users";
@@ -362,6 +363,11 @@ describe("the settings surfaces require a browser session", () => {
     { label: "create", call: (id) => post("/settings/tokens", { name: "ci" }, id) },
     { label: "revoke", call: (id) => post("/settings/tokens/tok_ci/revoke", {}, id) },
     { label: "legacy disable", call: (id) => post("/settings/legacy-token/disable", {}, id) },
+    // An agent token outlives the credential that minted it, so the same rule
+    // has to cover these two: a `read_write` token that could mint one would
+    // leave "revoke the lost laptop" incomplete.
+    { label: "agent create", call: (id) => post("/settings/agents", { name: "bot" }, id) },
+    { label: "agent revoke", call: (id) => post("/settings/agents/agt_1/delete", {}, id) },
   ];
 
   it.each(routes)("403s an API-token caller on $label", async ({ call }) => {
@@ -372,6 +378,8 @@ describe("the settings surfaces require a browser session", () => {
     expect(revokeApiToken).not.toHaveBeenCalled();
     expect(disableLegacyToken).not.toHaveBeenCalled();
     expect(listApiTokens).not.toHaveBeenCalled();
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(deleteAgent).not.toHaveBeenCalled();
   });
 
   it.each(routes)("sends an unauthenticated caller to sign in on $label", async ({ call }) => {
@@ -381,6 +389,53 @@ describe("the settings surfaces require a browser session", () => {
     expect(createApiToken).not.toHaveBeenCalled();
     expect(revokeApiToken).not.toHaveBeenCalled();
     expect(disableLegacyToken).not.toHaveBeenCalled();
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(deleteAgent).not.toHaveBeenCalled();
+  });
+
+  // A scoped token is the case #254 was written for; it must be refused here
+  // too, not merely the legacy credential.
+  it.each(routes)("403s a scoped-token caller on $label", async ({ call }) => {
+    const res = await call(SCOPED_TOKEN);
+    expect(res.status).toBe(403);
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(deleteAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("the agent surfaces still work for a browser session", () => {
+  it("mints an agent token and shows the plaintext once, uncached", async () => {
+    vi.mocked(createAgent).mockResolvedValue({
+      success: true,
+      data: { agent: { id: "agt_1" }, plaintext: "stratum_agent_fresh" },
+    } as unknown as Awaited<ReturnType<typeof createAgent>>);
+    const res = await post("/settings/agents", { name: "bot" }, SESSION);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(await res.text()).toContain("stratum_agent_fresh");
+  });
+
+  it("revokes an agent the caller owns", async () => {
+    vi.mocked(getAgent).mockResolvedValue({
+      success: true,
+      data: { id: "agt_1", ownerId: "usr_1" },
+    } as unknown as Awaited<ReturnType<typeof getAgent>>);
+    vi.mocked(deleteAgent).mockResolvedValue({
+      success: true,
+      data: undefined,
+    } as unknown as Awaited<ReturnType<typeof deleteAgent>>);
+    const res = await post("/settings/agents/agt_1/delete", {}, SESSION);
+    expect(res.status).toBe(302);
+    expect(deleteAgent).toHaveBeenCalled();
+  });
+
+  it("does not revoke an agent owned by someone else", async () => {
+    vi.mocked(getAgent).mockResolvedValue({
+      success: true,
+      data: { id: "agt_1", ownerId: "usr_other" },
+    } as unknown as Awaited<ReturnType<typeof getAgent>>);
+    await post("/settings/agents/agt_1/delete", {}, SESSION);
+    expect(deleteAgent).not.toHaveBeenCalled();
   });
 });
 

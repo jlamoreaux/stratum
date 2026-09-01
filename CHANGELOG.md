@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Minting an agent token from the settings form requires a browser session.**
+  `POST /settings/agents` and `POST /settings/agents/:id/delete` loaded the user
+  but never checked *how* they authenticated, so a scoped `read_write` API token
+  could post to the form and receive a fresh agent token — a credential that
+  outlives the token that minted it, which is exactly the circularity #254 closed
+  for `/settings/tokens`. Both are now behind the same session-only guard.
+  This closes the browser form only: `POST /api/agents` and
+  `DELETE /api/agents/:id` still accept any authenticated caller, so the
+  capability is not gone. Closing that too is a breaking change for automation
+  that provisions agents with an API token, and is left as a deliberate decision
+  rather than folded into this change.
+
 ### Added
 - **A profile page, and invite codes you can actually find.** `/profile` (linked
   from the header, next to settings) shows your account identity — username,
