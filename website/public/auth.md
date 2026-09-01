@@ -70,7 +70,7 @@ issues a real credential. Only call it when a human has asked you to.
      -d '{"name": "refactor-bot"}'
    ```
 
-   The response carries a short-lived `stratum_agent_...` token.
+   The response carries a `stratum_agent_...` token.
 
 3. **The agent receives the token out-of-band** — an environment variable or a
    secret store. It is never transmitted to the agent by Stratum directly.
@@ -89,7 +89,7 @@ agent identity — see [the MCP guide](https://docs.usestratum.dev/guides/mcp/).
 | Transport | `Authorization: Bearer <token>` header |
 | Alternative | `stratum_session` cookie — browsers only, not for agents |
 | Scopes | A user token carries `read` or `read_write`. An agent token carries neither: its authority is the owning user's access, minus the human-only gates. |
-| Lifetime | Short-lived. Re-request on `401`; never retry a stale token in a loop. |
+| Lifetime | A `stratum_user_` token is short-lived — obtain a new one after a `401`. A `stratum_agent_` token has no TTL: it is valid until the agent or the owning account is deleted (see Revocation). Never retry a `401` in a loop. |
 
 **These are the REST API's credentials, minted out-of-band.** The MCP endpoint
 at `app.usestratum.dev/mcp` is a separate surface with its own OAuth 2.1 flow —

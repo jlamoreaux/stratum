@@ -72,7 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are specific to a delegated credential and enforced before routing: an OAuth
   grant cannot reach `/api/admin/*` (even for the instance administrator, whom
   `resolveAdminAuth` would otherwise authorize on an `ADMIN_EMAIL` match), and
-  cannot rotate the never-expiring legacy API key.- **CLI and MCP server guides.** Dedicated documentation for `@stratum/cli`
+  cannot rotate the never-expiring legacy API key.
+- **CLI and MCP server guides.** Dedicated documentation for `@stratum/cli`
   (`docs/user-guide/cli.md`) and the MCP server (`docs/user-guide/mcp.md`),
   published at `/guides/cli/` and `/guides/mcp/` — configuration, the full
   command/tool surface (including `project delete` and `account delete`, which

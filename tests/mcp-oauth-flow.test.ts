@@ -619,6 +619,31 @@ describe("request hardening", () => {
       );
       expect(response.status, path).toBe(413);
     }
+
+    // POST /oauth/authorize takes the same cap through the same helper, but it
+    // is session-authenticated and carries different fields, so the loop above
+    // cannot reach it — and a regression there would pass unnoticed.
+    const { json } = await register();
+    const consent = await app.fetch(
+      new Request(`${ORIGIN}/oauth/authorize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Origin: ORIGIN,
+          Cookie: sessionCookie,
+        },
+        body: new URLSearchParams({
+          decision: "allow",
+          client_id: json.client_id,
+          redirect_uri: REDIRECT,
+          scope: "mcp:read",
+          code_challenge: CHALLENGE,
+          state: huge,
+        }).toString(),
+      }),
+      env,
+    );
+    expect(consent.status, "/oauth/authorize").toBe(413);
   });
 });
 

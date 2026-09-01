@@ -431,6 +431,36 @@ describe("protocol framing", () => {
     expect(response.status).toBe(400);
   });
 
+  it("refuses a batch from a client that declared 2025-06-18, which removed batching", async () => {
+    const response = await rpc([{ jsonrpc: "2.0", id: 1, method: "ping" }], {
+      headers: { "Mcp-Protocol-Version": "2025-06-18" },
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as RpcReply).error?.message).toContain("batching");
+  });
+
+  it("still accepts a batch on an older revision, and when none is declared", async () => {
+    // The rule keys on the client's own declaration, not on our preference. An
+    // absent header says nothing, and both older revisions do batch — refusing
+    // there would break every client that never sends the header at all.
+    const cases: Record<string, string>[] = [{ "Mcp-Protocol-Version": "2025-03-26" }, {}];
+    for (const headers of cases) {
+      const response = await rpc([{ jsonrpc: "2.0", id: 1, method: "ping" }], { headers });
+      expect(response.status, JSON.stringify(headers)).toBe(200);
+    }
+  });
+
+  it("refuses an explicit null id rather than answering it", async () => {
+    // MCP forbids a null request id. Answering one produces a reply that is
+    // indistinguishable from the error responses that carry `id: null` because
+    // no id could be determined — so a client correlating by id matches the
+    // answer to the wrong request.
+    const response = await rpc({ jsonrpc: "2.0", id: null, method: "tools/list" });
+    const reply = (await response.json()) as RpcReply;
+    expect(reply.error?.code).toBe(-32600);
+    expect(reply.result).toBeUndefined();
+  });
+
   it("rejects a protocol version it does not speak, but tolerates none at all", async () => {
     const bad = await rpc(
       { jsonrpc: "2.0", id: 1, method: "ping" },

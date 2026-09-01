@@ -78,6 +78,13 @@ export function rpcError(
  * A notification is a request with no `id`, and it gets NO reply — replying to
  * one is a protocol violation that some clients treat as a fatal desync, which
  * is why `handleMessage` returns `null` rather than an empty response.
+ *
+ * An explicit `id: null` is neither, and MCP rejects it outright where JSON-RPC
+ * merely discourages it. Accepting one would leave the reply indistinguishable
+ * from the error responses that carry `id: null` precisely because no id could
+ * be determined — so a client correlating replies by id would match the answer
+ * to the wrong request. `JsonRpcId` still admits `null` for exactly those
+ * responses; it is only inbound that it is refused.
  */
 export function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -85,7 +92,7 @@ export function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
   if (message.jsonrpc !== "2.0") return false;
   if (typeof message.method !== "string") return false;
   const id = message.id;
-  return id === undefined || id === null || typeof id === "string" || typeof id === "number";
+  return id === undefined || typeof id === "string" || typeof id === "number";
 }
 
 export interface McpContext {

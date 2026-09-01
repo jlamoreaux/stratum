@@ -174,6 +174,22 @@ app.post("/mcp", async (c) => {
   // than refused. Notifications contribute no reply, and a batch of only
   // notifications correctly produces an empty 202 instead of `[]`.
   if (Array.isArray(parsed)) {
+    // Unless the client declared 2025-06-18, where batching does not exist. The
+    // header is the client's own statement about which revision it speaks, so a
+    // batch under it is that client contradicting itself — and answering anyway
+    // would leave it believing this server supports something the revision
+    // removed. An ABSENT header stays permissive: it says nothing, and the two
+    // older revisions do batch.
+    if (c.req.header("Mcp-Protocol-Version") === LATEST_PROTOCOL_VERSION) {
+      return Response.json(
+        rpcError(
+          null,
+          JSON_RPC.INVALID_REQUEST,
+          `JSON-RPC batching was removed in ${LATEST_PROTOCOL_VERSION}. Send one message per request, or declare an older revision.`,
+        ),
+        { status: 400, headers: { "Cache-Control": "no-store" } },
+      );
+    }
     if (parsed.length === 0) {
       return Response.json(rpcError(null, JSON_RPC.INVALID_REQUEST, "Empty batch"), {
         status: 400,
