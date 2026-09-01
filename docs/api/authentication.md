@@ -15,11 +15,14 @@ For programmatic access:
   `POST /api/users/me/tokens`.
 - **Agent tokens**: `stratum_agent_xxxxx` — issued to an agent, tied to the
   owning user's access, and attributed to the agent in provenance. They do
-  **not** expire and are not scoped. Within the access they inherit they are
-  unrestricted, except that an agent can never approve a change (human-only on
-  every surface) and can never reach a session-only endpoint such as token
-  management. Revoke one by deleting the agent (settings UI, or
-  `DELETE /api/agents/{id}`).
+  **not** expire and are not scoped. Within the access they inherit they can
+  read, fork workspaces, commit, open changes, comment, and open issues — but
+  every **deciding** endpoint requires a user identity and refuses an agent
+  token: review verdicts (approve and request-changes alike), merge, reject,
+  re-evaluate, GitHub PR promotion, and issue editing/closing. Session-only
+  endpoints (token management) refuse agent and scoped tokens alike — the one
+  exception is `rotate-token`, [below](#the-legacy-token). Revoke one by
+  deleting the agent (settings UI, or `DELETE /api/agents/{id}`).
 
 ```bash
 curl -H "Authorization: Bearer stratum_user_xxxxx" \
@@ -86,11 +89,15 @@ curl -X POST https://your-instance.workers.dev/api/users/me/tokens \
 
 ### The legacy token
 
-Accounts created before scoped tokens have a single unnamed credential stored on
-the user row, minted by `POST /api/users/me/rotate-token`. It still works, with
-`read_write` access, and it never expires. It is legacy for a reason: it has no
-name, no scope, no expiry, and no last-used record, and rotating it invalidates
-whatever else is using it.
+**Every** account carries a single unnamed credential on the user row — it is
+minted at signup, though the plaintext is discarded unseen, so on a new account
+it sits inert until `POST /api/users/me/rotate-token` mints and returns a fresh
+one. Only accounts from before scoped tokens may have seen theirs. The
+credential works with `read_write` access and never expires. It is legacy for a
+reason: it has no name, no scope, no expiry, and no last-used record, rotating
+it invalidates whatever else is using it — and any account can activate it, so
+"we predate scoped tokens" is not the only way to end up depending on one.
+Prefer named scoped tokens for everything.
 
 `POST /api/users/me/legacy-token/disable` (or the button in the settings UI)
 makes it permanently unusable, by rotating it to a value that is never returned

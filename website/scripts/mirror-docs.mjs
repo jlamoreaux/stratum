@@ -23,6 +23,8 @@ const GUIDES = [
   ["code-review", "Line-anchored comment threads, replies, resolve/unresolve, and the three review verdicts."],
   ["issues", "Open, triage, search, and link issues — and how a merged change closes them."],
   ["ci-integration", "Bring your own CI: run evaluations on your existing infrastructure and report verdicts back."],
+  ["cli", "Install and use @stratum/cli — projects, workspaces, commits, and the change flow from the terminal."],
+  ["mcp", "Install the MCP server and give any MCP-capable agent or editor the eval-gated change flow."],
   ["troubleshooting", "Symptoms and fixes for auth, imports, evaluation, merges, and access."],
   ["faq", "Common questions about Stratum's merge gate, provenance, CI, limitations, and telemetry."],
 ];
@@ -49,7 +51,8 @@ function siteUrl(resolved) {
   m = resolved.match(/^docs\/api\/([a-z0-9-]+)\.md$/);
   if (m && REF_SLUGS.has(m[1])) return `/reference/${m[1]}/`;
   // Endpoint pages are not published individually; the site has one overview.
-  if (/^docs\/api\/endpoints\/[a-z0-9-]+\.md$/.test(resolved)) return "/reference/endpoints/";
+  // README (uppercase) is the directory's own index, so it maps there too.
+  if (/^docs\/api\/endpoints\/[A-Za-z0-9-]+\.md$/.test(resolved)) return "/reference/endpoints/";
   return null;
 }
 

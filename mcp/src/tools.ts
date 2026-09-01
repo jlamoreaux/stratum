@@ -66,14 +66,14 @@ const projectArg = z
 /**
  * The full Stratum surface an agent needs to propose governed changes:
  * read a project, fork a workspace, commit, open an eval-gated change, and
- * follow it through review to merge. Approval stays a human gate — the
- * server rejects review approvals from agent tokens by design.
+ * follow it through review to merge. Review verdicts, merge, and reject stay
+ * human gates — the server refuses them from agent tokens by design.
  */
 export function buildTools(client: StratumClient): ToolDef[] {
   return [
     tool(
       "stratum_whoami",
-      "Identify the authenticated Stratum user or agent for the configured API key.",
+      "Identify the authenticated Stratum user for the configured API key. User tokens only — with an agent token this returns a 401; agents should already know who they are.",
       {},
       () => client.me(),
     ),
@@ -81,7 +81,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     // ── Projects ──────────────────────────────────────────────────────────
     tool(
       "stratum_list_projects",
-      "List Stratum projects visible to the authenticated identity.",
+      "List Stratum projects in the caller's own namespace. Org-namespace projects are not included, and an agent token gets an empty list — address a known project by namespace/slug instead.",
       {},
       () => client.listProjects(),
     ),
@@ -119,7 +119,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     ),
     tool(
       "stratum_list_workspaces",
-      "List open workspaces for a Stratum project.",
+      "List all workspaces for a Stratum project (no status filter — workspaces whose changes already merged still appear).",
       { project: projectArg },
       (a) => client.listWorkspaces(parseProjectRef(a.project)),
     ),
@@ -180,7 +180,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     ),
     tool(
       "stratum_review_change",
-      "Submit a review verdict on a change. Note: approvals are a human gate — the server rejects ALL approve verdicts from agent tokens (not just on the agent's own changes); agents can only request changes.",
+      "Submit a review verdict on a change. Reviews are a human gate — the server refuses every verdict from an agent token, including request_changes and approve, so this tool requires a user token with write access.",
       {
         change_id: z.string().describe("Change id"),
         verdict: z.enum(["approve", "request_changes"]).describe("Review verdict"),

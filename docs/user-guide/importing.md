@@ -103,10 +103,14 @@ Enable automatic syncing with:
 curl -X POST "$STRATUM_HOST/api/projects/@username/repo/sync/settings" \
   -H "Authorization: Bearer $STRATUM_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"autoSyncEnabled": true, "syncFrequency": 60}'
+  -d '{"autoSyncEnabled": true}'
 ```
 
-`syncFrequency` is in minutes. Past runs are listed by
+Auto-sync runs on a **fixed daily schedule** (06:00 UTC on the hosted
+instance) for every project with `autoSyncEnabled`. The settings endpoint also
+accepts a `syncFrequency` field, but it is stored and **not yet used** — the
+scheduler does not read it, so it does not change the cadence. Trigger
+`POST …/sync` yourself for anything more frequent. Past runs are listed by
 `GET …/sync/history` (paginated with `limit`/`offset`).
 
 ## Failure notifications

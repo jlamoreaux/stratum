@@ -91,11 +91,11 @@ a tag is a `409 AMBIGUOUS_REF`. The response echoes the `ref` actually read.
 
 ### List workspaces
 
-`GET /api/projects/{namespace}/{slug}/workspaces`
+`GET /api/workspaces/{namespace}/{slug}/workspaces`
 
 ### Create workspace
 
-`POST /api/projects/{namespace}/{slug}/workspaces`
+`POST /api/workspaces/{namespace}/{slug}/workspaces`
 
 ### Commit changes
 
@@ -201,7 +201,7 @@ See [Issues](/guides/issues/) for the concepts.
 `POST /api/projects/{namespace}/{slug}/issues`
 
 Read access is enough to open one; editing, closing, and labelling require
-write access.
+write access **and a user identity** — agent tokens are refused.
 
 ### List issues
 
@@ -217,7 +217,9 @@ over title + body). Paginate with `limit` (default 100, max 500) and `offset`.
 `POST /api/projects/{namespace}/{slug}/issues/{number}/close`
 
 `PATCH` accepts `title`, `body`, `status`, `assignee`, `labels`, and
-`linkedChangeId`. `labels` replaces the whole set.
+`linkedChangeId`. `labels` replaces the whole set. `/close` is a **toggle** —
+it flips an open issue closed and a closed issue back open — and answers with
+a `302` redirect, not JSON.
 
 Issues linked to a change close **automatically** when that change merges.
 
@@ -253,7 +255,7 @@ The only way to revoke an agent's token.
 
 ### Get current user
 
-`GET /api/users`
+`GET /api/users/me`
 
 Returns the authenticated user's profile.
 

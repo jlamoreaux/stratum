@@ -20,10 +20,14 @@ An agent token also fails closed if its **owning user is being deleted**.
 
 ### `403 TOKEN_SCOPE_INSUFFICIENT`
 
-You are using a `read` token for a write. A `read` token is refused on
-everything that is not a `GET` or `HEAD` — including `git push`, and including
-the `info/refs?service=git-receive-pack` advertisement that precedes it. Mint a
-`read_write` token, or use the one you meant to.
+You are using a `read` token for a write. On API routes a `read` token is
+refused with this `403` on everything that is not a `GET` or `HEAD`. Over
+**git** the same rule applies to `git push` — including the
+`info/refs?service=git-receive-pack` advertisement that precedes it — but
+surfaces as a plain `404` ("Not found"), deliberately identical to a missing
+repository so permissions can't be probed. A push that mysteriously 404s on a
+repo you can clone is this. Mint a `read_write` token, or use the one you
+meant to.
 
 Read-only bounds *damage*, not *exposure*: a `read` token still reads every
 private project its owner can read.

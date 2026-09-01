@@ -28,13 +28,24 @@ codes are in the [OpenAPI specification](openapi.yml).
 
 ## Machine-readable error codes
 
-- `AUTH_REQUIRED` — authentication needed
-- `PROJECT_NOT_FOUND` — project doesn't exist
-- `RATE_LIMITED` — too many requests
+- Caller authentication failures carry **no machine-readable code**: a `401`
+  is `{"error": "Invalid token"}` (or similar) with no `code` field. Branch on
+  the status, not a code. (`AUTH_ERROR` exists internally but surfaces only
+  when the *instance's* outbound GitHub credential fails during a sync push —
+  it never describes your own authentication.)
+- `404`s likewise usually carry no code — `{"error": "..."}` only — and an
+  unauthorized private project is deliberately indistinguishable from a
+  missing one. There is no `PROJECT_NOT_FOUND` code; where a code does
+  appear on a 404 it is the generic `NOT_FOUND`.
+- Rate limiting carries **no machine-readable code**: a `429` has
+  `{"error": "Too many requests"}` plus `Retry-After`, `X-RateLimit-Limit`,
+  and `X-RateLimit-Remaining` headers
 - `TOKEN_SCOPE_INSUFFICIENT` — a `read` token was used for a write. Returned
-  `403`, checked before routing on the HTTP method, and applied over git to the
-  resolved operation (so `git push` and its `git-receive-pack` advertisement are
-  refused too)
+  `403`, checked before routing on the HTTP method, on API routes. The git
+  smart-HTTP router enforces the same rule on the resolved operation (so
+  `git push` and its `git-receive-pack` advertisement are refused too) but
+  answers with its deliberate plain-text `404` — never this code — so an
+  unauthorized caller cannot distinguish "no permission" from "no such repo"
 - `TOKEN_LIMIT_REACHED` — `409`; the account already holds 20 active tokens.
   Revoked tokens do not count toward the limit
 - `SESSION_REQUIRED` — `403`; the endpoint accepts the browser session cookie

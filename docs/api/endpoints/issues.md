@@ -53,8 +53,10 @@ Requires **write** access. Only the fields present are written.
 ## Close an Issue
 `POST /api/projects/{namespace}/{slug}/issues/{number}/close`
 
-Requires **write** access. No body. A convenience for the common case of
-`PATCH {"status": "closed"}`.
+Requires **write** access and a user identity. No body. Despite the name it is
+a **toggle**: it flips an open issue closed and a closed issue back open, and
+answers with a `302` redirect (it backs the UI button). For an idempotent close
+from a script, use `PATCH {"status": "closed"}` instead.
 
 Issues linked to a change also close **automatically** when that change merges,
 attributed to `system`.

@@ -81,11 +81,16 @@ distinguish "agent produced rejected work" from operational errors.
 ## Can agents approve or merge their own code?
 
 Agents can never **approve** — reviews are human-only, everywhere, with no
-configuration that relaxes it. Whether an agent can trigger a *merge* is up to
-your policy: with `merge.requiredApprovals: 1` or more, at least one human must
-approve first, so an agent can never land work no human has seen. If you set no
-required approvals and its required evaluators pass, a merge call with an agent
-token will go through — so set `requiredApprovals` on anything you care about.
+configuration that relaxes it. An agent cannot trigger the *merge* either —
+`POST /api/changes/{id}/merge` (and merge-batch) requires a user identity, so
+a merge call with an agent token is refused with `401` regardless of policy.
+The human in the loop presses merge; what `merge.requiredApprovals` controls is
+how many approvals from humans *other than the change's author* must exist
+before that press succeeds. The merger themselves can be one of those
+approvers — the only excluded identity is the author (for an agent-created
+change, the agent's owning user). Set it to 1 or more on anything you care
+about, so no single person can both own the agent and wave its work through
+unreviewed.
 
 ## What does provenance actually record?
 
@@ -117,7 +122,6 @@ Honestly, several:
 - **Scale**: git operations run in-memory inside a Worker, so very large
   repositories will hit Worker limits. Moving git ops off the Worker is on the
   roadmap.
-- **Squash-only merges**: true merge commits are not yet supported.
 - **Push to project remotes doesn't move `main` directly** — the push is
   rejected in-protocol with the reason (and, where gated push is enabled, opens
   an eval-gated change instead). Push to workspace remotes for direct writes.

@@ -93,34 +93,38 @@ repository. Commit it like any other file. Here is a realistic policy for a
 TypeScript service:
 
 ```yaml
-evaluation:
-  evaluators:
-    # Bound the blast radius of any single change.
-    - type: diff
-      maxFiles: 30
-      maxLines: 1000
-      forbiddenPatterns:
-        - "console.log("
-        - "TODO: remove"
+# Evaluators live at the TOP level — not nested under any other key.
+evaluators:
+  # Bound the blast radius of any single change. Patterns match FILE PATHS
+  # in the diff, not file contents.
+  - type: diff
+    maxFiles: 30
+    maxLines: 1000
+    forbiddenPatterns:
+      - "*.lock"
+      - "node_modules/"
+      - ".env"
 
-    # Call your existing CI system.
-    - type: webhook
-      url: "https://ci.example.com/evaluate"
-      secret: "${CI_WEBHOOK_SECRET}"
-      timeoutMs: 300000
+  # Call your existing CI system. The secret is used literally — there is
+  # no environment-variable interpolation in this file — and timeoutMs is
+  # capped at 120000 (2 minutes).
+  - type: webhook
+    url: "https://ci.example.com/evaluate"
+    secret: "a-long-random-string-you-generated"
+    timeoutMs: 120000
 
-    # Run the test suite in a Cloudflare Sandbox.
-    - type: sandbox
-      command: "npm test"
-      timeoutMs: 120000
-      totalBudgetMs: 150000
-      allowInstallScripts: false
+  # Run the test suite in a Cloudflare Sandbox.
+  - type: sandbox
+    command: "npm test"
+    timeoutMs: 120000
+    totalBudgetMs: 150000
+    allowInstallScripts: false
 
-    # AI review of the diff, scored 0.0-1.0.
-    - type: llm
-      model: "claude-sonnet-4-20250514"
-      threshold: 0.7
-      maxDiffChars: 100000
+  # AI review of the diff via the Workers AI binding, scored 0.0-1.0.
+  # Omitting `model` uses the default (@cf/meta/llama-3.1-8b-instruct);
+  # a model id Workers AI doesn't serve makes this evaluator fail closed.
+  - type: llm
+    threshold: 0.7
 
 merge:
   requiredApprovals: 1
@@ -142,12 +146,21 @@ downgrade your governance.
   can't turn it off. Every change is scanned for API keys, tokens, and other
   credentials; a hit blocks the merge.
 - **`diff`** — pure analysis of the change, no code execution. Caps the number
-  of files (`maxFiles`) and lines (`maxLines`) changed, and can reject diffs
-  containing `forbiddenPatterns` or missing `requiredPatterns`. Cheap, fast, and
-  the first line of defense against runaway agent edits.
+  of files (`maxFiles`, default 20) and lines (`maxLines`, default 500)
+  changed, and can reject diffs touching `forbiddenPatterns` or missing
+  `requiredPatterns`. **Patterns match file paths, not file contents** — `*`
+  is a wildcard and anything else is a substring match, so `node_modules/`
+  works and `console.log(` matches nothing. The verdict is **scored, not
+  binary**: each violation costs 0.25 off a 1.0 score, and the evaluator
+  passes at `minScore` — so under the default 0.7, a *single* violation
+  (0.75) still passes and it takes two to fail. Set `minScore` above 0.75 if
+  any one violation should block. Cheap, fast, and the first line of defense
+  against runaway agent edits.
 - **`webhook`** — POSTs the change to an external URL (your existing CI) and
-  waits up to `timeoutMs` for a verdict. `secret` signs the delivery so your CI
-  can verify it came from Stratum.
+  waits up to `timeoutMs` (default 10s, capped at 120s) for a verdict.
+  `secret` signs the delivery so your CI can verify it came from Stratum; the
+  value is used exactly as written, so generate a real secret rather than a
+  `${...}` placeholder — nothing interpolates it.
 - **`sandbox`** — clones the workspace into a Cloudflare Sandbox and runs
   `command` (default: the project's test command), passing or failing on exit
   code. Requires the Sandboxes binding on self-hosted instances; when the
@@ -162,10 +175,18 @@ downgrade your governance.
   them (native modules, a `prepare` step) — the usual symptom of leaving it off
   when you need it is *not* a failing install, but a native module that
   installs unbuilt and then fails when the test command loads it.
-- **`llm`** — sends the diff to an LLM (via the Workers AI binding) for review
-  against your criteria. `model` picks the reviewer, `threshold` is the minimum
-  passing score (0.0–1.0), and `maxDiffChars` bounds how much diff is sent.
-  Token usage is recorded on the change as a cost record.
+- **`llm`** — sends the diff to an LLM for review against your criteria.
+  `model` picks the reviewer and must be a model the **Workers AI binding**
+  serves (default: `@cf/meta/llama-3.1-8b-instruct`); `threshold` is the
+  minimum passing score (0.0–1.0); `maxDiffChars` bounds how much diff is
+  sent (default 24,000, max 100,000). An unavailable model or unparseable
+  verdict fails closed. Token usage is recorded on the change as a cost
+  record.
+
+Two top-level knobs sit alongside `evaluators`: `requireAll` (default `true`)
+makes the aggregate verdict demand every evaluator pass — set it to `false` to
+pass when any one does — and `minScore` (default `0.7`, clamped to 0–1) is the
+per-evaluator pass threshold the `diff` and `sandbox` evaluators score against.
 
 ### The merge protections
 
@@ -207,11 +228,17 @@ know about its scope:
 - The token is **bounded by the owning user**: the agent inherits your project
   access (including org access) and nothing more. Agent tokens do **not**
   expire and carry no read/`read_write` scope of their own. Within that
-  inherited access an agent token is unrestricted, with two exceptions that no
-  token can cross: it cannot approve a change, and it cannot reach an endpoint
-  that requires a browser session (token management, account deletion). Revoke
-  one by deleting the agent from the settings UI (or `DELETE /api/agents/{id}`);
-  that is the only way to retire it.
+  inherited access an agent can read, fork workspaces, commit, open changes,
+  comment, and open issues — but the **deciding** endpoints require a user
+  identity and refuse an agent token outright: review verdicts (approve *and*
+  request changes), merge, reject, re-evaluate, GitHub PR promotion, and issue
+  triage (edit/close). Session-only endpoints (creating and revoking tokens)
+  are out of reach for agent tokens as for scoped ones — the lone exception,
+  `rotate-token` accepting the legacy credential, is covered in the
+  [authentication reference](../api/authentication.md). Revoke an agent token
+  by deleting the agent from the
+  settings UI (or `DELETE /api/agents/{id}`); that is the only way to retire
+  it.
 - All writes made with an agent token are attributed to the agent in
   **provenance** — merged changes record which agent and which model produced
   them, not just which human owned the token.
@@ -267,7 +294,8 @@ workspace  →  commit  →  change (evaluation runs)  →  review  →  merge
    stratum change review chg_xxxxx --verdict approve --comment "LGTM"
    ```
 
-5. **Merge.** Merges are **squash merges**, serialized per-project through a
+5. **Merge.** The default is a **true three-way merge commit** (`--squash` /
+   `strategy: "squash"` opts into a squash), serialized per-project through a
    Durable Object merge queue so there are no races. The merge is rejected if a
    required evaluator is failing, approvals are short, the base is stale
    (`requireFreshBase`), or the workspace moved since evaluation. If a
@@ -311,7 +339,8 @@ stratum status        # who am I
 stratum projects      # list your projects
 ```
 
-See [`cli/README.md`](../../cli/README.md) for the full command reference.
+See [the CLI guide](cli.md) for the full command reference, configuration, and
+the commit path's limits.
 
 ### MCP server — `@stratum/mcp`
 
@@ -344,8 +373,9 @@ Any MCP client (stdio):
 
 `STRATUM_HOST` defaults to `https://app.usestratum.dev`; set it for self-hosted
 instances. All governance invariants hold over MCP exactly as over REST: agent
-tokens can't approve their own work, failing evaluators block merges, and
-provenance is recorded.
+tokens can't submit review verdicts, merge, or reject, failing evaluators block
+merges, and provenance is recorded. See [the MCP server guide](mcp.md) for the
+full tool reference and exactly what each token kind may do.
 
 ### Plain git over smart HTTP
 

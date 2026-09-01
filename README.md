@@ -108,9 +108,14 @@ npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
 # and set GOOGLE_REDIRECT_URI in [vars]
 
+# Admin surface (/api/admin/*: backups, restore plans, audit, metrics).
+# Set at least one, or the whole admin surface is unreachable — including backups:
+npx wrangler secret put ADMIN_API_KEY        # accepted via the X-Admin-API-Key header
+npx wrangler secret put ADMIN_EMAIL          # or: a signed-in user with this email is admin
+
 # Optional:
 npx wrangler secret put POSTHOG_API_KEY      # analytics (route patterns only, never paths)
-npx wrangler secret put GITHUB_TOKEN         # higher rate limits on GitHub import
+npx wrangler secret put GITHUB_TOKEN         # REQUIRED for promote-to-PR and eval reporting to GitHub; also raises import rate limits
 npx wrangler secret put GITHUB_WEBHOOK_SECRET  # inbound GitHub sync
 ```
 
