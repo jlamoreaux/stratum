@@ -33,10 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gate was on stay visible to their owners after signups reopen, and an
   unreachable service reports itself as such instead of rendering as "you have no
   codes". Requires the referral service to serve
-  `GET /api/referral/codes?userId=…` (contract in `wrangler.toml`); the page is
-  not rendered at all on instances with no referral service, which is every
-  ungated self-hosted deployment. Like `/settings`, it is session-only: an API
-  token cannot enumerate your codes.
+  `GET /api/referral/codes?userId=…` (contract in `wrangler.toml`). On an
+  instance with no referral service — every ungated self-hosted deployment — the
+  page still renders its account details, just without the invite section. Like
+  `/settings`, it is session-only: an API token cannot enumerate your codes.
 - **CLI and MCP server guides.** Dedicated documentation for `@stratum/cli`
   (`docs/user-guide/cli.md`) and `@stratum/mcp` (`docs/user-guide/mcp.md`),
   published at `/guides/cli/` and `/guides/mcp/` — installation from source,
