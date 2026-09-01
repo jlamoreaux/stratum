@@ -134,6 +134,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a change that passed before this release may fail on re-evaluation.
 
 ### Fixed
+- **Google sign-in works outside production.** Only `[env.production.vars]` declared
+  `GOOGLE_REDIRECT_URI`, and the Google routes require it, so `/auth/google` answered
+  501 on staging and under `wrangler dev` however the secrets were set — named
+  environments replace top-level `[vars]` rather than inheriting them. Staging and
+  local now declare their own callback.
+- **A sign-in returns to the page it started from.** `/auth/github` and `/auth/google`
+  accept `?next=`, carried through the flow on the OAuth state record and honoured by
+  both callbacks. The GitHub callback previously read `next` from its own query string,
+  where it could never arrive: an authorization server echoes back `code` and `state`
+  and drops everything else, so every sign-in landed on `/`. Off-origin destinations
+  are still refused, at both ends of the round trip.
 - Approvals are dismissed when the evaluated **base** moves, not only when the
   tip does. A change re-evaluated against a newer base kept approvals that were
   granted against different code.

@@ -23,15 +23,42 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /**
+ * Reduce a caller-supplied `?next=` to a same-origin path, or undefined.
+ *
+ * Parsing against a dummy base makes an absolute or protocol-relative target
+ * ("https://evil.example/x", "//evil.example/x") resolve to a foreign hostname,
+ * which is rejected — only a relative path keeps the base's host and survives.
+ */
+function sanitizeNextPath(next: unknown): string | undefined {
+  if (typeof next !== "string" || next === "") return undefined;
+  try {
+    const url = new URL(next, "http://localhost");
+    if (url.hostname !== "localhost" && url.hostname !== "") return undefined;
+    return url.pathname + url.search;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Mint an OAuth state, persist it in KV (replay prevention), and bind it to
  * the initiating browser via a short-lived cookie (login-CSRF prevention).
+ *
+ * The post-login destination rides along as the KV *value*: an authorization
+ * server echoes back only `code` and `state`, never the extra query params the
+ * sign-in link carried, so `next` cannot survive the round trip on the URL.
  */
 async function issueOAuthState(
   c: Parameters<typeof setCookie>[0],
   kv: KVNamespace,
+  next?: string,
 ): Promise<string> {
   const state = crypto.randomUUID().replace(/-/g, "");
-  await kv.put(`oauth_state:${state}`, "1", { expirationTtl: OAUTH_STATE_TTL_SECONDS });
+  // "1" is the no-destination marker (and what states minted before this
+  // carried, so one in flight across a deploy still validates).
+  await kv.put(`oauth_state:${state}`, sanitizeNextPath(next) ?? "1", {
+    expirationTtl: OAUTH_STATE_TTL_SECONDS,
+  });
   setCookie(c, OAUTH_STATE_COOKIE, state, {
     httpOnly: true,
     secure: true,
@@ -44,24 +71,27 @@ async function issueOAuthState(
 
 /**
  * Validate a callback's state: it must match the browser's state cookie
- * (constant-time) AND exist in KV. Consumes both on success.
+ * (constant-time) AND exist in KV. Consumes both on success, returning the
+ * post-login destination the state was minted with.
  */
 async function consumeOAuthState(
   c: Parameters<typeof getCookie>[0] & Parameters<typeof deleteCookie>[0],
   kv: KVNamespace,
   state: string,
-): Promise<boolean> {
+): Promise<{ ok: boolean; next?: string }> {
   const cookieState = getCookie(c, OAUTH_STATE_COOKIE);
   if (!cookieState || !timingSafeEqual(cookieState, state)) {
-    return false;
+    return { ok: false };
   }
   deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/auth" });
 
   const stateKey = `oauth_state:${state}`;
   const stored = await kv.get(stateKey);
-  if (!stored) return false;
+  if (!stored) return { ok: false };
   await kv.delete(stateKey);
-  return true;
+  // Re-sanitize on the way out: KV is trusted, but the value round-tripped
+  // through storage and the redirect below must not be widened by accident.
+  return { ok: true, next: stored === "1" ? undefined : sanitizeNextPath(stored) };
 }
 
 app.get("/github", async (c) => {
@@ -79,7 +109,7 @@ app.get("/github", async (c) => {
     return c.json({ error: "GitHub OAuth is not configured" }, 501);
   }
 
-  const state = await issueOAuthState(c, c.env.STATE);
+  const state = await issueOAuthState(c, c.env.STATE, c.req.query("next"));
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -108,14 +138,15 @@ app.get("/github/callback", async (c) => {
     return c.json({ error: "GitHub OAuth is not configured" }, 501);
   }
 
-  const { code, state, next } = c.req.query();
+  const { code, state } = c.req.query();
 
   if (!state) {
     logger.warn("Missing state parameter");
     return c.json({ error: "Missing state parameter" }, 400);
   }
 
-  if (!(await consumeOAuthState(c, c.env.STATE, state))) {
+  const consumed = await consumeOAuthState(c, c.env.STATE, state);
+  if (!consumed.ok) {
     logger.warn("Invalid, expired, or unbound state", { statePrefix: state.slice(0, 8) });
     return c.json({ error: "Invalid or expired state" }, 400);
   }
@@ -252,19 +283,7 @@ app.get("/github/callback", async (c) => {
 
   sessionLogger.info("GitHub OAuth successful, session created");
 
-  let redirectTo = "/";
-  if (next && typeof next === "string") {
-    try {
-      const url = new URL(next, "http://localhost");
-      if (url.hostname === "localhost" || url.hostname === "") {
-        redirectTo = url.pathname + url.search;
-      }
-    } catch {
-      // invalid next param — fall back to /
-    }
-  }
-
-  return c.redirect(redirectTo);
+  return c.redirect(consumed.next ?? "/");
 });
 
 app.get("/google", async (c) => {
@@ -282,7 +301,7 @@ app.get("/google", async (c) => {
     return c.json({ error: "Google OAuth is not configured" }, 501);
   }
 
-  const state = await issueOAuthState(c, c.env.STATE);
+  const state = await issueOAuthState(c, c.env.STATE, c.req.query("next"));
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -317,7 +336,8 @@ app.get("/google/callback", async (c) => {
   if (!state) {
     return c.json({ error: "Missing state parameter" }, 400);
   }
-  if (!(await consumeOAuthState(c, c.env.STATE, state))) {
+  const consumed = await consumeOAuthState(c, c.env.STATE, state);
+  if (!consumed.ok) {
     logger.warn("Invalid, expired, or unbound state", { statePrefix: state.slice(0, 8) });
     return c.json({ error: "Invalid or expired state" }, 400);
   }
@@ -412,7 +432,7 @@ app.get("/google/callback", async (c) => {
   });
 
   sessionLogger.info("Google OAuth successful, session created");
-  return c.redirect("/");
+  return c.redirect(consumed.next ?? "/");
 });
 
 // Logout is state-changing, so it happens on POST (the nav renders a form and
