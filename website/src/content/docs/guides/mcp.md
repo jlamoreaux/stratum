@@ -21,9 +21,18 @@ which serves documentation to agents. This one operates on your projects.)
 
 ## Connecting a client
 
-The endpoint is `/mcp` on your instance —
-`https://app.usestratum.dev/mcp` for the maintainer's hosted instance, or
-`https://app.usestratum.dev/mcp` if you self-host.
+The endpoint is `/mcp` on your own Stratum instance. The examples below use
+`https://app.usestratum.dev`, the maintainer's hosted instance — **if you
+self-host, substitute your own Worker's origin.** Pointing a client at someone
+else's instance sends your tool calls there, along with any credential you
+configure by hand.
+
+<!-- Do NOT reintroduce a `your-instance.workers.dev` placeholder into the
+     sentence above. `SELF_HOST_PLACEHOLDER` in website/scripts/mirror-docs.mjs
+     rewrites that string to the hosted origin for the published site, which
+     turns a sentence contrasting the two hosts into one naming the same host
+     twice — and tells a self-hoster to point their client at someone else's
+     instance. The wording above is correct in both copies. -->
 
 Claude Code:
 
@@ -43,11 +52,6 @@ Any MCP client that supports remote servers:
   }
 }
 ```
-
-Both examples name the maintainer's hosted instance. **If you self-host, replace
-the host with your own Worker** — pointing a client at someone else's instance
-sends your tool calls, and any credential you configure by hand, to that
-instance.
 
 The first tool call opens your browser, asks you to sign in if you are not
 already, and shows a consent screen naming the application and what it is asking
