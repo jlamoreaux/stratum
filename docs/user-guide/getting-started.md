@@ -345,10 +345,15 @@ the commit path's limits.
 ### MCP server — `/mcp`
 
 Stratum serves MCP from the Worker itself, so **any** MCP-capable agent or
-editor (Claude Code, Cursor, Zed, Copilot, custom agents) gets the full
-eval-gated change flow — read files, fork workspaces, commit, create changes
-(with each gate's verdict returned), review, merge, and track issues — with
-nothing to install.
+editor (Claude Code, Cursor, Zed, Copilot, custom agents) reaches the eval-gated
+change flow with nothing to install.
+
+How much of that flow depends on the credential. An OAuth grant with `mcp:write`
+— or a `stratum_user_` token with write access — gets all of it: read files,
+fork workspaces, commit, create changes (with each gate's verdict returned),
+review, merge, and track issues. An `mcp:read` grant reads only. An **agent
+token** can read, fork, commit and open a gated change, but never review, merge
+or reject: those are human decisions, and that is the point.
 
 Claude Code:
 

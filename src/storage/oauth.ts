@@ -59,6 +59,17 @@ export const AUTH_CODE_TTL_MS = 60 * 1000;
 export const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * The longest a grant may live, counted from when it was first issued.
+ *
+ * The refresh window above SLIDES: every rotation pushes it out another 30
+ * days. Without a ceiling, a grant that is refreshed even once a month never
+ * expires, and "connected six months ago, still connected" is indistinguishable
+ * from a credential nobody remembers granting. This caps the slide, so every
+ * grant eventually returns the user to the consent screen.
+ */
+export const REFRESH_GRANT_MAX_MS = 180 * 24 * 60 * 60 * 1000;
+
 /** Registration bounds. A self-registering client picks all of these, so each
  * one is a size an anonymous caller would otherwise choose for us. */
 export const MAX_REDIRECT_URIS = 10;
@@ -569,6 +580,7 @@ interface OAuthTokenRow {
   id: string;
   access_token_hash: string;
   refresh_token_hash: string | null;
+  previous_refresh_token_hash: string | null;
   client_id: string;
   user_id: string;
   scope: string;
@@ -645,9 +657,15 @@ export async function rotateRefreshToken(
   const oldHash = await hashToken(opts.refreshToken);
   let row: OAuthTokenRow | null;
   try {
+    // Matched against the CURRENT hash or the one rotation last retired, so a
+    // token that was already spent is recognised as this grant's rather than as
+    // an unknown string.
     row = await db
-      .prepare("SELECT * FROM oauth_tokens WHERE refresh_token_hash = ?")
-      .bind(oldHash)
+      .prepare(
+        `SELECT * FROM oauth_tokens
+          WHERE refresh_token_hash = ? OR previous_refresh_token_hash = ?`,
+      )
+      .bind(oldHash, oldHash)
       .first<OAuthTokenRow>();
   } catch (error) {
     const appError = toAppError(error, "rotateRefreshToken", {});
@@ -656,6 +674,28 @@ export async function rotateRefreshToken(
   }
 
   if (!row) return err(new NotFoundError("Refresh token", "by-token"));
+
+  // REUSE DETECTION. Rotation retires a refresh token; presenting a retired one
+  // means two parties hold the same credential, and only one of them is the
+  // rightful client. OAuth 2.1 §4.3.1 and RFC 9700 §4.14 both prescribe
+  // revoking the whole grant here — the legitimate client re-authorizes with a
+  // consent screen, the thief's copy is worthless.
+  //
+  // This is the refresh-side counterpart of the authorization-code replay rule
+  // this module already implements; leaving it out is what lets a stolen
+  // refresh token grant silent access until someone notices by hand.
+  if (row.previous_refresh_token_hash !== null && row.previous_refresh_token_hash === oldHash) {
+    logger.warn("Retired refresh token replayed; revoking the grant", {
+      grantId: row.id,
+      clientId: row.client_id,
+    });
+    await revokeGrantsForClientUser(db, logger, {
+      clientId: row.client_id,
+      userId: row.user_id,
+    });
+    return err(new NotFoundError("Refresh token", "reused"));
+  }
+
   if (row.revoked_at !== null) return err(new NotFoundError("Refresh token", "revoked"));
   if (isExpired(row.refresh_expires_at)) return err(new NotFoundError("Refresh token", "expired"));
   // A refresh token is bound to the client it was issued to. Without this check
@@ -673,18 +713,32 @@ export async function rotateRefreshToken(
     const accessToken = randomSecret("stratum_mcp");
     const refreshToken = randomSecret("stratum_mcprt");
     const now = Date.now();
+    // The sliding window, clamped to the grant's absolute deadline. An
+    // unparseable `created_at` falls back to the sliding value rather than
+    // producing a NaN timestamp that `isExpired` would then read as expired —
+    // a bad row must not silently disconnect a working editor.
+    const createdAt = Date.parse(row.created_at);
+    const slidingExpiry = now + REFRESH_TOKEN_TTL_MS;
+    const refreshExpiry = Number.isFinite(createdAt)
+      ? Math.min(slidingExpiry, createdAt + REFRESH_GRANT_MAX_MS)
+      : slidingExpiry;
+
     const updated = await db
       .prepare(
         `UPDATE oauth_tokens
             SET access_token_hash = ?, refresh_token_hash = ?,
+                previous_refresh_token_hash = ?,
                 access_expires_at = ?, refresh_expires_at = ?
           WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL`,
       )
       .bind(
         await hashToken(accessToken),
         await hashToken(refreshToken),
+        // Retiring, not discarding: this is what makes the reuse check above
+        // able to tell a stolen token from an unknown one.
+        oldHash,
         new Date(now + ACCESS_TOKEN_TTL_MS).toISOString(),
-        new Date(now + REFRESH_TOKEN_TTL_MS).toISOString(),
+        new Date(refreshExpiry).toISOString(),
         row.id,
         oldHash,
       )

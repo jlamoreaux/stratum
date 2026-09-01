@@ -3472,7 +3472,8 @@ paths:
       description: |
         Stateless. One JSON-RPC request in, one response out; there is no
         session to establish and no `Mcp-Session-Id`. Methods: `initialize`,
-        `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
+        `notifications/initialized`, `notifications/cancelled`, `ping`,
+        `tools/list`, `tools/call`.
 
         A JSON array is accepted as a batch (for the protocol revisions that
         allow one). A message with no `id` is a notification and is answered

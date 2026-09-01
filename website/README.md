@@ -85,7 +85,7 @@ The docs are built to be readable by agents as well as people:
 | `/llms-small.txt`, `/llms-full.txt` | Abridged and complete corpora |
 | `/openapi.yml` | REST API contract |
 | `/.well-known/api-catalog` | RFC 9727 linkset pointing at the spec and reference |
-| `/.well-known/mcp/server-card.json` | Discovery card for the remote MCP server at `/mcp` |
+| `/.well-known/mcp/server-card.json` | Discovery card for the remote MCP server at `app.usestratum.dev/mcp` |
 | `/.well-known/ai-catalog.json` | ARD capability manifest — the entry point that names all the others |
 | `/.well-known/agent-skills/index.json` | Agent Skills Discovery v0.2.0 index, with a `sha256` per skill |
 | `/.well-known/agent-skills/<name>/SKILL.md` | The skill artifacts themselves |
@@ -97,19 +97,25 @@ The docs are built to be readable by agents as well as people:
 before any HTTP request. They are not applied by CI — see `dns/README.md` for how
 to publish and verify them, and to sign the zone with DNSSEC.
 
-**Stratum publishes no `/.well-known/openid-configuration` and no
-`/.well-known/oauth-authorization-server`.** It is not an OAuth authorization
-server — it issues opaque bearer tokens minted by a human account holder, with no
-`authorization_endpoint`, `token_endpoint`, or `jwks_uri` to name. Inventing those
-would send agents into a handshake that cannot complete, so `/auth.md` carries the
-registration flow instead. **Nor any `/.well-known/oauth-protected-resource`**:
-RFC 9728 has a client derive that URL from the protected resource's own origin,
-which is `app.usestratum.dev` — not this site — so a copy served here would be
-found only by agents that already knew where to look. It belongs on the API
-origin or nowhere. If Stratum ever grows a real authorization server, or the API
-origin starts serving its own RFC 9728 document, update
-`tests/agent-discovery-metadata.test.ts`, which currently asserts both are
-absent.
+**This site publishes no `/.well-known/openid-configuration`, no
+`/.well-known/oauth-authorization-server`, and no
+`/.well-known/oauth-protected-resource`** — and that is still correct even now
+that Stratum *is* an OAuth authorization server.
+
+The MCP endpoint at `app.usestratum.dev/mcp` is an OAuth 2.1 protected resource,
+and the API origin serves both metadata documents for it (see
+`src/routes/mcp-oauth.tsx`). RFC 9728 has a client derive the protected-resource
+URL from that resource's own origin, and RFC 8414 has it follow the document
+found there — so every agent that needs these lands on `app.usestratum.dev`
+without ever asking this site. A copy served here would be found only by agents
+that already knew where to look, and would go stale the moment the app origin
+changed. It belongs on the API origin or nowhere.
+
+`/auth.md` still carries the bearer-token registration flow, which is the path
+for a headless agent with no browser to run a consent screen in.
+
+`tests/agent-discovery-metadata.test.ts` asserts all three are absent **here**.
+Update it only if this site itself starts serving them.
 
 The skills index is generated, never hand-edited: `scripts/emit-agent-skills.mjs`
 (wired into `predev`/`prebuild` as `sync:skills`) derives each entry from the

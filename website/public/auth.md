@@ -48,7 +48,7 @@ issues a real credential. Only call it when a human has asked you to.
 
    The response carries a short-lived `stratum_agent_...` token.
 
-3. **The agent receives the token out of band** — an environment variable or a
+3. **The agent receives the token out-of-band** — an environment variable or a
    secret store. It is never transmitted to the agent by Stratum directly.
 
 An agent driving an editor with a browser can skip all of this and connect over
@@ -64,8 +64,15 @@ agent identity — see [the MCP guide](https://docs.usestratum.dev/guides/mcp/).
 | Prefix | `stratum_agent_` (agents), `stratum_user_` (humans) |
 | Transport | `Authorization: Bearer <token>` header |
 | Alternative | `stratum_session` cookie — browsers only, not for agents |
-| Scopes | None. Stratum has no scope model; authority is the owning user's access. |
+| Scopes | A user token carries `read` or `read_write`. An agent token carries neither: its authority is the owning user's access, minus the human-only gates. |
 | Lifetime | Short-lived. Re-request on `401`; never retry a stale token in a loop. |
+
+**These are the REST API's credentials, minted out-of-band.** The MCP endpoint
+at `app.usestratum.dev/mcp` is a separate surface with its own OAuth 2.1 flow —
+dynamic client registration, PKCE, a browser consent screen, and `mcp:read` /
+`mcp:write` scopes — so an agent driving an editor never needs one of the tokens
+above. It accepts them anyway, for headless callers with no browser. See
+[the MCP guide](https://docs.usestratum.dev/guides/mcp/).
 
 ```bash
 curl -H "Authorization: Bearer $STRATUM_API_KEY" \

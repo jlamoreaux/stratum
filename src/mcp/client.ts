@@ -30,6 +30,22 @@ export interface ProjectRef {
 }
 
 /**
+ * A tool argument was malformed in a way the JSON Schema could not express.
+ *
+ * Its own type so `tools.ts` can label it as an ARGUMENT failure rather than an
+ * API failure. The distinction is the whole point of the two message prefixes:
+ * a model that reads "Stratum API error" for a malformed project reference
+ * retries the same reference, where "Invalid arguments" tells it to fix the
+ * value it sent.
+ */
+export class InvalidArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidArgumentError";
+  }
+}
+
+/**
  * Parse "ns/slug" or "@ns/slug" into a project reference. Exactly two
  * non-empty segments — extra segments are rejected rather than silently
  * dropped, so a tool can never operate on a different project than named.
@@ -38,7 +54,7 @@ export function parseProjectRef(ref: string): ProjectRef {
   const segments = ref.split("/");
   const [nsRaw, slug] = segments;
   if (segments.length !== 2 || !nsRaw || nsRaw === "@" || !slug) {
-    throw new Error(`Invalid project reference '${ref}' — expected namespace/slug`);
+    throw new InvalidArgumentError(`Invalid project reference '${ref}' — expected namespace/slug`);
   }
   return { namespace: nsRaw.startsWith("@") ? nsRaw : `@${nsRaw}`, slug };
 }

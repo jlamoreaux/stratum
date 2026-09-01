@@ -39,6 +39,10 @@ interface SettingsPageProps {
   apiTokens: ApiTokenSummary[];
   /** MCP clients the user has authorized over OAuth (#349). */
   oauthGrants: OAuthGrantSummary[];
+  /** True when the listing could not be READ, as opposed to being empty.
+   * "No applications connected" is a reassurance, and it must not be shown to
+   * someone whose connection list we simply failed to load. */
+  oauthGrantsUnavailable: boolean;
   freshToken?: FreshCredential;
   notice?: SettingsNotice;
   /** Per-request CSP nonce for the copy-button script (only rendered with a fresh token). */
@@ -159,6 +163,7 @@ export const SettingsPage: FC<SettingsPageProps> = ({
   agents,
   apiTokens,
   oauthGrants,
+  oauthGrantsUnavailable,
   freshToken,
   notice,
   nonce,
@@ -342,7 +347,12 @@ export const SettingsPage: FC<SettingsPageProps> = ({
           immediately — the application&rsquo;s access token and its ability to refresh both stop
           working at once.
         </p>
-        {oauthGrants.length === 0 ? (
+        {oauthGrantsUnavailable ? (
+          <p class="settings-help">
+            Your connected applications could not be loaded, so this list is not showing them.
+            Nothing has been disconnected &mdash; try again shortly.
+          </p>
+        ) : oauthGrants.length === 0 ? (
           <p class="settings-help">
             No applications connected. Point your editor&rsquo;s MCP client at <code>/mcp</code> on
             this instance and it will ask for access.

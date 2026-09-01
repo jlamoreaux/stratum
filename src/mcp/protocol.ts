@@ -5,7 +5,7 @@
  * one reply (or `null`, for a notification), and knows nothing about HTTP. The
  * route in `src/routes/mcp.ts` owns framing, auth and status codes. Keeping the
  * split means the protocol is testable by handing it plain objects, which is
- * how `tests/mcp-protocol.test.ts` exercises it.
+ * how `tests/mcp-endpoint.test.ts` exercises it.
  *
  * MCP is a thin layer over JSON-RPC, and the parts that matter here are the
  * handshake (`initialize`), discovery (`tools/list`) and invocation
@@ -147,11 +147,18 @@ export async function handleMessage(
       });
     }
 
-    // Post-handshake acknowledgement. It carries no data and expects no reply;
-    // accepting it silently is the whole contract.
+    // Post-handshake acknowledgements. They carry no data and, sent correctly
+    // (no `id`), expect no reply — accepting them silently is the whole
+    // contract.
+    //
+    // A client that sends one WITH an `id` has asked a question, though, and
+    // JSON-RPC requires an answer: dropping it leaves that client's request
+    // pending forever, and inside a batch it returns fewer replies than there
+    // were ids. So the `isNotification` guard is applied here exactly as it is
+    // in every other case below.
     case "notifications/initialized":
     case "notifications/cancelled":
-      return null;
+      return isNotification ? null : rpcResult(id, {});
 
     case "ping":
       return isNotification ? null : rpcResult(id, {});

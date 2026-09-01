@@ -118,6 +118,25 @@ describe("validate", () => {
     expect(result.errors[0]).toContain("this tool takes no arguments");
   });
 
+  it("rejects Object.prototype member names as unknown arguments", () => {
+    // `"constructor" in {}` is true, so an `in` check would read these as known
+    // fields — and they would then be silently DROPPED rather than reported,
+    // because the schema's own entries do not include them. That is the one
+    // outcome `additionalProperties: false` exists to prevent.
+    const result = validate({}, { constructor: 1, toString: "x", __proto__: {} });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.join("\n")).toContain("unknown argument 'constructor'");
+    expect(result.errors.join("\n")).toContain("unknown argument 'toString'");
+  });
+
+  it("rejects a prototype member name alongside a real schema", () => {
+    const result = validate(SCHEMA, { ...VALID, hasOwnProperty: "nope" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.join("\n")).toContain("unknown argument 'hasOwnProperty'");
+  });
+
   it("distinguishes an integer from a float and from a numeric string", () => {
     expect(validate(SCHEMA, { ...VALID, count: 3 }).ok).toBe(true);
     expect(validate(SCHEMA, { ...VALID, count: 3.5 }).ok).toBe(false);

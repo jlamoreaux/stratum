@@ -44,6 +44,11 @@ Any MCP client that supports remote servers:
 }
 ```
 
+Both examples name the maintainer's hosted instance. **If you self-host, replace
+the host with your own Worker** — pointing a client at someone else's instance
+sends your tool calls, and any credential you configure by hand, to that
+instance.
+
 The first tool call opens your browser, asks you to sign in if you are not
 already, and shows a consent screen naming the application and what it is asking
 for. Approve it once; the client stores the tokens and refreshes them on its
@@ -162,10 +167,16 @@ Eighteen tools cover the full contribution loop. Project arguments take a
 | `stratum_commit` | Commit a map of repo-relative paths to **complete file contents**. |
 
 `stratum_commit` takes the `project_id` from `stratum_get_project`, not the
-`namespace/slug` reference. The file map is capped at 2,000 files and 25 MB per
-commit, and it cannot express a deletion or rename — only full contents of
-added or modified files. Larger or destructive edits go over the workspace's
-git remote instead.
+`namespace/slug` reference. The file map is capped at 2,000 files, and it cannot
+express a deletion or rename — only full contents of added or modified files.
+Larger or destructive edits go over the workspace's git remote instead.
+
+**The whole MCP request is capped at 8 MB**, below the REST API's 25 MB commit
+limit. A tool call is buffered, parsed, re-serialized into an internal request
+and parsed again, so a body near the REST limit would cost more than a Workers
+isolate's entire 128 MB budget — which is shared with every other request that
+isolate is serving. A commit that does not fit belongs on the git remote
+anyway.
 
 **The change flow**
 

@@ -44,13 +44,39 @@ import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 import { mcpResourceIdentifier } from "../utils/oauth-challenge";
 import { rememberPostLoginRedirect } from "../utils/post-login-redirect";
-import { readJsonWithLimit } from "../utils/request-body";
+import { readJsonWithLimit, readTextWithLimit } from "../utils/request-body";
 
 const app = new Hono<{ Bindings: Env }>();
 
-/** Registration and token bodies are a handful of short fields; anything past
- * this is not a client we want to buffer for. */
+/** Every body on every endpoint here is a handful of short fields — a client
+ * id, a redirect URI, a code, a verifier. Anything past this is not a client we
+ * want to buffer for, and three of these endpoints are unauthenticated. */
 const MAX_OAUTH_BODY_BYTES = 64 * 1024;
+
+/**
+ * Read a form-encoded body under the cap.
+ *
+ * `c.req.text()` and `c.req.formData()` both buffer whatever arrives, so every
+ * endpoint here goes through the shared streaming limit instead — the cap is
+ * enforced DURING the read, so an absent or understated `Content-Length` cannot
+ * get past it. Returns the OAuth error to send when the body is too large.
+ */
+async function readForm(
+  c: Context<{ Bindings: Env }>,
+  logger: ReturnType<typeof createLogger>,
+): Promise<{ form: URLSearchParams } | { response: Response }> {
+  const body = await readTextWithLimit(c, MAX_OAUTH_BODY_BYTES, logger);
+  if (body.tooLarge) {
+    return {
+      response: oauthError(
+        "invalid_request",
+        `Request body too large (max ${MAX_OAUTH_BODY_BYTES} bytes)`,
+        413,
+      ),
+    };
+  }
+  return { form: new URLSearchParams(body.text) };
+}
 
 /**
  * Endpoints that authenticate the CLIENT rather than a Stratum user, and so
@@ -75,7 +101,7 @@ export function isOAuthClientEndpoint(path: string): boolean {
 function oauthError(
   error: string,
   description: string,
-  status: 400 | 401 | 403 | 404 | 405 | 500 = 400,
+  status: 400 | 401 | 403 | 404 | 405 | 413 | 500 = 400,
   headers: Record<string, string> = {},
 ): Response {
   return Response.json(
@@ -545,11 +571,14 @@ app.post("/oauth/authorize", async (c) => {
     return renderAuthorizeError(c, "Not signed in", "Your session expired. Please start again.");
   }
 
-  const form = await c.req.formData();
+  const body = await readForm(c, logger);
+  if ("response" in body) return body.response;
+  const form = body.form;
+
   const asParams = new URLSearchParams();
   for (const key of ["client_id", "redirect_uri", "scope", "state", "code_challenge", "resource"]) {
     const value = form.get(key);
-    if (typeof value === "string") asParams.set(key, value);
+    if (value !== null) asParams.set(key, value);
   }
   // The GET validated a request built from the query string; re-validate the
   // POST from scratch rather than trusting the hidden fields that came back.
@@ -618,10 +647,17 @@ function readClientCredentials(
     }
     const separator = decoded.indexOf(":");
     if (separator === -1) return null;
-    return {
-      clientId: decodeURIComponent(decoded.slice(0, separator)),
-      clientSecret: decodeURIComponent(decoded.slice(separator + 1)),
-    };
+    try {
+      return {
+        clientId: decodeURIComponent(decoded.slice(0, separator)),
+        clientSecret: decodeURIComponent(decoded.slice(separator + 1)),
+      };
+    } catch {
+      // `decodeURIComponent` throws URIError on a malformed percent sequence
+      // (`%zz`). Unhandled, that is a 500 from an unauthenticated endpoint;
+      // caught, it is the `invalid_client` this function exists to return.
+      return null;
+    }
   }
   const clientId = form.get("client_id");
   if (clientId === null || clientId === "") return null;
@@ -632,15 +668,12 @@ function readClientCredentials(
 app.post("/oauth/token", async (c) => {
   const logger = createLogger({ path: c.req.path, method: c.req.method });
 
-  let form: URLSearchParams;
-  try {
-    // RFC 6749 §4.1.3 mandates form encoding here. Read as text and parse
-    // ourselves so a client sending a wrong Content-Type gets an OAuth error
-    // rather than a framework-level failure.
-    form = new URLSearchParams(await c.req.text());
-  } catch {
-    return oauthError("invalid_request", "Request body must be application/x-www-form-urlencoded");
-  }
+  // RFC 6749 §4.1.3 mandates form encoding here. Parsed by us rather than by
+  // the framework so a client sending a wrong Content-Type gets an OAuth error
+  // rather than a framework-level failure.
+  const body = await readForm(c, logger);
+  if ("response" in body) return body.response;
+  const form = body.form;
 
   const credentials = readClientCredentials(c.req.header("Authorization"), form);
   if (credentials === null) {
@@ -786,12 +819,9 @@ async function handleRefreshGrant(
 app.post("/oauth/revoke", async (c) => {
   const logger = createLogger({ path: c.req.path, method: c.req.method });
 
-  let form: URLSearchParams;
-  try {
-    form = new URLSearchParams(await c.req.text());
-  } catch {
-    return oauthError("invalid_request", "Request body must be application/x-www-form-urlencoded");
-  }
+  const body = await readForm(c, logger);
+  if ("response" in body) return body.response;
+  const form = body.form;
 
   const token = form.get("token") ?? "";
   if (token === "") return oauthError("invalid_request", "Missing token");

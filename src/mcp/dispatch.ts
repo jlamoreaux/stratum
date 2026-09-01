@@ -52,7 +52,12 @@ api.onError((error, c) => {
   c.get("logger")?.error("MCP sub-request failed", error instanceof Error ? error : undefined, {
     path: c.req.path,
   });
-  return c.json({ error: error.message || "Internal error" }, 500);
+  // A fixed message, never `error.message`. `StratumClient` lifts `{error}`
+  // straight into the tool's result text, so an unhandled exception here would
+  // put D1 or SQL internals in front of a language model and into the client's
+  // transcript. The detail stays in the log line above, where an operator can
+  // read it and a caller cannot.
+  return c.json({ error: "Internal error" }, 500);
 });
 
 /**

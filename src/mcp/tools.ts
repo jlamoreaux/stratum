@@ -14,7 +14,7 @@
  * will reject its agent token asks a human instead of retrying nineteen times.
  */
 import type { StratumClient } from "./client";
-import { parseProjectRef } from "./client";
+import { InvalidArgumentError, parseProjectRef } from "./client";
 import { type SchemaArgs, type ToolSchema, toJsonSchema, validate } from "./schema";
 
 export interface ToolResult {
@@ -72,6 +72,17 @@ function tool<const S extends ToolSchema>(
         return jsonResult(await handler(parsed.value));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // Thirteen tools resolve a `namespace/slug` reference inside the
+        // handler, which the JSON Schema can only type as "a string". Those
+        // failures are argument failures and have to read as such, or the
+        // labelling above becomes a lie for the most common mistake a model
+        // makes.
+        if (error instanceof InvalidArgumentError) {
+          return {
+            content: [{ type: "text", text: `Invalid arguments for ${name}:\n  - ${message}` }],
+            isError: true,
+          };
+        }
         return {
           content: [{ type: "text", text: `Stratum API error: ${message}` }],
           isError: true,
@@ -148,7 +159,7 @@ export function buildTools(client: StratumClient): ToolDef[] {
     ),
     tool(
       "stratum_commit",
-      "Commit files to a workspace. Takes a map of repo-relative file paths to full new file contents. Capped at 2,000 files and 25 MB per commit, and it cannot express a deletion or a rename — push over the workspace's git remote for those.",
+      "Commit files to a workspace. Takes a map of repo-relative file paths to full new file contents. Over MCP the whole request is capped at 8 MB (the REST API allows 25 MB); it is also capped at 2,000 files, and it cannot express a deletion or a rename — push over the workspace's git remote for those.",
       {
         workspace: {
           type: "string",

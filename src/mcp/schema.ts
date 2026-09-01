@@ -128,7 +128,13 @@ export function validate<S extends ToolSchema>(schema: S, raw: unknown): Validat
   const value: Record<string, unknown> = {};
 
   for (const key of Object.keys(input)) {
-    if (!(key in schema)) {
+    // `Object.hasOwn`, never `key in schema`: `in` walks the prototype chain, so
+    // `constructor`, `toString` and every other Object.prototype member would
+    // read as a known field. They would then be neither reported here nor
+    // picked up by the loop below (which iterates the schema's OWN entries),
+    // and would vanish silently — the one outcome `additionalProperties: false`
+    // exists to prevent.
+    if (!Object.hasOwn(schema, key)) {
       const known = Object.keys(schema);
       errors.push(
         known.length === 0

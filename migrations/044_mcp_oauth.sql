@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   access_token_hash TEXT NOT NULL UNIQUE,
   -- NULL once rotation has retired it, or when the grant never had one.
   refresh_token_hash TEXT UNIQUE,
+  -- The hash rotation just retired. Kept so that presenting an OLD refresh
+  -- token is DETECTABLE rather than merely unknown: OAuth 2.1 §4.3.1 and
+  -- RFC 9700 §4.14 both say a server that rotates refresh tokens should treat
+  -- reuse of a retired one as a compromise signal and revoke the grant. Without
+  -- this column the reuse is indistinguishable from a random bad token, so the
+  -- stolen half keeps working until the user revokes by hand.
+  previous_refresh_token_hash TEXT,
   client_id TEXT NOT NULL REFERENCES oauth_clients(id),
   user_id TEXT NOT NULL REFERENCES users(id),
   -- Space-delimited. Narrowed to the api_tokens vocabulary at authentication

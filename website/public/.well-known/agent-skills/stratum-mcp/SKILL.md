@@ -35,8 +35,14 @@ If you are a headless agent with no browser, send a bearer token instead — a
 user token (`stratum_user_...`) or an agent token (`stratum_agent_...`). Prefer
 an agent token: your writes are then attributed to the agent in provenance.
 
-Call `stratum_whoami` first. It tells you which identity you are and therefore
-which operations will be refused.
+Call `stratum_whoami` first — but read its answer carefully. On a user
+credential (an OAuth grant, or a `stratum_user_` token) it returns your account.
+On an **agent token it returns 401, and that is the expected answer**, not a
+misconfiguration: the endpoint behind it is user-only. A 401 here means you are
+an agent, so plan for `stratum_review_change`, `stratum_merge_change`,
+`stratum_reject_change` and `stratum_update_issue` to be refused, and address
+projects by `namespace/slug` rather than through `stratum_list_projects`, which
+returns an empty list for you.
 
 ## Tools
 

@@ -33,22 +33,46 @@ import { readTextWithLimit } from "../utils/request-body";
 
 const app = new Hono<{ Bindings: Env }>();
 
-/** Reported in the `initialize` handshake. Tracks the Worker's own version so
- * a client's server-version log line means something. */
-const SERVER_VERSION = "0.2.0";
+/**
+ * Reported in the `initialize` handshake.
+ *
+ * Duplicated from `package.json` rather than imported: pulling JSON into the
+ * Worker bundle would need `resolveJsonModule` and would ship the whole
+ * manifest to the edge for one string. `tests/mcp-endpoint.test.ts` asserts the
+ * two match, which is how this repo pins its other cross-file constants
+ * (`tests/changelog.test.ts`, `tests/wrangler-migration-chain.test.ts`), so a
+ * release bump that forgets this line fails CI rather than shipping a stale
+ * version to every client's log.
+ */
+export const SERVER_VERSION = "0.2.0";
 
 /**
  * Cap on a single JSON-RPC body.
  *
- * Generous, because `stratum_commit` legitimately carries file contents and the
- * API behind it accepts up to 25 MB. Enforced with `readTextWithLimit` rather
- * than `readJsonWithLimit` because both failures on this endpoint — too large,
- * and unparseable — have to come back as JSON-RPC error objects, which an MCP
- * client understands, rather than as this codebase's `{error, code}`, which it
- * does not. The cap itself is the shared streaming one, so an absent or
- * understated `Content-Length` cannot get past it.
+ * Deliberately well below the 32 MB the REST commit route accepts, because a
+ * body arriving HERE is paid for several times over: the streaming read holds
+ * its chunks and then a joined buffer, decodes that to a string, `JSON.parse`
+ * builds the object graph, and `StratumClient` re-serializes the tool's
+ * arguments into a sub-request that `readJsonWithLimit` buffers and parses
+ * again. A near-32 MB body would therefore cost well over 100 MB of live
+ * allocation, and a Workers isolate has 128 MB TOTAL — shared across every
+ * concurrent request it is serving. Two such calls at once is an Error 1102 for
+ * everyone on that isolate, not just for the sender.
+ *
+ * 8 MiB keeps the multiplied footprint comfortably inside the budget while
+ * leaving room for any commit an agent should be making through a tool call.
+ * Larger commits are not blocked, they just take the path they always should:
+ * the workspace's git remote, or the REST API directly. The tool description
+ * and the MCP guide both say so.
+ *
+ * Enforced with `readTextWithLimit` rather than `readJsonWithLimit` because
+ * both failures on this endpoint — too large, and unparseable — have to come
+ * back as JSON-RPC error objects, which an MCP client understands, rather than
+ * as this codebase's `{error, code}`, which it does not. The cap itself is the
+ * shared streaming one, so an absent or understated `Content-Length` cannot get
+ * past it.
  */
-const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 /** Answer an unauthenticated request with the challenge that starts the OAuth
  * flow. This 401 is the entire bootstrap: a client that has never seen this

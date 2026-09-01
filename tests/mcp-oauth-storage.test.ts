@@ -12,7 +12,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACCESS_TOKEN_TTL_MS,
+  LAST_USED_DEBOUNCE_MS,
   MAX_REDIRECT_URIS,
+  REFRESH_GRANT_MAX_MS,
   claimAuthorizationCode,
   deleteOAuthDataForUser,
   getClient,
@@ -27,8 +29,10 @@ import {
   registerClient,
   resolveOAuthAccessToken,
   revokeGrantForUser,
+  revokeGrantsForClientUser,
   revokeToken,
   rotateRefreshToken,
+  touchOAuthTokenLastUsed,
   verifyClientSecret,
   verifyPkce,
 } from "../src/storage/oauth";
@@ -420,8 +424,16 @@ describe("tokens", () => {
     const count = raw.prepare("SELECT COUNT(*) AS n FROM oauth_tokens").get() as { n: number };
     expect(Number(count.n)).toBe(1);
 
-    // The retired pair is dead in both directions.
+    // The retired access token is dead, and the new one works.
     expect((await resolveOAuthAccessToken(db, issued.accessToken, logger)).success).toBe(false);
+    expect((await resolveOAuthAccessToken(db, rotated.data.accessToken, logger)).success).toBe(
+      true,
+    );
+
+    // Presenting the retired REFRESH token is a separate matter: it is a reuse
+    // signal, and it takes the whole grant down with it. That consequence is
+    // covered in "refresh-token reuse detection" below; here we assert only
+    // that the rotation itself fails.
     expect(
       (
         await rotateRefreshToken(db, logger, {
@@ -430,9 +442,6 @@ describe("tokens", () => {
         })
       ).success,
     ).toBe(false);
-    expect((await resolveOAuthAccessToken(db, rotated.data.accessToken, logger)).success).toBe(
-      true,
-    );
   });
 
   it("refuses to rotate a refresh token for a different client", async () => {
@@ -476,6 +485,204 @@ describe("tokens", () => {
     });
     expect(result.success && result.data.revoked).toBe(false);
     expect((await resolveOAuthAccessToken(db, mine.accessToken, logger)).success).toBe(true);
+  });
+});
+
+describe("refresh-token reuse detection", () => {
+  async function grant(userId = "usr_1") {
+    const { client } = await seedClient();
+    const tokens = await issueTokens(db, logger, {
+      clientId: client.id,
+      userId,
+      scope: "mcp:read mcp:write",
+    });
+    if (!tokens.success) throw new Error("issue failed");
+    return { clientId: client.id, ...tokens.data };
+  }
+
+  it("revokes the whole grant when a RETIRED refresh token is presented", async () => {
+    await seedUser();
+    const issued = await grant();
+
+    const rotated = await rotateRefreshToken(db, logger, {
+      refreshToken: issued.refreshToken,
+      clientId: issued.clientId,
+    });
+    expect(rotated.success).toBe(true);
+    if (!rotated.success) return;
+
+    // The rotated-away token is now a compromise signal, not merely an unknown
+    // string: two parties hold it and only one is the rightful client
+    // (OAuth 2.1 §4.3.1, RFC 9700 §4.14).
+    const reused = await rotateRefreshToken(db, logger, {
+      refreshToken: issued.refreshToken,
+      clientId: issued.clientId,
+    });
+    expect(reused.success).toBe(false);
+
+    // So the CURRENT pair — which the thief may also hold — dies too.
+    expect((await resolveOAuthAccessToken(db, rotated.data.accessToken, logger)).success).toBe(
+      false,
+    );
+    expect(
+      (
+        await rotateRefreshToken(db, logger, {
+          refreshToken: rotated.data.refreshToken,
+          clientId: issued.clientId,
+        })
+      ).success,
+    ).toBe(false);
+  });
+
+  it("caps the sliding refresh window at the grant's absolute lifetime", async () => {
+    await seedUser();
+    const issued = await grant();
+
+    // A grant first issued long ago. Without the cap, this rotation would push
+    // its expiry another 30 days out and the grant would never end.
+    const longAgo = new Date(Date.now() - REFRESH_GRANT_MAX_MS + 60_000).toISOString();
+    raw.prepare("UPDATE oauth_tokens SET created_at = ?").run(longAgo);
+
+    const rotated = await rotateRefreshToken(db, logger, {
+      refreshToken: issued.refreshToken,
+      clientId: issued.clientId,
+    });
+    expect(rotated.success).toBe(true);
+
+    const row = raw.prepare("SELECT refresh_expires_at FROM oauth_tokens").get() as {
+      refresh_expires_at: string;
+    };
+    // Clamped to created_at + the absolute max, roughly a minute from now,
+    // rather than the full sliding window.
+    const remaining = Date.parse(row.refresh_expires_at) - Date.now();
+    expect(remaining).toBeLessThan(5 * 60_000);
+    expect(remaining).toBeGreaterThan(0);
+  });
+
+  it("still slides normally for a young grant", async () => {
+    await seedUser();
+    const issued = await grant();
+    const rotated = await rotateRefreshToken(db, logger, {
+      refreshToken: issued.refreshToken,
+      clientId: issued.clientId,
+    });
+    expect(rotated.success).toBe(true);
+    const row = raw.prepare("SELECT refresh_expires_at FROM oauth_tokens").get() as {
+      refresh_expires_at: string;
+    };
+    const remaining = Date.parse(row.refresh_expires_at) - Date.now();
+    expect(remaining).toBeGreaterThan(29 * 24 * 60 * 60 * 1000);
+  });
+});
+
+describe("revokeGrantsForClientUser", () => {
+  it("kills every live grant for one client/user pair and no others", async () => {
+    await seedUser("usr_1");
+    await seedUser("usr_2");
+    const { client } = await seedClient();
+    const other = await seedClient();
+
+    const mineFirst = await issueTokens(db, logger, {
+      clientId: client.id,
+      userId: "usr_1",
+      scope: "mcp:read",
+    });
+    const mineSecond = await issueTokens(db, logger, {
+      clientId: client.id,
+      userId: "usr_1",
+      scope: "mcp:read",
+    });
+    const sameClientOtherUser = await issueTokens(db, logger, {
+      clientId: client.id,
+      userId: "usr_2",
+      scope: "mcp:read",
+    });
+    const otherClientSameUser = await issueTokens(db, logger, {
+      clientId: other.client.id,
+      userId: "usr_1",
+      scope: "mcp:read",
+    });
+    if (
+      !mineFirst.success ||
+      !mineSecond.success ||
+      !sameClientOtherUser.success ||
+      !otherClientSameUser.success
+    ) {
+      throw new Error("setup failed");
+    }
+
+    await revokeGrantsForClientUser(db, logger, { clientId: client.id, userId: "usr_1" });
+
+    // Every grant this client holds for this user — the code-replay response
+    // has to cover the ones already issued, not just the one being redeemed.
+    for (const dead of [mineFirst, mineSecond]) {
+      expect((await resolveOAuthAccessToken(db, dead.data.accessToken, logger)).success).toBe(
+        false,
+      );
+    }
+    // And nothing beyond that pair.
+    expect(
+      (await resolveOAuthAccessToken(db, sameClientOtherUser.data.accessToken, logger)).success,
+    ).toBe(true);
+    expect(
+      (await resolveOAuthAccessToken(db, otherClientSameUser.data.accessToken, logger)).success,
+    ).toBe(true);
+  });
+});
+
+describe("touchOAuthTokenLastUsed", () => {
+  async function seedGrant(): Promise<string> {
+    await seedUser();
+    const { client } = await seedClient();
+    const tokens = await issueTokens(db, logger, {
+      clientId: client.id,
+      userId: "usr_1",
+      scope: "mcp:read",
+    });
+    if (!tokens.success) throw new Error("issue failed");
+    const row = raw.prepare("SELECT id FROM oauth_tokens").get() as { id: string };
+    return row.id;
+  }
+
+  function storedLastUsed(): string | null {
+    return (
+      raw.prepare("SELECT last_used_at FROM oauth_tokens").get() as {
+        last_used_at: string | null;
+      }
+    ).last_used_at;
+  }
+
+  it("writes when there is no previous value", async () => {
+    const grantId = await seedGrant();
+    await touchOAuthTokenLastUsed(db, logger, { grantId });
+    expect(storedLastUsed()).not.toBeNull();
+  });
+
+  it("skips the write inside the debounce window", async () => {
+    const grantId = await seedGrant();
+    const recent = new Date(Date.now() - 60_000).toISOString();
+    raw.prepare("UPDATE oauth_tokens SET last_used_at = ?").run(recent);
+
+    // Without the debounce every authenticated MCP call carries a D1 write.
+    await touchOAuthTokenLastUsed(db, logger, { grantId, lastUsedAt: recent });
+    expect(storedLastUsed()).toBe(recent);
+  });
+
+  it("writes once the debounce window has passed", async () => {
+    const grantId = await seedGrant();
+    const stale = new Date(Date.now() - LAST_USED_DEBOUNCE_MS - 60_000).toISOString();
+    raw.prepare("UPDATE oauth_tokens SET last_used_at = ?").run(stale);
+
+    await touchOAuthTokenLastUsed(db, logger, { grantId, lastUsedAt: stale });
+    expect(storedLastUsed()).not.toBe(stale);
+  });
+
+  it("writes when the previous value is unparseable, repairing the row", async () => {
+    const grantId = await seedGrant();
+    raw.prepare("UPDATE oauth_tokens SET last_used_at = ?").run("not-a-date");
+    // Freezing the row forever would be the alternative, and it is worse.
+    await touchOAuthTokenLastUsed(db, logger, { grantId, lastUsedAt: "not-a-date" });
+    expect(storedLastUsed()).not.toBe("not-a-date");
   });
 });
 

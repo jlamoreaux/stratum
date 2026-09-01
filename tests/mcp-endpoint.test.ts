@@ -11,9 +11,12 @@
  * grant. That is the headless path the docs describe, and it keeps these tests
  * about MCP; the OAuth flow has its own suites.
  */
+/// <reference types="vite/client" />
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import packageJson from "../package.json?raw";
 import app from "../src/index";
 import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from "../src/mcp/protocol";
+import { SERVER_VERSION } from "../src/routes/mcp";
 import { issueTokens, registerClient } from "../src/storage/oauth";
 import type { Env } from "../src/types";
 import { hashToken } from "../src/utils/crypto";
@@ -203,6 +206,20 @@ describe("handshake", () => {
     expect(unknown.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
   });
 
+  it("reports the version in package.json, so a release bump cannot leave it stale", async () => {
+    // The constant is duplicated rather than imported (importing JSON would
+    // ship the whole manifest to the edge for one string), so this is what
+    // keeps the two in step — the same guard style as tests/changelog.test.ts
+    // and tests/wrangler-migration-chain.test.ts.
+    const declared = (JSON.parse(packageJson) as { version: string }).version;
+    expect(SERVER_VERSION).toBe(declared);
+
+    const reply = (await (
+      await rpc({ jsonrpc: "2.0", id: 1, method: "initialize" })
+    ).json()) as RpcReply;
+    expect((reply.result?.serverInfo as { version: string }).version).toBe(declared);
+  });
+
   it("answers a notification with 202 and no body", async () => {
     const response = await rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
     expect(response.status).toBe(202);
@@ -298,10 +315,16 @@ describe("tools/call", () => {
     expect(text).toContain("unknown argument 'typo'");
   });
 
-  it("rejects a malformed project reference before touching the API", async () => {
+  it("labels a malformed project reference as an ARGUMENT error, not an API error", async () => {
     const reply = await call("stratum_get_project", { project: "not-a-ref" });
     expect(reply.result?.isError).toBe(true);
-    expect(resultText(reply)).toContain("expected namespace/slug");
+    const text = resultText(reply);
+    expect(text).toContain("expected namespace/slug");
+    // The schema can only type this field as "a string", so the check lands in
+    // the handler — but a model that reads "Stratum API error" here retries the
+    // same broken reference instead of fixing it.
+    expect(text).toContain("Invalid arguments for stratum_get_project");
+    expect(text).not.toContain("Stratum API error");
   });
 
   it("answers an unknown tool with method-not-found", async () => {
@@ -337,7 +360,7 @@ describe("protocol framing", () => {
   it("caps an oversized body, and answers in JSON-RPC", async () => {
     // Enforced during the read, so an absent or understated Content-Length
     // cannot get past it — a lying header must not buy an unbounded buffer.
-    const huge = "x".repeat(40 * 1024 * 1024);
+    const huge = "x".repeat(12 * 1024 * 1024);
     const response = await app.fetch(
       new Request(`${ORIGIN}/mcp`, {
         method: "POST",
@@ -373,6 +396,28 @@ describe("protocol framing", () => {
     ]);
     const replies = (await response.json()) as RpcReply[];
     expect(replies).toHaveLength(2);
+    expect(replies.map((r) => r.id)).toEqual([1, 2]);
+  });
+
+  it("answers a notification method that arrives WITH an id", async () => {
+    // A client that sends one of these with an `id` has asked a question.
+    // Dropping the reply leaves its request pending forever.
+    const reply = (await (
+      await rpc({ jsonrpc: "2.0", id: 9, method: "notifications/initialized" })
+    ).json()) as RpcReply;
+    expect(reply.id).toBe(9);
+    expect(reply.result).toEqual({});
+  });
+
+  it("returns one reply per id in a batch, even for notification methods", async () => {
+    // Inside a batch the dropped reply is worse: the array comes back shorter
+    // than the ids that were sent, and the client cannot tell which is missing.
+    const response = await rpc([
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { jsonrpc: "2.0", id: 2, method: "notifications/initialized" },
+      { jsonrpc: "2.0", method: "notifications/cancelled" },
+    ]);
+    const replies = (await response.json()) as RpcReply[];
     expect(replies.map((r) => r.id)).toEqual([1, 2]);
   });
 

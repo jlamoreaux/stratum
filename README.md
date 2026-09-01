@@ -189,7 +189,7 @@ curl -X POST .../api/projects/@you/my-project/changes -d '{"workspace": "fix-bug
 curl -X POST .../api/changes/<change-id>/merge
 ```
 
-The full surface — 72 paths, 91 operations — is specified in
+The full surface — 86 paths, 107 operations — is specified in
 [`docs/api/openapi.yml`](docs/api/openapi.yml), with per-resource guides under
 [`docs/api/endpoints/`](docs/api/endpoints/README.md).
 
@@ -308,7 +308,7 @@ tested restore path · deletion jobs · admin metrics API · durable event outbo
 queue consumer and a stale-event sweep · workspace TTL sweep.
 
 **Interfaces**
-Server-rendered web UI · REST API (80 paths) · remote MCP server at `/mcp` with an
+Server-rendered web UI · REST API (86 paths) · remote MCP server at `/mcp` with an
 OAuth 2.1 authorization server (dynamic client registration, PKCE, rotating refresh
 tokens) · `@stratum/cli` at full API parity · `@stratum/agent` reference agent.
 

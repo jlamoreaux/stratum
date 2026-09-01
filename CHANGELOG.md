@@ -21,11 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stratum is now an OAuth 2.1 authorization server**, for `/mcp`. Dynamic
   client registration (RFC 7591) at `/oauth/register`, mandatory PKCE with
   `S256` only, 60-second single-use authorization codes, one-hour access tokens,
-  rotating 30-day refresh tokens, RFC 7009 revocation, and RFC 8414/9728
-  discovery documents built from the request origin so a self-hosted instance
-  advertises itself with nothing to configure. A replayed authorization code
-  revokes every token issued from it. An editor is connected with a browser
-  consent screen; no Stratum credential is ever pasted into a client config.
+  rotating 30-day refresh tokens capped at an absolute 180-day grant lifetime,
+  RFC 7009 revocation, and RFC 8414/9728 discovery documents built from the
+  request origin so a self-hosted instance advertises itself with nothing to
+  configure. An editor is connected with a browser consent screen; no Stratum
+  credential is ever pasted into a client config.
+
+  Reuse of a spent credential is treated as a compromise signal on both halves
+  of the flow, per OAuth 2.1 §4.3.1 and RFC 9700 §4.14: a replayed
+  authorization code and a replayed (already-rotated) refresh token each revoke
+  every token the grant produced. A redemption that merely *fails validation* —
+  wrong client, wrong verifier, wrong redirect URI — leaves the code untouched,
+  so observing one is not enough to disrupt the rightful client.
 - **Connected applications in settings.** Every authorized MCP client is listed
   with its self-declared name, client id, granted access and last use, and can
   be disconnected in one click — which revokes the access token and the ability
@@ -49,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user), so an agent's feedback channel is change comments.
 
 ### Changed
+- **The MCP request body is capped at 8 MB**, below the REST API's 25 MB commit
+  limit. A tool call is buffered, parsed, re-serialized into an internal request
+  and parsed again, so a body near the REST limit would cost more than a Workers
+  isolate's entire 128 MB budget — which is shared with every concurrent request
+  that isolate serves. A commit that does not fit belongs on the git remote.
 - **All three sign-in paths now honour one post-login destination.** The
   magic-link flow read a `redirect_after_login` cookie nothing set, GitHub
   threaded a `next` parameter, and Google always went to `/`. A flow that sends

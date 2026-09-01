@@ -589,6 +589,39 @@ describe("token endpoint", () => {
   });
 });
 
+describe("request hardening", () => {
+  it("returns invalid_client for malformed Basic credentials rather than a 500", async () => {
+    const { json } = await register({ token_endpoint_auth_method: "client_secret_basic" });
+    // `decodeURIComponent` throws URIError on `%zz`; unhandled, that is a 500
+    // from an unauthenticated endpoint.
+    const response = await exchange(
+      { grant_type: "authorization_code", code: "x", code_verifier: VERIFIER },
+      `Basic ${btoa("%zz:%zz")}`,
+    );
+    expect(response.status).toBe(401);
+    expect(((await response.json()) as { error: string }).error).toBe("invalid_client");
+    expect(json.client_id).toBeDefined();
+  });
+
+  it("caps the form-encoded bodies, not just the JSON one", async () => {
+    // /oauth/token and /oauth/revoke read their bodies as text and
+    // POST /oauth/authorize as form data; all three carry the same handful of
+    // short fields, and two of the three are unauthenticated.
+    const huge = "x".repeat(128 * 1024);
+    for (const path of ["/oauth/token", "/oauth/revoke"]) {
+      const response = await app.fetch(
+        new Request(`${ORIGIN}${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ token: huge, grant_type: "refresh_token" }).toString(),
+        }),
+        env,
+      );
+      expect(response.status, path).toBe(413);
+    }
+  });
+});
+
 describe("revocation", () => {
   it("returns 200 whether or not the token existed", async () => {
     for (const token of ["stratum_mcp_00000000000000000000000000000000", "not-a-token"]) {

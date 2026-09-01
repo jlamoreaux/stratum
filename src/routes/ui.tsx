@@ -330,6 +330,9 @@ async function renderSettings(
       agents={agents}
       apiTokens={tokens.tokens}
       oauthGrants={grants.grants}
+      // A failed read and an empty list are the same empty array, so the flag
+      // is what keeps them from rendering identically — see `loadOAuthGrants`.
+      oauthGrantsUnavailable={grants.notice !== undefined}
       telemetryOptOut={telemetryOptOut}
       // Threaded here rather than at each call site: this helper is the single
       // render path for the settings page, so the CSP nonce main added cannot
