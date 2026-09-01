@@ -15,6 +15,13 @@ export const BACKUP_TABLES: readonly string[] = [
   // silently invalidated every API credential is a worse failure than holding
   // token hashes a backup already carries on `users.token_hash`.
   "api_tokens",
+  // MCP OAuth (#349), FK-ordered: `oauth_clients` has no parent, and
+  // `oauth_tokens` references both it and `users`. Included for the same reason
+  // as `api_tokens` — these are live credentials held by editors the user has
+  // connected, and a restore that silently disconnected all of them (with no
+  // way to tell the user which) is worse than holding their hashes.
+  "oauth_clients",
+  "oauth_tokens",
   "orgs",
   "agents",
   "teams",
@@ -57,6 +64,11 @@ export const BACKUP_EXCLUDED_TABLES: readonly string[] = [
   // The backup orchestrator's own per-repo rotation cursor. It describes backup
   // progress, not user data; restoring it into a fresh DB would be meaningless.
   "backup_state",
+  // In-flight OAuth authorization codes (#349): single-use and 60 seconds long.
+  // Every row in a backup is already dead by the time it is written, and a
+  // restored one could not be redeemed even if it weren't. Same reasoning as
+  // `magic_links` above.
+  "oauth_auth_codes",
 ];
 
 const PAGE_SIZE = 500;

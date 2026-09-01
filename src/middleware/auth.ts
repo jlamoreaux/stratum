@@ -1,13 +1,20 @@
 import type { MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { isGitHttpPath } from "../routes/git-http";
+import { isOAuthClientEndpoint } from "../routes/mcp-oauth";
 import { getAgentByToken } from "../storage/agents";
 import { resolveApiToken, touchApiTokenLastUsed } from "../storage/api-tokens";
+import {
+  SCOPE_WRITE,
+  resolveOAuthAccessToken,
+  touchOAuthTokenLastUsed,
+} from "../storage/oauth";
 import { deleteSession, getSession } from "../storage/sessions";
 import { getUser, getUserByToken } from "../storage/users";
 import type { ApiTokenScope, Env, User } from "../types";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { isWriteMethod } from "../utils/http-methods";
+import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
 import { type Logger, createLogger } from "../utils/logger";
 
 declare module "hono" {
@@ -26,6 +33,16 @@ declare module "hono" {
      * `tokenScope` cannot tell the two apart and anything that must treat them
      * differently has to key on this. */
     apiTokenId?: string;
+    /** Row id of the authenticating OAuth grant (#349). Present ONLY for a
+     * caller holding an `stratum_mcp_` access token — i.e. one acting through
+     * a client the user consented to, rather than a credential they hold
+     * themselves. Anything that must treat a delegated credential differently
+     * keys on this. */
+    oauthGrantId?: string;
+    /** The OAuth client the grant was issued to (#349). Carried for logging and
+     * audit attribution: "which editor did this" is not answerable from the
+     * user id alone. */
+    oauthClientId?: string;
     /**
      * The caller's product-analytics preference (#257), read from the same
      * `users` row this middleware already loads. Absent for unauthenticated
@@ -43,20 +60,23 @@ function sanitizeToken(token: string): string {
 }
 
 /**
- * Did this request authenticate with a scoped API token (#254)?
+ * Did this request authenticate with a narrow, revocable credential — a scoped
+ * API token (#254) or an OAuth grant (#349)?
  *
  * Gates the endpoints that mint the LEGACY credential. That key never expires
- * and cannot be revoked one-at-a-time, so a scoped token able to rotate it
- * could outlive its own revocation: "revoke the lost laptop" would leave the
- * laptop holding a permanent key it minted on the way out. Session callers and
- * legacy-token callers are unaffected, which is what keeps existing automation
- * working — scoped tokens are new in #254, so nothing can yet depend on them
- * reaching these routes.
+ * and cannot be revoked one-at-a-time, so a credential able to rotate it could
+ * outlive its own revocation: "revoke the lost laptop" would leave the laptop
+ * holding a permanent key it minted on the way out. An OAuth grant is the same
+ * hazard one step worse — it lives inside software the user does not control,
+ * so "disconnect this editor" has to actually disconnect it.
+ *
+ * Session callers and legacy-token callers are unaffected, which is what keeps
+ * existing automation working.
  */
-export function isScopedTokenCaller(c: {
-  get: (key: "apiTokenId") => string | undefined;
+export function cannotMintLegacyCredential(c: {
+  get: (key: "apiTokenId" | "oauthGrantId") => string | undefined;
 }): boolean {
-  return c.get("apiTokenId") !== undefined;
+  return c.get("apiTokenId") !== undefined || c.get("oauthGrantId") !== undefined;
 }
 
 /**
@@ -82,6 +102,15 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
   // The git smart-HTTP router authenticates over HTTP Basic itself; let it own
   // the challenge instead of rejecting the non-Bearer header here.
   if (isGitHttpPath(c.req.path)) {
+    await next();
+    return;
+  }
+
+  // Same deal for the OAuth endpoints that authenticate a CLIENT rather than a
+  // user (#349): `client_secret_basic` sends `Authorization: Basic …`, which
+  // the non-Bearer rejection below would turn into a 401 before routing. They
+  // are also reachable before the caller holds any Stratum credential at all.
+  if (isOAuthClientEndpoint(c.req.path)) {
     await next();
     return;
   }
@@ -237,6 +266,105 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       logger.debug("Auth success - agent", {
         agentId: agentResult.data.id,
         ownerId: agentResult.data.ownerId,
+      });
+      await next();
+      return;
+    }
+
+    // OAuth access tokens issued to an MCP client (#349).
+    //
+    // Deliberately a peer of the two branches above rather than something the
+    // /mcp route resolves for itself: the MCP endpoint reuses the real API
+    // handlers, so an OAuth credential has to authenticate everywhere a user
+    // token does, or the tools would diverge from the API they wrap.
+    //
+    // The `stratum_mcp_` prefix is exact, so the sibling credentials this
+    // server also mints — `stratum_mcprt_` (refresh), `stratum_mcpac_` (code),
+    // `stratum_mcpcs_` (client secret) — fall through to the rejection below
+    // instead of being tried as access tokens.
+    if (token.startsWith("stratum_mcp_")) {
+      const grant = await resolveOAuthAccessToken(c.env.DB, token, logger);
+      if (!grant.success) {
+        logger.warn("Auth failed - invalid OAuth access token", {
+          path: c.req.path,
+          tokenHint: sanitizeToken(token),
+        });
+        // The challenge points the client at the metadata document that tells
+        // it where to re-authorize (RFC 9728). Without it a client whose token
+        // simply expired has no way to distinguish "refresh me" from "you are
+        // not welcome here", and gives up.
+        return c.json({ error: "Invalid token" }, 401, {
+          "WWW-Authenticate": buildAuthenticateChallenge(
+            c.req.url,
+            "invalid_token",
+            "The access token is expired, revoked, or unknown",
+          ),
+        });
+      }
+
+      // Refused before ROUTING, in the same spirit as the read-only rule below
+      // it: an OAuth grant is delegated to software the user does not control,
+      // and `resolveAdminAuth` grants admin authority on a bare `userId` +
+      // ADMIN_EMAIL match. Without this, an instance admin connecting an editor
+      // would hand that editor the admin API. Carving per-route exceptions is
+      // how a structural rule stops being structural.
+      if (c.req.path.startsWith("/api/admin/")) {
+        logger.warn("Auth rejected - OAuth grant on an admin route", {
+          path: c.req.path,
+          userId: grant.data.user.id,
+          clientId: grant.data.clientId,
+        });
+        return c.json(
+          {
+            error: "OAuth grants cannot reach the admin API",
+            code: "ADMIN_REQUIRES_DIRECT_CREDENTIAL",
+          },
+          403,
+        );
+      }
+
+      // Identical rule, identical reasoning, to the scoped-token check below:
+      // a read-only grant never reaches a write route, including reads
+      // expressed as POST.
+      if (grant.data.scope === "read" && isWriteMethod(c.req.method)) {
+        logger.warn("Auth rejected - read-only OAuth grant on a write request", {
+          path: c.req.path,
+          method: c.req.method,
+          userId: grant.data.user.id,
+        });
+        return c.json(
+          {
+            error: `This OAuth grant is read-only. Re-authorize requesting the '${SCOPE_WRITE}' scope.`,
+            code: "TOKEN_SCOPE_INSUFFICIENT",
+          },
+          403,
+        );
+      }
+
+      c.set("userId", grant.data.user.id);
+      c.set("username", grant.data.user.username);
+      c.set("authVia", "token");
+      c.set("tokenScope", grant.data.scope);
+      c.set("oauthGrantId", grant.data.grantId);
+      c.set("oauthClientId", grant.data.clientId);
+      c.set("telemetryOptOut", grant.data.user.telemetryOptOut === true);
+
+      // Off the response path and debounced inside the helper, exactly as the
+      // scoped-token touch below. `getWaitUntil` rather than `c.executionCtx`,
+      // which THROWS when none was supplied — as in every `app.fetch(request,
+      // env)` test.
+      const waitUntil = getWaitUntil(c);
+      const touch = touchOAuthTokenLastUsed(c.env.DB, logger, {
+        grantId: grant.data.grantId,
+        ...(grant.data.lastUsedAt !== undefined ? { lastUsedAt: grant.data.lastUsedAt } : {}),
+      });
+      if (waitUntil) waitUntil(touch);
+      else await touch;
+
+      logger.debug("Auth success - OAuth grant", {
+        userId: grant.data.user.id,
+        clientId: grant.data.clientId,
+        scope: grant.data.scope,
       });
       await next();
       return;

@@ -4,6 +4,7 @@ import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
 import { findActiveJobForTarget } from "./deletion-jobs";
 import { artifactsRepoNameFromRemote } from "./git-ops";
+import { deleteOAuthDataForUser } from "./oauth";
 import { deleteAllUserSessions } from "./sessions";
 import { listProjects } from "./state";
 
@@ -809,6 +810,11 @@ export async function deleteAccountCascade(
     // erasure request is itself a retention bug.
     await db.prepare("DELETE FROM agents WHERE owner_id = ?").bind(userId).run();
     await db.prepare("DELETE FROM api_tokens WHERE user_id = ?").bind(userId).run();
+    // Same reasoning, same trap: `oauth_tokens.user_id` and
+    // `oauth_auth_codes.user_id` both REFERENCE users(id) (#349). An OAuth
+    // grant is a live credential handed to an editor, so an erasure that left
+    // one behind would both block the cascade and leave the account reachable.
+    await deleteOAuthDataForUser(db, userId);
     const sessions = await deleteAllUserSessions(db, userId, logger);
     if (!sessions.success) residuals.push(`account:sessions:${sessions.error.code}`);
     await db.prepare("DELETE FROM org_members WHERE user_id = ?").bind(userId).run();

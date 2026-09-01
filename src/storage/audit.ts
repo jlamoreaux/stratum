@@ -27,7 +27,12 @@ export type AuditAction =
   | "webhook.project_id_backfilled"
   | "branch.created"
   | "branch.deleted"
-  | "telemetry.preference_changed";
+  | "telemetry.preference_changed"
+  // MCP OAuth grants (#349). Recorded on the consent decision and on revocation
+  // so "which editor did I connect, and when did I disconnect it" is answerable
+  // from the trail rather than only from the live grant list.
+  | "oauth.authorized"
+  | "oauth.revoked";
 
 export interface AuditEntry {
   id: string;

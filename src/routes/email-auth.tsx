@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { setCookie } from "hono/cookie";
 import { admitUser, betaGateEnabled, validateInviteCode } from "../beta/gate";
 import { getInviteCodesEmail, getMagicLinkEmail } from "../email/templates";
 import { enforceSameOrigin } from "../middleware/csrf";
@@ -12,6 +12,7 @@ import type { Env } from "../types";
 import { hashToken } from "../utils/crypto";
 import { escapeHtml } from "../utils/html";
 import { type Logger, createLogger } from "../utils/logger";
+import { consumePostLoginRedirect } from "../utils/post-login-redirect";
 import { validateUsername } from "../utils/username-validation";
 import { validateEmail } from "../utils/validation";
 
@@ -766,23 +767,9 @@ async function createSessionAndRedirect(
 
   sessionLogger.info("Session created, redirecting user");
 
-  // Validate redirect to prevent open redirects - only allow same-origin relative paths
-  const rawRedirect = getCookie(c, "redirect_after_login") ?? "";
-  let redirectTo = defaultRedirect;
-  try {
-    const candidate = new URL(rawRedirect, new URL(c.req.url).origin);
-    if (
-      candidate.origin === new URL(c.req.url).origin &&
-      /^\/[^/\\]/.test(rawRedirect) // disallow //, /\, etc.
-    ) {
-      redirectTo = candidate.pathname + candidate.search + candidate.hash;
-    }
-  } catch {
-    // ignore, use defaultRedirect
-  }
-  deleteCookie(c, "redirect_after_login", { path: "/" });
-
-  return c.redirect(redirectTo);
+  // Same-origin validation and the one-shot clear both live in the shared
+  // helper, so all three sign-in paths agree on where "back where I was" is.
+  return c.redirect(consumePostLoginRedirect(c, defaultRedirect));
 }
 
 export { app as emailAuthRouter };

@@ -23,6 +23,8 @@ import { gitHttpRouter } from "./routes/git-http";
 import { healthRouter } from "./routes/health";
 import { issuesRouter } from "./routes/issues";
 import { loginRouter } from "./routes/login";
+import { mcpRouter } from "./routes/mcp";
+import { mcpOAuthRouter } from "./routes/mcp-oauth";
 import { metricsRouter } from "./routes/metrics";
 import { orgsRouter } from "./routes/orgs";
 import { projectsRouter } from "./routes/projects";
@@ -182,6 +184,14 @@ app.route("/api", syncRouter);
 app.route("/api", syncManagementRouter);
 app.route("/api/bulk-import", bulkImportRouter);
 app.route("/api/webhooks/github", githubWebhookRouter);
+
+// The remote MCP endpoint and the OAuth 2.1 authorization server that fronts it
+// (#349). Both own absolute paths (/mcp, /oauth/*, /.well-known/oauth-*), so
+// they mount at the root — before the UI catch-all, whose /:namespace/:slug
+// route would otherwise swallow /.well-known/oauth-protected-resource.
+app.route("/", mcpOAuthRouter);
+app.route("/", mcpRouter);
+
 // Git smart-HTTP proxy (clone/fetch). Mount before the UI catch-all so its
 // /@ns/slug/{info/refs,git-upload-pack,git-receive-pack} paths resolve here.
 app.route("/", gitHttpRouter);
