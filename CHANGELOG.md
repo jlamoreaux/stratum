@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A profile page, and invite codes you can actually find.** `/profile` (linked
+  from the header, next to settings) shows your account identity — username,
+  email, member since, and any linked GitHub account — plus the invite codes
+  issued to your account, each with a share link and whether it has been
+  redeemed. Codes previously existed only in the one email sent at signup, which
+  is best-effort and skipped entirely when the instance has no email binding
+  configured, so a lost or never-sent email meant unreachable codes; they can now
+  be read back from the referral service on demand. The listing keys off
+  `REFERRAL_SERVICE_URL` alone rather than `BETA_GATE`, so codes minted while the
+  gate was on stay visible to their owners after signups reopen, and an
+  unreachable service reports itself as such instead of rendering as "you have no
+  codes". Requires the referral service to serve
+  `GET /api/referral/codes?userId=…` (contract in `wrangler.toml`); the page is
+  not rendered at all on instances with no referral service, which is every
+  ungated self-hosted deployment. Like `/settings`, it is session-only: an API
+  token cannot enumerate your codes.
 - **CLI and MCP server guides.** Dedicated documentation for `@stratum/cli`
   (`docs/user-guide/cli.md`) and `@stratum/mcp` (`docs/user-guide/mcp.md`),
   published at `/guides/cli/` and `/guides/mcp/` — installation from source,

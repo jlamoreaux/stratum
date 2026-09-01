@@ -221,6 +221,28 @@ Events also carry identity attribution: the `distinctId` is the acting user or
 agent id (or `server` for unattributed requests, which are marked personless) so
 usage can be counted per account.
 
+## Where are my invite codes?
+
+Open **`/profile`** (the *profile* link in the header). If your account was
+issued invite codes, they are listed there with a share link for each one and
+whether it has been redeemed yet — codes you can still give away are marked
+*Available*.
+
+Codes are issued only on an instance running the optional closed-beta gate, and
+only to accounts that joined through it. If you signed up while signups were
+open, you have no codes and the page says so. The hosted instance
+(`app.usestratum.dev`) has open signup, so most accounts there hold none.
+
+Send someone the share link rather than the bare code: it carries `?ref=<code>`,
+which fills the code in for them on the signup form. Each code admits one
+person, and a redeemed code cannot be reused.
+
+The page also stays useful after the gate is switched off — codes minted while
+it was on remain listed and redeemable, so the listing keys off the invite
+service being configured rather than off the gate. If the page says your codes
+could not be loaded, that is a temporary problem reaching the invite service;
+nothing has been lost, and a reload once it recovers shows them again.
+
 ## What if my policy file has a mistake in it?
 
 A present-but-malformed `.stratum/policy.yaml` fails closed: the merge gate
