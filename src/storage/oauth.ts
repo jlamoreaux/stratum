@@ -439,27 +439,31 @@ export interface RedeemedCode extends AuthCodeRecord {
 }
 
 /**
- * Redeem a code exactly once.
+ * Look a code up WITHOUT consuming it.
  *
- * The single-use claim is a conditional UPDATE (`WHERE consumed_at IS NULL`),
- * not a read-then-write: two token requests racing with the same code would
- * both pass a read-then-check, and D1 gives us the atomic claim for free.
+ * Split from the claim below on purpose. The obvious implementation — consume
+ * first, then check the client binding, the redirect URI and PKCE — hands an
+ * attacker who merely *observed* a code a way to hurt the legitimate client:
+ * their doomed redemption burns the code, so the real client's exchange then
+ * reports a replay, and the replay path revokes every grant that client holds
+ * for that user. Validating first means a wrong-client or wrong-verifier
+ * attempt changes nothing at all, and only a caller that has proven it may
+ * redeem the code goes on to claim it.
  *
- * A code that was already consumed reports `replayed` rather than `not_found`,
- * and callers are expected to revoke everything issued from it — RFC 6749
- * §10.5. That is why the row is retained after redemption instead of deleted.
+ * `alreadyConsumed` is reported rather than being folded into an error, because
+ * the caller needs the record itself — the client and user on it are who the
+ * revocation applies to.
  */
-export async function consumeAuthorizationCode(
+export async function readAuthorizationCode(
   db: D1Database,
   logger: Logger,
   code: string,
-): Promise<Result<RedeemedCode, CodeRedemptionFailure>> {
+): Promise<Result<RedeemedCode & { alreadyConsumed: boolean }, CodeRedemptionFailure>> {
   let row: AuthCodeRow | null;
-  const codeHash = await hashToken(code);
   try {
     row = await db
       .prepare("SELECT * FROM oauth_auth_codes WHERE code_hash = ?")
-      .bind(codeHash)
+      .bind(await hashToken(code))
       .first<AuthCodeRow>();
   } catch (error) {
     logger.warn("Authorization code lookup failed", {
@@ -469,34 +473,10 @@ export async function consumeAuthorizationCode(
   }
 
   if (!row) return err("not_found");
-  if (row.consumed_at !== null) {
-    logger.warn("Authorization code replayed", {
-      clientId: row.client_id,
-      userId: row.user_id,
-    });
-    return err("replayed");
-  }
-  // Checked before the claim so an expired code reports as expired rather than
-  // being consumed and then rejected — and re-checked implicitly by the claim
-  // below, which cannot succeed twice regardless.
+  // Expiry outranks consumption: an expired code that was also used is simply
+  // expired, and reporting it as a replay would revoke grants over a code
+  // nobody could have redeemed anyway.
   if (isExpired(row.expires_at)) return err("expired");
-
-  try {
-    const claimed = await db
-      .prepare(
-        "UPDATE oauth_auth_codes SET consumed_at = ? WHERE code_hash = ? AND consumed_at IS NULL",
-      )
-      .bind(new Date().toISOString(), codeHash)
-      .run();
-    // Lost the race: another request consumed it between our read and our
-    // write. Report it as a replay, which is exactly what it is.
-    if (claimed.meta.changes === 0) return err("replayed");
-  } catch (error) {
-    logger.warn("Authorization code claim failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return err("lookup_failed");
-  }
 
   return ok({
     clientId: row.client_id,
@@ -506,7 +486,43 @@ export async function consumeAuthorizationCode(
     codeChallenge: row.code_challenge,
     codeChallengeMethod: row.code_challenge_method,
     resource: row.resource,
+    alreadyConsumed: row.consumed_at !== null,
   });
+}
+
+/**
+ * Claim a code, exactly once.
+ *
+ * A conditional UPDATE (`WHERE consumed_at IS NULL`), not a read-then-write:
+ * two token requests racing with the same code would both pass a
+ * read-then-check, and D1 gives us the atomic claim for free. Losing that race
+ * is reported as `replayed`, which is exactly what it is.
+ *
+ * The row is retained after the claim rather than deleted, so a later
+ * presentation of the same code is distinguishable from an expired or unknown
+ * one — that difference is what triggers the revocation RFC 6749 §10.5 calls
+ * for.
+ */
+export async function claimAuthorizationCode(
+  db: D1Database,
+  logger: Logger,
+  code: string,
+): Promise<Result<void, CodeRedemptionFailure>> {
+  try {
+    const claimed = await db
+      .prepare(
+        "UPDATE oauth_auth_codes SET consumed_at = ? WHERE code_hash = ? AND consumed_at IS NULL",
+      )
+      .bind(new Date().toISOString(), await hashToken(code))
+      .run();
+    if (claimed.meta.changes === 0) return err("replayed");
+    return ok(undefined);
+  } catch (error) {
+    logger.warn("Authorization code claim failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return err("lookup_failed");
+  }
 }
 
 /**

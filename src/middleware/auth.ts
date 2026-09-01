@@ -11,7 +11,7 @@ import type { ApiTokenScope, Env, User } from "../types";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { isWriteMethod } from "../utils/http-methods";
 import { type Logger, createLogger } from "../utils/logger";
-import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
+import { buildAuthenticateChallenge, isMcpPath } from "../utils/oauth-challenge";
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -111,6 +111,55 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
     return;
   }
 
+  /**
+   * A 401 that carries the OAuth challenge when it is answering the MCP
+   * endpoint.
+   *
+   * Every rejection on `/mcp` has to say where to re-authorize, not just that
+   * the caller failed — a client whose stored token was revoked or expired
+   * otherwise gets a bare 401 and no way to tell "refresh me" from "you are not
+   * welcome here". That applies whichever credential kind was presented, so it
+   * lives here rather than only in the OAuth branch: someone whose
+   * `stratum_user_` token stopped working should still be pointed at the flow
+   * that would get them a working one.
+   */
+  const rejectToken = (message: string): Response =>
+    c.json(
+      { error: message },
+      401,
+      isMcpPath(c.req.path)
+        ? {
+            "WWW-Authenticate": buildAuthenticateChallenge(
+              c.req.url,
+              "invalid_token",
+              "The access token is expired, revoked, or unknown",
+            ),
+          }
+        : {},
+    );
+
+  /**
+   * Does the method-based read-only rule apply to this request?
+   *
+   * Everywhere except `/mcp`, yes: a `read` credential is refused on anything
+   * that is not a GET or HEAD, before routing, so no write route has to
+   * remember the rule and a route added later inherits it.
+   *
+   * `/mcp` is the one place where the method genuinely says nothing about the
+   * operation. Every MCP call is a POST — `tools/list` and `stratum_get_file`
+   * as much as `stratum_commit` — so applying the rule here would not restrict
+   * a read-only credential, it would lock it out of the endpoint entirely, and
+   * `mcp:read` would be a scope no client could use.
+   *
+   * This is not a hole, and it is emphatically not a per-route exception that
+   * some future write route could forget: the tool call is re-dispatched as a
+   * real API sub-request (`src/mcp/dispatch.ts`) carrying this same credential,
+   * and THAT request runs this middleware again with the method the operation
+   * actually uses. So a read-only caller is refused at exactly the same check,
+   * one layer in, where the method finally means something.
+   */
+  const scopeRuleApplies = !isMcpPath(c.req.path);
+
   const authHeader = c.req.header("Authorization");
 
   if (authHeader) {
@@ -118,7 +167,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       logger.warn("Auth failed - invalid Authorization header format", {
         path: c.req.path,
       });
-      return c.json({ error: "Invalid token" }, 401);
+      return rejectToken("Invalid token");
     }
 
     const token = authHeader.slice(7);
@@ -155,7 +204,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
             path: c.req.path,
             tokenHint: sanitizeToken(token),
           });
-          return c.json({ error: "Invalid token" }, 401);
+          return rejectToken("Invalid token");
         }
         // A soft-`deleting` account's credentials stop working immediately — the
         // deleting_at flag rides on the same user row (no second round-trip) and
@@ -165,7 +214,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
             path: c.req.path,
             userId: userResult.data.id,
           });
-          return c.json({ error: "Invalid token" }, 401);
+          return rejectToken("Invalid token");
         }
         user = userResult.data;
         // The legacy credential predates scopes and carries the full account
@@ -174,11 +223,10 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
         tokenId = null;
       }
 
-      // A read-only token is refused before ROUTING, so no write route has to
-      // remember to check it and a route added later inherits the rule. Reads
-      // expressed as POST are refused too; carving exceptions is how a
-      // structural rule stops being structural.
-      if (scope === "read" && isWriteMethod(c.req.method)) {
+      // See `scopeRuleApplies`: refused before ROUTING everywhere the method
+      // describes the operation, and re-checked one layer in for `/mcp`, where
+      // it does not.
+      if (scopeRuleApplies && scope === "read" && isWriteMethod(c.req.method)) {
         logger.warn("Auth rejected - read-only token on a write request", {
           path: c.req.path,
           method: c.req.method,
@@ -230,7 +278,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
           path: c.req.path,
           tokenHint: sanitizeToken(token),
         });
-        return c.json({ error: "Invalid token" }, 401);
+        return rejectToken("Invalid token");
       }
       // An agent inherits its owner's access, so a deleting owner's agent must
       // stop working too — otherwise it's an authenticated write channel that
@@ -246,11 +294,11 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
           ownerId: agentResult.data.ownerId,
           error: error instanceof Error ? error.message : String(error),
         });
-        return c.json({ error: "Invalid token" }, 401);
+        return rejectToken("Invalid token");
       }
       if (!ownerResult.success || ownerResult.data.deletingAt) {
         logger.warn("Auth failed - agent owner is deleting", { path: c.req.path });
-        return c.json({ error: "Invalid token" }, 401);
+        return rejectToken("Invalid token");
       }
       c.set("agentId", agentResult.data.id);
       c.set("agentOwnerId", agentResult.data.ownerId);
@@ -285,17 +333,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
           path: c.req.path,
           tokenHint: sanitizeToken(token),
         });
-        // The challenge points the client at the metadata document that tells
-        // it where to re-authorize (RFC 9728). Without it a client whose token
-        // simply expired has no way to distinguish "refresh me" from "you are
-        // not welcome here", and gives up.
-        return c.json({ error: "Invalid token" }, 401, {
-          "WWW-Authenticate": buildAuthenticateChallenge(
-            c.req.url,
-            "invalid_token",
-            "The access token is expired, revoked, or unknown",
-          ),
-        });
+        return rejectToken("Invalid token");
       }
 
       // Refused before ROUTING, in the same spirit as the read-only rule below
@@ -319,10 +357,10 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
         );
       }
 
-      // Identical rule, identical reasoning, to the scoped-token check below:
-      // a read-only grant never reaches a write route, including reads
-      // expressed as POST.
-      if (grant.data.scope === "read" && isWriteMethod(c.req.method)) {
+      // Identical rule, identical reasoning, to the scoped-token check above —
+      // including the `/mcp` carve-out, where the sub-request re-checks it
+      // against the method the tool actually uses.
+      if (scopeRuleApplies && grant.data.scope === "read" && isWriteMethod(c.req.method)) {
         logger.warn("Auth rejected - read-only OAuth grant on a write request", {
           path: c.req.path,
           method: c.req.method,
@@ -370,7 +408,7 @@ export const authMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, ne
       path: c.req.path,
       tokenHint: sanitizeToken(token),
     });
-    return c.json({ error: "Invalid token" }, 401);
+    return rejectToken("Invalid token");
   }
 
   const sessionId = getCookie(c, "stratum_session");

@@ -1,0 +1,406 @@
+/**
+ * Issue #349: the remote MCP endpoint at `/mcp`.
+ *
+ * Driven through the whole Worker (`src/index.ts`) against real SQLite, because
+ * the point of this endpoint is that a tool call lands on the REAL API route
+ * handlers — `stratum_whoami` here actually reaches `GET /api/users/me` and is
+ * answered by it. A mocked dispatcher would test the wiring and prove nothing
+ * about the thing the wiring exists for.
+ *
+ * The credential used throughout is a plain user token rather than an OAuth
+ * grant. That is the headless path the docs describe, and it keeps these tests
+ * about MCP; the OAuth flow has its own suites.
+ */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import app from "../src/index";
+import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from "../src/mcp/protocol";
+import { issueTokens, registerClient } from "../src/storage/oauth";
+import type { Env } from "../src/types";
+import { hashToken } from "../src/utils/crypto";
+import type { Logger } from "../src/utils/logger";
+import { makeSqliteD1 } from "./helpers/sqlite-d1";
+
+const logger: Logger = {
+  trace: vi.fn(),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  fatal: vi.fn(),
+  child: vi.fn(() => logger),
+} as unknown as Logger;
+
+const ORIGIN = "https://stratum.test";
+const USER_TOKEN = "stratum_user_11111111111111111111111111111111";
+
+let env: Env;
+let db: D1Database;
+
+interface RpcReply {
+  jsonrpc: string;
+  id: number | string | null;
+  result?: Record<string, unknown>;
+  error?: { code: number; message: string };
+}
+
+async function rpc(
+  body: unknown,
+  opts: { token?: string | null; headers?: Record<string, string> } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...opts.headers,
+  };
+  const token = opts.token === undefined ? USER_TOKEN : opts.token;
+  if (token !== null) headers.Authorization = `Bearer ${token}`;
+  return app.fetch(
+    new Request(`${ORIGIN}/mcp`, { method: "POST", headers, body: JSON.stringify(body) }),
+    env,
+  );
+}
+
+async function call(name: string, args: unknown = {}, token?: string): Promise<RpcReply> {
+  const response = await rpc(
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+    token === undefined ? {} : { token },
+  );
+  return (await response.json()) as RpcReply;
+}
+
+/** The text a tool result carries, whether it succeeded or failed. */
+function resultText(reply: RpcReply): string {
+  const content = reply.result?.content as Array<{ text: string }> | undefined;
+  return content?.map((part) => part.text).join("\n") ?? "";
+}
+
+beforeEach(async () => {
+  const made = makeSqliteD1();
+  db = made.db;
+  env = { DB: db, STATE: undefined, ARTIFACTS: undefined } as unknown as Env;
+  await db
+    .prepare("INSERT INTO users (id, email, username, token_hash) VALUES (?, ?, ?, ?)")
+    .bind("usr_1", "alice@test", "alice", await hashToken(USER_TOKEN))
+    .run();
+});
+
+describe("authentication", () => {
+  it("answers a credential-less request with the challenge that bootstraps OAuth", async () => {
+    const response = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize" }, { token: null });
+    expect(response.status).toBe(401);
+
+    // This header IS the discovery story (RFC 9728): without `resource_metadata`
+    // a client has no way to find the authorization server from a bare 401.
+    const challenge = response.headers.get("www-authenticate") ?? "";
+    expect(challenge).toContain("Bearer");
+    expect(challenge).toContain('error="invalid_token"');
+    expect(challenge).toContain(
+      `resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`,
+    );
+
+    // And the body is a JSON-RPC error, so a client that hands the body to its
+    // RPC layer before checking the status gets something parseable.
+    const body = (await response.json()) as RpcReply;
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.error?.code).toBe(-32600);
+  });
+
+  it("rejects an unknown token, still carrying the challenge", async () => {
+    const response = await rpc(
+      { jsonrpc: "2.0", id: 1, method: "initialize" },
+      { token: "stratum_user_99999999999999999999999999999999" },
+    );
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toContain("resource_metadata=");
+  });
+
+  it("accepts an OAuth access token", async () => {
+    const client = await registerClient(db, logger, {
+      clientName: "Editor",
+      redirectUris: ["http://127.0.0.1:9000/cb"],
+    });
+    if (!client.success) throw new Error("client setup failed");
+    const tokens = await issueTokens(db, logger, {
+      clientId: client.data.client.id,
+      userId: "usr_1",
+      scope: "mcp:read mcp:write",
+    });
+    if (!tokens.success) throw new Error("token setup failed");
+
+    const reply = await call("stratum_whoami", {}, tokens.data.accessToken);
+    expect(reply.error).toBeUndefined();
+    expect(resultText(reply)).toContain("alice@test");
+  });
+
+  it("refuses a read-only OAuth grant on a write tool, before the tool runs", async () => {
+    const client = await registerClient(db, logger, {
+      clientName: "Reader",
+      redirectUris: ["http://127.0.0.1:9000/cb"],
+    });
+    if (!client.success) throw new Error("client setup failed");
+    const tokens = await issueTokens(db, logger, {
+      clientId: client.data.client.id,
+      userId: "usr_1",
+      scope: "mcp:read",
+    });
+    if (!tokens.success) throw new Error("token setup failed");
+
+    const reply = await call(
+      "stratum_create_workspace",
+      { project: "@alice/api" },
+      tokens.data.accessToken,
+    );
+    expect(reply.result?.isError).toBe(true);
+    expect(resultText(reply)).toContain("read-only");
+
+    // The same grant still reads.
+    const read = await call("stratum_whoami", {}, tokens.data.accessToken);
+    expect(read.result?.isError).toBeUndefined();
+  });
+});
+
+describe("handshake", () => {
+  it("reports tools capability and identifies the server", async () => {
+    const reply = (await (
+      await rpc({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {} },
+      })
+    ).json()) as RpcReply;
+
+    expect(reply.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
+    expect(reply.result?.serverInfo).toMatchObject({ name: "stratum" });
+    // Only what we implement: advertising prompts or resources invites calls we
+    // would answer with a method-not-found the client cannot distinguish from a
+    // bug.
+    expect(Object.keys(reply.result?.capabilities as object)).toEqual(["tools"]);
+  });
+
+  it("echoes an older revision it knows, and falls back for one it does not", async () => {
+    for (const version of SUPPORTED_PROTOCOL_VERSIONS) {
+      const reply = (await (
+        await rpc({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: version },
+        })
+      ).json()) as RpcReply;
+      expect(reply.result?.protocolVersion).toBe(version);
+    }
+
+    const unknown = (await (
+      await rpc({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "1999-01-01" },
+      })
+    ).json()) as RpcReply;
+    // Answering with our newest is allowed and is how a client older than our
+    // list still connects.
+    expect(unknown.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
+  });
+
+  it("answers a notification with 202 and no body", async () => {
+    const response = await rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
+    expect(response.status).toBe(202);
+    expect(await response.text()).toBe("");
+  });
+
+  it("answers ping", async () => {
+    const reply = (await (await rpc({ jsonrpc: "2.0", id: 7, method: "ping" })).json()) as RpcReply;
+    expect(reply.id).toBe(7);
+    expect(reply.result).toEqual({});
+  });
+});
+
+describe("tools/list", () => {
+  it("publishes all eighteen tools with usable JSON Schema", async () => {
+    const reply = (await (
+      await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" })
+    ).json()) as RpcReply;
+    const tools = reply.result?.tools as Array<{
+      name: string;
+      description: string;
+      inputSchema: { type: string; properties: Record<string, unknown>; required?: string[] };
+    }>;
+
+    expect(tools).toHaveLength(18);
+    expect(tools.map((t) => t.name)).toContain("stratum_create_change");
+
+    for (const tool of tools) {
+      expect(tool.description.length).toBeGreaterThan(20);
+      expect(tool.inputSchema.type).toBe("object");
+    }
+
+    const commit = tools.find((t) => t.name === "stratum_commit");
+    expect(commit?.inputSchema.required?.sort()).toEqual([
+      "files",
+      "message",
+      "project_id",
+      "workspace",
+    ]);
+    expect(commit?.inputSchema.properties.files).toMatchObject({
+      type: "object",
+      additionalProperties: { type: "string" },
+    });
+
+    // An optional field must not be listed as required, or a model will
+    // hallucinate a value for it.
+    const merge = tools.find((t) => t.name === "stratum_merge_change");
+    expect(merge?.inputSchema.required).toEqual(["change_id"]);
+    expect(merge?.inputSchema.properties.strategy).toMatchObject({
+      enum: ["merge", "squash"],
+    });
+
+    // A tool with no arguments publishes no `required` key at all.
+    const whoami = tools.find((t) => t.name === "stratum_whoami");
+    expect(whoami?.inputSchema.required).toBeUndefined();
+  });
+});
+
+describe("tools/call", () => {
+  it("dispatches to the real API route and returns its JSON", async () => {
+    const reply = await call("stratum_whoami");
+    expect(reply.error).toBeUndefined();
+    expect(reply.result?.isError).toBeUndefined();
+    const body = JSON.parse(resultText(reply)) as { id: string; email: string };
+    expect(body).toMatchObject({ id: "usr_1", email: "alice@test" });
+  });
+
+  it("surfaces an API refusal as a tool error, not a transport error", async () => {
+    // A tool that RAN and was refused must come back as an `isError` result the
+    // model can read; a JSON-RPC error would reach the client as a transport
+    // fault it cannot reason about.
+    const reply = await call("stratum_get_project", { project: "@alice/nope" });
+    expect(reply.error).toBeUndefined();
+    expect(reply.result?.isError).toBe(true);
+    expect(resultText(reply)).toContain("Stratum API error:");
+  });
+
+  it("reports every argument problem at once, labelled as an argument problem", async () => {
+    const reply = await call("stratum_commit", {
+      workspace: 42,
+      message: "hi",
+      files: { "a.txt": 5 },
+      typo: "x",
+    });
+    expect(reply.result?.isError).toBe(true);
+    const text = resultText(reply);
+    // Labelled distinctly from an API failure: a model reading "Stratum API
+    // error" for a schema violation retries the same invalid arguments.
+    expect(text).toContain("Invalid arguments for stratum_commit");
+    expect(text).toContain("'workspace' must be a string");
+    expect(text).toContain("missing required argument 'project_id'");
+    expect(text).toContain("'files' must map every key to a string");
+    expect(text).toContain("unknown argument 'typo'");
+  });
+
+  it("rejects a malformed project reference before touching the API", async () => {
+    const reply = await call("stratum_get_project", { project: "not-a-ref" });
+    expect(reply.result?.isError).toBe(true);
+    expect(resultText(reply)).toContain("expected namespace/slug");
+  });
+
+  it("answers an unknown tool with method-not-found", async () => {
+    const reply = await call("stratum_delete_everything");
+    // Nothing ran, so this is not an `isError` result: reserving those for
+    // tools that ran and failed keeps the distinction legible.
+    expect(reply.error?.code).toBe(-32601);
+    expect(reply.error?.message).toContain("stratum_delete_everything");
+  });
+
+  it("rejects a call with no tool name", async () => {
+    const reply = (await (
+      await rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {} })
+    ).json()) as RpcReply;
+    expect(reply.error?.code).toBe(-32602);
+  });
+});
+
+describe("protocol framing", () => {
+  it("reports a parse error for a body that is not JSON", async () => {
+    const response = await app.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${USER_TOKEN}` },
+        body: "{not json",
+      }),
+      env,
+    );
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as RpcReply).error?.code).toBe(-32700);
+  });
+
+  it("rejects a message that is not a JSON-RPC 2.0 request", async () => {
+    const reply = (await (await rpc({ hello: "world" })).json()) as RpcReply;
+    expect(reply.error?.code).toBe(-32600);
+  });
+
+  it("answers an unknown method with method-not-found", async () => {
+    const reply = (await (
+      await rpc({ jsonrpc: "2.0", id: 3, method: "resources/list" })
+    ).json()) as RpcReply;
+    expect(reply.error?.code).toBe(-32601);
+  });
+
+  it("handles a batch, omitting replies for its notifications", async () => {
+    const response = await rpc([
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+    ]);
+    const replies = (await response.json()) as RpcReply[];
+    expect(replies).toHaveLength(2);
+    expect(replies.map((r) => r.id)).toEqual([1, 2]);
+  });
+
+  it("answers a batch of only notifications with 202, not an empty array", async () => {
+    const response = await rpc([{ jsonrpc: "2.0", method: "notifications/initialized" }]);
+    expect(response.status).toBe(202);
+  });
+
+  it("rejects an empty batch", async () => {
+    const response = await rpc([]);
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects a protocol version it does not speak, but tolerates none at all", async () => {
+    const bad = await rpc(
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { headers: { "Mcp-Protocol-Version": "1999-01-01" } },
+    );
+    expect(bad.status).toBe(400);
+
+    // Absent is fine — the older revision has no such header, and treating its
+    // absence as a violation would break every client that follows it.
+    const absent = await rpc({ jsonrpc: "2.0", id: 1, method: "ping" });
+    expect(absent.status).toBe(200);
+  });
+
+  it("never lets a response be cached", async () => {
+    const response = await rpc({ jsonrpc: "2.0", id: 1, method: "ping" });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("other methods on /mcp", () => {
+  it("returns 405 for GET, without requiring a credential to learn it", async () => {
+    const response = await app.fetch(new Request(`${ORIGIN}/mcp`), env);
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toContain("POST");
+  });
+
+  it("acknowledges DELETE, since there is no session state to discard", async () => {
+    const response = await app.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${USER_TOKEN}` },
+      }),
+      env,
+    );
+    expect(response.status).toBe(204);
+  });
+});

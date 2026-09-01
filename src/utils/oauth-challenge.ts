@@ -9,6 +9,28 @@
  * configured — so this header is load-bearing UX, not decoration.
  */
 
+/** The MCP endpoint's path.
+ *
+ * Lives here, in a module that imports nothing, because `authMiddleware` needs
+ * it and `src/routes/mcp.ts` imports the middleware (through the dispatcher) —
+ * defining it there and reading it from the middleware is an import cycle that
+ * leaves `authMiddleware` undefined at module-init time inside the dispatcher,
+ * which fails as an unauthenticated sub-request rather than as a loud error.
+ */
+export const MCP_ENDPOINT_PATH = "/mcp";
+
+/**
+ * Is this the MCP endpoint?
+ *
+ * `authMiddleware` treats this one path specially in two ways, both documented
+ * there: every 401 on it carries the OAuth challenge, and the method-based
+ * read-only rule is deferred to the sub-request (every MCP call is a POST,
+ * whatever the tool underneath actually does).
+ */
+export function isMcpPath(path: string): boolean {
+  return path === MCP_ENDPOINT_PATH;
+}
+
 /** Where the protected-resource metadata lives, derived from the request so a
  * self-hosted instance advertises its own origin rather than the maintainer's.
  */
@@ -23,7 +45,7 @@ export function authorizationServerMetadataUrl(requestUrl: string): string {
 
 /** The canonical resource identifier clients pass as RFC 8707 `resource`. */
 export function mcpResourceIdentifier(requestUrl: string): string {
-  return new URL("/mcp", requestUrl).toString();
+  return new URL(MCP_ENDPOINT_PATH, requestUrl).toString();
 }
 
 /**

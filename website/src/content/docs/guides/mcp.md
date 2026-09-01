@@ -89,7 +89,7 @@ Details worth knowing:
 | Property | Value |
 |---|---|
 | PKCE | **Required**, `S256` only. `plain` is not offered and cannot be stored. |
-| Authorization code lifetime | 60 seconds, single use. A replayed code revokes every token issued from it. |
+| Authorization code lifetime | 60 seconds, single use. A replayed code revokes every token issued from it — but a redemption that merely *fails validation* (wrong client, wrong verifier, wrong redirect URI) leaves the code untouched, so observing one is not enough to disrupt the real client. |
 | Access token lifetime | 1 hour |
 | Refresh token lifetime | 30 days, **rotated** on every use |
 | Redirect URIs | Matched exactly against the registered list. `https`, or `http` on a loopback IP literal for native apps. |

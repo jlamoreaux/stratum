@@ -25,12 +25,13 @@ import { recordAudit } from "../storage/audit";
 import {
   SCOPE_WRITE,
   SUPPORTED_SCOPES,
-  consumeAuthorizationCode,
+  claimAuthorizationCode,
   getClient,
   isValidCodeChallenge,
   issueAuthorizationCode,
   issueTokens,
   parseScope,
+  readAuthorizationCode,
   registerClient,
   revokeGrantsForClientUser,
   revokeToken,
@@ -40,7 +41,6 @@ import {
 } from "../storage/oauth";
 import { getUser } from "../storage/users";
 import type { Env } from "../types";
-import { hashToken } from "../utils/crypto";
 import { createLogger } from "../utils/logger";
 import { mcpResourceIdentifier } from "../utils/oauth-challenge";
 import { rememberPostLoginRedirect } from "../utils/post-login-redirect";
@@ -684,24 +684,29 @@ async function handleCodeGrant(
   if (code === "") return oauthError("invalid_request", "Missing code");
   if (verifier === "") return oauthError("invalid_request", "Missing code_verifier");
 
-  const redeemed = await consumeAuthorizationCode(c.env.DB, logger, code);
-  if (!redeemed.success) {
-    if (redeemed.error === "replayed") {
-      // RFC 6749 §10.5: a code presented twice means it leaked. Everything the
-      // grant produced is now suspect, so the whole grant goes — the legitimate
-      // client re-authorizes, the attacker's copy is worthless.
-      const replayed = await consumeReplayedCodeOwner(c.env.DB, logger, code);
-      if (replayed !== null) {
-        await revokeGrantsForClientUser(c.env.DB, logger, replayed);
-      }
-      return oauthError("invalid_grant", "Authorization code has already been used");
-    }
-    if (redeemed.error === "lookup_failed") {
+  // Read WITHOUT consuming. Everything below has to pass before the code is
+  // claimed, so a caller that cannot legitimately redeem it — the wrong client,
+  // the wrong redirect URI, the wrong verifier — leaves it untouched for the
+  // client that can. See `readAuthorizationCode` for why that matters.
+  const found = await readAuthorizationCode(c.env.DB, logger, code);
+  if (!found.success) {
+    if (found.error === "lookup_failed") {
       return oauthError("server_error", "Could not verify the authorization code", 500);
     }
     return oauthError("invalid_grant", "Authorization code is invalid or expired");
   }
-  const record = redeemed.data;
+  const record = found.data;
+
+  if (record.alreadyConsumed) {
+    // RFC 6749 §10.5: a code presented twice means it leaked. Everything the
+    // grant produced is now suspect, so the whole grant goes — the legitimate
+    // client re-authorizes, the attacker's copy is worthless.
+    await revokeGrantsForClientUser(c.env.DB, logger, {
+      clientId: record.clientId,
+      userId: record.userId,
+    });
+    return oauthError("invalid_grant", "Authorization code has already been used");
+  }
 
   // The code was minted for a specific client. Without this check, any
   // registered client that intercepted a code could redeem it as itself.
@@ -723,6 +728,20 @@ async function handleCodeGrant(
     return oauthError("invalid_grant", "PKCE verification failed");
   }
 
+  // Only now: the atomic single-use claim. Losing this race means a concurrent
+  // request already redeemed the code, which is a replay like any other.
+  const claimed = await claimAuthorizationCode(c.env.DB, logger, code);
+  if (!claimed.success) {
+    if (claimed.error === "replayed") {
+      await revokeGrantsForClientUser(c.env.DB, logger, {
+        clientId: record.clientId,
+        userId: record.userId,
+      });
+      return oauthError("invalid_grant", "Authorization code has already been used");
+    }
+    return oauthError("server_error", "Could not redeem the authorization code", 500);
+  }
+
   const tokens = await issueTokens(c.env.DB, logger, {
     clientId: client.id,
     userId: record.userId,
@@ -737,33 +756,6 @@ async function handleCodeGrant(
     refresh_token: tokens.data.refreshToken,
     scope: tokens.data.scope,
   });
-}
-
-/**
- * Recover the owner of an already-consumed code so its grants can be revoked.
- *
- * A separate read because `consumeAuthorizationCode` deliberately reports a
- * replay without returning the record — the caller of a failed redemption has
- * not proven anything and must not be handed the user id. This is used only on
- * the revocation path, where nothing is returned to the caller.
- */
-async function consumeReplayedCodeOwner(
-  db: D1Database,
-  logger: ReturnType<typeof createLogger>,
-  code: string,
-): Promise<{ clientId: string; userId: string } | null> {
-  try {
-    const row = await db
-      .prepare("SELECT client_id, user_id FROM oauth_auth_codes WHERE code_hash = ?")
-      .bind(await hashToken(code))
-      .first<{ client_id: string; user_id: string }>();
-    return row === null ? null : { clientId: row.client_id, userId: row.user_id };
-  } catch (error) {
-    logger.warn("Could not resolve replayed code owner", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
 }
 
 async function handleRefreshGrant(
