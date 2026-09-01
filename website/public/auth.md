@@ -10,16 +10,40 @@ projects, open changes, and merge approved work through the Stratum API at
 `https://app.usestratum.dev`. Human contributors should use the
 [web UI](https://app.usestratum.dev) instead.
 
-## Read this first: Stratum is not an OAuth authorization server
+## Read this first: two credential systems, and which one you want
 
-Stratum issues **opaque bearer tokens**, not OAuth access tokens. There is no
-`authorization_endpoint`, no `token_endpoint`, and no `jwks_uri`, which is why
-no `/.well-known/oauth-authorization-server` document is published. Do not
-attempt an OAuth authorization-code or client-credentials flow against this API —
-it will fail. Follow the registration flow below instead.
+Stratum authenticates two surfaces, and they do not share a credential model.
 
-GitHub OAuth and Google OAuth appear in Stratum only as *inbound sign-in
-providers* for humans. They do not issue tokens for the Stratum API.
+**The REST API takes opaque bearer tokens.** It is not an OAuth-protected
+resource: there is no `authorization_endpoint` and no `jwks_uri` describing it,
+and no `/.well-known/oauth-authorization-server` document for it. A human account
+holder mints the token out-of-band and hands it to you. That is the registration
+flow below.
+
+**The MCP endpoint at `/mcp` is an OAuth 2.1 protected resource**, and
+`https://app.usestratum.dev` is its authorization server — dynamic client
+registration (RFC 7591), PKCE, a browser consent screen, and `mcp:read` /
+`mcp:write` scopes. Its metadata is published on that origin, because RFC 9728
+and RFC 8414 have a client derive both URLs from the resource's own origin:
+
+| Document | URL |
+|---|---|
+| Protected-resource metadata (RFC 9728) | `https://app.usestratum.dev/.well-known/oauth-protected-resource` |
+| Authorization-server metadata (RFC 8414) | `https://app.usestratum.dev/.well-known/oauth-authorization-server` |
+
+You do not need either in advance. `POST /mcp` with no credential and the `401`'s
+`WWW-Authenticate` header names the first, which points at the second.
+
+So: if you drive an editor and can open a browser, connect over MCP and let the
+OAuth flow issue your credential — nothing is configured ahead of time. If you
+are headless, follow the registration flow below and send the resulting token as
+a bearer.
+
+**There is no client-credentials grant on either surface**, and none is planned.
+An agent's authority in Stratum derives from a human's, so a machine cannot mint
+itself a credential without one — every OAuth grant begins with a person at a
+consent screen. GitHub OAuth and Google OAuth appear only as *inbound sign-in
+providers* for humans; they do not issue tokens for the Stratum API.
 
 ## Registration is delegated, not self-service
 

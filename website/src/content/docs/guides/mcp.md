@@ -1,6 +1,6 @@
 ---
 title: "The Stratum MCP server"
-description: "Install the MCP server and give any MCP-capable agent or editor the eval-gated change flow."
+description: "Connect any MCP-capable agent or editor to the evaluation-gated change flow over the hosted /mcp endpoint — OAuth 2.1, nothing to install."
 editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/mcp.md"
 ---
 
