@@ -228,6 +228,10 @@ export const SettingsPage: FC<SettingsPageProps> = ({
           <dt>Email</dt>
           <dd>{user.email}</dd>
         </dl>
+        <p class="settings-help">
+          Your <a href="/profile">profile</a> has your account details and any invite codes you
+          hold.
+        </p>
       </div>
 
       <div class="card">
