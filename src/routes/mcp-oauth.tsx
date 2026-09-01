@@ -124,11 +124,7 @@ function authorizationServerMetadata(requestUrl: string): Record<string, unknown
     // S256 means a client cannot negotiate its way down to a challenge that
     // protects nothing.
     code_challenge_methods_supported: ["S256"],
-    token_endpoint_auth_methods_supported: [
-      "none",
-      "client_secret_post",
-      "client_secret_basic",
-    ],
+    token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
     // RFC 8707: we honour `resource`, which is what binds a token to this MCP
     // server rather than to any server the user happens to have authorized.
     resource_indicators_supported: true,
@@ -198,7 +194,8 @@ app.post("/oauth/register", async (c) => {
   });
 
   if (!result.success) {
-    const code = result.error.code === "INVALID_SCOPE" ? "invalid_scope" : "invalid_client_metadata";
+    const code =
+      result.error.code === "INVALID_SCOPE" ? "invalid_scope" : "invalid_client_metadata";
     return oauthError(
       result.error.code === "INVALID_REDIRECT_URI" ? "invalid_redirect_uri" : code,
       result.error.message,
@@ -490,9 +487,8 @@ app.get("/oauth/authorize", async (c) => {
           <div class="consent-card">
             <h1 class="consent-title">Connect an application</h1>
             <p class="consent-detail">
-              An application calling itself{" "}
-              <strong>{clientResult.data.clientName}</strong> wants to act on
-              Stratum as <strong>{userResult.data.username}</strong>.
+              An application calling itself <strong>{clientResult.data.clientName}</strong> wants to
+              act on Stratum as <strong>{userResult.data.username}</strong>.
             </p>
             <p class="consent-detail">It will be sent back to:</p>
             <code class="consent-client">{params.redirectUri}</code>
@@ -500,17 +496,16 @@ app.get("/oauth/authorize", async (c) => {
             <p class="consent-detail">If you allow this, it will be able to:</p>
             <ul class="consent-scopes">
               {describeScope(params.scope).map((line) => (
-                <li>{line}</li>
+                <li key={line}>{line}</li>
               ))}
             </ul>
 
             {/* Anyone can register a client under any name. Saying so is the
                 only defence against a client registered as "Stratum Official". */}
             <p class="consent-warn">
-              Any application can register itself under any name. Only continue
-              if you just started this from{" "}
-              <strong>{clientResult.data.clientName}</strong> yourself, and the
-              address above is one you recognise.
+              Any application can register itself under any name. Only continue if you just started
+              this from <strong>{clientResult.data.clientName}</strong> yourself, and the address
+              above is one you recognise.
             </p>
 
             <form method="post" action="/oauth/authorize">
@@ -631,9 +626,7 @@ function readClientCredentials(
   const clientId = form.get("client_id");
   if (clientId === null || clientId === "") return null;
   const secret = form.get("client_secret");
-  return secret === null || secret === ""
-    ? { clientId }
-    : { clientId, clientSecret: secret };
+  return secret === null || secret === "" ? { clientId } : { clientId, clientSecret: secret };
 }
 
 app.post("/oauth/token", async (c) => {
@@ -815,7 +808,10 @@ app.post("/oauth/revoke", async (c) => {
   let clientId: string | undefined;
   if (credentials !== null) {
     const clientResult = await getClient(c.env.DB, logger, credentials.clientId);
-    if (clientResult.success && (await verifyClientSecret(clientResult.data, credentials.clientSecret))) {
+    if (
+      clientResult.success &&
+      (await verifyClientSecret(clientResult.data, credentials.clientSecret))
+    ) {
       clientId = clientResult.data.id;
     }
   }

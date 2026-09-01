@@ -106,10 +106,44 @@ credential onto a named token first — disabling it cannot be undone, though
 `rotate-token` will mint a fresh legacy credential if you truly need one.
 
 `rotate-token` accepts a browser session or the legacy credential itself, but
-refuses a **scoped** token with `SESSION_REQUIRED`. The key it mints never
-expires and cannot be revoked one at a time, so letting a scoped token rotate it
-would mean revoking that token contained nothing — it could have issued itself a
-permanent replacement on the way out.
+refuses a **scoped** token or an **OAuth grant** with `SESSION_REQUIRED`. The key
+it mints never expires and cannot be revoked one at a time, so letting either
+rotate it would mean revoking them contained nothing — the credential could have
+issued itself a permanent replacement on the way out.
+
+## MCP OAuth grants
+
+The remote MCP endpoint at `/mcp` is an OAuth 2.1 protected resource, and
+Stratum is the authorization server. An MCP client registers itself
+([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)), sends the user to a
+consent screen, and receives an access token — so a user connects an editor
+without ever pasting a credential into it. See
+[the MCP guide](../user-guide/mcp.md) for the full flow.
+
+| | |
+|---|---|
+| Access token prefix | `stratum_mcp_` |
+| Lifetime | 1 hour, refreshed with a rotating 30-day refresh token |
+| Scopes | `mcp:read` (= a `read` token), `mcp:write` (= a `read_write` token) |
+| PKCE | Required, `S256` only |
+| Discovery | `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server` |
+
+An access token authenticates like any other bearer token, on every endpoint a
+user token reaches, and the `read`/`read_write` scope rules above apply
+unchanged. Two limits are specific to it, because a grant lives inside software
+the user does not control:
+
+- **No admin API.** `/api/admin/*` returns `403
+  ADMIN_REQUIRES_DIRECT_CREDENTIAL` for an OAuth grant, even when the account
+  behind it is the instance administrator.
+- **No legacy-key minting.** Like a scoped token, it is refused by
+  `rotate-token` with `SESSION_REQUIRED`.
+
+Grants are listed and revoked by their owner under **Settings → Connected
+applications**, and by the client itself at `POST /oauth/revoke`
+([RFC 7009](https://datatracker.ietf.org/doc/html/rfc7009)). Revocation is
+immediate and covers both halves of the pair — revoking either the access token
+or the refresh token ends the grant.
 
 ## Session cookies
 
@@ -133,7 +167,10 @@ requests. A small set of endpoints requires no authentication at all:
 
 Administrator endpoints (metrics, audit, backup, restore, deletion jobs)
 additionally accept an `X-Admin-API-Key` header carrying the instance's admin
-API key, configured by the instance operator.
+API key, configured by the instance operator. Alternatively an authenticated
+user whose email matches the instance's `ADMIN_EMAIL` is treated as an
+administrator — but **not** when they authenticated with an MCP OAuth grant,
+which is refused on these routes before routing.
 
 ## Dev login
 

@@ -8,8 +8,15 @@ info:
     `src/routes/*.ts`) and covers every `/api/*` route, the root health check,
     and the GitHub webhook receiver.
 
+    Also covered: the remote MCP endpoint (`/mcp`) and the OAuth 2.1
+    authorization server that fronts it (`/oauth/*` and its `.well-known`
+    discovery documents), which sit outside `/api/*` but are the surface an MCP
+    client speaks to.
+
     Not covered here:
     - HTML page routes (`/`, `/p/*`, `/changes/*`, `/auth/*`, `/dev-login`, `/ui.css`, ...).
+    - `GET|POST /oauth/authorize`, which renders and processes an HTML consent
+      screen rather than serving JSON.
     - The git smart-HTTP endpoints (`/@{namespace}/{slug}/info/refs`,
       `git-upload-pack`, `git-receive-pack`) — documented separately in
       `docs/adr/005`.
@@ -19,6 +26,11 @@ info:
     authenticated by the `stratum_session` cookie. Read endpoints on projects
     with `visibility: public` also accept anonymous requests. Admin endpoints
     additionally accept an `X-Admin-API-Key` header.
+
+    MCP OAuth grants (`stratum_mcp_...`) authenticate like any user token and
+    obey the same scopes — `mcp:write` maps to `read_write`, anything else to
+    `read` — with two extra refusals: they cannot reach `/api/admin/*` and
+    cannot rotate the legacy key.
 
     Token scopes: a user token carries either `read` or `read_write`. A `read`
     token is refused, before routing, on anything that is not a GET or HEAD —
@@ -67,6 +79,8 @@ tags:
     description: Importing many repositories at once
   - name: github
     description: Inbound GitHub webhook receiver
+  - name: mcp
+    description: The remote MCP server and its OAuth 2.1 authorization server
   - name: admin
     description: Administrator-only operations (metrics, audit, backup, restore, deletion jobs)
 
@@ -3451,6 +3465,256 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /mcp:
+    post:
+      tags: [mcp]
+      summary: MCP endpoint (JSON-RPC 2.0 over streamable HTTP)
+      description: |
+        Stateless. One JSON-RPC request in, one response out; there is no
+        session to establish and no `Mcp-Session-Id`. Methods: `initialize`,
+        `notifications/initialized`, `ping`, `tools/list`, `tools/call`.
+
+        A JSON array is accepted as a batch (for the protocol revisions that
+        allow one). A message with no `id` is a notification and is answered
+        with `202` and no body.
+
+        Authenticate with an MCP OAuth access token, a user token, or an agent
+        token. A request with no credential gets `401` with a
+        `WWW-Authenticate` header naming the protected-resource metadata, which
+        is how a client bootstraps the OAuth flow.
+      parameters:
+        - name: Mcp-Protocol-Version
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: ["2025-06-18", "2025-03-26", "2024-11-05"]
+          description: Omit it, or send a version this server speaks; anything else is a 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/JsonRpcRequest"
+                - type: array
+                  items: { $ref: "#/components/schemas/JsonRpcRequest" }
+      responses:
+        "200":
+          description: JSON-RPC response (or an array of them, for a batch)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/JsonRpcResponse"
+                  - type: array
+                    items: { $ref: "#/components/schemas/JsonRpcResponse" }
+        "202":
+          description: Notification accepted; no body
+        "400":
+          description: Malformed JSON, an empty batch, or an unsupported protocol version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonRpcResponse" }
+        "401":
+          description: Missing or invalid credential
+          headers:
+            WWW-Authenticate:
+              schema: { type: string }
+              description: 'Bearer challenge carrying `resource_metadata`'
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonRpcResponse" }
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+    get:
+      tags: [mcp]
+      summary: Server-initiated stream (not offered)
+      description: This server never initiates messages, so there is no stream to open.
+      responses:
+        "405":
+          description: No server-initiated stream
+    delete:
+      tags: [mcp]
+      summary: End an MCP session
+      description: There is no session state to discard, so this always succeeds.
+      responses:
+        "204":
+          description: Acknowledged
+
+  /.well-known/oauth-protected-resource:
+    get:
+      tags: [mcp]
+      summary: Protected-resource metadata (RFC 9728)
+      security: []
+      responses:
+        "200":
+          description: Metadata document, built from the request origin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  resource: { type: string }
+                  authorization_servers:
+                    type: array
+                    items: { type: string }
+                  scopes_supported:
+                    type: array
+                    items: { type: string }
+
+  /.well-known/oauth-authorization-server:
+    get:
+      tags: [mcp]
+      summary: Authorization-server metadata (RFC 8414)
+      security: []
+      responses:
+        "200":
+          description: Metadata document, built from the request origin
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  issuer: { type: string }
+                  authorization_endpoint: { type: string }
+                  token_endpoint: { type: string }
+                  registration_endpoint: { type: string }
+                  revocation_endpoint: { type: string }
+                  code_challenge_methods_supported:
+                    type: array
+                    items: { type: string, enum: [S256] }
+
+  /oauth/register:
+    post:
+      tags: [mcp]
+      summary: Dynamic client registration (RFC 7591)
+      description: |
+        Unauthenticated by design — an MCP client discovers this server from a
+        URL and has no pre-shared credential. The registration confers nothing
+        on its own: reaching a user's data still requires that user to complete
+        the consent screen in their own browser.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [redirect_uris]
+              properties:
+                client_name: { type: string, maxLength: 120 }
+                redirect_uris:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items: { type: string }
+                  description: |
+                    Exact URIs. `https`, or `http` on a loopback IP literal
+                    (`127.0.0.1`, `[::1]`) for native apps. No fragment, no
+                    embedded credentials.
+                scope: { type: string, example: "mcp:read mcp:write" }
+                token_endpoint_auth_method:
+                  type: string
+                  enum: [none, client_secret_post, client_secret_basic]
+                  default: none
+      responses:
+        "201":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client_id: { type: string }
+                  client_secret:
+                    type: string
+                    description: Confidential clients only; returned once.
+                  client_id_issued_at: { type: integer }
+                  client_secret_expires_at: { type: integer, enum: [0] }
+        "400":
+          description: Invalid client metadata, redirect URI, or scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+
+  /oauth/token:
+    post:
+      tags: [mcp]
+      summary: Token endpoint
+      description: |
+        Grant types: `authorization_code` (PKCE `S256` required) and
+        `refresh_token` (rotating). Client authentication is `none`,
+        `client_secret_post`, or `client_secret_basic`.
+
+        A replayed authorization code revokes every token issued from that
+        client to that user (RFC 6749 §10.5).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [authorization_code, refresh_token]
+                code: { type: string }
+                code_verifier: { type: string, minLength: 43, maxLength: 128 }
+                redirect_uri: { type: string }
+                refresh_token: { type: string }
+                client_id: { type: string }
+                client_secret: { type: string }
+      responses:
+        "200":
+          description: Tokens issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string, example: "stratum_mcp_..." }
+                  token_type: { type: string, enum: [Bearer] }
+                  expires_in: { type: integer, example: 3600 }
+                  refresh_token: { type: string }
+                  scope: { type: string }
+        "400":
+          description: Invalid grant or request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+        "401":
+          description: Client authentication failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+
+  /oauth/revoke:
+    post:
+      tags: [mcp]
+      summary: Token revocation (RFC 7009)
+      description: |
+        Accepts either half of a pair and revokes the whole grant. Always
+        returns `200`, whether or not the token existed — reporting the
+        difference would make this a free oracle for testing stolen tokens.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+                client_id: { type: string }
+                client_secret: { type: string }
+      responses:
+        "200":
+          description: Acknowledged
+
 components:
   securitySchemes:
     bearerAuth:
@@ -3560,8 +3824,68 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    PayloadTooLarge:
+      description: Request body exceeded the endpoint's cap (code PAYLOAD_TOO_LARGE)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    JsonRpcRequest:
+      type: object
+      required: [jsonrpc, method]
+      properties:
+        jsonrpc: { type: string, enum: ["2.0"] }
+        id:
+          oneOf:
+            - { type: string }
+            - { type: integer }
+          description: Omit it to send a notification, which is answered with 202 and no body.
+        method:
+          type: string
+          enum:
+            - initialize
+            - notifications/initialized
+            - notifications/cancelled
+            - ping
+            - tools/list
+            - tools/call
+        params: { type: object }
+
+    JsonRpcResponse:
+      type: object
+      required: [jsonrpc, id]
+      properties:
+        jsonrpc: { type: string, enum: ["2.0"] }
+        id:
+          oneOf:
+            - { type: string }
+            - { type: integer }
+            - { type: "null" }
+        result: { type: object }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: integer
+              description: >
+                JSON-RPC 2.0 reserved code: -32700 parse error, -32600 invalid
+                request, -32601 method (or tool) not found, -32602 invalid
+                params, -32603 internal error.
+            message: { type: string }
+            data: {}
+
+    OAuthError:
+      type: object
+      required: [error]
+      description: RFC 6749 §5.2 error body — distinct from this API's `{error, code}` shape.
+      properties:
+        error:
+          type: string
+          example: invalid_grant
+        error_description: { type: string }
+
     Error:
       type: object
       required: [error]

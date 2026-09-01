@@ -48,9 +48,13 @@ issues a real credential. Only call it when a human has asked you to.
 
    The response carries a short-lived `stratum_agent_...` token.
 
-3. **The agent receives the token out of band** — an environment variable, a
-   secret store, an MCP server `env` block. It is never transmitted to the agent
-   by Stratum directly.
+3. **The agent receives the token out of band** — an environment variable or a
+   secret store. It is never transmitted to the agent by Stratum directly.
+
+An agent driving an editor with a browser can skip all of this and connect over
+MCP at `/mcp` instead, where OAuth 2.1 with dynamic client registration issues
+the credential after a human consents. That grant is a *user* credential, not an
+agent identity — see [the MCP guide](https://docs.usestratum.dev/guides/mcp/).
 
 ## Using the credential
 

@@ -8,26 +8,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The MCP server is now remote, served by the Worker at `/mcp`.** Streamable
+  HTTP, stateless — no session id, no Durable Object, so any isolate answers any
+  request. Connecting a client is a URL (`claude mcp add --transport http
+  stratum https://…/mcp`) instead of a clone, a build, and a hand-copied token.
+  All eighteen tools are unchanged in name and behaviour; they now run against
+  the real API route handlers in-process (`src/mcp/dispatch.ts`) rather than
+  over the network, so every authorization check, evaluation gate and refusal is
+  the REST API's own rather than a reimplementation of it. Accepts the two
+  older protocol revisions alongside `2025-06-18`, and handles JSON-RPC batches
+  for the revisions that allow them.
+- **Stratum is now an OAuth 2.1 authorization server**, for `/mcp`. Dynamic
+  client registration (RFC 7591) at `/oauth/register`, mandatory PKCE with
+  `S256` only, 60-second single-use authorization codes, one-hour access tokens,
+  rotating 30-day refresh tokens, RFC 7009 revocation, and RFC 8414/9728
+  discovery documents built from the request origin so a self-hosted instance
+  advertises itself with nothing to configure. A replayed authorization code
+  revokes every token issued from it. An editor is connected with a browser
+  consent screen; no Stratum credential is ever pasted into a client config.
+- **Connected applications in settings.** Every authorized MCP client is listed
+  with its self-declared name, client id, granted access and last use, and can
+  be disconnected in one click — which revokes the access token and the ability
+  to refresh at once.
+- **`stratum_mcp_` access tokens are a first-class credential kind** in
+  `authMiddleware`, resolved on every request like user and agent tokens, with
+  `mcp:write` mapping to `read_write` and anything else to `read`. Two refusals
+  are specific to a delegated credential and enforced before routing: an OAuth
+  grant cannot reach `/api/admin/*` (even for the instance administrator, whom
+  `resolveAdminAuth` would otherwise authorize on an `ADMIN_EMAIL` match), and
+  cannot rotate the never-expiring legacy API key.
 - **CLI and MCP server guides.** Dedicated documentation for `@stratum/cli`
-  (`docs/user-guide/cli.md`) and `@stratum/mcp` (`docs/user-guide/mcp.md`),
-  published at `/guides/cli/` and `/guides/mcp/` — installation from source,
-  configuration, the full command/tool surface (including `project delete` and
-  `account delete`, which the package README omitted), the commit path's
-  2,000-file/25 MB caps and its inability to express deletions, and exactly
-  which MCP tools an agent token can use. Also corrects the `@stratum/mcp`
-  README and `stratum_review_change` tool description, which claimed agents
-  can submit `request_changes` verdicts: the server refuses every review
-  verdict from an agent token (`src/routes/reviews.ts` requires a user), so
-  an agent's feedback channel is change comments.
+  (`docs/user-guide/cli.md`) and the MCP server (`docs/user-guide/mcp.md`),
+  published at `/guides/cli/` and `/guides/mcp/` — configuration, the full
+  command/tool surface (including `project delete` and `account delete`, which
+  the package README omitted), the commit path's 2,000-file/25 MB caps and its
+  inability to express deletions, and exactly which MCP tools an agent token
+  can use. Also corrects the `stratum_review_change` tool description, which
+  claimed agents can submit `request_changes` verdicts: the server refuses
+  every review verdict from an agent token (`src/routes/reviews.ts` requires a
+  user), so an agent's feedback channel is change comments.
+
+### Changed
+- **All three sign-in paths now honour one post-login destination.** The
+  magic-link flow read a `redirect_after_login` cookie nothing set, GitHub
+  threaded a `next` parameter, and Google always went to `/`. A flow that sends
+  an unauthenticated user to sign in — the MCP consent screen, for one — has to
+  get them back to the request they interrupted whichever button they used, so
+  the cookie is now written and consumed by a shared helper with one
+  open-redirect check (`src/utils/post-login-redirect.ts`). GitHub's `next`
+  still wins when present.
+- `isScopedTokenCaller` is now `cannotMintLegacyCredential`, and covers OAuth
+  grants as well as scoped tokens.
+
+### Removed
+- **The standalone `mcp/` package (`@stratum/mcp`).** It was a stdio process
+  that wrapped the REST API over the network — 609 lines holding no state,
+  touching no local git, and offering nothing the Worker could not do itself,
+  in exchange for a clone-and-build install. The remote endpoint replaces it
+  outright; the CI job that built and smoke-tested it is gone with it.
 - **Agent discovery metadata on the docs site.** `docs.usestratum.dev` now publishes an ARD
   capability manifest (`/.well-known/ai-catalog.json`), an Agent Skills Discovery v0.2.0 index
   with three `SKILL.md` artifacts and `sha256` digests, `/auth.md` describing the agent
   registration contract, and WebMCP tools registered on page load. DNS-AID SVCB records live
   in `website/dns/agents.zone` for the operator to publish.
-  No OAuth authorization-server, OIDC, or RFC 9728 protected-resource document is published:
-  Stratum issues opaque bearer tokens and has no `token_endpoint` or `jwks_uri`, and RFC 9728
-  metadata is resolved from the API origin, which these docs do not serve. Advertising either
-  would send agents to a URL that cannot answer them.
+  The docs site itself publishes no OAuth authorization-server, OIDC, or RFC 9728
+  protected-resource document: RFC 9728 metadata is resolved from the API origin, which these
+  docs do not serve, so advertising it here would send agents to a URL that cannot answer
+  them. The app origin does now serve both discovery documents — see the MCP entry above.
 - **Multi-branch support (#181).** Create, list and delete branches on a project
   (`GET/POST/DELETE /api/projects/:ns/:slug/branches`), browse any of them with
   `?ref=` on the files, content and log endpoints and in the web UI, and switch

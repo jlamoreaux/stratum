@@ -4,18 +4,14 @@ import { isGitHttpPath } from "../routes/git-http";
 import { isOAuthClientEndpoint } from "../routes/mcp-oauth";
 import { getAgentByToken } from "../storage/agents";
 import { resolveApiToken, touchApiTokenLastUsed } from "../storage/api-tokens";
-import {
-  SCOPE_WRITE,
-  resolveOAuthAccessToken,
-  touchOAuthTokenLastUsed,
-} from "../storage/oauth";
+import { SCOPE_WRITE, resolveOAuthAccessToken, touchOAuthTokenLastUsed } from "../storage/oauth";
 import { deleteSession, getSession } from "../storage/sessions";
 import { getUser, getUserByToken } from "../storage/users";
 import type { ApiTokenScope, Env, User } from "../types";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { isWriteMethod } from "../utils/http-methods";
-import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
 import { type Logger, createLogger } from "../utils/logger";
+import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
 
 declare module "hono" {
   interface ContextVariableMap {

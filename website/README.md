@@ -85,7 +85,7 @@ The docs are built to be readable by agents as well as people:
 | `/llms-small.txt`, `/llms-full.txt` | Abridged and complete corpora |
 | `/openapi.yml` | REST API contract |
 | `/.well-known/api-catalog` | RFC 9727 linkset pointing at the spec and reference |
-| `/.well-known/mcp/server-card.json` | Discovery card for the `@stratum/mcp` server |
+| `/.well-known/mcp/server-card.json` | Discovery card for the remote MCP server at `/mcp` |
 | `/.well-known/ai-catalog.json` | ARD capability manifest — the entry point that names all the others |
 | `/.well-known/agent-skills/index.json` | Agent Skills Discovery v0.2.0 index, with a `sha256` per skill |
 | `/.well-known/agent-skills/<name>/SKILL.md` | The skill artifacts themselves |

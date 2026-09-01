@@ -170,7 +170,8 @@ function rowToClient(row: OAuthClientRow): OAuthClient {
   let redirectUris: string[] = [];
   try {
     const parsed: unknown = JSON.parse(row.redirect_uris);
-    if (Array.isArray(parsed)) redirectUris = parsed.filter((u): u is string => typeof u === "string");
+    if (Array.isArray(parsed))
+      redirectUris = parsed.filter((u): u is string => typeof u === "string");
   } catch {
     // A row whose redirect list will not parse registers ZERO usable redirect
     // URIs, so every authorization against it fails the exact-match check. That
@@ -482,7 +483,9 @@ export async function consumeAuthorizationCode(
 
   try {
     const claimed = await db
-      .prepare("UPDATE oauth_auth_codes SET consumed_at = ? WHERE code_hash = ? AND consumed_at IS NULL")
+      .prepare(
+        "UPDATE oauth_auth_codes SET consumed_at = ? WHERE code_hash = ? AND consumed_at IS NULL",
+      )
       .bind(new Date().toISOString(), codeHash)
       .run();
     // Lost the race: another request consumed it between our read and our
@@ -819,8 +822,7 @@ export async function revokeToken(
   const hash = await hashToken(opts.token);
   try {
     const bindings: unknown[] = [new Date().toISOString(), hash, hash];
-    let sql =
-      `UPDATE oauth_tokens SET revoked_at = ?
+    let sql = `UPDATE oauth_tokens SET revoked_at = ?
         WHERE (access_token_hash = ? OR refresh_token_hash = ?) AND revoked_at IS NULL`;
     // When the caller authenticated as a client, confine the revocation to that
     // client's own grants so one registered client cannot revoke another's.

@@ -31,6 +31,7 @@ import { getImportProgress } from "../storage/imports";
 import { listIssueComments } from "../storage/issue-comments";
 import { getLabelsForIssues, listIssueLabels } from "../storage/issue-labels";
 import { getIssueByNumber, listIssues } from "../storage/issues";
+import { type OAuthGrantSummary, listGrantsForUser, revokeGrantForUser } from "../storage/oauth";
 import { getProvenance } from "../storage/provenance";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import {
@@ -285,6 +286,28 @@ async function loadApiTokens(
   };
 }
 
+/**
+ * The caller's connected MCP clients (#349), plus a notice when they could not
+ * be read. Same reasoning as `loadApiTokens`: "no applications connected" and
+ * "we could not check" must not render identically, because one of them is a
+ * reassurance the user has not earned.
+ */
+async function loadOAuthGrants(
+  db: D1Database,
+  userId: string,
+  logger: ReturnType<typeof createLogger>,
+): Promise<{ grants: OAuthGrantSummary[]; notice?: SettingsNotice }> {
+  const result = await listGrantsForUser(db, logger, userId);
+  if (result.success) return { grants: result.data };
+  return {
+    grants: [],
+    notice: {
+      kind: "error",
+      message: "Your connected applications could not be loaded. Try again shortly.",
+    },
+  };
+}
+
 /** The settings page plus everything it lists, in one round of loads. */
 async function renderSettings(
   c: Context<{ Bindings: Env }>,
@@ -293,18 +316,20 @@ async function renderSettings(
   logger: ReturnType<typeof createLogger>,
   extras: { freshToken?: FreshCredential; notice?: SettingsNotice } = {},
 ) {
-  const [agents, tokens] = await Promise.all([
+  const [agents, tokens, grants] = await Promise.all([
     loadAgentSummaries(c.env.DB, user.id, logger),
     loadApiTokens(c.env.DB, user.id, logger),
+    loadOAuthGrants(c.env.DB, user.id, logger),
   ]);
-  // A notice about the action just taken outranks the listing's own failure —
+  // A notice about the action just taken outranks a listing's own failure —
   // the caller needs to know what their POST did first.
-  const notice = extras.notice ?? tokens.notice;
+  const notice = extras.notice ?? tokens.notice ?? grants.notice;
   return (
     <SettingsPage
       user={user}
       agents={agents}
       apiTokens={tokens.tokens}
+      oauthGrants={grants.grants}
       telemetryOptOut={telemetryOptOut}
       // Threaded here rather than at each call site: this helper is the single
       // render path for the settings page, so the CSP nonce main added cannot
@@ -325,6 +350,10 @@ async function renderSettings(
  */
 const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
   "token-revoked": { kind: "success", message: "That API token has been revoked." },
+  "connection-revoked": {
+    kind: "success",
+    message: "That application has been disconnected. Its access stopped immediately.",
+  },
   "legacy-disabled": {
     kind: "success",
     message:
@@ -474,6 +503,45 @@ app.post("/settings/tokens/:id/revoke", async (c) => {
   // Redirect rather than render, so a refresh re-runs the listing and not the
   // revocation.
   return c.redirect("/settings?notice=token-revoked");
+});
+
+// POST /settings/connections/:id/revoke — Disconnect one authorized MCP client
+app.post("/settings/connections/:id/revoke", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireSettingsSession(c, logger);
+  if ("response" in access) return access.response;
+
+  const { id } = c.req.param();
+  // Scoped by user id inside the storage call, so another account's grant id is
+  // a no-op rather than a cross-account revocation.
+  const revoked = await revokeGrantForUser(c.env.DB, logger, {
+    grantId: id,
+    userId: access.user.id,
+  });
+  if (!revoked.success) {
+    logger.error("Failed to revoke OAuth grant", revoked.error, { grantId: id });
+    const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
+      notice: { kind: "error", message: "Could not disconnect that application." },
+    });
+    return c.html(page, 500);
+  }
+  if (!revoked.data.revoked) {
+    // Already gone, or never this user's. Both are reported the same way: a
+    // distinguishable answer would let a signed-in user probe for other
+    // accounts' grant ids.
+    const page = await renderSettings(c, access.user, access.telemetryOptOut, logger, {
+      notice: { kind: "error", message: "No such connected application." },
+    });
+    return c.html(page, 404);
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "oauth.revoked",
+    actorType: "user",
+    actorId: access.user.id,
+    subject: id,
+  });
+  return c.redirect("/settings?notice=connection-revoked");
 });
 
 // POST /settings/legacy-token/disable — Turn off the pre-scopes credential

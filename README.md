@@ -49,8 +49,9 @@ Humans and AI agents are both first-class citizens, with different powers by des
   prompt produced it, its evaluation score, and what it cost (LLM tokens, sandbox time).
 - **Agent identities with a hard invariant** — agents authenticate as themselves and can
   never approve work; approvals are a human gate.
-- **Any agent, any editor** — REST API, CLI, and MCP server: Claude Code, Cursor, Copilot,
-  or your own agents all speak to the same gate. No editor subscription required.
+- **Any agent, any editor** — REST API, CLI, and a remote MCP server at `/mcp`: Claude
+  Code, Cursor, Copilot, or your own agents all speak to the same gate. Connecting one is
+  a URL and a browser consent screen. No editor subscription required.
 - **Two ways to run it** — as a **layer over GitHub** (keep your repos and PRs; eval
   verdicts land as PR comments and commit statuses) or as a **standalone forge** (Git
   hosting on Cloudflare Artifacts, workspace forking, issues, orgs, server-rendered UI).
@@ -192,23 +193,38 @@ The full surface — 72 paths, 91 operations — is specified in
 [`docs/api/openapi.yml`](docs/api/openapi.yml), with per-resource guides under
 [`docs/api/endpoints/`](docs/api/endpoints/README.md).
 
-### CLI, MCP server, and reference agent
+### MCP — connect an editor or agent
 
-Three first-party clients live in this repo. None are published to npm yet
+The MCP server is part of the Worker, served at **`/mcp`**. Nothing to install:
+
+```bash
+claude mcp add --transport http stratum https://your-instance.workers.dev/mcp
+```
+
+The first tool call opens your browser for sign-in and a consent screen; the client
+registers itself and handles tokens from there. No Stratum credential is ever pasted
+into an editor's config, and **Settings → Connected applications** revokes access
+immediately. Headless callers can present a `stratum_user_` or `stratum_agent_` token
+directly instead.
+
+That exposes the whole eval-gated change flow as eighteen MCP tools, so Claude Code,
+Cursor, Zed, Copilot, or a custom agent can drive Stratum without a bespoke integration.
+See the [MCP guide](docs/user-guide/mcp.md).
+
+### CLI and reference agent
+
+Two first-party client packages live in this repo. Neither is published to npm yet
 ([tracked](ROADMAP.md#publish-the-client-packages-to-npm)), so install them from source:
 
 ```bash
 # from the repository root
-for pkg in cli mcp agent; do
+for pkg in cli agent; do
   (cd "$pkg" && npm install && npm run build && npm link)
 done
 ```
 
-That gives you `stratum` (CLI, full API parity), `stratum-mcp` (MCP server), and
-`stratum-agent` (reference agent: identity → fork → LLM edit plan → commit → change).
-
-`@stratum/mcp` exposes the whole eval-gated change flow as MCP tools, so Claude Code,
-Cursor, Zed, Copilot, or a custom agent can drive Stratum without a bespoke integration.
+That gives you `stratum` (CLI, full API parity) and `stratum-agent` (reference agent:
+identity → fork → LLM edit plan → commit → change).
 
 ## Configuring the merge gate
 
@@ -292,8 +308,9 @@ tested restore path · deletion jobs · admin metrics API · durable event outbo
 queue consumer and a stale-event sweep · workspace TTL sweep.
 
 **Interfaces**
-Server-rendered web UI · REST API (72 paths) · `@stratum/cli` at full API parity ·
-`@stratum/mcp` MCP server · `@stratum/agent` reference agent.
+Server-rendered web UI · REST API (80 paths) · remote MCP server at `/mcp` with an
+OAuth 2.1 authorization server (dynamic client registration, PKCE, rotating refresh
+tokens) · `@stratum/cli` at full API parity · `@stratum/agent` reference agent.
 
 ## Known limitations
 
@@ -331,6 +348,10 @@ Each of these is documented in full, with the specific code paths involved, in
 │  │    Auth     │  │  Evaluation │  │  Merge Queue    │  │
 │  │ Middleware  │  │   Engine    │  │ (Durable Obj)   │  │
 │  └─────────────┘  └─────────────┘  └─────────────────┘  │
+│  ┌─────────────┐  ┌─────────────────────────────────┐   │
+│  │  MCP /mcp   │  │  OAuth 2.1 authorization server │   │
+│  │  (tools)    │  │  register · authorize · token   │   │
+│  └─────────────┘  └─────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
                            │
     ┌─────────┬────────────┼───────────┬──────────┐
@@ -390,7 +411,7 @@ Published at [docs.usestratum.dev](https://docs.usestratum.dev), built from
 
 ### GitHub Actions
 
-- **`pr-checks.yml`** — tests, lint, typecheck, and the CLI/agent/MCP package builds on
+- **`pr-checks.yml`** — tests, lint, typecheck, and the CLI/agent package builds on
   every pull request, plus a staging preview deploy.
 - **`ci.yml`** — the same gates on every push to `main`, then deploys to staging and to
   production. Both deploys are gated by GitHub deployment environments, so production waits

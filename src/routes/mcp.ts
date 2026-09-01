@@ -165,7 +165,10 @@ app.post("/mcp", async (c) => {
   if (reply === null) return new Response(null, { status: 202 });
 
   logger.debug("MCP message handled", {
-    method: typeof parsed === "object" && parsed !== null ? (parsed as { method?: unknown }).method : undefined,
+    method:
+      typeof parsed === "object" && parsed !== null
+        ? (parsed as { method?: unknown }).method
+        : undefined,
   });
 
   return Response.json(reply, {
@@ -187,7 +190,11 @@ app.post("/mcp", async (c) => {
  */
 app.get("/mcp", () =>
   Response.json(
-    rpcError(null, JSON_RPC.METHOD_NOT_FOUND, "This server does not offer a server-initiated stream"),
+    rpcError(
+      null,
+      JSON_RPC.METHOD_NOT_FOUND,
+      "This server does not offer a server-initiated stream",
+    ),
     { status: 405, headers: { Allow: "POST, DELETE" } },
   ),
 );

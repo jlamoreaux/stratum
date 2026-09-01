@@ -6,10 +6,7 @@ import { createSession, deleteSession, getSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
-import {
-  consumePostLoginRedirect,
-  isSafeRedirectTarget,
-} from "../utils/post-login-redirect";
+import { consumePostLoginRedirect, isSafeRedirectTarget } from "../utils/post-login-redirect";
 
 const app = new Hono<{ Bindings: Env }>();
 

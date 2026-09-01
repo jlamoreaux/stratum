@@ -167,9 +167,13 @@ export class StratumClient {
   // ── Changes ─────────────────────────────────────────────────────────────
 
   async createChange(projectName: string, workspace: string) {
-    return this.request<unknown>("POST", `/api/projects/${encodeURIComponent(projectName)}/changes`, {
-      workspace,
-    });
+    return this.request<unknown>(
+      "POST",
+      `/api/projects/${encodeURIComponent(projectName)}/changes`,
+      {
+        workspace,
+      },
+    );
   }
 
   async listChanges(projectName: string, status?: string) {
