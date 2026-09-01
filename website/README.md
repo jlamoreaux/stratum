@@ -41,9 +41,31 @@ in `docs/` as plain Markdown and is not published here.
 The site uses the same mark and palette as the app (`src/ui/layout.tsx`,
 `src/ui/styles.ts`): the `S` tile in `#7ca9f7` on `#0d0d0d`, and `#0a0a0a` /
 `#0d0d0d` / `#1e1e1e` / `#f0f0f0` surfaces. Those are mapped onto Starlight's own
-CSS custom properties in `src/styles/theme.css` — the app's stylesheet is
-deliberately *not* imported, since it targets app chrome and would break on
-Starlight upgrades.
+CSS custom properties in `src/styles/theme.css` — the rest of the app's
+stylesheet is deliberately *not* imported, since it targets app chrome and would
+break on Starlight upgrades.
+
+### The header
+
+The header is the exception: it is the app's, shared rather than reimplemented,
+so `docs.usestratum.dev` and `app.usestratum.dev` cannot drift into two
+different headers.
+
+- `src/ui/nav-css.ts` in the repository root owns the rules. The app splices
+  them into its stylesheet; `scripts/mirror-header.mjs` writes them, plus the
+  design tokens they reference, into `src/styles/header.css`.
+- `src/components/Header.astro` overrides Starlight's `Header` and renders the
+  app's markup against them, adding only the controls a docs site needs —
+  search, theme, social links — sized to sit on the app's chrome. It draws the
+  wordmark itself, which is why no `logo` is configured in `astro.config.mjs`.
+- `src/styles/header.css` is **generated — never edit it**. Run
+  `npm run sync:header` after changing the header (`predev`/`prebuild` run it
+  too), and commit the result. `npm run check:header` fails on a stale copy, in
+  the docs workflow and in the repository's own test suite
+  (`tests/shared-header.test.ts`).
+
+The mirrored token values are the app's, and the app is dark-only; `theme.css`
+repoints them at Starlight's light palette for the light theme.
 
 Raster assets (`favicon-32.png`, `apple-touch-icon.png`, `og.png`) are generated
 from the mark and committed, so the site build never depends on font
@@ -110,9 +132,9 @@ by hand at `public/index.md` because its source is `.mdx`.
 The site is a static build (`dist/`) served by a Cloudflare Worker
 (`stratum-docs`, configured in `wrangler.toml`) on the custom domain
 `docs.usestratum.dev`. It deploys automatically on every push to `main` that
-touches `website/` or `docs/` (`.github/workflows/docs.yml`; PRs get a
-build-only check, which also runs `npm run check:guides` to fail on a stale
-mirror). For an out-of-band redeploy, use the `Deploy Docs` workflow
+touches `website/`, `docs/`, or the app's header source (`.github/workflows/docs.yml`;
+PRs get a build-only check, which also runs `npm run check:guides` and
+`npm run check:header` to fail on a stale mirror). For an out-of-band redeploy, use the `Deploy Docs` workflow
 (`.github/workflows/deploy-docs.yml`, manual dispatch) or deploy by hand:
 
 ```bash

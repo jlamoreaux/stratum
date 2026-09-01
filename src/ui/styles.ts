@@ -1,3 +1,5 @@
+import { NAV_CSS } from "./nav-css";
+
 export const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
 
@@ -55,7 +57,8 @@ export const CSS = `
   --warning-surface: #3e3a1a;
   --merged-surface: #2d1a5e;
 
-  /* Long-form prose (READMEs) reads better in a text face; UI stays mono. */
+  /* UI is mono throughout; long-form prose (READMEs) reads better in a text face. */
+  --font-mono: 'JetBrains Mono', monospace;
   --font-prose: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 
   /* Aliases the auth pages already reference */
@@ -71,68 +74,14 @@ export const CSS = `
 body {
   background: var(--bg-page);
   color: var(--text-primary);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.6;
 }
 
 a { color: var(--accent-text); text-decoration: none; }
 a:hover { text-decoration: underline; }
-
-.nav {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  gap: 0.35rem 1.25rem;
-  padding: 0.75rem 1.5rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-@media (max-width: 600px) {
-  .nav { padding: 0.6rem 1rem; }
-}
-
-.nav-brand {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: 0.05em;
-  margin-right: auto;
-}
-.nav-brand:hover { text-decoration: none; color: var(--accent-text); }
-
-.nav-auth {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.nav-user {
-  color: var(--text-muted);
-  font-size: 0.85rem;
-}
-
-.nav-auth-link {
-  color: var(--accent-text);
-  font-size: 0.9rem;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  transition: background 0.15s;
-}
-
-.nav-auth-link:hover {
-  background: var(--accent);
-  text-decoration: none;
-}
-
-.nav-logout-form { display: inline; }
-button.nav-auth-link {
-  background: none; border: none; cursor: pointer;
-  font-family: inherit; font-size: 0.9rem; line-height: inherit;
-}
-
+${NAV_CSS}
 .main {
   max-width: 1100px;
   margin: 0 auto;

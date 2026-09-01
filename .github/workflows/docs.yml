@@ -6,12 +6,18 @@ on:
     paths:
       - "website/**"
       - "docs/**"
+      # The site's header is generated from the app's stylesheet, so a change
+      # there has to rebuild (and re-check) the docs site too.
+      - "src/ui/nav-css.ts"
+      - "src/ui/styles.ts"
       - ".github/workflows/docs.yml"
   push:
     branches: [main]
     paths:
       - "website/**"
       - "docs/**"
+      - "src/ui/nav-css.ts"
+      - "src/ui/styles.ts"
       - ".github/workflows/docs.yml"
 
 concurrency:
@@ -47,6 +53,13 @@ jobs:
       - name: Check the docs mirrors are current
         working-directory: website
         run: npm run check:guides
+
+      # Same for the header: it is generated from the app's own stylesheet
+      # (src/ui/nav-css.ts) so both origins render one header, and nothing
+      # regenerates it at build time.
+      - name: Check the header mirror is current
+        working-directory: website
+        run: npm run check:header
 
       - name: Build
         working-directory: website

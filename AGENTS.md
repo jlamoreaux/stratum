@@ -23,7 +23,7 @@ client-side framework or a build step.
 | `migrations/` | D1 SQL migrations |
 | `docs/` | User, API, developer docs, ADRs (`docs/adr/`), and runbooks (`docs/runbooks/`) |
 | `scripts/` | Benchmark and operational scripts |
-| `website/` | Docs site (own build; deployed by `deploy-docs.yml`). Its guide and reference pages are **generated** from `docs/` by `website/scripts/mirror-docs.mjs` — edit `docs/`, not `website/src/content/docs/` |
+| `website/` | Docs site (own build; deployed by `docs.yml` on every push to `main` that touches it — `deploy-docs.yml` is the manual redeploy). Its guide and reference pages are **generated** from `docs/` by `website/scripts/mirror-docs.mjs` — edit `docs/`, not `website/src/content/docs/`. Its header is **generated** from the app's, by `website/scripts/mirror-header.mjs` — edit `src/ui/nav-css.ts`, not `website/src/styles/header.css` |
 
 ## Commands
 
