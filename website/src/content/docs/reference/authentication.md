@@ -74,7 +74,8 @@ scopes.
 
 `GET|POST /api/users/me/tokens`, `DELETE /api/users/me/tokens/{id}` and
 `POST /api/users/me/legacy-token/disable` accept the `stratum_session` cookie
-**only**. An API token calling them gets `403 SESSION_REQUIRED`, whatever its
+**only** — the cookie every web sign-in sets (magic link, GitHub, or Google
+OAuth). An API token calling them gets `403 SESSION_REQUIRED`, whatever its
 scope. A token that could mint tokens, revoke its siblings, or turn off the
 legacy credential would make revocation meaningless — a lost machine would
 simply issue itself a replacement.
@@ -114,12 +115,6 @@ refuses a **scoped** token with `SESSION_REQUIRED`. The key it mints never
 expires and cannot be revoked one at a time, so letting a scoped token rotate it
 would mean revoking that token contained nothing — it could have issued itself a
 permanent replacement on the way out.
-
-## Session cookies
-
-Signing in through the web UI (email magic link, GitHub OAuth, or Google
-OAuth) sets a `stratum_session` cookie, which authenticates browser requests
-to the same endpoints.
 
 ## Anonymous access
 
