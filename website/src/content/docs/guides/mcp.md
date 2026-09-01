@@ -105,9 +105,18 @@ instance advertises itself with nothing to configure.
 | `mcp:read` | Read projects, files, changes, evaluations and issues. Exactly a read-only API token. |
 | `mcp:write` | The above, plus workspaces, commits, changes, merges, reviews and issue management. Exactly a read-write API token. |
 
-A client that asks for no scope gets `mcp:read`. A read-only grant is refused at
+A client that asks for no scope gets `mcp:read`. A read-only grant is refused in
 the middleware, before routing, on any write request — so no route has to
 remember the rule.
+
+The one place the check is deferred is `/mcp` itself, and only because the HTTP
+method there says nothing about the operation: every MCP call is a POST,
+`tools/list` as much as `stratum_commit`, so refusing on the method would lock a
+read-only grant out of the endpoint rather than restrict it. Each tool call is
+re-dispatched internally as a real API request carrying the same credential, and
+*that* request meets the identical check against the method the operation
+actually uses. So `stratum_get_file` works on an `mcp:read` grant and
+`stratum_commit` does not.
 
 An OAuth grant is a *delegated* credential: it lives inside software you do not
 control. Two things it therefore cannot do, regardless of scope:

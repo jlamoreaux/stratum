@@ -3526,7 +3526,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/JsonRpcResponse" }
         "413":
-          $ref: "#/components/responses/PayloadTooLarge"
+          description: Request body exceeded the endpoint's cap
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonRpcResponse" }
     get:
       tags: [mcp]
       summary: Server-initiated stream (not offered)
@@ -3821,11 +3824,6 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     InternalError:
       description: Internal server error
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-    PayloadTooLarge:
-      description: Request body exceeded the endpoint's cap (code PAYLOAD_TOO_LARGE)
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

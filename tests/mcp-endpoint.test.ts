@@ -334,6 +334,25 @@ describe("protocol framing", () => {
     expect(((await response.json()) as RpcReply).error?.code).toBe(-32700);
   });
 
+  it("caps an oversized body, and answers in JSON-RPC", async () => {
+    // Enforced during the read, so an absent or understated Content-Length
+    // cannot get past it — a lying header must not buy an unbounded buffer.
+    const huge = "x".repeat(40 * 1024 * 1024);
+    const response = await app.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${USER_TOKEN}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: { huge } }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(413);
+    // A `{error, code}` body is unparseable to an MCP client; this one is not.
+    const body = (await response.json()) as RpcReply;
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.error?.message).toContain("too large");
+  });
+
   it("rejects a message that is not a JSON-RPC 2.0 request", async () => {
     const reply = (await (await rpc({ hello: "world" })).json()) as RpcReply;
     expect(reply.error?.code).toBe(-32600);

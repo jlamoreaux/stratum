@@ -29,7 +29,7 @@ import type { Env } from "../types";
 import { getExecutionCtx } from "../utils/execution-ctx";
 import { createLogger } from "../utils/logger";
 import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
-import { payloadTooLarge } from "../utils/response";
+import { readTextWithLimit } from "../utils/request-body";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -41,10 +41,12 @@ const SERVER_VERSION = "0.2.0";
  * Cap on a single JSON-RPC body.
  *
  * Generous, because `stratum_commit` legitimately carries file contents and the
- * API behind it accepts up to 25 MB. Read as text rather than through
- * `readJsonWithLimit` because a JSON-RPC parse failure has to come back as a
- * JSON-RPC error object (-32700), not as this codebase's `{error, code}` shape,
- * which an MCP client cannot interpret.
+ * API behind it accepts up to 25 MB. Enforced with `readTextWithLimit` rather
+ * than `readJsonWithLimit` because both failures on this endpoint — too large,
+ * and unparseable — have to come back as JSON-RPC error objects, which an MCP
+ * client understands, rather than as this codebase's `{error, code}`, which it
+ * does not. The cap itself is the shared streaming one, so an absent or
+ * understated `Content-Length` cannot get past it.
  */
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
@@ -114,14 +116,21 @@ app.post("/mcp", async (c) => {
   const versionProblem = unsupportedProtocol(c.req.header("Mcp-Protocol-Version"));
   if (versionProblem !== null) return versionProblem;
 
-  const declaredLength = c.req.header("content-length");
-  if (declaredLength !== undefined && Number(declaredLength) > MAX_BODY_BYTES) {
-    return payloadTooLarge(`request body too large (max ${MAX_BODY_BYTES} bytes)`);
+  const body = await readTextWithLimit(c, MAX_BODY_BYTES, logger);
+  if (body.tooLarge) {
+    return Response.json(
+      rpcError(
+        null,
+        JSON_RPC.INVALID_REQUEST,
+        `Request body too large (max ${MAX_BODY_BYTES} bytes)`,
+      ),
+      { status: 413, headers: { "Cache-Control": "no-store" } },
+    );
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await c.req.text());
+    parsed = JSON.parse(body.text);
   } catch {
     return Response.json(rpcError(null, JSON_RPC.PARSE_ERROR, "Request body is not valid JSON"), {
       status: 400,
