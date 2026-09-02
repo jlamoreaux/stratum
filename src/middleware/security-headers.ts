@@ -27,6 +27,24 @@ export function generateCspNonce(): string {
   return btoa(binary);
 }
 
+export interface CspOptions {
+  /**
+   * Extra `form-action` sources beyond `'self'`, or `null` to omit the
+   * directive entirely.
+   *
+   * Exists for one page: the OAuth consent screen (`/oauth/authorize`). Its
+   * form POSTs to us, but the RESPONSE to that POST is a redirect to the
+   * client's registered callback, and Chromium and WebKit enforce the
+   * submitting page's `form-action` against that redirect target as well as
+   * against the form's own action (the CSP spec leaves this open —
+   * w3c/webappsec-csp#8 — and Firefox does not check redirects). Under the
+   * site-wide `'self'`, clicking Allow mints an authorization code that the
+   * browser then refuses to deliver, and the page just sits there. Every other
+   * page keeps the default.
+   */
+  formAction?: string[] | null;
+}
+
 /**
  * CSP for the server-rendered UI and API, parameterized by the per-request
  * script nonce. Built in ONE place so the request middleware and the error
@@ -44,8 +62,19 @@ export function generateCspNonce(): string {
  *   scripts; the UI loads no external scripts and injects none, so granting
  *   transitive trust would only widen the policy.
  */
-export function contentSecurityPolicy(nonce: string): string {
-  return `frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; script-src 'nonce-${nonce}'`;
+export function contentSecurityPolicy(nonce: string, options: CspOptions = {}): string {
+  const formAction =
+    options.formAction === null
+      ? []
+      : [`form-action ${["'self'", ...(options.formAction ?? [])].join(" ")}`];
+  return [
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    ...formAction,
+    "frame-src 'none'",
+    `script-src 'nonce-${nonce}'`,
+  ].join("; ");
 }
 
 /**
@@ -56,7 +85,7 @@ export function contentSecurityPolicy(nonce: string): string {
  * already stamped, and both calls must emit the SAME policy string. HSTS is
  * applied separately — it is conditional on HTTPS.
  */
-export function setHtmlSecurityHeaders(c: Context<{ Bindings: Env }>): void {
+export function setHtmlSecurityHeaders(c: Context<{ Bindings: Env }>, options?: CspOptions): void {
   let nonce = c.get("cspNonce");
   if (nonce === undefined) {
     nonce = generateCspNonce();
@@ -65,7 +94,7 @@ export function setHtmlSecurityHeaders(c: Context<{ Bindings: Env }>): void {
   c.header("X-Content-Type-Options", "nosniff");
   c.header("X-Frame-Options", "DENY");
   c.header("Referrer-Policy", "strict-origin-when-cross-origin");
-  c.header("Content-Security-Policy", contentSecurityPolicy(nonce));
+  c.header("Content-Security-Policy", contentSecurityPolicy(nonce, options));
 }
 
 /**

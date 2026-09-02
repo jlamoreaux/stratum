@@ -9,10 +9,13 @@
  * configured — so this header is load-bearing UX, not decoration.
  */
 
+import { SUPPORTED_SCOPES } from "../storage/oauth";
+
 /** The MCP endpoint's path.
  *
- * Lives here, in a module that imports nothing, because `authMiddleware` needs
- * it and `src/routes/mcp.ts` imports the middleware (through the dispatcher) —
+ * Lives here, in a module that imports nothing from the route or middleware
+ * layers, because `authMiddleware` needs it and `src/routes/mcp.ts` imports the
+ * middleware (through the dispatcher) —
  * defining it there and reading it from the middleware is an import cycle that
  * leaves `authMiddleware` undefined at module-init time inside the dispatcher,
  * which fails as an unauthenticated sub-request rather than as a loud error.
@@ -56,6 +59,13 @@ export function mcpResourceIdentifier(requestUrl: string): string {
  * assembled from our own message strings today, but stripping means a future
  * caller that passes something client-controlled cannot inject a second
  * auth-param, and losing a character from an English sentence costs nothing.
+ *
+ * `scope` (RFC 6750 §3) names what full use of the endpoint needs. Clients that
+ * follow the MCP authorization guidance take the scopes they request from this
+ * attribute first and from the protected-resource metadata second; a client
+ * that consults neither still gets `mcp:read` by default. Without the hint, a
+ * connector authorizes read-only and fails on its first commit with no
+ * indication that the fix is to re-authorize.
  */
 export function buildAuthenticateChallenge(
   requestUrl: string,
@@ -68,6 +78,7 @@ export function buildAuthenticateChallenge(
     [
       `error=${quoted(error)}`,
       `error_description=${quoted(description)}`,
+      `scope=${quoted(SUPPORTED_SCOPES.join(" "))}`,
       `resource_metadata=${quoted(protectedResourceMetadataUrl(requestUrl))}`,
     ].join(", "),
   ].join(" ");

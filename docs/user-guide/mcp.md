@@ -30,6 +30,13 @@ configure by hand.
      twice — and tells a self-hoster to point their client at someone else's
      instance. The wording above is correct in both copies. -->
 
+Claude (web, desktop and mobile), as a connector: **Settings → Connectors →
+Add custom connector**. Name it, paste `https://app.usestratum.dev/mcp` as the
+URL, and leave the advanced OAuth client id and secret blank — Stratum registers
+the client itself. Click **Connect** on the new connector and approve the
+consent screen that opens; the tools are then available in any conversation
+where the connector is enabled.
+
 Claude Code:
 
 ```bash
@@ -49,10 +56,11 @@ Any MCP client that supports remote servers:
 }
 ```
 
-The first tool call opens your browser, asks you to sign in if you are not
-already, and shows a consent screen naming the application and what it is asking
-for. Approve it once; the client stores the tokens and refreshes them on its
-own.
+Connecting opens your browser, asks you to sign in if you are not already, and
+shows a consent screen: which application is asking, what it will be able to do,
+and the host it returns you to. The full redirect address and where to
+disconnect later are one click away under **Where this request came from**.
+Approve it once; the client stores the tokens and refreshes them on its own.
 
 You never paste a Stratum credential into your editor's configuration, and you
 can withdraw access at any time from **Settings → Connected applications**
@@ -81,7 +89,8 @@ The endpoint is an OAuth 2.1 protected resource, and Stratum is the
 authorization server. A client bootstraps the whole flow from the URL alone:
 
 1. It calls `/mcp` with no credential. The `401` carries a `WWW-Authenticate`
-   header naming `/.well-known/oauth-protected-resource`.
+   header naming `/.well-known/oauth-protected-resource` and the scopes full
+   use of the endpoint needs (`scope="mcp:read mcp:write"`).
 2. That document points at `/.well-known/oauth-authorization-server`.
 3. The client registers itself at `/oauth/register`
    ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) dynamic client
@@ -110,9 +119,12 @@ instance advertises itself with nothing to configure.
 | `mcp:read` | Read projects, files, changes, evaluations and issues. Exactly a read-only API token. |
 | `mcp:write` | The above, plus workspaces, commits, changes, merges, reviews and issue management. Exactly a read-write API token. |
 
-A client that asks for no scope gets `mcp:read`. A read-only grant is refused in
-the middleware, before routing, on any write request — so no route has to
-remember the rule.
+A client that asks for no scope gets `mcp:read`. Most clients do ask: the `401`
+challenge and the protected-resource metadata both list `mcp:read mcp:write`,
+and a client that follows either requests both. The consent screen spells out
+what the grant covers, so a read-only connection is a choice you can see being
+made. A read-only grant is refused in the middleware, before routing, on any
+write request — so no route has to remember the rule.
 
 The one place the check is deferred is `/mcp` itself, and only because the HTTP
 method there says nothing about the operation: every MCP call is a POST,

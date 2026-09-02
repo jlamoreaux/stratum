@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authMiddleware } from "../src/middleware/auth";
 import { csrfMiddleware } from "../src/middleware/csrf";
+import { securityHeadersMiddleware } from "../src/middleware/security-headers";
 import { mcpOAuthRouter } from "../src/routes/mcp-oauth";
 import { createSession } from "../src/storage/sessions";
 import type { Env } from "../src/types";
@@ -133,6 +134,7 @@ beforeEach(async () => {
   CHALLENGE = await pkceChallenge(VERIFIER);
 
   app = new Hono<{ Bindings: Env }>();
+  app.use("*", securityHeadersMiddleware);
   app.use("*", authMiddleware);
   app.use("*", csrfMiddleware);
   app.route("/", mcpOAuthRouter);
@@ -230,6 +232,35 @@ describe("authorization", () => {
     expect(html).toContain("Create workspaces, commit files");
     // And the screen must say the name is self-asserted.
     expect(html).toContain("register itself under any name");
+  });
+
+  it("lets the browser follow the post-consent redirect to the client", async () => {
+    // Chromium and WebKit enforce the consent page's `form-action` against the
+    // redirect that answers its form POST. Under the site-wide `'self'`,
+    // clicking Allow minted a code the browser then refused to deliver, so this
+    // page — and only this page — has to name the client's origin. The
+    // middleware sets the site-wide policy first; the route must win.
+    const { json } = await register();
+    const url = `${ORIGIN}/oauth/authorize?response_type=code&client_id=${json.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&code_challenge=${CHALLENGE}&code_challenge_method=S256`;
+    const consentPage = await app.fetch(
+      new Request(url, { headers: { Cookie: sessionCookie } }),
+      env,
+    );
+    expect(consentPage.status).toBe(200);
+    expect(consentPage.headers.get("Content-Security-Policy")).toContain(
+      "form-action 'self' http://127.0.0.1:9876;",
+    );
+
+    // The error page redirects nowhere, so it keeps the default.
+    const errorPage = await app.fetch(
+      new Request(
+        `${ORIGIN}/oauth/authorize?response_type=code&client_id=${json.client_id}&redirect_uri=${encodeURIComponent("https://attacker.example/steal")}&code_challenge=${CHALLENGE}&code_challenge_method=S256`,
+        { headers: { Cookie: sessionCookie } },
+      ),
+      env,
+    );
+    expect(errorPage.status).toBe(400);
+    expect(errorPage.headers.get("Content-Security-Policy")).toContain("form-action 'self';");
   });
 
   it("RENDERS rather than redirects when the redirect URI is not registered", async () => {
