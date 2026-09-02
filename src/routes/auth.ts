@@ -231,7 +231,7 @@ app.get("/github/callback", async (c) => {
   );
 
   if (!userResult.success) {
-    logger.error("Failed to upsert GitHub user", undefined, { githubId });
+    logger.error("Failed to upsert GitHub user", userResult.error, { githubId });
     return c.json({ error: "Failed to sign in" }, 500);
   }
 

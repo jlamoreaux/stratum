@@ -10,6 +10,7 @@ import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername } from "../storage/users";
 import type { Env } from "../types";
 import { hashToken } from "../utils/crypto";
+import { getWaitUntil } from "../utils/execution-ctx";
 import { escapeHtml } from "../utils/html";
 import { type Logger, createLogger } from "../utils/logger";
 import { consumePostLoginRedirect } from "../utils/post-login-redirect";
@@ -648,13 +649,18 @@ app.post("/verify", async (c) => {
       logger.info("New user created via signup", { userId, emailHash, username });
 
       // Beta program: record the redemption, mint this user's 5 codes, and email
-      // them. Best-effort — never blocks the now-created account.
+      // them. Best-effort — never blocks the now-created account, and no longer
+      // delays its first redirect either: scheduled past the response where an
+      // ExecutionContext exists, awaited inline where none does (tests).
       if (betaGateEnabled(c.env)) {
-        await admitAndDeliverCodes(
+        const delivery = admitAndDeliverCodes(
           c.env,
           { userId, email, inviteCode, source: "magic_link" },
           logger,
         );
+        const waitUntil = getWaitUntil(c);
+        if (waitUntil) waitUntil(delivery);
+        else await delivery;
       }
 
       // Create session and redirect to welcome/onboarding

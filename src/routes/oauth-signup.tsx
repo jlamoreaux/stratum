@@ -24,6 +24,7 @@ import { recordAudit } from "../storage/audit";
 import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername, linkGitHub } from "../storage/users";
 import type { Env } from "../types";
+import { getWaitUntil } from "../utils/execution-ctx";
 import { type Logger, createLogger } from "../utils/logger";
 import { consumePostLoginRedirect } from "../utils/post-login-redirect";
 import { sanitizeUsername, validateUsername } from "../utils/username-validation";
@@ -403,11 +404,17 @@ app.post("/", async (c) => {
   }
 
   if (betaGateEnabled(c.env)) {
-    await admitAndDeliverCodes(
+    // Best-effort and already error-swallowing, so the redirect need not wait
+    // on the referral service and the mail provider; inline only where there
+    // is no ExecutionContext to hand it to (tests, non-Workers runtimes).
+    const delivery = admitAndDeliverCodes(
       c.env,
       { userId, email: record.email, inviteCode, source: `${record.provider}_oauth` },
       logger,
     );
+    const waitUntil = getWaitUntil(c);
+    if (waitUntil) waitUntil(delivery);
+    else await delivery;
   }
 
   await clearPendingSignup(c, token);
