@@ -9,8 +9,10 @@
  * - betaGateEnabled: is the gate switched on and pointed at a service?
  * - validateInviteCode: is this code redeemable? (pre-createUser check)
  * - admitUser: record the redemption + mint the user's 5 codes (post-createUser)
+ * - admitAndDeliverCodes: admitUser plus the best-effort email of those codes
  * - fetchInviteCodes: read back the codes a user already holds (profile page)
  */
+import { getInviteCodesEmail } from "../email/templates";
 import type { Env } from "../types";
 import type { Logger } from "../utils/logger";
 
@@ -115,6 +117,54 @@ export async function admitUser(
       userId: params.userId,
     });
     return { codes: [], referrerUserId: null };
+  }
+}
+
+/**
+ * Redeem the invite code, mint the user's shareable codes, and email them.
+ * Best-effort — failures are logged and swallowed so a created account is never
+ * left in a broken state by a referral-service hiccup. Shared by every signup
+ * path (magic link, GitHub, Google) so they cannot drift on what "admitted"
+ * means.
+ */
+export async function admitAndDeliverCodes(
+  env: Env,
+  params: { userId: string; email: string; inviteCode: string; source: string },
+  logger: Logger,
+): Promise<void> {
+  try {
+    const result = await admitUser(
+      env,
+      {
+        userId: params.userId,
+        email: params.email,
+        code: params.inviteCode,
+        source: params.source,
+      },
+      logger,
+    );
+    if (result.codes.length === 0) {
+      logger.warn("No invite codes minted for new user", { userId: params.userId });
+      return;
+    }
+    const fromAddress = env.EMAIL_FROM_ADDRESS;
+    if (!env.EMAIL || !fromAddress) return;
+    const emailContent = getInviteCodesEmail({
+      email: params.email,
+      codes: result.codes,
+      shareBaseUrl: env.REFERRAL_SERVICE_URL,
+    });
+    await env.EMAIL.send({
+      to: params.email,
+      from: { email: fromAddress, name: "Stratum" },
+      subject: emailContent.subject,
+      text: emailContent.text,
+      html: emailContent.html,
+    });
+  } catch (err) {
+    logger.error("Failed to deliver invite codes", err instanceof Error ? err : undefined, {
+      userId: params.userId,
+    });
   }
 }
 

@@ -1,12 +1,12 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { betaGateEnabled } from "../beta/gate";
 import { recordAudit } from "../storage/audit";
 import { createSession, deleteSession, getSession } from "../storage/sessions";
-import { createUser, getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
+import { getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 import { consumePostLoginRedirect, isSafeRedirectTarget } from "../utils/post-login-redirect";
+import { beginPendingSignup, suggestUsername } from "./oauth-signup";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -181,48 +181,58 @@ app.get("/github/callback", async (c) => {
   const githubUser = await userRes.json<{ id: number; login: string }>();
   const emails = await emailsRes.json<{ email: string; primary: boolean; verified: boolean }[]>();
 
-  const primaryEmail =
-    emails.find((e) => e.primary && e.verified)?.email ??
-    emails.find((e) => e.verified)?.email ??
-    emails[0]?.email;
+  // Only an address the provider has verified may identify an account. GitHub
+  // lets a user list any address unverified, so matching on one would let
+  // anyone reach an existing account by adding its owner's email to their own
+  // profile — and would create new accounts under emails nobody has proven.
+  const verifiedEmail =
+    emails.find((e) => e.primary && e.verified)?.email ?? emails.find((e) => e.verified)?.email;
 
-  if (!primaryEmail) {
+  if (!verifiedEmail) {
     logger.warn("No verified email found on GitHub account", { githubId: githubUser.id });
     return c.json({ error: "No verified email found on GitHub account" }, 422);
   }
 
-  const emailPrefix = primaryEmail.split("@")[0];
-  logger.info("Upserting GitHub user", { githubId: githubUser.id, emailPrefix });
+  // `next` (carried through GitHub's state parameter) still wins when present,
+  // so existing links keep behaving as they did. The cookie is the fallback,
+  // and it is what a flow that started somewhere else — the MCP consent screen,
+  // say — uses to get the user back to the request they interrupted.
+  let nextPath: string | undefined;
+  if (next && typeof next === "string" && isSafeRedirectTarget(next, c.req.url)) {
+    const url = new URL(next, new URL(c.req.url).origin);
+    nextPath = url.pathname + url.search + url.hash;
+  }
 
-  // Closed beta: OAuth is login-only. A brand-new account (no match by GitHub id
-  // or email) must be created through the invite-gated magic-link flow first.
-  if (betaGateEnabled(c.env)) {
-    const byGithub = await getUserByGitHubId(c.env.DB, String(githubUser.id), logger);
-    // Match an existing account only by a *verified* email — never the unverified
-    // fallback used for primaryEmail, which could be attacker-controlled and let
-    // someone slip past the gate by claiming a beta user's address.
-    const verifiedEmail =
-      emails.find((e) => e.primary && e.verified)?.email ?? emails.find((e) => e.verified)?.email;
-    const byEmail = verifiedEmail ? await getUserByEmail(c.env.DB, verifiedEmail, logger) : null;
-    if (!byGithub.success && !byEmail?.success) {
-      logger.warn("Blocked GitHub signup — closed beta", { githubId: githubUser.id });
-      return c.redirect("/auth/signup?error=invite_required");
+  const githubId = String(githubUser.id);
+  const byGithub = await getUserByGitHubId(c.env.DB, githubId, logger);
+  if (!byGithub.success) {
+    const byEmail = await getUserByEmail(c.env.DB, verifiedEmail, logger);
+    if (!byEmail.success) {
+      // First time we have seen this person: nothing is created until they have
+      // chosen a username (and, under the closed beta, presented an invite code).
+      logger.info("New GitHub identity; asking for a username", { githubId });
+      return beginPendingSignup(c, {
+        provider: "github",
+        email: verifiedEmail,
+        suggestedUsername: suggestUsername(githubUser.login),
+        github: { id: githubId, login: githubUser.login },
+        ...(nextPath !== undefined ? { next: nextPath } : {}),
+      });
     }
   }
 
+  logger.info("Signing in GitHub user", { githubId });
+  // Finds by GitHub id or links by verified email; the create branch inside is
+  // unreachable from here, because a brand-new identity was diverted above.
   const userResult = await upsertGitHubUser(
     c.env.DB,
-    {
-      githubId: String(githubUser.id),
-      email: primaryEmail,
-      username: githubUser.login,
-    },
+    { githubId, email: verifiedEmail, username: githubUser.login },
     logger,
   );
 
   if (!userResult.success) {
-    logger.error("Failed to upsert GitHub user", undefined, { githubId: githubUser.id });
-    return c.json({ error: "Failed to create user" }, 500);
+    logger.error("Failed to upsert GitHub user", undefined, { githubId });
+    return c.json({ error: "Failed to sign in" }, 500);
   }
 
   const user = userResult.data;
@@ -253,19 +263,10 @@ app.get("/github/callback", async (c) => {
 
   sessionLogger.info("GitHub OAuth successful, session created");
 
-  // `next` (carried through GitHub's state parameter) still wins when present,
-  // so existing links keep behaving as they did. The cookie is the fallback,
-  // and it is what a flow that started somewhere else — the MCP consent screen,
-  // say — uses to get the user back to the request they interrupted.
-  let redirectTo: string | undefined;
-  if (next && typeof next === "string" && isSafeRedirectTarget(next, c.req.url)) {
-    const url = new URL(next, new URL(c.req.url).origin);
-    redirectTo = url.pathname + url.search + url.hash;
-  }
   // Consumed unconditionally, even when `next` won, so a stale destination is
   // never left in the jar for the next sign-in to pick up.
   const remembered = consumePostLoginRedirect(c, "/");
-  return c.redirect(redirectTo ?? remembered);
+  return c.redirect(nextPath ?? remembered);
 });
 
 app.get("/google", async (c) => {
@@ -371,25 +372,18 @@ app.get("/google/callback", async (c) => {
   }
 
   // Google identity maps onto the email-based account model: an existing
-  // account with this email is reused, otherwise one is created — the same
-  // semantics as magic-link sign-in.
+  // account with this email is reused — the same semantics as magic-link
+  // sign-in. A new one is created only once its owner has chosen a username.
   const existing = await getUserByEmail(c.env.DB, googleUser.email, logger);
-  let userId: string;
-  if (existing.success) {
-    userId = existing.data.id;
-  } else {
-    // Closed beta: OAuth is login-only — new accounts require an invite code.
-    if (betaGateEnabled(c.env)) {
-      logger.warn("Blocked Google signup — closed beta");
-      return c.redirect("/auth/signup?error=invite_required");
-    }
-    const createdResult = await createUser(c.env.DB, googleUser.email, logger);
-    if (!createdResult.success) {
-      logger.error("Failed to create user from Google sign-in", createdResult.error);
-      return c.json({ error: "Failed to create user" }, 500);
-    }
-    userId = createdResult.data.user.id;
+  if (!existing.success) {
+    logger.info("New Google identity; asking for a username");
+    return beginPendingSignup(c, {
+      provider: "google",
+      email: googleUser.email,
+      suggestedUsername: suggestUsername(googleUser.email.split("@")[0] ?? ""),
+    });
   }
+  const userId = existing.data.id;
 
   const sessionLogger = logger.child({ userId });
   const sessionResult = await createSession(c.env.DB, userId, sessionLogger);
