@@ -26,13 +26,21 @@ function timingSafeEqual(a: string, b: string): boolean {
 /**
  * Mint an OAuth state, persist it in KV (replay prevention), and bind it to
  * the initiating browser via a short-lived cookie (login-CSRF prevention).
+ *
+ * The KV record is also where a requested post-login destination rides out
+ * the round trip: the provider sends back only `code` and `state`, so a
+ * `next` on the start URL survives only if it is stored under the state and
+ * read back when the state is consumed. It is validated before storage, so
+ * the callback can trust whatever it finds there.
  */
 async function issueOAuthState(
   c: Parameters<typeof setCookie>[0],
   kv: KVNamespace,
+  next?: string,
 ): Promise<string> {
   const state = crypto.randomUUID().replace(/-/g, "");
-  await kv.put(`oauth_state:${state}`, "1", { expirationTtl: OAUTH_STATE_TTL_SECONDS });
+  const record = next === undefined ? "1" : JSON.stringify({ next });
+  await kv.put(`oauth_state:${state}`, record, { expirationTtl: OAUTH_STATE_TTL_SECONDS });
   setCookie(c, OAUTH_STATE_COOKIE, state, {
     httpOnly: true,
     secure: true,
@@ -45,24 +53,42 @@ async function issueOAuthState(
 
 /**
  * Validate a callback's state: it must match the browser's state cookie
- * (constant-time) AND exist in KV. Consumes both on success.
+ * (constant-time) AND exist in KV. Consumes both on success, returning the
+ * destination stored with the state (if any); null when the state is bad.
  */
 async function consumeOAuthState(
   c: Parameters<typeof getCookie>[0] & Parameters<typeof deleteCookie>[0],
   kv: KVNamespace,
   state: string,
-): Promise<boolean> {
+): Promise<{ next?: string } | null> {
   const cookieState = getCookie(c, OAUTH_STATE_COOKIE);
   if (!cookieState || !timingSafeEqual(cookieState, state)) {
-    return false;
+    return null;
   }
   deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/auth" });
 
   const stateKey = `oauth_state:${state}`;
   const stored = await kv.get(stateKey);
-  if (!stored) return false;
+  if (!stored) return null;
   await kv.delete(stateKey);
-  return true;
+  // A bare "1" is a state with nothing attached (the historical shape).
+  if (!stored.startsWith("{")) return {};
+  try {
+    const parsed = JSON.parse(stored) as { next?: unknown };
+    return typeof parsed.next === "string" ? { next: parsed.next } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * A `next` from the request, reduced to a same-origin path — or undefined
+ * when it is missing or unsafe, so an open redirect never gets stored.
+ */
+function safeNextPath(next: string | undefined, requestUrl: string): string | undefined {
+  if (!next || !isSafeRedirectTarget(next, requestUrl)) return undefined;
+  const url = new URL(next, new URL(requestUrl).origin);
+  return url.pathname + url.search + url.hash;
 }
 
 app.get("/github", async (c) => {
@@ -80,7 +106,7 @@ app.get("/github", async (c) => {
     return c.json({ error: "GitHub OAuth is not configured" }, 501);
   }
 
-  const state = await issueOAuthState(c, c.env.STATE);
+  const state = await issueOAuthState(c, c.env.STATE, safeNextPath(c.req.query("next"), c.req.url));
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -116,7 +142,8 @@ app.get("/github/callback", async (c) => {
     return c.json({ error: "Missing state parameter" }, 400);
   }
 
-  if (!(await consumeOAuthState(c, c.env.STATE, state))) {
+  const consumed = await consumeOAuthState(c, c.env.STATE, state);
+  if (consumed === null) {
     logger.warn("Invalid, expired, or unbound state", { statePrefix: state.slice(0, 8) });
     return c.json({ error: "Invalid or expired state" }, 400);
   }
@@ -193,15 +220,12 @@ app.get("/github/callback", async (c) => {
     return c.json({ error: "No verified email found on GitHub account" }, 422);
   }
 
-  // `next` (carried through GitHub's state parameter) still wins when present,
-  // so existing links keep behaving as they did. The cookie is the fallback,
-  // and it is what a flow that started somewhere else — the MCP consent screen,
-  // say — uses to get the user back to the request they interrupted.
-  let nextPath: string | undefined;
-  if (next && typeof next === "string" && isSafeRedirectTarget(next, c.req.url)) {
-    const url = new URL(next, new URL(c.req.url).origin);
-    nextPath = url.pathname + url.search + url.hash;
-  }
+  // A `next` given to /auth/github rides in the state record, since GitHub
+  // returns only `code` and `state`; one on the callback URL itself is still
+  // honoured so existing links keep behaving as they did. Either wins over the
+  // post-login cookie, which is the fallback a flow that started somewhere
+  // else — the MCP consent screen, say — uses to get back to its request.
+  const nextPath = consumed.next ?? safeNextPath(next, c.req.url);
 
   const githubId = String(githubUser.id);
   const byGithub = await getUserByGitHubId(c.env.DB, githubId, logger);
@@ -319,7 +343,7 @@ app.get("/google/callback", async (c) => {
   if (!state) {
     return c.json({ error: "Missing state parameter" }, 400);
   }
-  if (!(await consumeOAuthState(c, c.env.STATE, state))) {
+  if ((await consumeOAuthState(c, c.env.STATE, state)) === null) {
     logger.warn("Invalid, expired, or unbound state", { statePrefix: state.slice(0, 8) });
     return c.json({ error: "Invalid or expired state" }, 400);
   }

@@ -278,6 +278,50 @@ describe("OAuth signup: choosing a username", () => {
       ).toBeUndefined();
     });
 
+    it("carries a `next` given to /auth/github through the state record", async () => {
+      const app = makeApp();
+      const env = makeEnv();
+      mockGitHub([{ email: "octo@example.com", primary: true, verified: true }]);
+
+      const start = await app.fetch(
+        new Request("http://localhost/auth/github?next=%2Fp%2Fdemo%3Ftab%3D1"),
+        env,
+      );
+      expect(start.status).toBe(302);
+      const state = cookieValue(start, "stratum_oauth_state") ?? "";
+      expect(state).not.toBe("");
+      // GitHub gets only the state; the destination stays server-side.
+      expect(start.headers.get("Location")).not.toContain("next");
+      expect(kvOf(env).store.get(`oauth_state:${state}`)).toBe(
+        JSON.stringify({ next: "/p/demo?tab=1" }),
+      );
+
+      const res = await app.fetch(
+        new Request(`http://localhost/auth/github/callback?code=ok&state=${state}`, {
+          headers: { Cookie: `stratum_oauth_state=${state}` },
+        }),
+        env,
+      );
+      expect(res.headers.get("Location")).toBe(COMPLETE);
+      expect(pendingRecord(env, cookieValue(res, "stratum_pending_signup") ?? "").next).toBe(
+        "/p/demo?tab=1",
+      );
+      // The state is single-use, destination included.
+      expect(kvOf(env).store.has(`oauth_state:${state}`)).toBe(false);
+    });
+
+    it("drops an unsafe `next` at /auth/github rather than storing it", async () => {
+      const app = makeApp();
+      const env = makeEnv();
+
+      const start = await app.fetch(
+        new Request("http://localhost/auth/github?next=https%3A%2F%2Fevil.example%2F"),
+        env,
+      );
+      const state = cookieValue(start, "stratum_oauth_state") ?? "";
+      expect(kvOf(env).store.get(`oauth_state:${state}`)).toBe("1");
+    });
+
     it("suggests nothing when the GitHub handle cannot become a username", async () => {
       const app = makeApp();
       const env = makeEnv();
