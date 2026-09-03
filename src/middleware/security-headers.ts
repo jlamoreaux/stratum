@@ -76,7 +76,36 @@ export function contentSecurityPolicy(nonce: string, options: CspOptions = {}): 
     ...formAction,
     "frame-src 'none'",
     `script-src 'nonce-${nonce}'`,
+    // Both reporting directives, deliberately. A browser that implements the
+    // Reporting API honours `report-to` and ignores `report-uri`; one that does
+    // not falls back to `report-uri`. No browser sends the same report twice.
+    `report-to ${CSP_REPORT_GROUP}`,
+    `report-uri ${CSP_REPORT_PATH}`,
   ].join("; ");
+}
+
+/**
+ * Where browsers POST Content Security Policy violation reports.
+ *
+ * A CSP block happens entirely inside the browser: the server answers a
+ * perfectly good request and never learns that the page refused to act on it.
+ * That is how #353/#355 stayed invisible — every user who clicked Allow on the
+ * MCP consent screen hit a `form-action` block, and the Worker logs showed a
+ * healthy flow right up to the redirect nobody followed. With a report
+ * endpoint, each of those clicks would have produced a warning naming the
+ * blocked URL and the directive within seconds. Served by
+ * `src/routes/csp-report.ts`; exempt from the CSRF check because browsers send
+ * reports with a bare POST and no Origin, and the endpoint only logs.
+ */
+export const CSP_REPORT_PATH = "/csp-report";
+
+/** The Reporting API endpoint group that `report-to` names; declared to the
+ * browser by the `Reporting-Endpoints` header `setHtmlSecurityHeaders` sets. */
+const CSP_REPORT_GROUP = "csp-endpoint";
+
+/** Is this the CSP report endpoint? Read by `csrfMiddleware`. */
+export function isCspReportPath(path: string): boolean {
+  return path === CSP_REPORT_PATH;
 }
 
 /**
@@ -96,6 +125,9 @@ export function setHtmlSecurityHeaders(c: Context<{ Bindings: Env }>, options?: 
   c.header("X-Content-Type-Options", "nosniff");
   c.header("X-Frame-Options", "DENY");
   c.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  // A relative endpoint URL is resolved against the response URL, so a
+  // self-hosted instance reports to itself with nothing to configure.
+  c.header("Reporting-Endpoints", `${CSP_REPORT_GROUP}="${CSP_REPORT_PATH}"`);
   c.header("Content-Security-Policy", contentSecurityPolicy(nonce, options));
 }
 

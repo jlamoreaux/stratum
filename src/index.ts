@@ -17,6 +17,7 @@ import { backfillRouter } from "./routes/backfill";
 import { backupRouter } from "./routes/backup";
 import { bulkImportRouter } from "./routes/bulk-import";
 import { changesRouter } from "./routes/changes";
+import { cspReportRouter } from "./routes/csp-report";
 import { deletionJobsRouter } from "./routes/deletion-jobs";
 import { emailAuthRouter } from "./routes/email-auth";
 import { gitHttpRouter } from "./routes/git-http";
@@ -191,6 +192,9 @@ app.route("/api/webhooks/github", githubWebhookRouter);
 // route would otherwise swallow /.well-known/oauth-protected-resource.
 app.route("/", mcpOAuthRouter);
 app.route("/", mcpRouter);
+
+// Browsers POST CSP violation reports here; every page's policy names it.
+app.route("/", cspReportRouter);
 
 // Git smart-HTTP proxy (clone/fetch). Mount before the UI catch-all so its
 // /@ns/slug/{info/refs,git-upload-pack,git-receive-pack} paths resolve here.

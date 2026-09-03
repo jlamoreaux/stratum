@@ -42,10 +42,11 @@ import {
 } from "../storage/oauth";
 import { getUser } from "../storage/users";
 import type { Env } from "../types";
-import { createLogger } from "../utils/logger";
+import type { createLogger } from "../utils/logger";
 import { mcpResourceIdentifier } from "../utils/oauth-challenge";
 import { rememberPostLoginRedirect } from "../utils/post-login-redirect";
 import { readJsonWithLimit, readTextWithLimit } from "../utils/request-body";
+import { requestLogger } from "../utils/request-logger";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -201,7 +202,7 @@ interface RegistrationBody {
 }
 
 app.post("/oauth/register", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   const raw = await readJsonWithLimit<RegistrationBody>(c, MAX_OAUTH_BODY_BYTES, logger);
   if (raw instanceof Response) return raw;
@@ -478,7 +479,7 @@ function describeScope(scope: string): string[] {
 }
 
 app.get("/oauth/authorize", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
   const url = new URL(c.req.url);
 
   // Sign-in comes FIRST, before the request is validated, so an unauthenticated
@@ -505,6 +506,14 @@ app.get("/oauth/authorize", async (c) => {
     return renderAuthorizeError(c, "Unknown client", "This application is no longer registered.");
   }
   const clientName = clientResult.data.clientName;
+  // The first of three lines a healthy connection leaves: this, then
+  // "Authorization code issued", then "OAuth tokens issued" seconds later.
+  logger.info("MCP consent screen shown", {
+    clientId: params.clientId,
+    clientName,
+    userId,
+    scope: params.scope,
+  });
 
   // No `form-action` on this page. Its form POSTs to us, but the answer to that
   // POST is a redirect to the client's callback, and Chromium and WebKit check
@@ -595,7 +604,7 @@ app.get("/oauth/authorize", async (c) => {
 });
 
 app.post("/oauth/authorize", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   const userId = c.get("userId");
   if (!userId || c.get("authVia") !== "session") {
@@ -627,6 +636,7 @@ app.post("/oauth/authorize", async (c) => {
   if (params.state !== undefined) redirect.searchParams.set("state", params.state);
 
   if (form.get("decision") !== "allow") {
+    logger.info("MCP consent declined", { clientId: params.clientId, userId });
     redirect.searchParams.set("error", "access_denied");
     redirect.searchParams.set("error_description", "The user declined the request");
     return c.redirect(redirect.toString());
@@ -699,7 +709,7 @@ function readClientCredentials(
 }
 
 app.post("/oauth/token", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   // RFC 6749 §4.1.3 mandates form encoding here. Parsed by us rather than by
   // the framework so a client sending a wrong Content-Type gets an OAuth error
@@ -772,6 +782,10 @@ async function handleCodeGrant(
   const record = found.data;
 
   if (record.alreadyConsumed) {
+    logger.warn("Token request rejected - authorization code replayed", {
+      clientId: client.id,
+      codeId: record.codeId,
+    });
     // RFC 6749 §10.5: a code presented twice means it leaked. Everything the
     // grant produced is now suspect, so the whole grant goes — the legitimate
     // client re-authorizes, the attacker's copy is worthless.
@@ -786,6 +800,7 @@ async function handleCodeGrant(
   // registered client that intercepted a code could redeem it as itself.
   if (record.clientId !== client.id) {
     logger.warn("Token request rejected - code issued to a different client", {
+      codeId: record.codeId,
       codeClientId: record.clientId,
       presentedClientId: client.id,
     });
@@ -798,7 +813,10 @@ async function handleCodeGrant(
   }
 
   if (!(await verifyPkce(verifier, record.codeChallenge))) {
-    logger.warn("Token request rejected - PKCE verification failed", { clientId: client.id });
+    logger.warn("Token request rejected - PKCE verification failed", {
+      clientId: client.id,
+      codeId: record.codeId,
+    });
     return oauthError("invalid_grant", "PKCE verification failed");
   }
 
@@ -820,6 +838,7 @@ async function handleCodeGrant(
     clientId: client.id,
     userId: record.userId,
     scope: record.scope,
+    codeId: record.codeId,
   });
   if (!tokens.success) return oauthError("server_error", "Could not issue tokens", 500);
 
@@ -867,7 +886,7 @@ async function handleRefreshGrant(
 // ── Revocation (RFC 7009) ───────────────────────────────────────────────────
 
 app.post("/oauth/revoke", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   const body = await readForm(c, logger);
   if ("response" in body) return body.response;

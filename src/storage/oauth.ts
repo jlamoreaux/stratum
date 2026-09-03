@@ -83,6 +83,18 @@ export const LAST_USED_DEBOUNCE_MS = 60 * 60 * 1000;
 /** Has this timestamp passed? A `null` expiry never has. An unparseable one
  * counts as EXPIRED — a credential whose lifetime cannot be established must
  * not be honoured indefinitely. */
+/**
+ * The first 12 hex digits of a code's SHA-256, for log correlation (#355).
+ *
+ * "Authorization code issued" and "OAuth tokens issued" both carry it, so a
+ * code that was minted and never redeemed is one log query away instead of a
+ * guess. Not a secret: redemption needs the plaintext code, and the full hash
+ * is never logged.
+ */
+function codeIdOf(codeHash: string): string {
+  return codeHash.slice(0, 12);
+}
+
 export function isExpired(expiresAt: string | null): boolean {
   if (expiresAt === null) return false;
   const at = Date.parse(expiresAt);
@@ -409,9 +421,11 @@ export async function issueAuthorizationCode(
   db: D1Database,
   logger: Logger,
   record: AuthCodeRecord,
-): Promise<Result<{ code: string; expiresAt: string }, AppError>> {
+): Promise<Result<{ code: string; expiresAt: string; codeId: string }, AppError>> {
   try {
     const code = randomSecret("stratum_mcpac");
+    const codeHash = await hashToken(code);
+    const codeId = codeIdOf(codeHash);
     const now = Date.now();
     const expiresAt = new Date(now + AUTH_CODE_TTL_MS).toISOString();
     await db
@@ -422,7 +436,7 @@ export async function issueAuthorizationCode(
          VALUES (?, ?, ?, ?, ?, ?, 'S256', ?, ?, ?)`,
       )
       .bind(
-        await hashToken(code),
+        codeHash,
         record.clientId,
         record.userId,
         record.redirectUri,
@@ -434,11 +448,12 @@ export async function issueAuthorizationCode(
       )
       .run();
     logger.info("Authorization code issued", {
+      codeId,
       clientId: record.clientId,
       userId: record.userId,
       scope: record.scope,
     });
-    return ok({ code, expiresAt });
+    return ok({ code, expiresAt, codeId });
   } catch (error) {
     const appError = toAppError(error, "issueAuthorizationCode", { clientId: record.clientId });
     logger.error("Failed to issue authorization code", appError, { clientId: record.clientId });
@@ -452,6 +467,9 @@ export type CodeRedemptionFailure = "not_found" | "expired" | "replayed" | "look
 
 export interface RedeemedCode extends AuthCodeRecord {
   codeChallengeMethod: string;
+  /** See `codeIdOf`. Carried so the token endpoint can log the same id the
+   * consent step logged. */
+  codeId: string;
 }
 
 /**
@@ -475,11 +493,12 @@ export async function readAuthorizationCode(
   logger: Logger,
   code: string,
 ): Promise<Result<RedeemedCode & { alreadyConsumed: boolean }, CodeRedemptionFailure>> {
+  const codeHash = await hashToken(code);
   let row: AuthCodeRow | null;
   try {
     row = await db
       .prepare("SELECT * FROM oauth_auth_codes WHERE code_hash = ?")
-      .bind(await hashToken(code))
+      .bind(codeHash)
       .first<AuthCodeRow>();
   } catch (error) {
     logger.warn("Authorization code lookup failed", {
@@ -503,6 +522,7 @@ export async function readAuthorizationCode(
     codeChallengeMethod: row.code_challenge_method,
     resource: row.resource,
     alreadyConsumed: row.consumed_at !== null,
+    codeId: codeIdOf(codeHash),
   });
 }
 
@@ -602,7 +622,7 @@ interface OAuthTokenRow {
 export async function issueTokens(
   db: D1Database,
   logger: Logger,
-  opts: { clientId: string; userId: string; scope: string },
+  opts: { clientId: string; userId: string; scope: string; codeId?: string },
 ): Promise<Result<IssuedTokens, AppError>> {
   try {
     const accessToken = randomSecret("stratum_mcp");
@@ -628,6 +648,7 @@ export async function issueTokens(
       )
       .run();
     logger.info("OAuth tokens issued", {
+      codeId: opts.codeId,
       clientId: opts.clientId,
       userId: opts.userId,
       scope: opts.scope,
@@ -1043,4 +1064,89 @@ export async function revokeGrantForUser(
 export async function deleteOAuthDataForUser(db: D1Database, userId: string): Promise<void> {
   await db.prepare("DELETE FROM oauth_tokens WHERE user_id = ?").bind(userId).run();
   await db.prepare("DELETE FROM oauth_auth_codes WHERE user_id = ?").bind(userId).run();
+}
+
+// ── Housekeeping ────────────────────────────────────────────────────────────
+
+/** How many rows one sweep pass examines. Codes live 60 seconds and the sweep
+ * runs every five minutes, so a healthy instance holds a handful; the cap only
+ * bounds a pathological backlog, and the next tick takes the rest. */
+const CODE_SWEEP_LIMIT = 500;
+
+/** D1 allows 100 bound parameters per statement; deletes are chunked under it. */
+const CODE_SWEEP_DELETE_CHUNK = 50;
+
+export interface AuthCodeSweepResult {
+  deleted: number;
+  unredeemed: number;
+  unredeemedByClient: Record<string, number>;
+}
+
+/**
+ * Delete expired authorization codes, and count the ones nobody redeemed.
+ *
+ * The deletion is housekeeping; nothing else ever removed these rows. The
+ * count is the signal: a code is minted only when a person clicks Allow, and a
+ * client that receives it redeems it within seconds. A code that expires
+ * unredeemed means consent succeeded and delivery failed — the browser refused
+ * the redirect, or the client never reached `/oauth/token` (a client that
+ * reached it and was refused is logged there). #355 was exactly this, and it
+ * was invisible because nothing counted it. Any non-zero count is logged at
+ * warn with the clients involved.
+ *
+ * Expiry is evaluated in JavaScript, per this module's rule. The query orders
+ * by `expires_at` only so the oldest rows come first, which is safe because
+ * every value in this table is ISO written by this module.
+ */
+export async function sweepExpiredAuthorizationCodes(
+  db: D1Database,
+  logger: Logger,
+  now: number = Date.now(),
+): Promise<Result<AuthCodeSweepResult, AppError>> {
+  try {
+    const { results } = await db
+      .prepare(
+        "SELECT code_hash, client_id, expires_at, consumed_at FROM oauth_auth_codes ORDER BY expires_at ASC LIMIT ?",
+      )
+      .bind(CODE_SWEEP_LIMIT)
+      .all<{
+        code_hash: string;
+        client_id: string;
+        expires_at: string;
+        consumed_at: string | null;
+      }>();
+
+    const expired = results.filter((row) => {
+      const at = Date.parse(row.expires_at);
+      return !Number.isFinite(at) || at <= now;
+    });
+    const unredeemedByClient: Record<string, number> = {};
+    for (const row of expired) {
+      if (row.consumed_at === null) {
+        unredeemedByClient[row.client_id] = (unredeemedByClient[row.client_id] ?? 0) + 1;
+      }
+    }
+    const unredeemed = Object.values(unredeemedByClient).reduce((sum, n) => sum + n, 0);
+
+    for (let i = 0; i < expired.length; i += CODE_SWEEP_DELETE_CHUNK) {
+      const chunk = expired.slice(i, i + CODE_SWEEP_DELETE_CHUNK);
+      const placeholders = chunk.map(() => "?").join(", ");
+      await db
+        .prepare(`DELETE FROM oauth_auth_codes WHERE code_hash IN (${placeholders})`)
+        .bind(...chunk.map((row) => row.code_hash))
+        .run();
+    }
+
+    if (unredeemed > 0) {
+      logger.warn("Authorization codes expired unredeemed", { unredeemed, unredeemedByClient });
+    }
+    if (expired.length > 0) {
+      logger.info("Swept expired authorization codes", { deleted: expired.length, unredeemed });
+    }
+    return ok({ deleted: expired.length, unredeemed, unredeemedByClient });
+  } catch (error) {
+    const appError = toAppError(error, "sweepExpiredAuthorizationCodes", {});
+    logger.error("Failed to sweep expired authorization codes", appError, {});
+    return err(appError);
+  }
 }

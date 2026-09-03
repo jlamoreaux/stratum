@@ -32,6 +32,7 @@ import {
   revokeGrantsForClientUser,
   revokeToken,
   rotateRefreshToken,
+  sweepExpiredAuthorizationCodes,
   touchOAuthTokenLastUsed,
   verifyClientSecret,
   verifyPkce,
@@ -763,5 +764,81 @@ describe("account deletion", () => {
       Number((raw.prepare("SELECT COUNT(*) AS n FROM oauth_auth_codes").get() as { n: number }).n),
     ).toBe(0);
     expect(() => raw.prepare("DELETE FROM users WHERE id = 'usr_1'").run()).not.toThrow();
+  });
+});
+
+describe("code correlation and sweep (#355)", () => {
+  async function mint(clientId: string) {
+    const issued = await issueAuthorizationCode(db, logger, {
+      clientId,
+      userId: "usr_1",
+      redirectUri: "http://127.0.0.1:9000/callback",
+      scope: "mcp:read",
+      codeChallenge: CHALLENGE,
+      resource: null,
+    });
+    if (!issued.success) throw new Error("issue failed");
+    return issued.data;
+  }
+
+  it("returns a code id that the redemption lookup reports back", async () => {
+    await seedUser();
+    const { client } = await seedClient();
+    const issued = await mint(client.id);
+    // Twelve hex digits of the hash: enough to join two log lines, useless for
+    // redeeming the code, which needs the plaintext.
+    expect(issued.codeId).toMatch(/^[0-9a-f]{12}$/);
+    const read = await readAuthorizationCode(db, logger, issued.code);
+    expect(read.success).toBe(true);
+    if (read.success) expect(read.data.codeId).toBe(issued.codeId);
+    expect(logger.info).toHaveBeenCalledWith(
+      "Authorization code issued",
+      expect.objectContaining({ codeId: issued.codeId }),
+    );
+  });
+
+  it("sweeps expired codes and counts the ones nobody redeemed", async () => {
+    await seedUser();
+    const { client } = await seedClient();
+    const unredeemed = await mint(client.id);
+    const redeemed = await mint(client.id);
+    const live = await mint(client.id);
+    await claimAuthorizationCode(db, logger, redeemed.code);
+    raw
+      .prepare("UPDATE oauth_auth_codes SET expires_at = ? WHERE code_hash IN (?, ?)")
+      .run(
+        new Date(Date.now() - 1000).toISOString(),
+        await hashToken(unredeemed.code),
+        await hashToken(redeemed.code),
+      );
+
+    const result = await sweepExpiredAuthorizationCodes(db, logger);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).toEqual({
+        deleted: 2,
+        unredeemed: 1,
+        unredeemedByClient: { [client.id]: 1 },
+      });
+    }
+    // The signal: consent happened, delivery did not.
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Authorization codes expired unredeemed",
+      expect.objectContaining({ unredeemed: 1 }),
+    );
+    // Only the live code remains, and it still redeems.
+    const remaining = raw.prepare("SELECT COUNT(*) AS n FROM oauth_auth_codes").get() as {
+      n: number;
+    };
+    expect(remaining.n).toBe(1);
+    expect((await readAuthorizationCode(db, logger, live.code)).success).toBe(true);
+  });
+
+  it("is a no-op on a table with nothing expired", async () => {
+    await seedUser();
+    const { client } = await seedClient();
+    await mint(client.id);
+    const result = await sweepExpiredAuthorizationCodes(db, logger);
+    expect(result.success && result.data.deleted).toBe(0);
   });
 });
