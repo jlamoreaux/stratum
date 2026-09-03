@@ -50,6 +50,17 @@ describe("parseCspReports", () => {
     expect(reports[0]?.statusCode).toBe(200);
   });
 
+  it("drops credentials from the authority as well as the query", () => {
+    const reports = parseCspReports({
+      "csp-report": {
+        "blocked-uri": "https://user:secret@evil.example/path?x=1#frag",
+        "source-file": "https://alice:pw@stratum.test/app.js",
+      },
+    });
+    expect(reports[0]?.blockedUri).toBe("https://evil.example/path");
+    expect(reports[0]?.sourceFile).toBe("https://stratum.test/app.js");
+  });
+
   it("reads the Reporting API array and ignores entries of other types", () => {
     const reports = parseCspReports([
       { type: "deprecation", body: { id: "whatever" } },

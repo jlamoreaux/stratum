@@ -21,6 +21,7 @@ export interface McpOutcome {
   meta: Record<string, unknown>;
 }
 
+/** A non-empty string, or nothing; the client's self-description is untyped. */
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
 }
@@ -38,18 +39,31 @@ function firstText(content: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Classify one exchange for logging. `reply` is what `handleMessage` returned:
+ * a response, or `null` for a notification.
+ */
 export function describeMcpOutcome(message: unknown, reply: JsonRpcResponse | null): McpOutcome {
   if (!isJsonRpcRequest(message)) {
     return { level: "warn", message: "MCP message rejected", meta: { reason: "not JSON-RPC" } };
   }
   const method = message.method;
 
+  // A notification gets no reply and, for the request-style methods below,
+  // runs nothing: `handleMessage` returns null for a `tools/call` with no id
+  // without invoking the tool. Classifying by method first would log a tool
+  // that never ran as a success, so notifications are settled before any
+  // method-specific branch.
+  if (reply === null) {
+    return { level: "debug", message: "MCP notification handled", meta: { method } };
+  }
+
   if (method === "initialize") {
     const params = (message.params ?? {}) as {
       protocolVersion?: unknown;
       clientInfo?: { name?: unknown; version?: unknown };
     };
-    const result = reply?.result as { protocolVersion?: unknown } | undefined;
+    const result = reply.result as { protocolVersion?: unknown } | undefined;
     return {
       level: "info",
       message: "MCP client initialized",
@@ -64,14 +78,14 @@ export function describeMcpOutcome(message: unknown, reply: JsonRpcResponse | nu
 
   if (method === "tools/call") {
     const tool = asString((message.params as { name?: unknown } | undefined)?.name);
-    if (reply?.error !== undefined) {
+    if (reply.error !== undefined) {
       return {
         level: "warn",
         message: "MCP tool call rejected",
         meta: { tool, code: reply.error.code, error: reply.error.message },
       };
     }
-    const result = reply?.result as { isError?: unknown; content?: unknown } | undefined;
+    const result = reply.result as { isError?: unknown; content?: unknown } | undefined;
     if (result?.isError === true) {
       return {
         level: "warn",
@@ -82,9 +96,6 @@ export function describeMcpOutcome(message: unknown, reply: JsonRpcResponse | nu
     return { level: "debug", message: "MCP tool call succeeded", meta: { tool } };
   }
 
-  if (reply === null) {
-    return { level: "debug", message: "MCP notification handled", meta: { method } };
-  }
   if (reply.error !== undefined) {
     return {
       level: "warn",

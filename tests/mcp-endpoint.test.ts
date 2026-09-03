@@ -560,6 +560,26 @@ describe("describeMcpOutcome (#355)", () => {
     expect(ok.level).toBe("debug");
   });
 
+  it("never reports a notification as a tool run or a handshake", () => {
+    // `handleMessage` returns null for a `tools/call` or `initialize` that
+    // arrives without an id, and runs nothing. The classifier must not turn
+    // that into "MCP tool call succeeded" or "MCP client initialized".
+    const tool = describeMcpOutcome(
+      { jsonrpc: "2.0", method: "tools/call", params: { name: "stratum_commit" } },
+      null,
+    );
+    expect(tool).toEqual({
+      level: "debug",
+      message: "MCP notification handled",
+      meta: { method: "tools/call" },
+    });
+    const handshake = describeMcpOutcome(
+      { jsonrpc: "2.0", method: "initialize", params: { clientInfo: { name: "Claude" } } },
+      null,
+    );
+    expect(handshake.message).toBe("MCP notification handled");
+  });
+
   it("keeps notifications and routine requests at debug, and malformed input at warn", () => {
     expect(
       describeMcpOutcome({ jsonrpc: "2.0", method: "notifications/initialized" }, null).level,

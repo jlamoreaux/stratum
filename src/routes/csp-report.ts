@@ -37,16 +37,21 @@ export interface CspViolation {
 }
 
 /**
- * Drop the query and fragment from a reported URL.
+ * Reduce a reported URL to scheme, host and path.
  *
- * A blocked redirect target can carry an authorization code (`…?code=…`).
- * Browsers already strip cross-origin URLs to their origin before reporting,
- * but this endpoint must not rely on that for what ends up in the log.
+ * A blocked redirect target can carry an authorization code (`…?code=…`), and
+ * a URL can carry credentials in its authority (`user:secret@host`). Browsers
+ * already strip cross-origin URLs to their origin before reporting, but this
+ * endpoint must not rely on that for what ends up in the log. A value that is
+ * not a URL (`inline`, `eval`, `data`) is kept as is, minus anything after a
+ * `?` or `#`.
  */
 function stripQuery(value: unknown): string | undefined {
   if (typeof value !== "string" || value === "") return undefined;
   try {
     const url = new URL(value);
+    url.username = "";
+    url.password = "";
     url.search = "";
     url.hash = "";
     return url.toString();
@@ -55,10 +60,12 @@ function stripQuery(value: unknown): string | undefined {
   }
 }
 
+/** A non-empty string, or nothing. Report fields are untyped on the wire. */
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
 }
 
+/** A finite number, or nothing. */
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
