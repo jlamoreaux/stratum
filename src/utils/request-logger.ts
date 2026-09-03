@@ -14,7 +14,9 @@ import type { Context } from "hono";
 import type { Env } from "../types";
 import { type Logger, type LoggerContext, createLogger } from "./logger";
 
-/** The context's request-scoped logger, optionally narrowed with more fields. */
+/** Use this instead of `createLogger` in a route so its lines share the middleware's
+ * request id and can be joined with the middleware's own warnings. `extra` narrows
+ * the logger with route-specific fields without losing that correlation. */
 export function requestLogger(c: Context<{ Bindings: Env }>, extra: LoggerContext = {}): Logger {
   const base = c.get("logger") ?? createLogger({ path: c.req.path, method: c.req.method });
   return Object.keys(extra).length === 0 ? base : base.child(extra);

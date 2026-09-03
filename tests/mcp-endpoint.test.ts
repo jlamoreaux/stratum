@@ -577,7 +577,11 @@ describe("describeMcpOutcome (#355)", () => {
       { jsonrpc: "2.0", method: "initialize", params: { clientInfo: { name: "Claude" } } },
       null,
     );
-    expect(handshake.message).toBe("MCP notification handled");
+    expect(handshake).toEqual({
+      level: "debug",
+      message: "MCP notification handled",
+      meta: { method: "initialize" },
+    });
   });
 
   it("keeps notifications and routine requests at debug, and malformed input at warn", () => {
