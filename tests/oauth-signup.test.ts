@@ -39,7 +39,7 @@ vi.mock("../src/beta/gate", () => ({
 }));
 
 import { admitAndDeliverCodes, betaGateEnabled, validateInviteCode } from "../src/beta/gate";
-import { createSession } from "../src/storage/sessions";
+import { createSession, getSession } from "../src/storage/sessions";
 import {
   createUser,
   getUserByEmail,
@@ -206,6 +206,7 @@ describe("OAuth signup: choosing a username", () => {
     vi.mocked(getUserByEmail).mockResolvedValue(notFound);
     vi.mocked(getUserByGitHubId).mockResolvedValue(notFound);
     vi.mocked(getUserByUsername).mockResolvedValue(notFound);
+    vi.mocked(getSession).mockResolvedValue(notFound);
     vi.mocked(linkGitHub).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(createSession).mockResolvedValue({
       success: true,
@@ -465,6 +466,25 @@ describe("OAuth signup: choosing a username", () => {
       expect(cookieLine(res, "stratum_pending_signup")).toContain("Max-Age=0");
     });
 
+    it("sends a signed-in visitor with nothing parked home instead", async () => {
+      const app = makeApp();
+      const env = makeEnv();
+      vi.mocked(getSession).mockResolvedValue({
+        success: true,
+        data: { id: "sess_1", userId: "usr_new", expiresAt: "2099-01-01T00:00:00.000Z" },
+      });
+
+      const res = await app.fetch(
+        new Request(`http://localhost${COMPLETE}`, {
+          headers: { Cookie: "stratum_session=sess_1" },
+        }),
+        env,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe("/");
+    });
+
     it("renders the form prefilled with the suggestion and the verified email", async () => {
       const app = makeApp();
       const env = makeEnv();
@@ -558,6 +578,49 @@ describe("OAuth signup: choosing a username", () => {
       const env = makeEnv();
 
       const res = await post(app, env, undefined, { username: "chosen" });
+
+      expect(res.headers.get("Location")).toBe("/auth/signup?error=signup_expired");
+      expect(createUser).not.toHaveBeenCalled();
+    });
+
+    it("treats a re-submission from a browser that is already signed in as done", async () => {
+      const app = makeApp();
+      const env = makeEnv();
+      vi.mocked(getSession).mockResolvedValue({
+        success: true,
+        data: { id: "sess_1", userId: "usr_new", expiresAt: "2099-01-01T00:00:00.000Z" },
+      });
+
+      const res = await post(
+        app,
+        env,
+        undefined,
+        { username: "chosen" },
+        { Origin: "http://localhost", Cookie: "stratum_session=sess_1" },
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe("/");
+      expect(cookieLine(res, "stratum_pending_signup")).toContain("Max-Age=0");
+      expect(createUser).not.toHaveBeenCalled();
+      expect(createSession).not.toHaveBeenCalled();
+    });
+
+    it("still reports an expired signup when the session cookie is stale", async () => {
+      const app = makeApp();
+      const env = makeEnv();
+      vi.mocked(getSession).mockResolvedValue({
+        success: true,
+        data: { id: "sess_1", userId: "usr_new", expiresAt: "2000-01-01T00:00:00.000Z" },
+      });
+
+      const res = await post(
+        app,
+        env,
+        undefined,
+        { username: "chosen" },
+        { Origin: "http://localhost", Cookie: "stratum_session=sess_1" },
+      );
 
       expect(res.headers.get("Location")).toBe("/auth/signup?error=signup_expired");
       expect(createUser).not.toHaveBeenCalled();

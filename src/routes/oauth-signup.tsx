@@ -21,7 +21,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { admitAndDeliverCodes, betaGateEnabled, validateInviteCode } from "../beta/gate";
 import { enforceSameOrigin } from "../middleware/csrf";
 import { recordAudit } from "../storage/audit";
-import { createSession } from "../storage/sessions";
+import { createSession, getSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername, linkGitHub } from "../storage/users";
 import type { Env } from "../types";
 import { getWaitUntil } from "../utils/execution-ctx";
@@ -140,10 +140,24 @@ function formError(c: Context<{ Bindings: Env }>, code: string, username: string
   return c.redirect(`${COMPLETE_SIGNUP_PATH}?${params.toString()}`);
 }
 
-/** Nothing to complete: the cookie or the record is gone. */
-function expired(c: Context<{ Bindings: Env }>): Response {
+/**
+ * Nothing to complete: the cookie or the record is gone. A browser that is
+ * already signed in most likely just finished this form (a double-click with
+ * JavaScript off, or a back-button re-POST spent the record moments ago), so
+ * it goes home rather than being told its signup expired.
+ */
+async function nothingPending(c: Context<{ Bindings: Env }>, logger: Logger): Promise<Response> {
   deleteCookie(c, PENDING_SIGNUP_COOKIE, { path: "/auth" });
+  if (await hasLiveSession(c, logger)) return c.redirect("/");
   return c.redirect("/auth/signup?error=signup_expired");
+}
+
+/** Whether the request carries a session cookie that still resolves and has not expired. */
+async function hasLiveSession(c: Context<{ Bindings: Env }>, logger: Logger): Promise<boolean> {
+  const sessionId = getCookie(c, "stratum_session");
+  if (!sessionId) return false;
+  const session = await getSession(c.env.DB, sessionId, logger);
+  return session.success && new Date(session.data.expiresAt) > new Date();
 }
 
 /**
@@ -187,8 +201,13 @@ const app = new Hono<{ Bindings: Env }>();
 
 // GET /auth/signup/complete — the username form for a parked OAuth identity
 app.get("/", async (c) => {
+  const logger = createLogger({
+    requestId: crypto.randomUUID(),
+    path: c.req.path,
+    method: c.req.method,
+  });
   const pending = await loadPendingSignup(c);
-  if (!pending) return expired(c);
+  if (!pending) return nothingPending(c, logger);
   const { record } = pending;
 
   const errorCode = c.req.query("error");
@@ -324,7 +343,7 @@ app.post("/", async (c) => {
   if (csrf) return csrf;
 
   const pending = await loadPendingSignup(c);
-  if (!pending) return expired(c);
+  if (!pending) return nothingPending(c, logger);
   const { token, record } = pending;
 
   const body = await c.req.parseBody();
