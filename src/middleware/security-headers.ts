@@ -32,15 +32,17 @@ export interface CspOptions {
    * Extra `form-action` sources beyond `'self'`, or `null` to omit the
    * directive entirely.
    *
-   * Exists for one page: the OAuth consent screen (`/oauth/authorize`). Its
-   * form POSTs to us, but the RESPONSE to that POST is a redirect to the
-   * client's registered callback, and Chromium and WebKit enforce the
-   * submitting page's `form-action` against that redirect target as well as
-   * against the form's own action (the CSP spec leaves this open —
-   * w3c/webappsec-csp#8 — and Firefox does not check redirects). Under the
-   * site-wide `'self'`, clicking Allow mints an authorization code that the
-   * browser then refuses to deliver, and the page just sits there. Every other
-   * page keeps the default.
+   * Exists for one page: the OAuth consent screen (`/oauth/authorize`), which
+   * passes `null`. Its form POSTs to us, but the RESPONSE to that POST is a
+   * redirect to the client's callback, and Chromium and WebKit enforce the
+   * submitting page's `form-action` against every hop of the redirect chain
+   * that follows, not only the form's own action (the CSP spec leaves this
+   * open — w3c/webappsec-csp#8 — and Firefox does not check redirects). Under
+   * the site-wide `'self'`, clicking Allow minted an authorization code the
+   * browser then refused to deliver, and the page just sat there. Listing the
+   * client's origin was not enough either: the client's callback redirects
+   * onward, and a hop to any origin not listed cancels the navigation the same
+   * way. Every other page keeps the default.
    */
   formAction?: string[] | null;
 }

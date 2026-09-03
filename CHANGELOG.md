@@ -206,8 +206,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an authorization code the browser then refused to deliver to the client, so
   the page sat there and the connector never connected. Firefox does not check
   redirects, which is why the flow appeared to work in one browser and not
-  another. The consent page now names the client's registered redirect origin
-  in its own `form-action`; every other response keeps `'self'`.
+  another. Naming the client's registered redirect origin turned out not to be
+  enough either: the browsers apply the directive to every hop of the redirect
+  chain, and Claude's callback redirects onward again, so the connection still
+  stalled on a consent page that appeared to reload. The consent page now
+  carries no `form-action` at all; it has no user-controlled markup and its
+  only form targets `/oauth/authorize`, so the directive protected nothing
+  there. Every other response keeps `'self'`.
+- **The consent screen's Allow button no longer looks disabled.** It used
+  near-black text on the deep-navy accent; it now uses the same colour pair as
+  every other primary button.
 - **The MCP `401` challenge names the scopes the endpoint needs**
   (`scope="mcp:read mcp:write"`, RFC 6750 §3). A client that takes its scope
   from the challenge asks for read and write up front rather than authorizing
