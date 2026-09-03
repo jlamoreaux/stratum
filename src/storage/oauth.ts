@@ -342,7 +342,7 @@ export async function registerClient(
     if (!isAllowedRedirectUri(uri)) {
       return err(
         new AppError(
-          `redirect_uri '${uri}' must be https, or http on a loopback IP literal, with no fragment or credentials`,
+          `redirect_uri '${uri}' must be https, or http on loopback (localhost, 127.0.0.1 or [::1]), with no fragment or credentials`,
           "INVALID_REDIRECT_URI",
           400,
         ),
