@@ -149,6 +149,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants as well as scoped tokens.
 
 ### Fixed
+- **The header fits a phone.** Signed in, the nav's five links were laid out in
+  one unwrappable row, so below about 460px the row ran past the viewport, the
+  page scrolled sideways, and the wordmark and "logout" were clipped off either
+  edge. Below 640px the links now collapse behind a "menu" button next to the
+  wordmark and open as a full-width list beneath it. The toggle is a checkbox
+  driven purely by CSS, so it works with scripts disabled and keeps its place in
+  the tab order. Wider screens, the signed-out header and the docs site's header
+  (which shares this stylesheet) are unchanged.
 - **Claude Code can connect to the MCP server.** `claude mcp add` registers
   `http://localhost:<port>/callback` as its OAuth redirect, and the
   authorization server refused the name outright — only the loopback IP

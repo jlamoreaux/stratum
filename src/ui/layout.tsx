@@ -29,6 +29,16 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, children 
           <a class="nav-brand" href="/">
             stratum
           </a>
+          {user && (
+            <>
+              {/* Phone-width menu toggle; see the .nav-menu-toggle rules in nav-css.ts. */}
+              <input type="checkbox" id="nav-menu" class="nav-menu-toggle" />
+              <label for="nav-menu" class="nav-menu-button">
+                <span class="nav-menu-open">menu</span>
+                <span class="nav-menu-close">close</span>
+              </label>
+            </>
+          )}
           <div class="nav-auth">
             {user ? (
               <>
