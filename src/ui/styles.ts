@@ -139,6 +139,8 @@ ${NAV_CSS}
 .table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--bg-card); vertical-align: middle; }
 .table tr:last-child td { border-bottom: none; }
 .table a { color: var(--accent-text); }
+/* Identifiers in a cell stay whole; the table scrolls sideways instead. */
+.table code { white-space: nowrap; }
 
 .badge {
   display: inline-block;
@@ -210,9 +212,10 @@ ${NAV_CSS}
 .file-item { padding: 0.3rem 0; border-bottom: 1px solid #161616; font-size: 0.85rem; color: var(--text-body); }
 .file-item:last-child { border-bottom: none; }
 
-.detail-list { display: grid; grid-template-columns: 140px 1fr; gap: 0.4rem 1rem; }
+/* The value column may hold an email at 320px: it must shrink and wrap, never overflow the card. */
+.detail-list { display: grid; grid-template-columns: minmax(6rem, 140px) minmax(0, 1fr); gap: 0.4rem 1rem; }
 .detail-list dt { color: var(--text-muted); font-size: 0.85rem; }
-.detail-list dd { color: var(--text-body); }
+.detail-list dd { color: var(--text-body); overflow-wrap: anywhere; }
 
 .action-row { display: flex; gap: 0.75rem; margin-top: 1rem; }
 
@@ -542,7 +545,7 @@ ${NAV_CSS}
 .webhook-delivery-type { font-family: 'JetBrains Mono', monospace; color: var(--text-body); }
 .webhook-delivery-meta { color: var(--text-muted); }
 .webhook-delivery-time { color: var(--text-muted); margin-left: auto; }
-.btn-small, .btn-sm { font-size: 0.75rem; padding: 0.25rem 0.6rem; }
+.btn-small, .btn-sm { font-size: 0.75rem; padding: 0.25rem 0.6rem; min-height: 2rem; }
 .btn-link { background: none; border-color: transparent; color: var(--accent-text); }
 
 /* Issues */
@@ -662,31 +665,86 @@ ${NAV_CSS}
 }
 .diff-cell:first-child { border-left: none; }
 
-/* Settings */
-.settings-help { font-size: 0.85rem; color: var(--text-muted); }
+/* Settings.
+   The global reset zeroes every margin, so the help copy, lists and forms
+   here put back the spacing that keeps one card's paragraphs apart. */
+.settings-help { font-size: 0.85rem; color: var(--text-muted); margin: 0 0 0.75rem; }
+.settings-help:last-child { margin-bottom: 0; }
+.settings-help-error { color: var(--error-text); }
+ul.settings-help { padding-left: 1.25rem; }
+.settings-help li { margin: 0.25rem 0; }
+.settings-help code { font-size: 0.8rem; background: var(--bg-raised); padding: 0.05em 0.3em; border-radius: 3px; color: var(--text-body); }
+.settings-details { margin: 0 0 0.75rem; font-size: 0.85rem; }
+.settings-details summary { cursor: pointer; color: var(--accent-text); padding: 0.25rem 0; }
+.settings-details[open] summary { margin-bottom: 0.5rem; }
+.settings-notice { color: var(--text-body); }
+.card-error { border-color: var(--danger-border); }
+.card-error .settings-notice { color: var(--error-text-soft); }
+.card-success { border-color: var(--success-border); }
 .settings-token-reveal { border: 1px solid #2d4f2d; background: #101a10; }
 .settings-token {
   display: block; padding: 0.6rem 0.75rem; background: var(--bg-panel);
   border: 1px solid var(--border-strong); border-radius: 4px; word-break: break-all;
   font-size: 0.85rem; color: #9ecbff;
 }
-.settings-agent-form { display: flex; flex-direction: column; gap: 0.75rem; max-width: 420px; margin-top: 1rem; }
-.settings-agent-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text-body); }
-.settings-agent-form input {
-  background: var(--bg-card); border: 1px solid var(--border-strong); color: #eee;
-  padding: 0.5rem; border-radius: 4px; font-family: inherit;
+
+/* Jump links under the Settings heading, styled like the project tabs. */
+.section-nav {
+  display: flex; gap: 0.25rem; margin-bottom: 1.25rem;
+  border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none;
 }
+.section-nav::-webkit-scrollbar { display: none; }
+.section-nav a {
+  padding: 0.45rem 0.85rem; color: var(--text-muted); font-size: 0.85rem;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap;
+}
+.section-nav a:hover { color: var(--text-body); text-decoration: none; border-bottom-color: var(--border-strong); }
+/* A card jumped to sits clear of the top edge and lights up briefly. */
+.card:target { border-color: var(--accent-border); scroll-margin-top: 1rem; }
+
+/* Forms: stacked fields, inputs and selects styled alike, controls tall enough to tap. */
+.settings-form, .settings-agent-form {
+  display: flex; flex-direction: column; gap: 0.75rem; max-width: 420px; margin: 1rem 0;
+}
+.settings-form:last-child, .settings-agent-form:last-child { margin-bottom: 0; }
+.settings-form + .settings-form { padding-top: 1rem; border-top: 1px solid var(--divider); }
+.settings-form label, .settings-agent-form label {
+  display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.85rem; color: var(--text-body);
+}
+.settings-form input, .settings-form select,
+.settings-agent-form input, .settings-agent-form select {
+  min-height: 2.5rem; padding: 0.5rem 0.65rem; background: var(--bg-card);
+  border: 1px solid var(--border-strong); border-radius: 4px;
+  color: var(--text-primary); font-family: inherit; font-size: 0.9rem;
+}
+.settings-form select, .settings-agent-form select {
+  appearance: none; -webkit-appearance: none; padding-right: 2rem; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%239aa4ad' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 0.75rem center;
+}
+.settings-form input:focus-visible, .settings-form select:focus-visible,
+.settings-agent-form input:focus-visible, .settings-agent-form select:focus-visible {
+  outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 3px rgba(42, 90, 174, 0.3);
+}
+.settings-form .settings-help { margin: -0.35rem 0 0; }
+.settings-form .btn, .settings-inline-form .btn { align-self: flex-start; min-height: 2.5rem; }
+.settings-inline-form { display: flex; align-items: center; gap: 0.75rem 1.25rem; flex-wrap: wrap; margin-top: 1rem; }
+.settings-inline-form .checkbox-label { min-height: 2.5rem; }
+.settings-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.settings-actions .btn { min-height: 2.5rem; }
+input[type="checkbox"] { width: 1.15rem; height: 1.15rem; accent-color: var(--accent-text); flex-shrink: 0; cursor: pointer; }
 
 /* Danger zone (project + account deletion) */
 .danger-zone { border-color: var(--danger-border); }
-.danger-zone h3 { color: var(--error-text); }
+.danger-zone h2, .danger-zone h3 { color: var(--error-text); }
 .danger-zone p { color: var(--text-body); }
 .danger-zone form { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
 .danger-zone input[type="text"] {
   background: var(--bg-page); border: 1px solid var(--border-strong); color: var(--text-primary);
   padding: 0.4rem 0.6rem; border-radius: 4px; font-family: inherit; font-size: 0.85rem;
-  min-width: 220px;
+  min-width: 220px; min-height: 2.5rem;
 }
+.danger-zone .btn { min-height: 2.5rem; }
 .danger-zone input[type="text"]:focus {
   outline: none; border-color: var(--danger-border);
   box-shadow: 0 0 0 3px var(--error-bg);
@@ -918,9 +976,10 @@ ${NAV_CSS}
 .token-reveal-row { display: flex; gap: 0.5rem; align-items: stretch; flex-wrap: wrap; }
 .token-reveal-row .settings-token { flex: 1; min-width: 240px; }
 
-/* Profile: invite codes. The share link is the long column, so it is the one
-   allowed to wrap; the code itself stays on one line to stay readable. */
-.invite-share-link { word-break: break-all; font-size: 0.8rem; color: var(--accent-text); }
+/* Settings: invite codes. The share link stays on one line — the table
+   scrolls sideways on a phone — because a link broken one character per line
+   was 300px tall and unreadable. */
+.invite-share-link { white-space: nowrap; font-size: 0.8rem; color: var(--accent-text); }
 
 /* New project form: CSS-only mode toggle (script only re-points the action) */
 .mode-toggle { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; flex-wrap: wrap; }

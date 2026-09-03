@@ -1,14 +1,23 @@
 import type { FC } from "hono/jsx";
 
+/** The header links a page can mark as the one the reader is on. */
+export type NavItem = "new" | "settings";
+
 interface LayoutProps {
   title: string;
-  user?: { id: string; email: string; username: string } | null | undefined;
+  user?:
+    | { id: string; email: string; username: string; displayName?: string | undefined }
+    | null
+    | undefined;
   /** Auto-reload the page every N seconds (status polling without client JS). */
   refreshSeconds?: number;
+  /** Which header link, if any, points at the current page. */
+  active?: NavItem;
   children?: unknown;
 }
 
-export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, children }) => {
+export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, children }) => {
+  const current = (item: NavItem) => (active === item ? "page" : undefined);
   return (
     <html lang="en">
       <head>
@@ -42,14 +51,14 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, children 
           <div class="nav-auth">
             {user ? (
               <>
-                <span class="nav-user">{user.username ?? user.email}</span>
-                <a href="/new" class="nav-auth-link">
+                {/* Identity, not navigation: who is signed in. The account page is "settings". */}
+                <span class="nav-user" title={`@${user.username}`}>
+                  {user.displayName ?? user.username ?? user.email}
+                </span>
+                <a href="/new" class="nav-auth-link" aria-current={current("new")}>
                   new project
                 </a>
-                <a href="/profile" class="nav-auth-link">
-                  profile
-                </a>
-                <a href="/settings" class="nav-auth-link">
+                <a href="/settings" class="nav-auth-link" aria-current={current("settings")}>
                   settings
                 </a>
                 <form method="post" action="/auth/logout" class="nav-logout-form">

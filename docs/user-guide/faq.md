@@ -224,10 +224,10 @@ usage can be counted per account.
 
 ## Where are my invite codes?
 
-Open **`/profile`** (the *profile* link in the header). If your account was
-issued invite codes, they are listed there with a share link for each one and
-whether it has been redeemed yet — codes you can still give away are marked
-*Available*.
+Open **Settings** (the *settings* link in the header) and look under
+*Account*. If your account was issued invite codes, they are listed there with
+a share link for each one and whether it has been redeemed yet — codes you can
+still give away are marked *Available*. (`/profile` still redirects there.)
 
 Codes are issued only on an instance running the optional closed-beta gate, and
 only to accounts that joined through it. If you signed up while signups were

@@ -40,13 +40,16 @@ import {
   getProjectByPath,
   getWorkspace,
   listProjects,
+  listProjectsByNamespace,
   listWorkspaces,
 } from "../storage/state";
 import { getProjectSourceUrl, getSyncStatus } from "../storage/sync";
 import {
   disableLegacyToken,
   getUser,
+  renameUser,
   rotateUserToken,
+  setUserDisplayName,
   setUserTelemetryOptOut,
 } from "../storage/users";
 import { listDeliveries, listWebhooks } from "../storage/webhooks";
@@ -63,7 +66,6 @@ import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { IssueDetailPage, IssuesPage, NewIssuePage } from "../ui/pages/issues";
 import { NewProjectPage } from "../ui/pages/new-project";
-import { ProfilePage } from "../ui/pages/profile";
 import { ProjectSettingsPage } from "../ui/pages/project-settings";
 import { RepoPage } from "../ui/pages/repo";
 import { type FreshCredential, type SettingsNotice, SettingsPage } from "../ui/pages/settings";
@@ -72,6 +74,7 @@ import { TagsPage } from "../ui/pages/tags";
 import { WebhooksPage } from "../ui/pages/webhooks";
 import { WorkspacesPage } from "../ui/pages/workspaces";
 import { canReadProject, canWriteProject, filterMemberProjects } from "../utils/authz";
+import { MAX_DISPLAY_NAME_LENGTH, normalizeDisplayName } from "../utils/display-name";
 import type { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { createLogger } from "../utils/logger";
@@ -224,6 +227,7 @@ type AccountUser = {
   id: string;
   email: string;
   username: string;
+  displayName?: string;
   createdAt: string;
   githubUsername?: string;
 };
@@ -242,13 +246,15 @@ async function getAccountUser(
   const result = await getUser(c.env.DB, userId, logger);
   if (!result.success) return null;
 
-  const { id, email, username, createdAt, githubUsername, telemetryOptOut } = result.data;
+  const { id, email, username, displayName, createdAt, githubUsername, telemetryOptOut } =
+    result.data;
   return {
     user: {
       id,
       email,
       username,
       createdAt,
+      ...(displayName !== undefined ? { displayName } : {}),
       ...(githubUsername !== undefined ? { githubUsername } : {}),
     },
     telemetryOptOut: telemetryOptOut === true,
@@ -333,6 +339,20 @@ async function loadOAuthGrants(
 }
 
 /** The settings page plus everything it lists, in one round of loads. */
+/**
+ * Whether the username may change: only while nothing is keyed under it. Fails
+ * closed — if the project listing cannot be read, the rename form is withheld
+ * rather than offered on a guess.
+ */
+async function ownsNoProjects(
+  kv: KVNamespace,
+  namespace: string,
+  logger: ReturnType<typeof createLogger>,
+): Promise<boolean> {
+  const projects = await listProjectsByNamespace(kv, namespace, logger);
+  return projects.success && projects.data.length === 0;
+}
+
 async function renderSettings(
   c: Context<{ Bindings: Env }>,
   user: AccountUser,
@@ -340,10 +360,17 @@ async function renderSettings(
   logger: ReturnType<typeof createLogger>,
   extras: { freshToken?: FreshCredential; notice?: SettingsNotice } = {},
 ) {
-  const [agents, tokens, grants] = await Promise.all([
+  const [agents, tokens, grants, canRenameUsername, invites] = await Promise.all([
     loadAgentSummaries(c.env.DB, user.id, logger),
     loadApiTokens(c.env.DB, user.id, logger),
     loadOAuthGrants(c.env.DB, user.id, logger),
+    ownsNoProjects(c.env.STATE, user.username, logger),
+    // Keyed off the service URL alone, not `betaGateEnabled`: codes minted while
+    // the gate was on stay redeemable after it is switched off, so gating the
+    // listing on the gate would hide real codes from the users holding them.
+    referralServiceConfigured(c.env)
+      ? fetchInviteCodes(c.env, user.id, logger)
+      : Promise.resolve(undefined),
   ]);
   // A notice about the action just taken outranks a listing's own failure —
   // the caller needs to know what their POST did first.
@@ -351,6 +378,11 @@ async function renderSettings(
   return (
     <SettingsPage
       user={user}
+      canRenameUsername={canRenameUsername}
+      {...(invites !== undefined ? { invites } : {})}
+      {...(c.env.REFERRAL_SERVICE_URL !== undefined
+        ? { shareBaseUrl: c.env.REFERRAL_SERVICE_URL }
+        : {})}
       agents={agents}
       apiTokens={tokens.tokens}
       oauthGrants={grants.grants}
@@ -377,6 +409,11 @@ async function renderSettings(
  */
 const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
   "token-revoked": { kind: "success", message: "That API token has been revoked." },
+  "display-name-saved": { kind: "success", message: "Display name saved." },
+  "username-changed": {
+    kind: "success",
+    message: "Username changed. Your new namespace applies to everything you create from now on.",
+  },
   "connection-revoked": {
     kind: "success",
     message: "That application has been disconnected. Its access stopped immediately.",
@@ -388,30 +425,10 @@ const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
   },
 };
 
-// GET /profile — Account identity and the caller's own invite codes
-app.get("/profile", async (c) => {
-  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const access = await requireAccountSession(c, logger);
-  if ("response" in access) return access.response;
-
-  // Keyed off the service URL alone, not `betaGateEnabled`: codes minted while
-  // the gate was on stay redeemable after it is switched off, so gating the
-  // listing on the gate would hide real codes from the users holding them.
-  const invites = referralServiceConfigured(c.env)
-    ? await fetchInviteCodes(c.env, access.user.id, logger)
-    : undefined;
-
-  return c.html(
-    <ProfilePage
-      user={access.user}
-      {...(invites !== undefined ? { invites } : {})}
-      {...(c.env.REFERRAL_SERVICE_URL !== undefined
-        ? { shareBaseUrl: c.env.REFERRAL_SERVICE_URL }
-        : {})}
-      nonce={c.get("cspNonce") ?? ""}
-    />,
-  );
-});
+// GET /profile — Folded into Settings (#profile-settings merge): the two pages
+// opened with the same Account card and each pointed at the other. Kept as a
+// redirect so old links and the docs' `/profile` keep working.
+app.get("/profile", (c) => c.redirect("/settings#account", 302));
 
 // GET /settings — Account, privacy, API token, and agent token management
 app.get("/settings", async (c) => {
@@ -429,6 +446,99 @@ app.get("/settings", async (c) => {
     ...(notice !== undefined ? { notice } : {}),
   });
   return c.html(page);
+});
+
+// POST /settings/account — Set or clear the display name
+app.post("/settings/account", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user, telemetryOptOut } = access;
+
+  const form = await c.req.parseBody();
+  const raw = typeof form.displayName === "string" ? form.displayName : "";
+  const displayName = normalizeDisplayName(raw);
+  if (displayName.length > MAX_DISPLAY_NAME_LENGTH) {
+    const page = await renderSettings(c, user, telemetryOptOut, logger, {
+      notice: {
+        kind: "error",
+        message: `A display name can be at most ${MAX_DISPLAY_NAME_LENGTH} characters.`,
+      },
+    });
+    return c.html(page, 400);
+  }
+
+  const saved = await setUserDisplayName(
+    c.env.DB,
+    user.id,
+    displayName === "" ? null : displayName,
+    logger,
+  );
+  if (!saved.success) {
+    logger.error("Failed to save display name", saved.error);
+    return c.html(issuePageError(500, user), 500);
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "user.display_name_changed",
+    actorType: "user",
+    actorId: user.id,
+  });
+  return c.redirect("/settings?notice=display-name-saved#account", 302);
+});
+
+// POST /settings/username — Change the username, only while nothing is keyed under it
+//
+// The username is the namespace in every project URL, clone URL, KV project
+// key and backing repository name, none of which is rewritten here. So the
+// rename is refused outright once the account owns a project, and the check
+// fails closed when the listing cannot be read.
+app.post("/settings/username", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user, telemetryOptOut } = access;
+
+  const form = await c.req.parseBody();
+  const requested = typeof form.username === "string" ? form.username.trim().toLowerCase() : "";
+  if (requested === user.username) return c.redirect("/settings#account", 302);
+
+  const refuse = async (message: string, status: 400 | 403 | 409) => {
+    const page = await renderSettings(c, user, telemetryOptOut, logger, {
+      notice: { kind: "error", message },
+    });
+    return c.html(page, status);
+  };
+
+  const projects = await listProjectsByNamespace(c.env.STATE, user.username, logger);
+  if (!projects.success) {
+    logger.error("Could not list projects before a rename", projects.error);
+    return c.html(issuePageError(500, user), 500);
+  }
+  if (projects.data.length > 0) {
+    logger.warn("Rename refused - account owns projects", { projects: projects.data.length });
+    return refuse(
+      "Your username cannot be changed while you own projects: every project URL is keyed under it.",
+      403,
+    );
+  }
+
+  const renamed = await renameUser(c.env.DB, user.id, requested, logger);
+  if (!renamed.success) {
+    if (renamed.error.statusCode === 400 || renamed.error.statusCode === 409) {
+      return refuse(renamed.error.message, renamed.error.statusCode);
+    }
+    logger.error("Failed to rename user", renamed.error);
+    return c.html(issuePageError(500, user), 500);
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "user.renamed",
+    actorType: "user",
+    actorId: user.id,
+    detail: { from: user.username, to: renamed.data },
+  });
+  return c.redirect("/settings?notice=username-changed#account", 302);
 });
 
 /** Same bounds as `POST /api/users/me/tokens`, applied to form fields. */

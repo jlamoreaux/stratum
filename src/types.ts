@@ -394,6 +394,8 @@ export interface User {
   id: string;
   email: string;
   username: string; // Username for namespace (@username)
+  /** Free-form label shown in place of the username; never an identifier. */
+  displayName?: string;
   githubId?: string;
   githubUsername?: string;
   tokenHash: string;

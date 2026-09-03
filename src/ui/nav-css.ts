@@ -66,6 +66,12 @@ export const NAV_CSS = `
   text-decoration: none;
 }
 
+/* The link to the page the reader is on: quiet, not clickable-blue. */
+.nav-auth-link[aria-current="page"] {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
 .nav-logout-form { display: inline; }
 button.nav-auth-link {
   background: none; border: none; cursor: pointer;
@@ -100,7 +106,7 @@ button.nav-auth-link {
     display: inline-block;
     color: var(--accent-text);
     font-size: 0.9rem;
-    padding: 0.25rem 0.6rem;
+    padding: 0.5rem 0.75rem;
     border: 1px solid var(--border-strong);
     border-radius: 4px;
     cursor: pointer;
@@ -127,10 +133,13 @@ button.nav-auth-link {
   .nav-menu-toggle:checked ~ .nav-auth { display: flex; }
   .nav-menu-toggle ~ .nav-auth .nav-user { padding: 0.5rem; }
   .nav-menu-toggle ~ .nav-auth .nav-logout-form { display: block; }
+  /* Full-width rows at least 44px tall, so a thumb hits one link and not two. */
   .nav-menu-toggle ~ .nav-auth .nav-auth-link {
-    display: block;
+    display: flex;
+    align-items: center;
     width: 100%;
-    padding: 0.6rem 0.5rem;
+    min-height: 2.75rem;
+    padding: 0.5rem;
     text-align: left;
   }
 }

@@ -1,4 +1,5 @@
 import type { FC } from "hono/jsx";
+import type { InviteCodesResult } from "../../beta/gate";
 import {
   type ApiTokenSummary,
   MAX_ACTIVE_TOKENS_PER_USER,
@@ -8,13 +9,26 @@ import {
 } from "../../storage/api-tokens";
 import type { OAuthGrantSummary } from "../../storage/oauth";
 import type { ApiTokenScope } from "../../types";
+import { MAX_DISPLAY_NAME_LENGTH } from "../../utils/display-name";
+import { formatDate } from "../format";
 import { Layout } from "../layout";
+import { InviteCodesCard } from "./invite-codes";
 
 interface AgentSummary {
   id: string;
   name: string;
   model?: string;
   createdAt: string;
+}
+
+/** The signed-in account as the settings page shows it. */
+export interface SettingsUser {
+  id: string;
+  email: string;
+  username: string;
+  displayName?: string | undefined;
+  createdAt: string;
+  githubUsername?: string | undefined;
 }
 
 /**
@@ -34,7 +48,16 @@ export interface SettingsNotice {
 }
 
 interface SettingsPageProps {
-  user: { id: string; email: string; username: string };
+  user: SettingsUser;
+  /**
+   * True while the account owns no projects — the only time the username can
+   * change, since it is the namespace every project is keyed under.
+   */
+  canRenameUsername: boolean;
+  /** Absent when no referral service is configured; the card is then not rendered. */
+  invites?: InviteCodesResult;
+  /** Origin for invite share links, e.g. https://referral.usestratum.dev. */
+  shareBaseUrl?: string;
   agents: AgentSummary[];
   apiTokens: ApiTokenSummary[];
   /** MCP clients the user has authorized over OAuth (#349). */
@@ -45,7 +68,7 @@ interface SettingsPageProps {
   oauthGrantsUnavailable: boolean;
   freshToken?: FreshCredential;
   notice?: SettingsNotice;
-  /** Per-request CSP nonce for the copy-button script (only rendered with a fresh token). */
+  /** Per-request CSP nonce for the copy-button scripts. */
   nonce?: string;
   /** True when the user has opted out of product analytics (#257). */
   telemetryOptOut: boolean;
@@ -56,12 +79,22 @@ const SCOPE_LABEL: Record<ApiTokenScope, string> = {
   read_write: "Read & write",
 };
 
-function formatDate(iso: string): string {
-  const parsed = new Date(iso);
-  // A timestamp we cannot parse is shown verbatim rather than as "Invalid Date":
-  // the raw value is at least evidence of what is stored.
-  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleDateString();
-}
+/** Same rule the signup forms apply, so the browser refuses what the server would. */
+const USERNAME_PATTERN = "^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){2,38}$";
+const USERNAME_RULES =
+  "3-39 characters, lowercase letters, numbers, and hyphens only. Cannot start or end with a hyphen.";
+
+const DOCS = "https://docs.usestratum.dev";
+
+/** The page's sections, in order, for the jump links under the heading. */
+const SECTIONS: ReadonlyArray<readonly [id: string, label: string]> = [
+  ["account", "Account"],
+  ["privacy", "Privacy"],
+  ["tokens", "API tokens"],
+  ["connections", "Connected apps"],
+  ["agents", "Agents"],
+  ["danger", "Danger zone"],
+];
 
 /** Revoked beats expired: an explicitly revoked token stays revoked in the
  * listing even once its expiry has also passed. */
@@ -158,8 +191,96 @@ const ApiTokenRow: FC<{ token: ApiTokenSummary; now: number }> = ({ token, now }
   );
 };
 
+/**
+ * Who the account is, and the two things about it that can change.
+ *
+ * The display name is free-form and cosmetic. The username is the namespace
+ * every project URL, clone URL and backing repository is keyed on, so it can
+ * be edited only while the account owns nothing that would have to be
+ * rewritten — after that the row is read-only and says why.
+ */
+const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
+  user,
+  canRenameUsername,
+}) => (
+  <div class="card" id="account">
+    <h2>Account</h2>
+    <dl class="detail-list">
+      <dt>Username</dt>
+      <dd>@{user.username}</dd>
+      <dt>Email</dt>
+      <dd>{user.email}</dd>
+      <dt>Member since</dt>
+      <dd>{formatDate(user.createdAt)}</dd>
+      {user.githubUsername !== undefined && (
+        <>
+          <dt>GitHub</dt>
+          <dd>
+            <a href={`https://github.com/${user.githubUsername}`}>@{user.githubUsername}</a>
+          </dd>
+        </>
+      )}
+    </dl>
+
+    <form method="post" action="/settings/account" class="settings-form">
+      <label>
+        Display name
+        <input
+          type="text"
+          name="displayName"
+          value={user.displayName ?? ""}
+          maxlength={MAX_DISPLAY_NAME_LENGTH}
+          placeholder={user.username}
+          autocomplete="name"
+        />
+      </label>
+      <p class="settings-help">
+        Shown in the header instead of your username. Leave it blank to show the username.
+      </p>
+      <button type="submit" class="btn btn-primary">
+        Save display name
+      </button>
+    </form>
+
+    {canRenameUsername ? (
+      <form method="post" action="/settings/username" class="settings-form">
+        <label>
+          Username
+          <input
+            type="text"
+            name="username"
+            value={user.username}
+            required
+            minlength={3}
+            maxlength={39}
+            pattern={USERNAME_PATTERN}
+            title={USERNAME_RULES}
+            autocomplete="username"
+            spellcheck={false}
+          />
+        </label>
+        <p class="settings-help">
+          Your namespace: <code>@{user.username}/…</code> in every project and clone URL. It can be
+          changed only until you create your first project.
+        </p>
+        <button type="submit" class="btn">
+          Change username
+        </button>
+      </form>
+    ) : (
+      <p class="settings-help">
+        Your username is the namespace in every project and clone URL, so it cannot be changed while
+        you own projects.
+      </p>
+    )}
+  </div>
+);
+
 export const SettingsPage: FC<SettingsPageProps> = ({
   user,
+  canRenameUsername,
+  invites,
+  shareBaseUrl,
   agents,
   apiTokens,
   oauthGrants,
@@ -177,31 +298,33 @@ export const SettingsPage: FC<SettingsPageProps> = ({
     (token) => token.revokedAt === undefined && !isExpired(token.expiresAt ?? null),
   ).length;
   return (
-    <Layout title="Settings" user={user}>
+    <Layout title="Settings" user={user} active="settings">
       <div class="page-header">
         <h1>Settings</h1>
       </div>
+      <nav class="section-nav" aria-label="Settings sections">
+        {SECTIONS.map(([id, label]) => (
+          <a key={id} href={`#${id}`}>
+            {label}
+          </a>
+        ))}
+      </nav>
 
       {notice && (
-        <div class="card" style={notice.kind === "error" ? { borderColor: "#f87171" } : undefined}>
-          <p
-            class="settings-help"
-            style={notice.kind === "error" ? { color: "#f87171" } : undefined}
-          >
-            {notice.message}
-          </p>
+        <div class={`card ${notice.kind === "error" ? "card-error" : "card-success"}`}>
+          <p class="settings-help settings-notice">{notice.message}</p>
         </div>
       )}
 
       {freshToken && (
         <div class="card settings-token-reveal">
-          <h3 style={{ marginTop: 0 }}>
+          <h2>
             {freshToken.kind === "api-key"
               ? "Your new API key"
               : freshToken.kind === "agent"
                 ? `Token for agent ${freshToken.agentName ?? ""}`
                 : `Token “${freshToken.tokenName}”`}
-          </h3>
+          </h2>
           <p class="settings-help">
             Copy it now — it is shown only once.{" "}
             {freshToken.kind === "api-key" ? "Your previous key no longer works." : ""}
@@ -220,42 +343,38 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         </div>
       )}
 
-      <div class="card">
-        <h3 style={{ marginTop: 0 }}>Account</h3>
-        <dl class="detail-list">
-          <dt>Username</dt>
-          <dd>@{user.username}</dd>
-          <dt>Email</dt>
-          <dd>{user.email}</dd>
-        </dl>
-        <p class="settings-help">
-          Your <a href="/profile">profile</a> has your account details and any invite codes you
-          hold.
-        </p>
-      </div>
+      <AccountCard user={user} canRenameUsername={canRenameUsername} />
 
-      <div class="card">
-        <h3 style={{ marginTop: 0 }}>Privacy</h3>
+      {invites !== undefined && (
+        <InviteCodesCard
+          invites={invites}
+          {...(shareBaseUrl !== undefined ? { shareBaseUrl } : {})}
+          {...(nonce !== undefined ? { nonce } : {})}
+        />
+      )}
+
+      <div class="card" id="privacy">
+        <h2>Privacy</h2>
         <p class="settings-help">
-          Stratum can send anonymous usage analytics. Two kinds of event are sent, and only these:
+          Stratum can send anonymous usage analytics: one event per request and one per repository
+          activity, never a URL, name, path, diff or payload. Turning this off stops future events
+          for your account and your agent tokens; it does not delete events already sent.
         </p>
-        <ul class="settings-help">
-          <li>
-            One <code>api_request</code> per request, carrying the matched route pattern (e.g.{" "}
-            <code>/:namespace/:slug/files</code>), the method, the status, and the latency.
-          </li>
-          <li>
-            One event per repository activity (a change opening, a merge), carrying the event type
-            and an opaque project id.
-          </li>
-        </ul>
-        <p class="settings-help">
-          Concrete URLs, namespaces, repository names, file paths, diffs, and request payloads are
-          never sent. Turning this off stops future events for your account and for any agent token
-          you own; it does not delete events already sent.
-        </p>
-        <form method="post" action="/settings/telemetry">
-          <label>
+        <details class="settings-details">
+          <summary>Exactly what is sent</summary>
+          <ul class="settings-help">
+            <li>
+              One <code>api_request</code> per request, carrying the matched route pattern (e.g.{" "}
+              <code>/:namespace/:slug/files</code>), the method, the status, and the latency.
+            </li>
+            <li>
+              One event per repository activity (a change opening, a merge), carrying the event type
+              and an opaque project id.
+            </li>
+          </ul>
+        </details>
+        <form method="post" action="/settings/telemetry" class="settings-inline-form">
+          <label class="checkbox-label">
             {/*
               The missing `value` is load-bearing: browsers submit a valueless
               checked box as "on", and POST /settings/telemetry accepts only
@@ -273,41 +392,40 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         </form>
       </div>
 
-      <div class="card">
-        <h3 style={{ marginTop: 0 }}>API tokens</h3>
+      <div class="card" id="tokens">
+        <h2>API tokens</h2>
         <p class="settings-help">
-          Named tokens for the API, the CLI, and git over HTTPS, sent as{" "}
-          <code>Authorization: Bearer stratum_user_…</code>. A read-only token can <code>GET</code>{" "}
-          and <code>git clone</code>, and is refused on every write — so a leaked CI credential
-          cannot push, merge, or delete. Each token can be revoked on its own without disturbing the
-          others. Managing tokens requires a signed-in session; a token can never mint or revoke
-          another.
+          Named credentials for the API, the CLI, and git over HTTPS. A read-only token can read and
+          clone but never write, and each token is revoked on its own.{" "}
+          <a href={`${DOCS}/api/authentication/`}>How tokens work</a>.
         </p>
         {apiTokens.length === 0 ? (
           <p class="settings-help">
             No API tokens yet. Create one below — you will see its value only once.
           </p>
         ) : (
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Token</th>
-                <th>Scope</th>
-                <th>Expires</th>
-                <th>Last used</th>
-                <th>Status</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {apiTokens.map((token) => (
-                <ApiTokenRow key={token.id} token={token} now={now} />
-              ))}
-            </tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Token</th>
+                  <th>Scope</th>
+                  <th>Expires</th>
+                  <th>Last used</th>
+                  <th>Status</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {apiTokens.map((token) => (
+                  <ApiTokenRow key={token.id} token={token} now={now} />
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
-        <form method="post" action="/settings/tokens" class="settings-agent-form">
+        <form method="post" action="/settings/tokens" class="settings-form">
           <label>
             Token name
             <input type="text" name="name" required maxlength={100} placeholder="buildkite" />
@@ -343,13 +461,12 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         </p>
       </div>
 
-      <div class="card">
-        <h3 style={{ marginTop: 0 }}>Connected applications</h3>
+      <div class="card" id="connections">
+        <h2>Connected applications</h2>
         <p class="settings-help">
           Editors and agents you have authorized to reach Stratum over MCP at <code>/mcp</code>.
-          Each one acts as you, within the access you granted it. Disconnecting takes effect
-          immediately — the application&rsquo;s access token and its ability to refresh both stop
-          working at once.
+          Each one acts as you, within the access you granted it, and disconnecting takes effect
+          immediately.
         </p>
         {oauthGrantsUnavailable ? (
           <p class="settings-help">
@@ -362,23 +479,25 @@ export const SettingsPage: FC<SettingsPageProps> = ({
             this instance and it will ask for access.
           </p>
         ) : (
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Application</th>
-                <th>Client ID</th>
-                <th>Access</th>
-                <th>Connected</th>
-                <th>Last used</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {oauthGrants.map((grant) => (
-                <OAuthGrantRow key={grant.id} grant={grant} />
-              ))}
-            </tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Application</th>
+                  <th>Client ID</th>
+                  <th>Access</th>
+                  <th>Connected</th>
+                  <th>Last used</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {oauthGrants.map((grant) => (
+                  <OAuthGrantRow key={grant.id} grant={grant} />
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
         <p class="settings-help">
           An application chooses its own display name when it registers, and nobody vets it. Treat a
@@ -386,32 +505,29 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         </p>
       </div>
 
-      <div class="card">
-        <h3 style={{ marginTop: 0 }}>Legacy API key</h3>
+      <div class="card" id="legacy-key">
+        <h2>Legacy API key</h2>
         <p class="settings-help">
-          The single unnamed key every account was given before API tokens existed. It never
-          expires, carries full read &amp; write access, and cannot be told apart from your other
-          credentials in a log. Rotating replaces it; disabling makes it unusable for good. Your
-          named API tokens above are unaffected either way.
+          The unnamed key every account had before API tokens existed: it never expires and has full
+          read &amp; write access. Rotating replaces it; disabling makes it unusable for good. Your
+          named tokens are unaffected either way.
         </p>
-        <form method="post" action="/settings/rotate-token">
-          <button type="submit" class="btn btn-danger">
-            Rotate API key
-          </button>
-        </form>
-        <form
-          method="post"
-          action="/settings/legacy-token/disable"
-          style={{ marginTop: "0.75rem" }}
-        >
-          <button type="submit" class="btn btn-danger">
-            Disable legacy API key
-          </button>
-        </form>
+        <div class="settings-actions">
+          <form method="post" action="/settings/rotate-token">
+            <button type="submit" class="btn">
+              Rotate API key
+            </button>
+          </form>
+          <form method="post" action="/settings/legacy-token/disable">
+            <button type="submit" class="btn">
+              Disable legacy API key
+            </button>
+          </form>
+        </div>
       </div>
 
-      <div class="card">
-        <h3 style={{ marginTop: 0 }}>Agents</h3>
+      <div class="card" id="agents">
+        <h2>Agents</h2>
         <p class="settings-help">
           Agent tokens let automated agents fork workspaces, commit, and open changes under your
           account. Reviews remain human-only.
@@ -419,34 +535,36 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         {agents.length === 0 ? (
           <p class="settings-help">No agents yet.</p>
         ) : (
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Model</th>
-                <th>Created</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {agents.map((agent) => (
-                <tr key={agent.id}>
-                  <td>{agent.name}</td>
-                  <td>{agent.model ?? "—"}</td>
-                  <td>{new Date(agent.createdAt).toLocaleDateString()}</td>
-                  <td>
-                    <form method="post" action={`/settings/agents/${agent.id}/delete`}>
-                      <button type="submit" class="btn btn-small btn-danger">
-                        Revoke
-                      </button>
-                    </form>
-                  </td>
+          <div class="table-scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Model</th>
+                  <th>Created</th>
+                  <th />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {agents.map((agent) => (
+                  <tr key={agent.id}>
+                    <td>{agent.name}</td>
+                    <td>{agent.model ?? "—"}</td>
+                    <td>{formatDate(agent.createdAt)}</td>
+                    <td>
+                      <form method="post" action={`/settings/agents/${agent.id}/delete`}>
+                        <button type="submit" class="btn btn-small btn-danger">
+                          Revoke
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
-        <form method="post" action="/settings/agents" class="settings-agent-form">
+        <form method="post" action="/settings/agents" class="settings-form">
           <label>
             Agent name
             <input type="text" name="name" required maxlength={100} />
@@ -461,8 +579,8 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         </form>
       </div>
 
-      <div class="card danger-zone">
-        <h3 style={{ marginTop: 0 }}>Danger Zone</h3>
+      <div class="card danger-zone" id="danger">
+        <h2>Danger zone</h2>
         <p class="settings-help">
           Permanently delete your account. All your projects and personal data are erased and your
           tokens stop working immediately. Contributions you left in other people's projects are

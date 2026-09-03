@@ -1,3 +1,7 @@
+import { Hono } from "hono";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApiTokenSummary } from "../src/storage/api-tokens";
+import type { Env } from "../src/types";
 /**
  * Issue #254: the scoped-token surfaces on the server-rendered settings page.
  *
@@ -7,10 +11,7 @@
  * client JS, and a caller holding an API token rather than a browser session
  * must not reach any of it.
  */
-import { Hono } from "hono";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApiTokenSummary } from "../src/storage/api-tokens";
-import type { Env } from "../src/types";
+import { formatDate } from "../src/ui/format";
 
 vi.mock("../src/storage/audit", () => ({ recordAudit: vi.fn(async () => ({ success: true })) }));
 // Spread the real module and override only what touches D1. Listing the
@@ -144,8 +145,8 @@ describe("GET /settings — the token listing", () => {
     expect(html).toContain("Read-only");
     expect(html).toContain("Never used"); // the revoked token was never used
     expect(html).toContain("Revoked");
-    expect(html).toContain(new Date(ACTIVE_TOKEN.lastUsedAt ?? "").toLocaleDateString());
-    expect(html).toContain(new Date(ACTIVE_TOKEN.expiresAt ?? "").toLocaleDateString());
+    expect(html).toContain(formatDate(ACTIVE_TOKEN.lastUsedAt ?? ""));
+    expect(html).toContain(formatDate(ACTIVE_TOKEN.expiresAt ?? ""));
     // Read & write, rendered for the revoked row.
     expect(html).toContain("Read &amp; write");
   });

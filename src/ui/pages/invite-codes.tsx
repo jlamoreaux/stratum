@@ -1,35 +1,6 @@
 import type { FC } from "hono/jsx";
 import type { InviteCodeStatus, InviteCodesResult } from "../../beta/gate";
-import { Layout } from "../layout";
-
-interface ProfileUser {
-  id: string;
-  email: string;
-  username: string;
-  createdAt: string;
-  githubUsername?: string;
-}
-
-interface ProfilePageProps {
-  user: ProfileUser;
-  /**
-   * Absent when no referral service is configured (every self-hosted instance,
-   * and any deployment that never ran the closed beta) — the invite section is
-   * then not rendered at all rather than rendered empty.
-   */
-  invites?: InviteCodesResult;
-  /** Origin for share links, e.g. https://referral.usestratum.dev. */
-  shareBaseUrl?: string;
-  /** Per-request CSP nonce for the copy-button script. */
-  nonce?: string;
-}
-
-function formatDate(iso: string): string {
-  const parsed = new Date(iso);
-  // Show the raw value rather than "Invalid Date": it is at least evidence of
-  // what is stored. Same rule as the settings page.
-  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleDateString();
-}
+import { formatDate } from "../format";
 
 function shareLink(base: string | undefined, code: string): string | null {
   if (!base) return null;
@@ -128,18 +99,25 @@ const InviteCodeRow: FC<{ entry: InviteCodeStatus; index: number; shareBaseUrl?:
   );
 };
 
-const InviteCodesCard: FC<{
+/**
+ * The caller's own closed-beta invite codes, as a settings card. Rendered only
+ * when a referral service is configured; the three states (codes, none,
+ * service unreachable) are deliberately distinct, since "you have no codes"
+ * must never be shown over an outage.
+ */
+export const InviteCodesCard: FC<{
   invites: InviteCodesResult;
   shareBaseUrl?: string;
+  /** Per-request CSP nonce for the copy-button script. */
   nonce?: string;
 }> = ({ invites, shareBaseUrl, nonce }) => {
   const codes = invites.status === "ok" ? invites.codes : [];
   const available = codes.filter((entry) => entry.redeemedAt === null).length;
   return (
-    <div class="card">
-      <h3 style={{ marginTop: 0 }}>Invite codes</h3>
+    <div class="card" id="invites">
+      <h2>Invite codes</h2>
       {invites.status === "unavailable" ? (
-        <p class="settings-help" style={{ color: "#f87171" }}>
+        <p class="settings-help settings-help-error">
           Your invite codes could not be loaded right now. This is a temporary problem reaching the
           invite service — your codes have not been lost. Try again shortly.
         </p>
@@ -185,42 +163,3 @@ const InviteCodesCard: FC<{
     </div>
   );
 };
-
-export const ProfilePage: FC<ProfilePageProps> = ({ user, invites, shareBaseUrl, nonce }) => (
-  <Layout title="Profile" user={user}>
-    <div class="page-header">
-      <h1>Profile</h1>
-    </div>
-
-    <div class="card">
-      <h3 style={{ marginTop: 0 }}>Account</h3>
-      <dl class="detail-list">
-        <dt>Username</dt>
-        <dd>@{user.username}</dd>
-        <dt>Email</dt>
-        <dd>{user.email}</dd>
-        <dt>Member since</dt>
-        <dd>{formatDate(user.createdAt)}</dd>
-        {user.githubUsername !== undefined && (
-          <>
-            <dt>GitHub</dt>
-            <dd>
-              <a href={`https://github.com/${user.githubUsername}`}>@{user.githubUsername}</a>
-            </dd>
-          </>
-        )}
-      </dl>
-      <p class="settings-help">
-        Credentials, API tokens, and privacy live in <a href="/settings">settings</a>.
-      </p>
-    </div>
-
-    {invites !== undefined && (
-      <InviteCodesCard
-        invites={invites}
-        {...(shareBaseUrl !== undefined ? { shareBaseUrl } : {})}
-        {...(nonce !== undefined ? { nonce } : {})}
-      />
-    )}
-  </Layout>
-);

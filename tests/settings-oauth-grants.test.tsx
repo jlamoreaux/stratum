@@ -15,12 +15,18 @@ import { describe, expect, it } from "vitest";
 import type { OAuthGrantSummary } from "../src/storage/oauth";
 import { SettingsPage } from "../src/ui/pages/settings";
 
-const user = { id: "usr_1", email: "alice@example.com", username: "alice" };
+const user = {
+  id: "usr_1",
+  email: "alice@example.com",
+  username: "alice",
+  createdAt: "2026-01-01T00:00:00.000Z",
+};
 
 function render(opts: { grants: OAuthGrantSummary[]; unavailable: boolean }): string {
   return renderToString(
     SettingsPage({
       user,
+      canRenameUsername: false,
       agents: [],
       apiTokens: [],
       oauthGrants: opts.grants,
