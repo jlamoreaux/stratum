@@ -257,7 +257,9 @@ function parseUrl(value: string): URL | null {
 /** The WHATWG parser keeps the brackets on an IPv6 hostname, hence both forms. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
-/** Is this WHATWG-parsed hostname one of the loopback forms `isAllowedRedirectUri` admits over plaintext http? */
+/** One predicate shared by registration and authorization, so the two can never disagree about
+ * what counts as loopback: it is the only thing that lets plaintext http through at all, and
+ * the only thing that unlocks the port-only match exception. */
 function isLoopbackHost(hostname: string): boolean {
   return LOOPBACK_HOSTS.has(hostname);
 }
