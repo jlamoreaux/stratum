@@ -26,6 +26,7 @@ import {
   narrowOAuthScope,
   parseScope,
   readAuthorizationCode,
+  redirectUriMatches,
   registerClient,
   resolveOAuthAccessToken,
   revokeGrantForUser,
@@ -117,18 +118,58 @@ describe("scope handling", () => {
   });
 });
 
+describe("redirect URI matching", () => {
+  const registered = ["http://localhost:9876/callback", "https://editor.example/cb"];
+
+  it("matches a registered URI exactly", () => {
+    expect(redirectUriMatches(registered, "http://localhost:9876/callback")).toBe(true);
+    expect(redirectUriMatches(registered, "https://editor.example/cb")).toBe(true);
+  });
+
+  it("lets a loopback redirect use any port, as RFC 8252 §7.3 requires", () => {
+    expect(redirectUriMatches(registered, "http://localhost:41234/callback")).toBe(true);
+    expect(redirectUriMatches(registered, "http://localhost/callback")).toBe(true);
+    expect(redirectUriMatches(["http://127.0.0.1:1/cb"], "http://127.0.0.1:65000/cb")).toBe(true);
+    expect(redirectUriMatches(["http://[::1]:1/cb"], "http://[::1]:2/cb")).toBe(true);
+  });
+
+  it("relaxes only the port: host, path, query and scheme still have to be identical", () => {
+    // `localhost` and `127.0.0.1` are both loopback, but they are not each other.
+    expect(redirectUriMatches(registered, "http://127.0.0.1:9876/callback")).toBe(false);
+    expect(redirectUriMatches(registered, "http://localhost:9876/callback/")).toBe(false);
+    expect(redirectUriMatches(registered, "http://localhost:9876/other")).toBe(false);
+    expect(redirectUriMatches(registered, "http://localhost:9876/callback?x=1")).toBe(false);
+    expect(redirectUriMatches(["http://localhost:1/cb?x=1"], "http://localhost:2/cb?x=2")).toBe(
+      false,
+    );
+    expect(redirectUriMatches(registered, "https://localhost:9876/callback")).toBe(false);
+    // An https registration never gets the port exception.
+    expect(redirectUriMatches(registered, "https://editor.example:8443/cb")).toBe(false);
+  });
+
+  it("never admits a URI the registration policy would have refused", () => {
+    expect(redirectUriMatches(registered, "http://localhost:1/callback#frag")).toBe(false);
+    expect(redirectUriMatches(registered, "http://user:pw@localhost:1/callback")).toBe(false);
+    expect(redirectUriMatches(registered, "not a url")).toBe(false);
+    expect(redirectUriMatches([], "http://localhost:1/callback")).toBe(false);
+  });
+});
+
 describe("redirect URI policy", () => {
-  it("accepts https and loopback IP literals", () => {
+  it("accepts https and plaintext http on loopback, by IP literal or by name", () => {
     expect(isAllowedRedirectUri("https://editor.example/cb")).toBe(true);
     expect(isAllowedRedirectUri("http://127.0.0.1:1234/cb")).toBe(true);
     expect(isAllowedRedirectUri("http://[::1]:1234/cb")).toBe(true);
+    // Claude Code registers exactly this shape and cannot be told otherwise.
+    expect(isAllowedRedirectUri("http://localhost:1234/cb")).toBe(true);
+    expect(isAllowedRedirectUri("http://localhost/cb")).toBe(true);
   });
 
-  it("rejects plaintext http on a resolvable host, including localhost", () => {
-    // RFC 8252 §8.3: `localhost` goes through DNS, so it is not reliably
-    // loopback. Only the IP literals are.
-    expect(isAllowedRedirectUri("http://localhost:1234/cb")).toBe(false);
+  it("rejects plaintext http on any resolvable host that is not loopback", () => {
     expect(isAllowedRedirectUri("http://editor.example/cb")).toBe(false);
+    expect(isAllowedRedirectUri("http://localhost.example/cb")).toBe(false);
+    expect(isAllowedRedirectUri("http://127.0.0.2/cb")).toBe(false);
+    expect(isAllowedRedirectUri("http://10.0.0.1:1234/cb")).toBe(false);
   });
 
   it("rejects fragments, embedded credentials, and non-http schemes", () => {

@@ -106,7 +106,7 @@ Details worth knowing:
 | Authorization code lifetime | 60 seconds, single use. A replayed code revokes every token issued from it — but a redemption that merely *fails validation* (wrong client, wrong verifier, wrong redirect URI) leaves the code untouched, so observing one is not enough to disrupt the real client. |
 | Access token lifetime | 1 hour |
 | Refresh token lifetime | 30 days, **rotated** on every use |
-| Redirect URIs | Matched exactly against the registered list. `https`, or `http` on a loopback IP literal for native apps. |
+| Redirect URIs | `https`, or plaintext `http` on loopback (`localhost`, `127.0.0.1`, `[::1]`) for native apps. Matched exactly against the registered list, except that a loopback redirect may use any port, which RFC 8252 requires because a native app binds whatever port is free when it starts. |
 | Scopes | `mcp:read`, `mcp:write` |
 
 Every metadata document is built from the request's own origin, so a self-hosted

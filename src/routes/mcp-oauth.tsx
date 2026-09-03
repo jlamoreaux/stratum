@@ -33,6 +33,7 @@ import {
   issueTokens,
   parseScope,
   readAuthorizationCode,
+  redirectUriMatches,
   registerClient,
   revokeGrantsForClientUser,
   revokeToken,
@@ -306,10 +307,12 @@ async function validateAuthorizeRequest(
   }
   const client = clientResult.data;
 
-  // EXACT match against the registered list. No prefix matching, no
-  // subdirectory allowance, no ignoring the query string — every relaxation of
-  // this comparison is a published way to steal authorization codes.
-  if (redirectUri === "" || !client.redirectUris.includes(redirectUri)) {
+  // Exact match against the registered list, with the single RFC 8252 §7.3
+  // exception for a loopback redirect's port (see `redirectUriMatches`). No
+  // prefix matching, no subdirectory allowance, no ignoring the query string —
+  // every other relaxation of this comparison is a published way to steal
+  // authorization codes.
+  if (redirectUri === "" || !redirectUriMatches(client.redirectUris, redirectUri)) {
     logger.warn("Authorization rejected - redirect_uri not registered", { clientId });
     return {
       response: await renderAuthorizeError(

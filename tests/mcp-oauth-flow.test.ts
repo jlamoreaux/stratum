@@ -401,6 +401,55 @@ describe("authorization", () => {
 });
 
 describe("token endpoint", () => {
+  it("completes the flow for a Claude Code style localhost redirect on a different port", async () => {
+    // Claude Code registers `http://localhost:<port>/callback` and binds whatever
+    // ephemeral port is free on each run, so the port at authorization time is
+    // routinely not the one in the registration. RFC 8252 §7.3.
+    const { status, json } = await register({
+      redirect_uris: ["http://localhost:9876/callback"],
+    });
+    expect(status).toBe(201);
+    const used = "http://localhost:41234/callback";
+
+    const consented = await consent({
+      client_id: json.client_id,
+      redirect_uri: used,
+      scope: "mcp:read mcp:write",
+      code_challenge: CHALLENGE,
+      state: "xyz",
+    });
+    const location = new URL(consented.headers.get("location") ?? "");
+    expect(location.origin).toBe("http://localhost:41234");
+    expect(location.pathname).toBe("/callback");
+    const code = location.searchParams.get("code");
+    expect(code).not.toBeNull();
+
+    // The token request presents the URI the code was actually bound to.
+    const response = await exchange({
+      grant_type: "authorization_code",
+      code: code as string,
+      code_verifier: VERIFIER,
+      redirect_uri: used,
+      client_id: json.client_id,
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("does not let the loopback port exception cross to a different host", async () => {
+    const { json } = await register({
+      redirect_uris: ["http://localhost:9876/callback"],
+    });
+    const response = await consent({
+      client_id: json.client_id,
+      redirect_uri: "http://127.0.0.1:9876/callback",
+      scope: "mcp:read",
+      code_challenge: CHALLENGE,
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+    expect(await response.text()).toContain("Redirect URI mismatch");
+  });
+
   it("completes the authorization_code grant with a valid verifier", async () => {
     const { json } = await register();
     const code = await codeFor(json.client_id);

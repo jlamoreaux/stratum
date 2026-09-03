@@ -3614,9 +3614,10 @@ paths:
                   maxItems: 10
                   items: { type: string }
                   description: |
-                    Exact URIs. `https`, or `http` on a loopback IP literal
-                    (`127.0.0.1`, `[::1]`) for native apps. No fragment, no
-                    embedded credentials.
+                    `https`, or `http` on loopback (`localhost`, `127.0.0.1`,
+                    `[::1]`) for native apps. No fragment, no embedded
+                    credentials. Matched exactly at authorization time, except
+                    that a loopback redirect may use any port (RFC 8252 §7.3).
                 scope: { type: string, example: "mcp:read mcp:write" }
                 token_endpoint_auth_method:
                   type: string
