@@ -245,6 +245,7 @@ export function isAllowedRedirectUri(value: string): boolean {
   return url.protocol === "http:" && isLoopbackHost(url.hostname);
 }
 
+/** `new URL` without the throw: the callers treat unparseable input as a policy failure, not an exception. */
 function parseUrl(value: string): URL | null {
   try {
     return new URL(value);
@@ -256,6 +257,7 @@ function parseUrl(value: string): URL | null {
 /** The WHATWG parser keeps the brackets on an IPv6 hostname, hence both forms. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
+/** Is this WHATWG-parsed hostname one of the loopback forms `isAllowedRedirectUri` admits over plaintext http? */
 function isLoopbackHost(hostname: string): boolean {
   return LOOPBACK_HOSTS.has(hostname);
 }
