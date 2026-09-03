@@ -97,6 +97,16 @@ vi.mock("../src/storage/users", () => {
       return { success: true, data: user };
     }),
 
+    getUserByGitHubId: vi.fn(async (_db, githubId: string) => {
+      const users = getMockUsers();
+      for (const user of users.values()) {
+        if (user.githubId === githubId) {
+          return { success: true, data: user };
+        }
+      }
+      return { success: false, error: new NotFoundError("User", githubId) };
+    }),
+
     upsertGitHubUser: vi.fn(async (_db, opts, _logger) => {
       const users = getMockUsers();
       // Check if user exists by GitHub ID first
@@ -1418,6 +1428,9 @@ describe("Auth Signup/Login Integration Tests", () => {
       );
 
       expect(res.status).toBe(302);
+      // A first-time GitHub identity is asked to choose a username before an
+      // account exists (tests/oauth-signup.test.ts covers the rest).
+      expect(res.headers.get("location")).toBe("/auth/signup/complete");
 
       // Restore fetch
       vi.restoreAllMocks();

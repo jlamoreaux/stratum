@@ -1,12 +1,12 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { betaGateEnabled } from "../beta/gate";
 import { recordAudit } from "../storage/audit";
 import { createSession, deleteSession, getSession } from "../storage/sessions";
-import { createUser, getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
+import { getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 import { consumePostLoginRedirect, isSafeRedirectTarget } from "../utils/post-login-redirect";
+import { beginPendingSignup, suggestUsername } from "./oauth-signup";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -26,13 +26,21 @@ function timingSafeEqual(a: string, b: string): boolean {
 /**
  * Mint an OAuth state, persist it in KV (replay prevention), and bind it to
  * the initiating browser via a short-lived cookie (login-CSRF prevention).
+ *
+ * The KV record is also where a requested post-login destination rides out
+ * the round trip: the provider sends back only `code` and `state`, so a
+ * `next` on the start URL survives only if it is stored under the state and
+ * read back when the state is consumed. It is validated before storage, so
+ * the callback can trust whatever it finds there.
  */
 async function issueOAuthState(
   c: Parameters<typeof setCookie>[0],
   kv: KVNamespace,
+  next?: string,
 ): Promise<string> {
   const state = crypto.randomUUID().replace(/-/g, "");
-  await kv.put(`oauth_state:${state}`, "1", { expirationTtl: OAUTH_STATE_TTL_SECONDS });
+  const record = next === undefined ? "1" : JSON.stringify({ next });
+  await kv.put(`oauth_state:${state}`, record, { expirationTtl: OAUTH_STATE_TTL_SECONDS });
   setCookie(c, OAUTH_STATE_COOKIE, state, {
     httpOnly: true,
     secure: true,
@@ -45,24 +53,42 @@ async function issueOAuthState(
 
 /**
  * Validate a callback's state: it must match the browser's state cookie
- * (constant-time) AND exist in KV. Consumes both on success.
+ * (constant-time) AND exist in KV. Consumes both on success, returning the
+ * destination stored with the state (if any); null when the state is bad.
  */
 async function consumeOAuthState(
   c: Parameters<typeof getCookie>[0] & Parameters<typeof deleteCookie>[0],
   kv: KVNamespace,
   state: string,
-): Promise<boolean> {
+): Promise<{ next?: string } | null> {
   const cookieState = getCookie(c, OAUTH_STATE_COOKIE);
   if (!cookieState || !timingSafeEqual(cookieState, state)) {
-    return false;
+    return null;
   }
   deleteCookie(c, OAUTH_STATE_COOKIE, { path: "/auth" });
 
   const stateKey = `oauth_state:${state}`;
   const stored = await kv.get(stateKey);
-  if (!stored) return false;
+  if (!stored) return null;
   await kv.delete(stateKey);
-  return true;
+  // A bare "1" is a state with nothing attached (the historical shape).
+  if (!stored.startsWith("{")) return {};
+  try {
+    const parsed = JSON.parse(stored) as { next?: unknown };
+    return typeof parsed.next === "string" ? { next: parsed.next } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * A `next` from the request, reduced to a same-origin path — or undefined
+ * when it is missing or unsafe, so an open redirect never gets stored.
+ */
+function safeNextPath(next: string | undefined, requestUrl: string): string | undefined {
+  if (!next || !isSafeRedirectTarget(next, requestUrl)) return undefined;
+  const url = new URL(next, new URL(requestUrl).origin);
+  return url.pathname + url.search + url.hash;
 }
 
 app.get("/github", async (c) => {
@@ -80,7 +106,7 @@ app.get("/github", async (c) => {
     return c.json({ error: "GitHub OAuth is not configured" }, 501);
   }
 
-  const state = await issueOAuthState(c, c.env.STATE);
+  const state = await issueOAuthState(c, c.env.STATE, safeNextPath(c.req.query("next"), c.req.url));
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -116,7 +142,8 @@ app.get("/github/callback", async (c) => {
     return c.json({ error: "Missing state parameter" }, 400);
   }
 
-  if (!(await consumeOAuthState(c, c.env.STATE, state))) {
+  const consumed = await consumeOAuthState(c, c.env.STATE, state);
+  if (consumed === null) {
     logger.warn("Invalid, expired, or unbound state", { statePrefix: state.slice(0, 8) });
     return c.json({ error: "Invalid or expired state" }, 400);
   }
@@ -181,48 +208,55 @@ app.get("/github/callback", async (c) => {
   const githubUser = await userRes.json<{ id: number; login: string }>();
   const emails = await emailsRes.json<{ email: string; primary: boolean; verified: boolean }[]>();
 
-  const primaryEmail =
-    emails.find((e) => e.primary && e.verified)?.email ??
-    emails.find((e) => e.verified)?.email ??
-    emails[0]?.email;
+  // Only an address the provider has verified may identify an account. GitHub
+  // lets a user list any address unverified, so matching on one would let
+  // anyone reach an existing account by adding its owner's email to their own
+  // profile — and would create new accounts under emails nobody has proven.
+  const verifiedEmail =
+    emails.find((e) => e.primary && e.verified)?.email ?? emails.find((e) => e.verified)?.email;
 
-  if (!primaryEmail) {
+  if (!verifiedEmail) {
     logger.warn("No verified email found on GitHub account", { githubId: githubUser.id });
     return c.json({ error: "No verified email found on GitHub account" }, 422);
   }
 
-  const emailPrefix = primaryEmail.split("@")[0];
-  logger.info("Upserting GitHub user", { githubId: githubUser.id, emailPrefix });
+  // A `next` given to /auth/github rides in the state record, since GitHub
+  // returns only `code` and `state`; one on the callback URL itself is still
+  // honoured so existing links keep behaving as they did. Either wins over the
+  // post-login cookie, which is the fallback a flow that started somewhere
+  // else — the MCP consent screen, say — uses to get back to its request.
+  const nextPath = consumed.next ?? safeNextPath(next, c.req.url);
 
-  // Closed beta: OAuth is login-only. A brand-new account (no match by GitHub id
-  // or email) must be created through the invite-gated magic-link flow first.
-  if (betaGateEnabled(c.env)) {
-    const byGithub = await getUserByGitHubId(c.env.DB, String(githubUser.id), logger);
-    // Match an existing account only by a *verified* email — never the unverified
-    // fallback used for primaryEmail, which could be attacker-controlled and let
-    // someone slip past the gate by claiming a beta user's address.
-    const verifiedEmail =
-      emails.find((e) => e.primary && e.verified)?.email ?? emails.find((e) => e.verified)?.email;
-    const byEmail = verifiedEmail ? await getUserByEmail(c.env.DB, verifiedEmail, logger) : null;
-    if (!byGithub.success && !byEmail?.success) {
-      logger.warn("Blocked GitHub signup — closed beta", { githubId: githubUser.id });
-      return c.redirect("/auth/signup?error=invite_required");
+  const githubId = String(githubUser.id);
+  const byGithub = await getUserByGitHubId(c.env.DB, githubId, logger);
+  if (!byGithub.success) {
+    const byEmail = await getUserByEmail(c.env.DB, verifiedEmail, logger);
+    if (!byEmail.success) {
+      // First time we have seen this person: nothing is created until they have
+      // chosen a username (and, under the closed beta, presented an invite code).
+      logger.info("New GitHub identity; asking for a username", { githubId });
+      return beginPendingSignup(c, {
+        provider: "github",
+        email: verifiedEmail,
+        suggestedUsername: suggestUsername(githubUser.login),
+        github: { id: githubId, login: githubUser.login },
+        ...(nextPath !== undefined ? { next: nextPath } : {}),
+      });
     }
   }
 
+  logger.info("Signing in GitHub user", { githubId });
+  // Finds by GitHub id or links by verified email; the create branch inside is
+  // unreachable from here, because a brand-new identity was diverted above.
   const userResult = await upsertGitHubUser(
     c.env.DB,
-    {
-      githubId: String(githubUser.id),
-      email: primaryEmail,
-      username: githubUser.login,
-    },
+    { githubId, email: verifiedEmail, username: githubUser.login },
     logger,
   );
 
   if (!userResult.success) {
-    logger.error("Failed to upsert GitHub user", undefined, { githubId: githubUser.id });
-    return c.json({ error: "Failed to create user" }, 500);
+    logger.error("Failed to upsert GitHub user", userResult.error, { githubId });
+    return c.json({ error: "Failed to sign in" }, 500);
   }
 
   const user = userResult.data;
@@ -253,19 +287,10 @@ app.get("/github/callback", async (c) => {
 
   sessionLogger.info("GitHub OAuth successful, session created");
 
-  // `next` (carried through GitHub's state parameter) still wins when present,
-  // so existing links keep behaving as they did. The cookie is the fallback,
-  // and it is what a flow that started somewhere else — the MCP consent screen,
-  // say — uses to get the user back to the request they interrupted.
-  let redirectTo: string | undefined;
-  if (next && typeof next === "string" && isSafeRedirectTarget(next, c.req.url)) {
-    const url = new URL(next, new URL(c.req.url).origin);
-    redirectTo = url.pathname + url.search + url.hash;
-  }
   // Consumed unconditionally, even when `next` won, so a stale destination is
   // never left in the jar for the next sign-in to pick up.
   const remembered = consumePostLoginRedirect(c, "/");
-  return c.redirect(redirectTo ?? remembered);
+  return c.redirect(nextPath ?? remembered);
 });
 
 app.get("/google", async (c) => {
@@ -318,7 +343,7 @@ app.get("/google/callback", async (c) => {
   if (!state) {
     return c.json({ error: "Missing state parameter" }, 400);
   }
-  if (!(await consumeOAuthState(c, c.env.STATE, state))) {
+  if ((await consumeOAuthState(c, c.env.STATE, state)) === null) {
     logger.warn("Invalid, expired, or unbound state", { statePrefix: state.slice(0, 8) });
     return c.json({ error: "Invalid or expired state" }, 400);
   }
@@ -371,25 +396,18 @@ app.get("/google/callback", async (c) => {
   }
 
   // Google identity maps onto the email-based account model: an existing
-  // account with this email is reused, otherwise one is created — the same
-  // semantics as magic-link sign-in.
+  // account with this email is reused — the same semantics as magic-link
+  // sign-in. A new one is created only once its owner has chosen a username.
   const existing = await getUserByEmail(c.env.DB, googleUser.email, logger);
-  let userId: string;
-  if (existing.success) {
-    userId = existing.data.id;
-  } else {
-    // Closed beta: OAuth is login-only — new accounts require an invite code.
-    if (betaGateEnabled(c.env)) {
-      logger.warn("Blocked Google signup — closed beta");
-      return c.redirect("/auth/signup?error=invite_required");
-    }
-    const createdResult = await createUser(c.env.DB, googleUser.email, logger);
-    if (!createdResult.success) {
-      logger.error("Failed to create user from Google sign-in", createdResult.error);
-      return c.json({ error: "Failed to create user" }, 500);
-    }
-    userId = createdResult.data.user.id;
+  if (!existing.success) {
+    logger.info("New Google identity; asking for a username");
+    return beginPendingSignup(c, {
+      provider: "google",
+      email: googleUser.email,
+      suggestedUsername: suggestUsername(googleUser.email.split("@")[0] ?? ""),
+    });
   }
+  const userId = existing.data.id;
 
   const sessionLogger = logger.child({ userId });
   const sessionResult = await createSession(c.env.DB, userId, sessionLogger);

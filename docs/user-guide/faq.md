@@ -61,7 +61,8 @@ at all. You choose the level of buy-in, and you can start with layer mode.
 
 No. Email magic-link authentication is the recommended sign-in and has no
 external dependencies. GitHub OAuth (needed for GitHub sync) and Google OAuth
-are alternatives; all resolve to the same email-based identity.
+are alternatives; all resolve to the same email-based identity, and all three
+ask you to choose your username when the account is first created.
 
 ## What happens when an evaluation fails?
 

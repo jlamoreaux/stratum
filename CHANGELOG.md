@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **GitHub sign-in no longer trusts an unverified email.** The callback picked
+  the primary address, verified or not, and fell back to *any* address on the
+  account. That address then matched (and linked to) an existing Stratum
+  account, so anyone could add a victim's email to their own GitHub profile,
+  leave it unverified, and sign in as the victim; it also created new accounts
+  under addresses nobody had proven. Only a verified address is used now, for
+  matching and for creation alike, and an account with none is refused (`422`).
+  The closed-beta path already worked this way; the open-signup path did not.
 - **Minting an agent token from the settings form requires a browser session.**
   `POST /settings/agents` and `POST /settings/agents/:id/delete` loaded the user
   but never checked *how* they authenticated, so a scoped `read_write` API token
@@ -39,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   info with the client's self-reported name and version, and any tool call
   that ran and failed at warn with the tool name and the error the model was
   shown; both were previously debug lines the default level dropped.
+- **Signing up with GitHub or Google now asks you to choose a username.** The
+  callbacks used to mint the account on the spot, naming it after the GitHub
+  handle or the email's local part — and a username is the namespace every
+  project URL, clone URL, and backing repository is keyed on, so it cannot be
+  changed afterwards. A first-time identity is now parked (verified email and,
+  for GitHub, the account to link; fifteen minutes, in KV, bound to an httpOnly
+  cookie) and lands on `/auth/signup/complete` to pick a name, with the handle
+  prefilled as a suggestion and live availability feedback. Nothing is written
+  until the form comes back; signing in to an existing account is unchanged.
+  The same page collects an invite code while the closed beta is on, so OAuth
+  signup is no longer refused under the gate — it presents a code like the
+  magic-link form does, and is admitted (codes minted, emailed) the same way.
 - **A profile page, and invite codes you can actually find.** `/profile` (linked
   from the header, next to settings) shows your account identity — username,
   email, member since, and any linked GitHub account — plus the invite codes

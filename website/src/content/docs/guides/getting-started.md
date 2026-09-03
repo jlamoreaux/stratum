@@ -30,6 +30,10 @@ Sign in with any of:
 - **Google OAuth** at `/auth/google`.
 
 All three resolve to the same email-identity account, so you can mix methods.
+Every method asks you to choose a **username** the first time: it is your
+namespace (`@you/project` in every URL and clone URL) and cannot be changed
+later. GitHub and Google sign-in suggest one from your handle or email address
+and let you pick another before the account exists.
 
 ### Self-hosting
 

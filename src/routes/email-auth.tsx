@@ -1,8 +1,8 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { setCookie } from "hono/cookie";
-import { admitUser, betaGateEnabled, validateInviteCode } from "../beta/gate";
-import { getInviteCodesEmail, getMagicLinkEmail } from "../email/templates";
+import { admitAndDeliverCodes, betaGateEnabled, validateInviteCode } from "../beta/gate";
+import { getMagicLinkEmail } from "../email/templates";
 import { enforceSameOrigin } from "../middleware/csrf";
 import { recordAudit } from "../storage/audit";
 import { consumeMagicLink, createMagicLink } from "../storage/magic-links";
@@ -10,6 +10,7 @@ import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername } from "../storage/users";
 import type { Env } from "../types";
 import { hashToken } from "../utils/crypto";
+import { getWaitUntil } from "../utils/execution-ctx";
 import { escapeHtml } from "../utils/html";
 import { type Logger, createLogger } from "../utils/logger";
 import { consumePostLoginRedirect } from "../utils/post-login-redirect";
@@ -648,9 +649,18 @@ app.post("/verify", async (c) => {
       logger.info("New user created via signup", { userId, emailHash, username });
 
       // Beta program: record the redemption, mint this user's 5 codes, and email
-      // them. Best-effort — never blocks the now-created account.
+      // them. Best-effort — never blocks the now-created account, and no longer
+      // delays its first redirect either: scheduled past the response where an
+      // ExecutionContext exists, awaited inline where none does (tests).
       if (betaGateEnabled(c.env)) {
-        await admitAndDeliverCodes(c, { userId, email, inviteCode, source: "magic_link" }, logger);
+        const delivery = admitAndDeliverCodes(
+          c.env,
+          { userId, email, inviteCode, source: "magic_link" },
+          logger,
+        );
+        const waitUntil = getWaitUntil(c);
+        if (waitUntil) waitUntil(delivery);
+        else await delivery;
       }
 
       // Create session and redirect to welcome/onboarding
@@ -683,50 +693,6 @@ app.post("/verify", async (c) => {
     return emailAuthRedirect(c, "error", "verify_failed");
   }
 });
-
-// Beta program: redeem the invite code, mint the user's 5 shareable codes, and
-// email them. Best-effort — failures are logged and swallowed so a created
-// account is never left in a broken state by a referral-service hiccup.
-async function admitAndDeliverCodes(
-  c: Context<{ Bindings: Env }>,
-  params: { userId: string; email: string; inviteCode: string; source: string },
-  logger: Logger,
-): Promise<void> {
-  try {
-    const result = await admitUser(
-      c.env,
-      {
-        userId: params.userId,
-        email: params.email,
-        code: params.inviteCode,
-        source: params.source,
-      },
-      logger,
-    );
-    if (result.codes.length === 0) {
-      logger.warn("No invite codes minted for new user", { userId: params.userId });
-      return;
-    }
-    const fromAddress = c.env.EMAIL_FROM_ADDRESS;
-    if (!c.env.EMAIL || !fromAddress) return;
-    const emailContent = getInviteCodesEmail({
-      email: params.email,
-      codes: result.codes,
-      shareBaseUrl: c.env.REFERRAL_SERVICE_URL,
-    });
-    await c.env.EMAIL.send({
-      to: params.email,
-      from: { email: fromAddress, name: "Stratum" },
-      subject: emailContent.subject,
-      text: emailContent.text,
-      html: emailContent.html,
-    });
-  } catch (err) {
-    logger.error("Failed to deliver invite codes", err instanceof Error ? err : undefined, {
-      userId: params.userId,
-    });
-  }
-}
 
 // Helper function to create session and redirect
 async function createSessionAndRedirect(
