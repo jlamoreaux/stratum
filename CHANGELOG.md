@@ -29,6 +29,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than folded into this change.
 
 ### Added
+- **Browsers now report Content Security Policy violations to the server.**
+  Every page's policy names `/csp-report` (via `report-to` and, for browsers
+  without the Reporting API, `report-uri`), and the Worker logs each report at
+  warn with the blocked URL, the directive and the user agent. Query strings
+  are stripped before logging. A CSP block happens entirely in the browser, so
+  until now the server could not see one: the MCP consent redirect that Chrome
+  refused for every user showed up in the logs as a healthy flow. It would now
+  show up as a warning within seconds of the first click.
+- **MCP connections leave a readable trail in the logs.** The consent screen
+  being shown, the authorization code being issued, and the tokens being
+  issued share a short code id, so a code that was minted and never redeemed
+  is one log query away. A five-minute sweep deletes expired authorization
+  codes (nothing removed them before) and logs a warning naming the clients
+  when any expired unredeemed, which is the signature of consent succeeding
+  and delivery failing. The MCP endpoint logs the `initialize` handshake at
+  info with the client's self-reported name and version, and any tool call
+  that ran and failed at warn with the tool name and the error the model was
+  shown; both were previously debug lines the default level dropped.
 - **Signing up with GitHub or Google now asks you to choose a username.** The
   callbacks used to mint the account on the spot, naming it after the GitHub
   handle or the email's local part — and a username is the namespace every
@@ -105,6 +123,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user), so an agent's feedback channel is change comments.
 
 ### Changed
+- **OAuth and MCP route logs carry the request id.** The routes built their
+  own loggers and dropped the id the auth middleware minted, so a middleware
+  rejection and the route's own line for the same request could not be joined.
 - **The MCP consent screen is shorter.** It leads with the question (allow
   *this application* to access Stratum as *you*), the permissions it is asking
   for, and the two buttons, with the host it returns you to on one line. The
@@ -226,8 +247,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an authorization code the browser then refused to deliver to the client, so
   the page sat there and the connector never connected. Firefox does not check
   redirects, which is why the flow appeared to work in one browser and not
-  another. The consent page now names the client's registered redirect origin
-  in its own `form-action`; every other response keeps `'self'`.
+  another. Naming the client's registered redirect origin turned out not to be
+  enough either: the browsers apply the directive to every hop of the redirect
+  chain, and Claude's callback redirects onward again, so the connection still
+  stalled on a consent page that appeared to reload. The consent page now
+  carries no `form-action` at all; it has no user-controlled markup and its
+  only form targets `/oauth/authorize`, so the directive protected nothing
+  there. Every other response keeps `'self'`.
+- **The consent screen's Allow button no longer looks disabled.** It used
+  near-black text on the deep-navy accent; it now uses the same colour pair as
+  every other primary button.
 - **The MCP `401` challenge names the scopes the endpoint needs**
   (`scope="mcp:read mcp:write"`, RFC 6750 §3). A client that takes its scope
   from the challenge asks for read and write up front rather than authorizing

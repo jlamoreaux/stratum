@@ -5,6 +5,7 @@ import { runImportSweep } from "./queue/import-sweep";
 import { runTtlSweep } from "./queue/ttl-sweep";
 import { syncAllProjects } from "./routes/sync";
 import { cleanupOldImports } from "./storage/imports";
+import { sweepExpiredAuthorizationCodes } from "./storage/oauth";
 import type { Env } from "./types";
 import type { Logger } from "./utils/logger";
 
@@ -15,7 +16,8 @@ export type ScheduledJob =
   | "backup"
   | "ttl-sweep"
   | "project-sync"
-  | "import-cleanup";
+  | "import-cleanup"
+  | "oauth-code-sweep";
 
 /** How long a finished import job is kept before `import-cleanup` prunes it. */
 const IMPORT_RETENTION_DAYS = 30;
@@ -30,11 +32,16 @@ const IMPORT_RETENTION_DAYS = 30;
  * `import-sweep` is safe on the 5-minute tick despite that reasoning: it is one
  * indexed query plus at most `SWEEP_BATCH_LIMIT` small writes, and recovery
  * speed is the point — the job it reaps is one a user is staring at.
+ *
+ * `oauth-code-sweep` rides the same tick for the same reason: it is one bounded
+ * SELECT plus a chunked DELETE, and its warning — authorization codes that
+ * expired without being redeemed — is a signal about a connection someone is
+ * trying to make right now.
  */
 export function jobsForCron(cron: string): ScheduledJob[] {
   switch (cron) {
     case "*/5 * * * *":
-      return ["event-sweep", "deletion-sweep", "import-sweep"];
+      return ["event-sweep", "deletion-sweep", "import-sweep", "oauth-code-sweep"];
     case "0 4 * * *":
       return ["backup"];
     case "0 6 * * *":
@@ -54,6 +61,7 @@ const JOB_RUNNERS: JobRunners = {
   "ttl-sweep": (env, logger) => runTtlSweep(env, logger),
   "project-sync": (env) => syncAllProjects(env),
   "import-cleanup": (env, logger) => cleanupOldImports(env.DB, IMPORT_RETENTION_DAYS, logger),
+  "oauth-code-sweep": (env, logger) => sweepExpiredAuthorizationCodes(env.DB, logger),
 };
 
 /**

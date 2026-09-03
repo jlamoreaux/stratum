@@ -17,6 +17,7 @@
 import { Hono } from "hono";
 import { StratumClient } from "../mcp/client";
 import { dispatchApiRequest } from "../mcp/dispatch";
+import { describeMcpOutcome } from "../mcp/outcome";
 import {
   JSON_RPC,
   LATEST_PROTOCOL_VERSION,
@@ -27,11 +28,22 @@ import {
 import { buildTools } from "../mcp/tools";
 import type { Env } from "../types";
 import { getExecutionCtx } from "../utils/execution-ctx";
-import { createLogger } from "../utils/logger";
+import type { Logger } from "../utils/logger";
 import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
 import { readTextWithLimit } from "../utils/request-body";
+import { requestLogger } from "../utils/request-logger";
 
 const app = new Hono<{ Bindings: Env }>();
+
+/** One log line per exchange, at the level `describeMcpOutcome` picks. */
+function logOutcome(
+  logger: Logger,
+  message: unknown,
+  reply: Awaited<ReturnType<typeof handleMessage>>,
+): void {
+  const outcome = describeMcpOutcome(message, reply);
+  logger[outcome.level](outcome.message, outcome.meta);
+}
 
 /**
  * Reported in the `initialize` handshake.
@@ -116,10 +128,9 @@ function unsupportedProtocol(header: string | undefined): Response | null {
 }
 
 app.post("/mcp", async (c) => {
-  const logger = createLogger({
-    path: c.req.path,
-    method: c.req.method,
+  const logger = requestLogger(c, {
     userId: c.get("userId"),
+    agentId: c.get("agentId"),
     oauthClientId: c.get("oauthClientId"),
   });
 
@@ -201,6 +212,7 @@ app.post("/mcp", async (c) => {
     const replies = [];
     for (const message of parsed) {
       const reply = await handleMessage(message, ctx);
+      logOutcome(logger, message, reply);
       if (reply !== null) replies.push(reply);
     }
     if (replies.length === 0) return new Response(null, { status: 202 });
@@ -208,17 +220,11 @@ app.post("/mcp", async (c) => {
   }
 
   const reply = await handleMessage(parsed, ctx);
+  logOutcome(logger, parsed, reply);
   // A notification gets no body. 202 Accepted is what the spec prescribes, and
   // it is distinguishable from a 200 with an empty body, which some clients
   // treat as a truncated response.
   if (reply === null) return new Response(null, { status: 202 });
-
-  logger.debug("MCP message handled", {
-    method:
-      typeof parsed === "object" && parsed !== null
-        ? (parsed as { method?: unknown }).method
-        : undefined,
-  });
 
   return Response.json(reply, {
     headers: {

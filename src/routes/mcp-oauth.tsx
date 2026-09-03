@@ -42,10 +42,11 @@ import {
 } from "../storage/oauth";
 import { getUser } from "../storage/users";
 import type { Env } from "../types";
-import { createLogger } from "../utils/logger";
+import type { createLogger } from "../utils/logger";
 import { mcpResourceIdentifier } from "../utils/oauth-challenge";
 import { rememberPostLoginRedirect } from "../utils/post-login-redirect";
 import { readJsonWithLimit, readTextWithLimit } from "../utils/request-body";
+import { requestLogger } from "../utils/request-logger";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -201,7 +202,7 @@ interface RegistrationBody {
 }
 
 app.post("/oauth/register", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   const raw = await readJsonWithLimit<RegistrationBody>(c, MAX_OAUTH_BODY_BYTES, logger);
   if (raw instanceof Response) return raw;
@@ -458,9 +459,12 @@ const CONSENT_CSS = `
   .consent-more p { margin: 0.6rem 0 0; }
   .consent-more .consent-client { margin: 0.35rem 0 0; }
   .consent-actions { display: flex; gap: 0.75rem; }
-  .consent-actions button { flex: 1; padding: 0.6rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.92rem; }
-  .consent-allow { background: var(--accent, #7ca9f7); color: #0d0d0d; border: none; font-weight: 600; }
-  .consent-deny { background: transparent; color: var(--text-primary); border: 1px solid var(--border); }
+  .consent-actions button { flex: 1; padding: 0.6rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.92rem; border: 1px solid transparent; }
+  /* Mirrors .btn-primary. The accent is a deep navy, so near-black text on it
+     read as a disabled button; the accent-text pair is the legible one. */
+  .consent-allow { background: var(--accent); border-color: var(--accent-border); color: var(--accent-text); font-weight: 600; }
+  .consent-allow:hover { background: var(--accent-hover); color: var(--accent-text-hover); }
+  .consent-deny { background: transparent; color: var(--text-primary); border-color: var(--border); }
 `;
 
 /** Plain-language rendering of a scope. Never show a raw scope token to a
@@ -475,7 +479,7 @@ function describeScope(scope: string): string[] {
 }
 
 app.get("/oauth/authorize", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
   const url = new URL(c.req.url);
 
   // Sign-in comes FIRST, before the request is validated, so an unauthenticated
@@ -502,14 +506,28 @@ app.get("/oauth/authorize", async (c) => {
     return renderAuthorizeError(c, "Unknown client", "This application is no longer registered.");
   }
   const clientName = clientResult.data.clientName;
+  // The first of three lines a healthy connection leaves: this, then
+  // "Authorization code issued", then "OAuth tokens issued" seconds later.
+  logger.info("MCP consent screen shown", {
+    clientId: params.clientId,
+    clientName,
+    userId,
+    scope: params.scope,
+  });
 
-  // The redirect URI is verified against the registered list by now, so the
-  // browser must be allowed to follow the redirect that answers the consent
-  // POST. Chromium and WebKit check this page's `form-action` against that
-  // redirect, and under the site-wide `'self'` they refuse it — the code is
-  // minted and never delivered, and clicking Allow visibly does nothing. See
-  // `CspOptions`.
-  setHtmlSecurityHeaders(c, { formAction: consentFormAction(params.redirectUri) });
+  // No `form-action` on this page. Its form POSTs to us, but the answer to that
+  // POST is a redirect to the client's callback, and Chromium and WebKit check
+  // the submitting page's `form-action` against EVERY hop of the chain that
+  // follows — not just the first. Naming the registered redirect origin was
+  // not enough: Claude's callback itself answers with a 307 onward, and any hop
+  // to an origin this page did not list cancels the whole navigation, leaving
+  // the user on a consent page that "did nothing" while the code sits minted
+  // and undelivered. The chain past our redirect belongs to the client and is
+  // not ours to enumerate, so the directive is omitted here rather than guessed
+  // at. This page has no user-controlled markup and its only form targets
+  // `/oauth/authorize`, so the directive protected nothing here anyway. Every
+  // other response keeps the site-wide `'self'`. See `CspOptions`.
+  setHtmlSecurityHeaders(c, { formAction: null });
 
   return c.html(
     <html lang="en">
@@ -585,22 +603,8 @@ app.get("/oauth/authorize", async (c) => {
   );
 });
 
-/**
- * The `form-action` sources the consent page needs: `'self'` plus the client's
- * registered origin, which is where the post-consent redirect goes.
- *
- * CSP's host-source grammar has no spelling for an IPv6 literal, so a client
- * listening on `[::1]` cannot be named; for that one case the directive is
- * dropped on this page rather than emitted in a form the browser would discard
- * as invalid (and then enforce as if absent — or, in Chromium, as if `'none'`).
- */
-function consentFormAction(redirectUri: string): string[] | null {
-  const origin = new URL(redirectUri).origin;
-  return origin.includes("[") ? null : [origin];
-}
-
 app.post("/oauth/authorize", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   const userId = c.get("userId");
   if (!userId || c.get("authVia") !== "session") {
@@ -632,6 +636,7 @@ app.post("/oauth/authorize", async (c) => {
   if (params.state !== undefined) redirect.searchParams.set("state", params.state);
 
   if (form.get("decision") !== "allow") {
+    logger.info("MCP consent declined", { clientId: params.clientId, userId });
     redirect.searchParams.set("error", "access_denied");
     redirect.searchParams.set("error_description", "The user declined the request");
     return c.redirect(redirect.toString());
@@ -704,7 +709,7 @@ function readClientCredentials(
 }
 
 app.post("/oauth/token", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   // RFC 6749 §4.1.3 mandates form encoding here. Parsed by us rather than by
   // the framework so a client sending a wrong Content-Type gets an OAuth error
@@ -777,6 +782,10 @@ async function handleCodeGrant(
   const record = found.data;
 
   if (record.alreadyConsumed) {
+    logger.warn("Token request rejected - authorization code replayed", {
+      clientId: client.id,
+      codeId: record.codeId,
+    });
     // RFC 6749 §10.5: a code presented twice means it leaked. Everything the
     // grant produced is now suspect, so the whole grant goes — the legitimate
     // client re-authorizes, the attacker's copy is worthless.
@@ -791,6 +800,7 @@ async function handleCodeGrant(
   // registered client that intercepted a code could redeem it as itself.
   if (record.clientId !== client.id) {
     logger.warn("Token request rejected - code issued to a different client", {
+      codeId: record.codeId,
       codeClientId: record.clientId,
       presentedClientId: client.id,
     });
@@ -803,7 +813,10 @@ async function handleCodeGrant(
   }
 
   if (!(await verifyPkce(verifier, record.codeChallenge))) {
-    logger.warn("Token request rejected - PKCE verification failed", { clientId: client.id });
+    logger.warn("Token request rejected - PKCE verification failed", {
+      clientId: client.id,
+      codeId: record.codeId,
+    });
     return oauthError("invalid_grant", "PKCE verification failed");
   }
 
@@ -825,6 +838,7 @@ async function handleCodeGrant(
     clientId: client.id,
     userId: record.userId,
     scope: record.scope,
+    codeId: record.codeId,
   });
   if (!tokens.success) return oauthError("server_error", "Could not issue tokens", 500);
 
@@ -872,7 +886,7 @@ async function handleRefreshGrant(
 // ── Revocation (RFC 7009) ───────────────────────────────────────────────────
 
 app.post("/oauth/revoke", async (c) => {
-  const logger = createLogger({ path: c.req.path, method: c.req.method });
+  const logger = requestLogger(c);
 
   const body = await readForm(c, logger);
   if ("response" in body) return body.response;

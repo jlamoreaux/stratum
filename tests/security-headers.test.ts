@@ -107,8 +107,19 @@ describe("SEC-7: security headers", () => {
     }
     // And the default is byte-for-byte what it was.
     expect(contentSecurityPolicy("n")).toBe(
-      "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; script-src 'nonce-n'",
+      "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; script-src 'nonce-n'; report-to csp-endpoint; report-uri /csp-report",
     );
+  });
+
+  it("names the violation-report endpoint in every policy and declares it to the browser", async () => {
+    // A CSP block is invisible to the server unless the browser is told where
+    // to report it (#355). Both directives, so browsers with and without the
+    // Reporting API report; the header is what makes `report-to` resolvable.
+    const res = await app.fetch(new Request("http://localhost/health"), makeEnv());
+    expect(res.headers.get("Reporting-Endpoints")).toBe('csp-endpoint="/csp-report"');
+    const csp = res.headers.get("Content-Security-Policy") ?? "";
+    expect(csp).toContain("report-to csp-endpoint");
+    expect(csp).toContain("report-uri /csp-report");
   });
 
   it("applies the same CSP to 500 error responses (error boundary parity)", async () => {

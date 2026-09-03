@@ -1,3 +1,6 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import packageJson from "../package.json?raw";
+import app from "../src/index";
 /**
  * Issue #349: the remote MCP endpoint at `/mcp`.
  *
@@ -12,9 +15,7 @@
  * about MCP; the OAuth flow has its own suites.
  */
 /// <reference types="vite/client" />
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import packageJson from "../package.json?raw";
-import app from "../src/index";
+import { describeMcpOutcome } from "../src/mcp/outcome";
 import { LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from "../src/mcp/protocol";
 import { SERVER_VERSION } from "../src/routes/mcp";
 import { issueTokens, registerClient } from "../src/storage/oauth";
@@ -500,5 +501,99 @@ describe("other methods on /mcp", () => {
       env,
     );
     expect(response.status).toBe(204);
+  });
+});
+
+describe("describeMcpOutcome (#355)", () => {
+  it("logs the handshake at info with the client's self-description", () => {
+    const outcome = describeMcpOutcome(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-03-26", clientInfo: { name: "Claude", version: "1.2" } },
+      },
+      { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-03-26" } },
+    );
+    expect(outcome.level).toBe("info");
+    expect(outcome.message).toBe("MCP client initialized");
+    expect(outcome.meta).toEqual({
+      clientName: "Claude",
+      clientVersion: "1.2",
+      requestedProtocolVersion: "2025-03-26",
+      protocolVersion: "2025-03-26",
+    });
+  });
+
+  it("logs a tool that ran and failed at warn, with the error the model saw", () => {
+    const outcome = describeMcpOutcome(
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "stratum_commit" } },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        result: {
+          isError: true,
+          content: [{ type: "text", text: "Stratum API error: 403 read-only" }],
+        },
+      },
+    );
+    expect(outcome.level).toBe("warn");
+    expect(outcome.message).toBe("MCP tool call failed");
+    expect(outcome.meta).toEqual({
+      tool: "stratum_commit",
+      detail: "Stratum API error: 403 read-only",
+    });
+  });
+
+  it("logs a rejected call at warn and a successful one at debug", () => {
+    const rejected = describeMcpOutcome(
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "nope" } },
+      { jsonrpc: "2.0", id: 3, error: { code: -32601, message: "Unknown tool 'nope'" } },
+    );
+    expect(rejected.level).toBe("warn");
+    expect(rejected.meta).toEqual({ tool: "nope", code: -32601, error: "Unknown tool 'nope'" });
+
+    const ok = describeMcpOutcome(
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "stratum_whoami" } },
+      { jsonrpc: "2.0", id: 4, result: { content: [] } },
+    );
+    expect(ok.level).toBe("debug");
+  });
+
+  it("never reports a notification as a tool run or a handshake", () => {
+    // `handleMessage` returns null for a `tools/call` or `initialize` that
+    // arrives without an id, and runs nothing. The classifier must not turn
+    // that into "MCP tool call succeeded" or "MCP client initialized".
+    const tool = describeMcpOutcome(
+      { jsonrpc: "2.0", method: "tools/call", params: { name: "stratum_commit" } },
+      null,
+    );
+    expect(tool).toEqual({
+      level: "debug",
+      message: "MCP notification handled",
+      meta: { method: "tools/call" },
+    });
+    const handshake = describeMcpOutcome(
+      { jsonrpc: "2.0", method: "initialize", params: { clientInfo: { name: "Claude" } } },
+      null,
+    );
+    expect(handshake).toEqual({
+      level: "debug",
+      message: "MCP notification handled",
+      meta: { method: "initialize" },
+    });
+  });
+
+  it("keeps notifications and routine requests at debug, and malformed input at warn", () => {
+    expect(
+      describeMcpOutcome({ jsonrpc: "2.0", method: "notifications/initialized" }, null).level,
+    ).toBe("debug");
+    expect(
+      describeMcpOutcome(
+        { jsonrpc: "2.0", id: 5, method: "tools/list" },
+        { jsonrpc: "2.0", id: 5, result: { tools: [] } },
+      ).level,
+    ).toBe("debug");
+    expect(describeMcpOutcome("garbage", null).level).toBe("warn");
   });
 });

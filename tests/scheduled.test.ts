@@ -13,6 +13,7 @@ const noopRunners: JobRunners = {
   "ttl-sweep": () => Promise.resolve(),
   "project-sync": () => Promise.resolve(),
   "import-cleanup": () => Promise.resolve(),
+  "oauth-code-sweep": () => Promise.resolve(),
 };
 
 describe("jobsForCron", () => {
@@ -29,7 +30,12 @@ describe("jobsForCron", () => {
   });
 
   it("runs the event, deletion and import sweeps on the */5 trigger", () => {
-    expect(jobsForCron("*/5 * * * *")).toEqual(["event-sweep", "deletion-sweep", "import-sweep"]);
+    expect(jobsForCron("*/5 * * * *")).toEqual([
+      "event-sweep",
+      "deletion-sweep",
+      "import-sweep",
+      "oauth-code-sweep",
+    ]);
   });
 
   // #304: a wedged import must reach a terminal state without anyone loading

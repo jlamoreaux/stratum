@@ -234,12 +234,14 @@ describe("authorization", () => {
     expect(html).toContain("register itself under any name");
   });
 
-  it("lets the browser follow the post-consent redirect to the client", async () => {
-    // Chromium and WebKit enforce the consent page's `form-action` against the
-    // redirect that answers its form POST. Under the site-wide `'self'`,
-    // clicking Allow minted a code the browser then refused to deliver, so this
-    // page — and only this page — has to name the client's origin. The
-    // middleware sets the site-wide policy first; the route must win.
+  it("lets the browser follow the post-consent redirect chain to the client", async () => {
+    // Chromium and WebKit enforce the consent page's `form-action` against
+    // every hop of the redirect chain that answers its form POST. Under the
+    // site-wide `'self'`, clicking Allow minted a code the browser then refused
+    // to deliver; naming the client's origin still broke when the client's own
+    // callback redirected onward. So this page — and only this page — carries
+    // no `form-action` at all. The middleware sets the site-wide policy first;
+    // the route must win, and the rest of the policy must survive.
     const { json } = await register();
     const url = `${ORIGIN}/oauth/authorize?response_type=code&client_id=${json.client_id}&redirect_uri=${encodeURIComponent(REDIRECT)}&code_challenge=${CHALLENGE}&code_challenge_method=S256`;
     const consentPage = await app.fetch(
@@ -247,9 +249,10 @@ describe("authorization", () => {
       env,
     );
     expect(consentPage.status).toBe(200);
-    expect(consentPage.headers.get("Content-Security-Policy")).toContain(
-      "form-action 'self' http://127.0.0.1:9876;",
-    );
+    const consentCsp = consentPage.headers.get("Content-Security-Policy") ?? "";
+    expect(consentCsp).not.toContain("form-action");
+    expect(consentCsp).toContain("frame-ancestors 'none'");
+    expect(consentCsp).toContain("script-src 'nonce-");
 
     // The error page redirects nowhere, so it keeps the default.
     const errorPage = await app.fetch(
