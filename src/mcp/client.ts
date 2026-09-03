@@ -1,17 +1,15 @@
 /**
  * The Stratum API surface the MCP tools call.
  *
- * This is a port of the client the standalone stdio server used to carry, with
- * one substitution: where that one issued `fetch` calls across the internet to
- * `app.usestratum.dev`, this one hands the request to a dispatcher that runs
- * the SAME Hono routers in-process. The paths, payloads and error mapping are
- * unchanged, deliberately — the point of routing through the real handlers is
- * that MCP callers get exactly the REST API's behaviour, including its
- * authorization checks, its evaluation gates and its refusals, rather than a
- * parallel implementation that has to be kept in agreement with it.
+ * Every tool call is handed to a dispatcher that runs the SAME Hono routers
+ * in-process, with the REST API's own paths, payloads and error mapping. The
+ * point of routing through the real handlers is that MCP callers get exactly
+ * the REST API's behaviour, including its authorization checks, its evaluation
+ * gates and its refusals, rather than a parallel implementation that has to be
+ * kept in agreement with it.
  *
- * There is no request timeout here, unlike the network client. A dispatched
- * request never leaves the isolate, so there is no socket to hang: the bound is
+ * There is no request timeout here. A dispatched request never leaves the
+ * isolate, so there is no socket to hang: the bound is
  * the Worker's own wall-clock limit, and an AbortController racing it would
  * only turn a clean platform error into a confusing one. `stratum_create_change`
  * is the long pole — it runs the whole evaluation suite synchronously — and it

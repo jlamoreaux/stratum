@@ -220,32 +220,78 @@ function rowToClient(row: OAuthClientRow): OAuthClient {
  * Is this a redirect URI we will ever hand an authorization code to?
  *
  * MCP clients are overwhelmingly native apps that listen on an ephemeral
- * loopback port, so `http://127.0.0.1:<port>/…` has to be allowed — that is
- * what RFC 8252 prescribes for native apps, and it is safe precisely because
- * loopback cannot be reached off the machine. Everything else must be https.
+ * loopback port, so plaintext `http` has to be allowed there — RFC 8252 §7.3
+ * prescribes it for native apps, and it is safe precisely because loopback
+ * cannot be reached off the machine. Everything else must be https.
+ *
+ * `localhost` is accepted alongside the IP literals. RFC 8252 §8.3 prefers the
+ * literals because a hostname nominally goes through DNS, but every current
+ * browser resolves `localhost` to loopback internally without consulting a
+ * resolver (RFC 6761 §6.3 requires it), and the clients that matter use the
+ * name: Claude Code registers `http://localhost:<port>/callback` and offers no
+ * way to change it. Refusing the name locked those clients out at registration
+ * for no security gained.
  *
  * Rejected outright: a fragment (the redirect target would be rewritten),
  * credentials in the authority, and any non-loopback plaintext http.
  */
 export function isAllowedRedirectUri(value: string): boolean {
   if (value.length > MAX_REDIRECT_URI_LENGTH) return false;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
+  const url = parseUrl(value);
+  if (url === null) return false;
   if (url.hash !== "") return false;
   if (url.username !== "" || url.password !== "") return false;
   if (url.protocol === "https:") return true;
-  if (url.protocol === "http:") {
-    // Note: `localhost` is deliberately NOT accepted alongside the literals.
-    // It resolves through DNS, so on a compromised resolver it is not loopback
-    // at all — RFC 8252 §8.3 says to use the IP literals for exactly this
-    // reason.
-    return url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
+  return url.protocol === "http:" && isLoopbackHost(url.hostname);
+}
+
+function parseUrl(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
   }
-  return false;
+}
+
+/** The WHATWG parser keeps the brackets on an IPv6 hostname, hence both forms. */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname);
+}
+
+/**
+ * Does a presented `redirect_uri` match one the client registered?
+ *
+ * Exact string equality, with one deliberate exception: a plaintext loopback
+ * redirect may differ from its registration in PORT only. RFC 8252 §7.3
+ * requires this of an authorization server — a native app binds whatever
+ * ephemeral port is free when it starts, so the port in its registration is
+ * merely the one it happened to get that day — and the relaxation is safe
+ * because every loopback port on the user's machine is equally theirs.
+ *
+ * Nothing else is relaxed. Scheme, host, path and query must be identical;
+ * `localhost` and `127.0.0.1` do not stand in for each other; an https URI
+ * matches only itself; and the presented URI must still pass
+ * `isAllowedRedirectUri`, so a fragment cannot ride in on the port exception.
+ * Every broader comparison — prefix, subdirectory, ignored query — is a
+ * published way to steal authorization codes.
+ */
+export function redirectUriMatches(registered: readonly string[], presented: string): boolean {
+  if (registered.includes(presented)) return true;
+  if (!isAllowedRedirectUri(presented)) return false;
+  const url = parseUrl(presented);
+  if (url === null || url.protocol !== "http:" || !isLoopbackHost(url.hostname)) return false;
+  return registered.some((candidate) => {
+    const reg = parseUrl(candidate);
+    return (
+      reg !== null &&
+      reg.protocol === "http:" &&
+      reg.hostname === url.hostname &&
+      reg.pathname === url.pathname &&
+      reg.search === url.search
+    );
+  });
 }
 
 export interface RegisteredClient {

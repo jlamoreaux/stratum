@@ -148,6 +148,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `isScopedTokenCaller` is now `cannotMintLegacyCredential`, and covers OAuth
   grants as well as scoped tokens.
 
+### Fixed
+- **Claude Code can connect to the MCP server.** `claude mcp add` registers
+  `http://localhost:<port>/callback` as its OAuth redirect, and the
+  authorization server refused the name outright — only the loopback IP
+  literals were accepted — so every registration from the CLI failed with
+  `invalid_redirect_uri` before a browser ever opened. `localhost` is now
+  accepted as loopback (every current browser resolves it internally, without
+  DNS), and a loopback redirect may use a different port at authorization time
+  than the one it registered with, as RFC 8252 §7.3 requires of a server that
+  serves native apps. Nothing else about redirect matching is relaxed: host,
+  path, query and scheme are still compared exactly, and `localhost` and
+  `127.0.0.1` do not stand in for each other.
+
 ### Removed
 - **The standalone `mcp/` package (`@stratum/mcp`).** It was a stdio process
   that wrapped the REST API over the network — 609 lines holding no state,

@@ -7,9 +7,8 @@
  * exceptional one. Both halves have to agree, or a model reads one contract and
  * is judged against another.
  *
- * Rather than carry a validator library plus a schema converter (the stdio
- * server this replaces used zod and let the MCP SDK derive the JSON Schema),
- * the field spec here IS the schema: `toJsonSchema` and `validate` are two
+ * Rather than carry a validator library plus a schema converter, the field
+ * spec here IS the schema: `toJsonSchema` and `validate` are two
  * readings of the same declaration, so they cannot drift. The tool surface only
  * needs strings, enums, integers, booleans and one string map, which is far
  * less than a general validator would give us and exactly what a hand-written
