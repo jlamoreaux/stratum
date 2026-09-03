@@ -119,9 +119,11 @@ instance advertises itself with nothing to configure.
 | `mcp:read` | Read projects, files, changes, evaluations and issues. Exactly a read-only API token. |
 | `mcp:write` | The above, plus workspaces, commits, changes, merges, reviews and issue management. Exactly a read-write API token. |
 
-A client that asks for no scope gets `mcp:read`. Most clients do ask: the `401`
-challenge and the protected-resource metadata both list `mcp:read mcp:write`,
-and a client that follows either requests both. The consent screen spells out
+A client that asks for no scope gets `mcp:read`. Most clients ask for more: the
+`401` challenge names `mcp:read mcp:write` as what full use of the endpoint
+needs, and the protected-resource metadata lists both scopes as supported, so a
+client that follows either discovery path can request both. Neither obliges it
+to: a client may still ask for `mcp:read` alone. The consent screen spells out
 what the grant covers, so a read-only connection is a choice you can see being
 made. A read-only grant is refused in the middleware, before routing, on any
 write request — so no route has to remember the rule.
