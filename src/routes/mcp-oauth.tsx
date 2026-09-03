@@ -21,6 +21,7 @@
  */
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { setHtmlSecurityHeaders } from "../middleware/security-headers";
 import { recordAudit } from "../storage/audit";
 import {
   SCOPE_WRITE,
@@ -428,7 +429,7 @@ const CONSENT_CSS = `
     padding: 2rem;
   }
   .consent-title { margin: 0 0 0.5rem; font-size: 1.25rem; }
-  .consent-detail { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.5; }
+  .consent-detail { margin: 0 0 0.75rem; color: var(--text-secondary); font-size: 0.9rem; line-height: 1.5; }
   .consent-client {
     display: block;
     font-family: monospace;
@@ -447,15 +448,15 @@ const CONSENT_CSS = `
     font-size: 0.9rem;
   }
   .consent-scopes li:last-child { border-bottom: none; }
-  .consent-warn {
-    background: var(--bg-primary);
-    border-left: 3px solid var(--accent, #7ca9f7);
-    padding: 0.65rem 0.85rem;
-    margin: 0 0 1.25rem;
+  .consent-more {
+    margin-top: 1.25rem;
     font-size: 0.82rem;
     color: var(--text-secondary);
     line-height: 1.45;
   }
+  .consent-more summary { cursor: pointer; color: var(--text-muted, var(--text-secondary)); }
+  .consent-more p { margin: 0.6rem 0 0; }
+  .consent-more .consent-client { margin: 0.35rem 0 0; }
   .consent-actions { display: flex; gap: 0.75rem; }
   .consent-actions button { flex: 1; padding: 0.6rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.92rem; }
   .consent-allow { background: var(--accent, #7ca9f7); color: #0d0d0d; border: none; font-weight: 600; }
@@ -500,6 +501,15 @@ app.get("/oauth/authorize", async (c) => {
   if (!clientResult.success) {
     return renderAuthorizeError(c, "Unknown client", "This application is no longer registered.");
   }
+  const clientName = clientResult.data.clientName;
+
+  // The redirect URI is verified against the registered list by now, so the
+  // browser must be allowed to follow the redirect that answers the consent
+  // POST. Chromium and WebKit check this page's `form-action` against that
+  // redirect, and under the site-wide `'self'` they refuse it — the code is
+  // minted and never delivered, and clicking Allow visibly does nothing. See
+  // `CspOptions`.
+  setHtmlSecurityHeaders(c, { formAction: consentFormAction(params.redirectUri) });
 
   return c.html(
     <html lang="en">
@@ -513,28 +523,23 @@ app.get("/oauth/authorize", async (c) => {
       <body>
         <div class="consent-page">
           <div class="consent-card">
-            <h1 class="consent-title">Connect an application</h1>
+            <h1 class="consent-title">
+              Allow <strong>{clientName}</strong> to access Stratum?
+            </h1>
+            {/* The host it returns to is the one signal a person can actually
+                check against a self-asserted name, so it stays above the fold;
+                the full URI and the rest of the fine print are one click away. */}
             <p class="consent-detail">
-              An application calling itself <strong>{clientResult.data.clientName}</strong> wants to
-              act on Stratum as <strong>{userResult.data.username}</strong>.
+              Signed in as <strong>{userResult.data.username}</strong>. Returns you to{" "}
+              <strong>{new URL(params.redirectUri).host}</strong> when done.
             </p>
-            <p class="consent-detail">It will be sent back to:</p>
-            <code class="consent-client">{params.redirectUri}</code>
 
-            <p class="consent-detail">If you allow this, it will be able to:</p>
+            <p class="consent-detail">It will be able to:</p>
             <ul class="consent-scopes">
               {describeScope(params.scope).map((line) => (
                 <li key={line}>{line}</li>
               ))}
             </ul>
-
-            {/* Anyone can register a client under any name. Saying so is the
-                only defence against a client registered as "Stratum Official". */}
-            <p class="consent-warn">
-              Any application can register itself under any name. Only continue if you just started
-              this from <strong>{clientResult.data.clientName}</strong> yourself, and the address
-              above is one you recognise.
-            </p>
 
             <form method="post" action="/oauth/authorize">
               <input type="hidden" name="client_id" value={params.clientId} />
@@ -556,12 +561,43 @@ app.get("/oauth/authorize", async (c) => {
                 </button>
               </div>
             </form>
+
+            {/* Anyone can register a client under any name. Saying so is the
+                only defence against a client registered as "Stratum Official". */}
+            <details class="consent-more">
+              <summary>Where this request came from</summary>
+              <p>
+                Application names are self-declared: any application can register itself under any
+                name. Only continue if you started this connection from{" "}
+                <strong>{clientName}</strong> yourself.
+              </p>
+              <p>After you allow, your browser is sent to:</p>
+              <code class="consent-client">{params.redirectUri}</code>
+              <p>
+                You can disconnect it at any time from{" "}
+                <a href="/settings">Settings → Connected applications</a>.
+              </p>
+            </details>
           </div>
         </div>
       </body>
     </html>,
   );
 });
+
+/**
+ * The `form-action` sources the consent page needs: `'self'` plus the client's
+ * registered origin, which is where the post-consent redirect goes.
+ *
+ * CSP's host-source grammar has no spelling for an IPv6 literal, so a client
+ * listening on `[::1]` cannot be named; for that one case the directive is
+ * dropped on this page rather than emitted in a form the browser would discard
+ * as invalid (and then enforce as if absent — or, in Chromium, as if `'none'`).
+ */
+function consentFormAction(redirectUri: string): string[] | null {
+  const origin = new URL(redirectUri).origin;
+  return origin.includes("[") ? null : [origin];
+}
 
 app.post("/oauth/authorize", async (c) => {
   const logger = createLogger({ path: c.req.path, method: c.req.method });

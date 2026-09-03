@@ -85,6 +85,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user), so an agent's feedback channel is change comments.
 
 ### Changed
+- **The MCP consent screen is shorter.** It leads with the question (allow
+  *this application* to access Stratum as *you*), the permissions it is asking
+  for, and the two buttons, with the host it returns you to on one line. The
+  full redirect address, the note that application names are self-declared, and
+  where to disconnect later are under a collapsible **Where this request came
+  from** instead of above the buttons.
 - **The MCP request body is capped at 8 MB**, below the REST API's 25 MB commit
   limit. A tool call is buffered, parsed, re-serialized into an internal request
   and parsed again, so a body near the REST limit would cost more than a Workers
@@ -193,6 +199,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a change that passed before this release may fail on re-evaluation.
 
 ### Fixed
+- **Approving an MCP connection in Chrome, Edge or Safari now completes it.**
+  The consent screen shipped the site-wide `form-action 'self'` policy, and
+  those browsers enforce that directive against the redirect that answers the
+  consent form, not just against the form's own action. Clicking Allow minted
+  an authorization code the browser then refused to deliver to the client, so
+  the page sat there and the connector never connected. Firefox does not check
+  redirects, which is why the flow appeared to work in one browser and not
+  another. The consent page now names the client's registered redirect origin
+  in its own `form-action`; every other response keeps `'self'`.
+- **The MCP `401` challenge names the scopes the endpoint needs**
+  (`scope="mcp:read mcp:write"`, RFC 6750 §3). A client that takes its scope
+  from the challenge asks for read and write up front rather than authorizing
+  read-only and failing on its first commit. A client that asks for nothing
+  still gets `mcp:read`.
 - Approvals are dismissed when the evaluated **base** moves, not only when the
   tip does. A change re-evaluated against a newer base kept approvals that were
   granted against different code.

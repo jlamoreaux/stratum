@@ -99,6 +99,10 @@ describe("authentication", () => {
     expect(challenge).toContain(
       `resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`,
     );
+    // RFC 6750 §3: the scopes full use of the endpoint needs, so a client that
+    // takes its scope from the challenge asks for write access up front rather
+    // than authorizing read-only and failing on its first commit.
+    expect(challenge).toContain('scope="mcp:read mcp:write"');
 
     // And the body is a JSON-RPC error, so a client that hands the body to its
     // RPC layer before checking the status gets something parseable.
