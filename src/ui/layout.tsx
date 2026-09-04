@@ -1,6 +1,10 @@
 import type { FC } from "hono/jsx";
 
-/** The header links a page can mark as the one the reader is on. */
+/**
+ * A closed union rather than a free string: the header renders exactly these
+ * links, so a page cannot claim an "active" link that does not exist, and
+ * adding a link means adding it here where the compiler lists every caller.
+ */
 export type NavItem = "new" | "settings";
 
 interface LayoutProps {
@@ -11,7 +15,10 @@ interface LayoutProps {
     | undefined;
   /** Auto-reload the page every N seconds (status polling without client JS). */
   refreshSeconds?: number;
-  /** Which header link, if any, points at the current page. */
+  /**
+   * Set by the page, not derived from the request path: the layout does not
+   * see the URL, and a page under /new/import is still "new" to the reader.
+   */
   active?: NavItem;
   children?: unknown;
 }
@@ -40,7 +47,12 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, c
           </a>
           {user && (
             <>
-              {/* Phone-width menu toggle; see the .nav-menu-toggle rules in nav-css.ts. */}
+              {/*
+                A checkbox, not a button: the phone menu's open/closed state
+                has to live somewhere with no client script, and :checked is
+                the only state CSS can read. The label is the visible button;
+                the input is visually hidden but kept in the tab order.
+              */}
               <input type="checkbox" id="nav-menu" class="nav-menu-toggle" />
               <label for="nav-menu" class="nav-menu-button">
                 <span class="nav-menu-open">menu</span>

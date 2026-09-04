@@ -39,6 +39,7 @@ import {
   updateImportStatus,
 } from "../storage/imports";
 import { getOrgAccessLevel, getOrgBySlug } from "../storage/orgs";
+import { confirmOwnerNamespace } from "../storage/project-namespace";
 import { listProvenance } from "../storage/provenance";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
 import { getProjectByPath, listProjectsByNamespace, setProject } from "../storage/state";
@@ -52,7 +53,7 @@ import {
   updateProjectSyncError,
 } from "../storage/sync";
 import type { ArtifactsCreateResult, Env, ImportStatus, ProjectEntry } from "../types";
-import { getArtifactsRepoName, projectDefaultBranch } from "../types";
+import { getArtifactsRepoName, getUserNamespace, projectDefaultBranch } from "../types";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
 import {
   canReadProject,
@@ -64,6 +65,7 @@ import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
 import { readJsonWithLimit } from "../utils/request-body";
 import {
+  appError,
   badRequest,
   created,
   forbidden,
@@ -109,11 +111,6 @@ function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
 // Helper to generate project ID
 function generateProjectId(): string {
   return crypto.randomUUID();
-}
-
-// Helper to get user's namespace (username with @ prefix)
-function getUserNamespace(username: string): string {
-  return username.startsWith("@") ? username : `@${username}`;
 }
 
 // POST /projects - Create a new project
@@ -263,6 +260,13 @@ app.post("/", async (c) => {
   if (!setResult.success) {
     logger.error("Failed to set project", setResult.error);
     return internalError(setResult.error.message);
+  }
+
+  // The username on this request was read at auth time, before the repository
+  // was created; see confirmOwnerNamespace for the rename it may have crossed.
+  if (owner.type === "user") {
+    const confirmed = await confirmOwnerNamespace(c.env, owner.id, namespace, slug, logger);
+    if (!confirmed.success) return appError(confirmed.error);
   }
 
   logger.info("Project created", {
@@ -661,6 +665,11 @@ app.post(
         logger.error("Failed to set project after import", setResult.error);
         return internalError(setResult.error.message);
       }
+
+      // Same guard as project creation. The import job row created above is
+      // never queued in this case; it ages out with cleanupOldImports.
+      const confirmed = await confirmOwnerNamespace(c.env, userId, namespace, slug, logger);
+      if (!confirmed.success) return appError(confirmed.error);
 
       // Queue the actual import job for background processing using the queue if available
       if (c.env.IMPORT_QUEUE) {

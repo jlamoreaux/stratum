@@ -253,6 +253,15 @@ export function projectPath(project: ProjectEntry): string {
   return `/${project.namespace}/${project.slug}`;
 }
 
+/**
+ * A user's namespace as it appears in every project key and URL: the username
+ * with an "@" prefix. Tolerates an already-prefixed value so callers can pass
+ * either a username or a namespace.
+ */
+export function getUserNamespace(username: string): string {
+  return username.startsWith("@") ? username : `@${username}`;
+}
+
 // Helper to generate Artifacts repo name
 // Uses double underscore separator to avoid collisions between namespace/slug boundaries
 // e.g., "user-a/b" and "user/a-b" both become "user-a-b" with hyphen, but

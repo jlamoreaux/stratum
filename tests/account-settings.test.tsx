@@ -307,6 +307,13 @@ describe("POST /settings/username", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/settings?notice=username-changed#account");
+    // KV keys carry the "@": listing the bare username would find nothing and
+    // wave every rename through.
+    expect(listProjectsByNamespace).toHaveBeenCalledWith(
+      expect.anything(),
+      "@alice",
+      expect.anything(),
+    );
     expect(renameUser).toHaveBeenCalledWith(
       expect.anything(),
       "usr_1",

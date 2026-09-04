@@ -54,7 +54,7 @@ import {
 } from "../storage/users";
 import { listDeliveries, listWebhooks } from "../storage/webhooks";
 import type { ApiTokenScope, Env, ProjectEntry } from "../types";
-import { projectDefaultBranch } from "../types";
+import { getUserNamespace, projectDefaultBranch } from "../types";
 import { parseUnifiedDiff } from "../ui/components/diff-view";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
 import { ActivityPage } from "../ui/pages/activity";
@@ -348,7 +348,7 @@ async function ownsNoProjects(
   namespace: string,
   logger: ReturnType<typeof createLogger>,
 ): Promise<boolean> {
-  const projects = await listProjectsByNamespace(kv, namespace, logger);
+  const projects = await listProjectsByNamespace(kv, getUserNamespace(namespace), logger);
   return projects.success && projects.data.length === 0;
 }
 
@@ -510,7 +510,11 @@ app.post("/settings/username", async (c) => {
     return c.html(page, status);
   };
 
-  const projects = await listProjectsByNamespace(c.env.STATE, user.username, logger);
+  const projects = await listProjectsByNamespace(
+    c.env.STATE,
+    getUserNamespace(user.username),
+    logger,
+  );
   if (!projects.success) {
     logger.error("Could not list projects before a rename", projects.error);
     return c.html(issuePageError(500, user), 500);
@@ -541,7 +545,7 @@ app.post("/settings/username", async (c) => {
   // creation that read the old name before the UPDATE and wrote KV after this
   // check, a window the width of that one request; and KV listings are only
   // eventually consistent across edges, which no check here can close.
-  const late = await listProjectsByNamespace(c.env.STATE, user.username, logger);
+  const late = await listProjectsByNamespace(c.env.STATE, getUserNamespace(user.username), logger);
   if (!late.success || late.data.length > 0) {
     const reverted = await renameUser(c.env.DB, user.id, user.username, logger);
     if (!reverted.success) {

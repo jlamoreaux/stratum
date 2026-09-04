@@ -11,9 +11,10 @@ import {
   resolveDefaultBranch,
 } from "../storage/git-providers";
 import { createImportJob, updateImportStatus } from "../storage/imports";
+import { confirmOwnerNamespace } from "../storage/project-namespace";
 import { getProjectByPath, setProject } from "../storage/state";
 import type { ArtifactsCreateResult, BulkImportJob, Env, ProjectEntry } from "../types";
-import { getArtifactsRepoName } from "../types";
+import { getArtifactsRepoName, getUserNamespace } from "../types";
 import { createLogger } from "../utils/logger";
 import { readJsonWithLimit } from "../utils/request-body";
 import { badRequest, created, forbidden, notFound, ok, unauthorized } from "../utils/response";
@@ -51,13 +52,6 @@ interface RepoImportRequest {
  */
 function generateProjectId(): string {
   return crypto.randomUUID();
-}
-
-/**
- * Helper to get user's namespace
- */
-function getUserNamespace(username: string): string {
-  return username.startsWith("@") ? username : `@${username}`;
 }
 
 /**
@@ -213,6 +207,14 @@ export async function processRepoImport(
     if (!setResult.success) {
       job && job.failedRepos++;
       return { success: false, error: setResult.error.message, repo: url };
+    }
+
+    // The owner's username was read when the bulk job started; see
+    // confirmOwnerNamespace for the rename it may have crossed since.
+    const confirmed = await confirmOwnerNamespace(env, ownerId, namespace, slug, logger);
+    if (!confirmed.success) {
+      job && job.failedRepos++;
+      return { success: false, error: confirmed.error.message, repo: url };
     }
 
     // Enqueue the clone FIRST, then mark "queued" only once it's accepted — so a
