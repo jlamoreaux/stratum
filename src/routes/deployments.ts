@@ -26,6 +26,7 @@
  */
 import { Hono } from "hono";
 import type { DeployQueueMessage } from "../deploy/runner";
+import { recordDeployRequest } from "../queue/deploy-queue";
 import { recordAudit } from "../storage/audit";
 import {
   DEPLOYMENT_STATUSES,
@@ -590,7 +591,20 @@ deploymentApp.post("/:id/approve", async (c) => {
       error instanceof Error ? error : undefined,
       { deploymentId: approved.id, projectId: project.id },
     );
-    return internalError("Deployment was approved but could not be queued; retry it");
+    // The row has already left `pending_approval`, and only a queue message can
+    // move it any further — `claimDeployment` runs from the consumer, and a
+    // second approval of a `queued` row is refused. "Retry it" was therefore
+    // advice that could not succeed. Recording the request durably instead
+    // hands it to the outbox sweep, so the approval the user granted still runs.
+    const recorded = await recordDeployRequest(c.env, logger, {
+      message,
+      project: project.name,
+    });
+    if (!recorded) {
+      return internalError(
+        "Deployment was approved but could not be started, and the request could not be recorded for recovery",
+      );
+    }
   }
 
   await recordAudit(c.env.DB, logger, {
@@ -701,7 +715,19 @@ deploymentApp.post("/:id/retry", async (c) => {
       error instanceof Error ? error : undefined,
       { deploymentId: retry.id, projectId: project.id },
     );
-    return internalError("Retry was recorded but could not be queued; try again");
+    // Same dead end as approve, one step further along: the new attempt row
+    // exists and is `queued`, so "try again" would only be refused by the
+    // unique index on (project, name, commit, attempt). The outbox sweep is
+    // what can still start it.
+    const recorded = await recordDeployRequest(c.env, logger, {
+      message,
+      project: project.name,
+    });
+    if (!recorded) {
+      return internalError(
+        "Retry was recorded but could not be started, and the request could not be saved for recovery",
+      );
+    }
   }
 
   await recordAudit(c.env.DB, logger, {

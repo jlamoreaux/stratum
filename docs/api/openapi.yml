@@ -1252,10 +1252,43 @@ paths:
         the secret's name travels in the body. Same authorization gate. A
         form-encoded caller is redirected back to the project settings page
         with a fixed error code rather than a caller-supplied message.
+
+        The content type is what selects the response shape, not just the
+        parser: `application/json` is answered with JSON, and anything else is
+        treated as a browser form and answered with a `302`.
       requestBody:
         required: true
         content:
           application/json:
+            schema:
+              type: object
+              required: [name, value]
+              properties:
+                name:
+                  type: string
+                  pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+                value:
+                  type: string
+                  description: At most 4096 bytes. Never returned by any endpoint.
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [name, value]
+              properties:
+                name:
+                  type: string
+                  pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+                  description: >
+                    Surrounding whitespace is trimmed before validation. A name
+                    that does not match the pattern redirects with
+                    `?secretError=name` instead of returning `400`.
+                value:
+                  type: string
+                  description: >
+                    At most 4096 bytes; must not be empty (an empty value
+                    redirects with `?secretError=value`). Never returned by any
+                    endpoint.
+          multipart/form-data:
             schema:
               type: object
               required: [name, value]

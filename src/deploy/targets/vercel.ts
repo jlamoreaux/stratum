@@ -159,6 +159,32 @@ export function inlineBodyBytes(bytes: number): number {
 /** The largest request body this target can produce, given the shared byte limit. */
 export const MAX_INLINE_BODY_BYTES = inlineBodyBytes(MAX_TOTAL_BYTES);
 
+/**
+ * Peak heap one accepted deployment of this target holds, in bytes.
+ *
+ * Three live copies of the tree exist at the instant `fetch` is called: the raw
+ * bytes the runner read (`MAX_TOTAL_BYTES`), the base64 strings in `files`, and
+ * the string `JSON.stringify` produced from them. Nothing can be released
+ * earlier — the runner still owns the raw map (it may have another deploy to
+ * run from the same tree), and `JSON.stringify` cannot see the array lazily.
+ *
+ * **This number is why `MAX_DEPLOY_CONCURRENCY` is 1.** It is exported so that
+ * relationship is asserted in the test suite rather than remembered: two of
+ * these in one isolate exceed `ISOLATE_MEMORY_BYTES` (both in `../limits`), and
+ * the isolate is killed before any `finally` can write a terminal deployment
+ * status.
+ *
+ * The only way to cut it meaningfully is to stop materializing the body at all
+ * — generate each file's base64 inside a `ReadableStream` and hand *that* to
+ * `fetch`, which would hold one file at a time. That is deliberately not done
+ * here: a streamed body is sent with `Transfer-Encoding: chunked`, whether
+ * Vercel's create-deployment endpoint accepts a chunked body is not something
+ * this repo's tests can establish (every target test injects `fetch`), and the
+ * failure mode of guessing wrong is that every Vercel deploy 400s. The
+ * concurrency bound removes the OOM without betting on that.
+ */
+export const MAX_PEAK_DEPLOY_BYTES = MAX_TOTAL_BYTES + 2 * MAX_INLINE_BODY_BYTES;
+
 export const vercelTarget: DeployTarget = {
   name: "vercel",
   requiredSecrets: REQUIRED_SECRETS,

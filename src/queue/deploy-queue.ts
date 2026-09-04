@@ -19,13 +19,175 @@
  * A malformed body is acked with a logged error rather than retried. Nothing
  * about redelivering a message the runner cannot parse changes its shape, and
  * the retry budget would only delay the DLQ.
+ *
+ * ## The send itself can fail, and losing it loses the deploy
+ *
+ * Everything above is about a message that *arrived*. `queue.send` can also
+ * reject, and every producer of this queue is in a position where it cannot
+ * usefully report that: the merge has already happened, or the deployment row
+ * has already been moved to `queued`, where nothing but a queue message can
+ * ever pick it up again. {@link recordDeployRequest} is the durable fallback —
+ * an outbox row in D1, swept by the five-minute cron and forwarded to this
+ * queue by {@link forwardDeployRequest}. See the note on that function for why
+ * the deploy work itself never rides the events queue.
  */
 import { type DeployQueueMessage, runDeployMessage } from "../deploy/runner";
 import type { PostMergeStatus } from "../merge/post-merge";
 import { getChange } from "../storage/changes";
 import { isIsoTimestamp } from "../storage/deployments";
+import { type EventRecord, insertEvent } from "../storage/events";
+import { getProjectById } from "../storage/state";
 import type { Env, Message, MessageBatch } from "../types";
 import { type Logger, createLogger } from "../utils/logger";
+import type { EventQueueMessage } from "./events";
+
+/**
+ * Outbox `events.type` for a deploy request that could not be handed to
+ * `DEPLOY_QUEUE` directly.
+ *
+ * Deliberately outside `StratumEvent`. A row of this type is *work*, not a
+ * notification: it carries no meaning for a subscriber, and the union is what
+ * webhook receivers and analytics see. Keeping it out of the union is what lets
+ * {@link forwardDeployRequest} be its only handler.
+ */
+export const DEPLOY_ENQUEUE_EVENT_TYPE = "deploy.enqueue";
+
+/**
+ * Is this outbox row internal work rather than a domain notification?
+ *
+ * The event consumer asks before choosing a handler set, so an internal row is
+ * never delivered to a `*`-subscribed webhook or counted as a product event.
+ */
+export function isInternalEventType(type: string): boolean {
+  return type === DEPLOY_ENQUEUE_EVENT_TYPE;
+}
+
+/**
+ * Record a deploy request that `DEPLOY_QUEUE.send` refused, so it can be
+ * delivered later instead of being lost.
+ *
+ * The row goes in the **existing event outbox** rather than a new table: that
+ * outbox already has the two halves this needs — a durable D1 row written
+ * before anything is sent, and a five-minute sweep that re-enqueues rows still
+ * `pending`. A `deployments`-only sweep could not cover the merge path at all,
+ * because a merge whose send fails has produced no deployment row to find (the
+ * runner creates rows only after it consumes the message).
+ *
+ * Never throws: every caller is on a path that has already succeeded at
+ * something the user was told about, and none of them can undo it.
+ *
+ * @param input.project - The project's name, for the outbox row's own column.
+ *   Callers that only know the id may omit it; it is resolved, best effort.
+ * @returns Whether the request is now durable. `false` means the outbox write
+ *   itself failed, and the request is genuinely lost.
+ */
+export async function recordDeployRequest(
+  env: Env,
+  logger: Logger,
+  input: { message: DeployQueueMessage; project?: string },
+): Promise<boolean> {
+  if (!env.DB) {
+    logger.error("Cannot record a deploy request: no database is bound", undefined, {
+      projectId: input.message.projectId,
+    });
+    return false;
+  }
+
+  let project = input.project;
+  if (project === undefined) {
+    // Only reached on a send failure, so the extra read costs nothing in the
+    // normal case. The id is a usable stand-in if the lookup fails: the column
+    // is descriptive here, and every consumer of this row scopes on project_id.
+    try {
+      const resolved = await getProjectById(env.STATE, input.message.projectId, logger);
+      project = resolved.success ? resolved.data.name : input.message.projectId;
+    } catch {
+      project = input.message.projectId;
+    }
+  }
+
+  const inserted = await insertEvent(env.DB, logger, {
+    type: DEPLOY_ENQUEUE_EVENT_TYPE,
+    project,
+    projectId: input.message.projectId,
+    actorType: "system",
+    payload: { ...input.message },
+  });
+  if (!inserted.success) {
+    logger.error("Could not record a deploy request for recovery", inserted.error, {
+      projectId: input.message.projectId,
+      kind: input.message.kind,
+    });
+    return false;
+  }
+
+  logger.warn("Deploy request recorded for recovery after a failed queue send", {
+    eventId: inserted.data.id,
+    projectId: input.message.projectId,
+    kind: input.message.kind,
+  });
+
+  // Best effort nudge so recovery does not always wait for the cron. The sweep
+  // is the guarantee; this is only latency.
+  if (env.EVENTS_QUEUE) {
+    try {
+      const nudge: EventQueueMessage = { eventId: inserted.data.id };
+      await env.EVENTS_QUEUE.send(nudge);
+    } catch (error) {
+      logger.warn("Could not nudge the events queue; the sweep will pick the request up", {
+        eventId: inserted.data.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return true;
+}
+
+/**
+ * Deliver one {@link DEPLOY_ENQUEUE_EVENT_TYPE} outbox row to `DEPLOY_QUEUE`.
+ *
+ * **Forwarding is all it does.** The deploy itself never runs on the events
+ * queue: that queue's consumer has no deploy lease, no visibility timeout sized
+ * for a provider upload, and a batch size that would put several deploys in one
+ * isolate — every property `stratum-deploys` exists to provide. This handler's
+ * whole job is to put the message back where it belongs.
+ *
+ * Throws when the forward fails, which is the contract `processEvent` expects:
+ * the event stays `pending`, the queue retries it, and the sweep re-enqueues it
+ * until the attempt budget runs out. A payload that cannot be parsed and an
+ * instance with no `DEPLOY_QUEUE` both return normally instead — no redelivery
+ * changes either answer.
+ */
+export async function forwardDeployRequest(
+  env: Env,
+  event: EventRecord,
+  logger: Logger,
+): Promise<void> {
+  if (event.type !== DEPLOY_ENQUEUE_EVENT_TYPE) return;
+
+  const message = parseDeployMessage(event.payload);
+  if (message === null) {
+    logger.error("Deploy enqueue outbox row is unusable; dropping it", undefined, {
+      eventId: event.id,
+    });
+    return;
+  }
+
+  if (!env.DEPLOY_QUEUE) {
+    logger.warn("Deployments are not enabled on this instance; dropping a recovered request", {
+      eventId: event.id,
+      projectId: message.projectId,
+    });
+    return;
+  }
+
+  await env.DEPLOY_QUEUE.send(message);
+  logger.info("Recovered deploy request forwarded to the deploy queue", {
+    eventId: event.id,
+    projectId: message.projectId,
+    kind: message.kind,
+  });
+}
 
 /** Narrows an untrusted queue body to a message the runner will accept. */
 function parseDeployMessage(body: unknown): DeployQueueMessage | null {
@@ -221,5 +383,18 @@ export async function enqueueMergeDeploy(
       error instanceof Error ? error : new Error(String(error)),
       { changeId: input.changeId, commitSha: input.commitSha },
     );
+    // Swallowing the failure is right — the merge happened and the response
+    // describes it truthfully. Losing the request is not: the runner creates
+    // deployment rows only *after* it consumes this message, so a dropped send
+    // leaves no row at all, and there is nothing for an operator to see, retry
+    // or sweep. The outbox row is the thing that can still be recovered.
+    const recorded = await recordDeployRequest(env, logger, { message });
+    if (!recorded) {
+      logger.error("Post-merge deploy request could not be made durable and is lost", undefined, {
+        changeId: input.changeId,
+        commitSha: input.commitSha,
+        projectId: input.projectId,
+      });
+    }
   }
 }

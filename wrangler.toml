@@ -123,10 +123,17 @@ retry_delay = 30    # Wait 30 seconds between retries
 # for a tree of up to MAX_TOTAL_BYTES, both in `src/deploy/limits.ts`. Raise
 # those limits and this MUST rise with them — a run that outlives its lease is
 # redelivered while still uploading, and the second copy races the first.
+#
+# max_concurrency is 1, and must stay 1: concurrent invocations share one
+# isolate's 128 MiB, one Vercel deploy peaks near 92 MiB of that (the tree, its
+# base64 copy, and the request body), and an OOM kill happens *before* the
+# runner's `finally` can write a terminal status. See MAX_DEPLOY_CONCURRENCY in
+# `src/deploy/limits.ts` for the arithmetic and for the price — this serializes
+# Cloudflare deploys too.
 [[queues.consumers]]
 queue = "stratum-deploys"
 max_batch_size = 1
-max_concurrency = 2
+max_concurrency = 1
 max_retries = 2
 retry_delay = 60
 visibility_timeout_ms = 900000  # 15 min; see src/deploy/limits.ts
@@ -283,11 +290,12 @@ max_retries = 3
 retry_delay = 30
 
 # See the top-level stratum-deploys consumer for why each knob is set:
-# visibility_timeout_ms is tied to the bounds in `src/deploy/limits.ts`.
+# visibility_timeout_ms is tied to the bounds in `src/deploy/limits.ts`, and
+# max_concurrency = 1 is the isolate-memory bound (MAX_DEPLOY_CONCURRENCY).
 [[env.production.queues.consumers]]
 queue = "stratum-deploys"
 max_batch_size = 1
-max_concurrency = 2
+max_concurrency = 1
 max_retries = 2
 retry_delay = 60
 visibility_timeout_ms = 900000  # 15 min; see src/deploy/limits.ts
@@ -432,11 +440,12 @@ retry_delay = 30
 # "stratum-deploys" would hand staging's deploy messages to the production
 # consumer, whose D1 has no matching deployments row. Its DLQ is suffixed too.
 # See the top-level consumer for the knobs; visibility_timeout_ms is tied to
-# the bounds in `src/deploy/limits.ts`.
+# the bounds in `src/deploy/limits.ts`, and max_concurrency = 1 is the
+# isolate-memory bound (MAX_DEPLOY_CONCURRENCY).
 [[env.staging.queues.consumers]]
 queue = "stratum-deploys-staging"
 max_batch_size = 1
-max_concurrency = 2
+max_concurrency = 1
 max_retries = 2
 retry_delay = 60
 visibility_timeout_ms = 900000  # 15 min; see src/deploy/limits.ts

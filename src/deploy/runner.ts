@@ -58,6 +58,7 @@ import { projectDefaultBranch } from "../types";
 import type { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
+import { DEPLOY_ATTEMPT_DEADLINE_MS } from "./limits";
 import { redactAndTruncate } from "./redact";
 import { type DeployFetch, getDeployTarget } from "./targets/index";
 
@@ -110,11 +111,17 @@ export type DeployFilesReader = (
   branch: string,
 ) => Promise<Result<Map<string, Uint8Array>, AppError>>;
 
-/** The seams a test replaces. All three default to the production implementation. */
+/** The seams a test replaces. Every one defaults to the production implementation. */
 export interface DeployRunnerDeps {
   readFiles?: DeployFilesReader;
   now?: () => number;
   fetch?: DeployFetch;
+  /**
+   * Wall-clock budget for one deployment attempt. Defaults to
+   * {@link DEPLOY_ATTEMPT_DEADLINE_MS}; a test shortens it rather than waiting
+   * ten minutes for a provider that never answers.
+   */
+  deadlineMs?: number;
 }
 
 /** One deployment row this run touched, for the queue consumer's log. */
@@ -163,6 +170,11 @@ const MAX_REASON_LENGTH = 1_000;
 /** Stamped only if something threw between the assignments in `runOneDeployment`. */
 const ABANDONED_REASON = "The deploy runner exited without recording an outcome";
 
+/** Stamped on a row whose attempt outlived the runner's wall-clock budget. */
+function deadlineReason(deadlineMs: number): string {
+  return `The deploy did not finish within ${Math.round(deadlineMs / 1000)}s and was abandoned before its lease could expire; retry it`;
+}
+
 const DELETING_REASON = "The project is being deleted; the deploy was not run";
 
 const NO_PROJECT_ID_REASON =
@@ -206,6 +218,7 @@ interface RunContext {
   iso: () => string;
   readFiles: DeployFilesReader;
   fetch: DeployFetch;
+  deadlineMs: number;
 }
 
 /**
@@ -250,6 +263,7 @@ export async function runDeployMessage(
     iso: () => new Date(now()).toISOString(),
     readFiles: deps.readFiles ?? readRepoFiles,
     fetch: deps.fetch ?? ((url, init) => fetch(url, init)),
+    deadlineMs: deps.deadlineMs ?? DEPLOY_ATTEMPT_DEADLINE_MS,
   };
 
   return message.kind === "merge"
@@ -344,9 +358,19 @@ async function runMergeMessage(
   // A rejected entry becomes a visible failed row, never a dropped one: a deploy
   // the author wrote and that never runs means production silently stopped
   // updating. See the note in `sanitizeDeploys`.
+  //
+  // *One row per rejection*, which is why the names are made distinct first.
+  // `insertDeployment` excludes on (project, name, commit, attempt), so two
+  // rejections sharing a name — two entries with no usable `name` at all, or a
+  // duplicate-name pair — would collapse into one row and silently lose a
+  // reason. A rejection can also collide with an *accepted* entry, because the
+  // duplicate-name rule rejects the second declaration of a name the first
+  // declaration is legitimately using; the accepted names are therefore claimed
+  // up front, so a rejection row can never take the key the real deploy needs.
+  const claimedNames = new Set(policy.deploys.map((entry) => entry.name));
   for (const rejection of policy.rejections) {
     const created = await createDeployment(ctx, {
-      name: rejection.name ?? UNRESOLVED_DEPLOY_NAME,
+      name: distinctName(rejection.name ?? UNRESOLVED_DEPLOY_NAME, claimedNames),
       target: UNRESOLVED_TARGET,
       commitSha: message.commitSha,
       changeId: message.changeId,
@@ -582,8 +606,29 @@ async function runOneDeployment(
   let terminal: TerminalWrite = { status: "failed", reason: ABANDONED_REASON };
   let writtenReason: string | null = null;
 
+  /**
+   * The runner's half of the lease invariant (`src/deploy/limits.ts`). The
+   * attempt is abandoned strictly before `DEFAULT_DEPLOY_LEASE_MS` can elapse,
+   * so "the lease expired" can only ever mean "no runner is alive" — otherwise
+   * `claimDeployment` would hand this still-uploading row to a second consumer
+   * and the same commit would deploy twice. The signal is threaded into the
+   * provider `fetch` so the timeout actually cuts the upload off rather than
+   * leaving it running behind a resolved race.
+   */
+  const controller = new AbortController();
+  let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<TerminalWrite>((resolve) => {
+    deadlineTimer = setTimeout(() => {
+      controller.abort();
+      resolve({ status: "failed", reason: deadlineReason(ctx.deadlineMs) });
+    }, ctx.deadlineMs);
+  });
+
   try {
-    terminal = await deployOnce(ctx, claim.data.deployment, config, files, secretValues);
+    terminal = await Promise.race([
+      deployOnce(ctx, claim.data.deployment, config, files, secretValues, controller.signal),
+      deadline,
+    ]);
   } catch (error) {
     // A target that throws — a malformed provider response, an unexpected
     // runtime fault — must still leave a terminal row. This is why the write
@@ -597,6 +642,9 @@ async function runOneDeployment(
       reason: `Deploy failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`,
     };
   } finally {
+    // Left armed, this keeps the invocation alive for the rest of the budget.
+    if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+
     // The single point where anything from a provider reaches D1, so redaction
     // goes here rather than at each producer: a payload that echoed a credential
     // cannot get past it, whichever branch produced it.
@@ -655,6 +703,7 @@ async function deployOnce(
   config: DeployConfig,
   files: ReadonlyMap<string, Uint8Array>,
   secretValues: string[],
+  signal: AbortSignal,
 ): Promise<TerminalWrite> {
   const { env, logger, project } = ctx;
   const target = getDeployTarget(config.target);
@@ -718,7 +767,10 @@ async function deployOnce(
     config,
     commitSha: deployment.commitSha,
     logger,
-    fetch: ctx.fetch,
+    // Every target reaches its provider through this one `fetch`, so attaching
+    // the deadline's signal here covers all of them without a target ever
+    // having to know a deadline exists.
+    fetch: (url, init) => ctx.fetch(url, { ...init, signal }),
   });
 
   if (!result.success) {
@@ -1039,6 +1091,23 @@ function toRecord(deployment: Deployment): DeployRunRecord {
   if (deployment.reason !== undefined) record.reason = deployment.reason;
   if (deployment.url !== undefined) record.url = deployment.url;
   return record;
+}
+
+/**
+ * `base`, or the first of `base #2`, `base #3`, … not already spoken for.
+ * Records the answer in `claimed`, so successive calls keep diverging.
+ *
+ * Deterministic given the same policy, which is what keeps `insertDeployment`'s
+ * unique index doing its job: two consumers fanning out the same merge derive
+ * the same names in the same order, so exactly one of them wins each row. The
+ * suffixed form cannot collide with a declared deploy name either — those match
+ * `^[a-z][a-z0-9-]{0,31}$`, which admits neither a space nor a `#`.
+ */
+function distinctName(base: string, claimed: Set<string>): string {
+  let candidate = base;
+  for (let n = 2; claimed.has(candidate); n++) candidate = `${base} #${n}`;
+  claimed.add(candidate);
+  return candidate;
 }
 
 /** The commit prefix humans recognise, for reasons that name a commit. */

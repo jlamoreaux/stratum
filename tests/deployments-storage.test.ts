@@ -8,6 +8,7 @@
  * database error, and a second claim of the same row must lose.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DEPLOY_ATTEMPT_DEADLINE_MS } from "../src/deploy/limits";
 import {
   DEFAULT_DEPLOY_LEASE_MS,
   type Deployment,
@@ -322,6 +323,41 @@ describe("claimDeployment", () => {
     if (!stillLive.success || stillLive.data.claimed) throw new Error("expected no claim");
     expect(stillLive.data.reason).toBe("not_claimable");
     expect(readStatus(deployment.id).lease_expires_at).toBe("2026-09-04T00:01:00.000Z");
+  });
+
+  // The double-deploy this lease exists to prevent. A runner gives up at
+  // DEPLOY_ATTEMPT_DEADLINE_MS, so the whole window in which one can still be
+  // uploading has to be a window in which nobody else can claim its row.
+  it("cannot be reclaimed at any point where a runner may still hold it", async () => {
+    const deployment = await insert();
+    const claimed = await claimDeployment(db, logger, {
+      projectId: PROJECT,
+      deploymentId: deployment.id,
+      now: T0,
+    });
+    if (!claimed.success || !claimed.data.claimed) throw new Error("expected a claim");
+
+    const start = Date.parse(T0);
+    for (const elapsed of [0, 1, DEPLOY_ATTEMPT_DEADLINE_MS - 1, DEPLOY_ATTEMPT_DEADLINE_MS]) {
+      const attempt = await claimDeployment(db, logger, {
+        projectId: PROJECT,
+        deploymentId: deployment.id,
+        now: new Date(start + elapsed).toISOString(),
+      });
+      expect(attempt.success).toBe(true);
+      if (!attempt.success || attempt.data.claimed) {
+        throw new Error(`reclaimed a live deployment ${elapsed}ms in`);
+      }
+      expect(attempt.data.reason).toBe("not_claimable");
+    }
+
+    // …and the lease does eventually release, or a dead runner would strand it.
+    const afterLease = await claimDeployment(db, logger, {
+      projectId: PROJECT,
+      deploymentId: deployment.id,
+      now: new Date(start + DEFAULT_DEPLOY_LEASE_MS).toISOString(),
+    });
+    expect(afterLease.success && afterLease.data.claimed).toBe(true);
   });
 
   it("refuses a pending_approval row", async () => {

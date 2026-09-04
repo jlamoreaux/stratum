@@ -263,4 +263,55 @@ describe("ProjectSettingsPage — deploy secrets", () => {
     );
     expect(html).toContain("A secret value is required.");
   });
+
+  // A failed listing rendered as "no secrets" reads as "you have none" when the
+  // truth is "we could not tell" — an admin acting on it would re-paste
+  // credentials that are already stored.
+  it("distinguishes a failed secret listing from an empty one", () => {
+    const html = renderToString(
+      <ProjectSettingsPage
+        project={settingsProject}
+        isOwner={true}
+        secrets={[]}
+        secretsUnavailable={true}
+        canManageSecrets={true}
+        user={user}
+      />,
+    );
+
+    expect(html).not.toContain("No deploy secrets stored for this project.");
+    expect(html).toContain("Could not load this project");
+    expect(html).toContain("settings-help-error");
+  });
+
+  it("still says 'none stored' when the listing succeeded and was empty", () => {
+    const html = renderToString(
+      <ProjectSettingsPage
+        project={settingsProject}
+        isOwner={true}
+        secrets={[]}
+        canManageSecrets={true}
+        user={user}
+      />,
+    );
+
+    expect(html).toContain("No deploy secrets stored for this project.");
+    expect(html).not.toContain("Could not load this project");
+  });
+
+  it("prefers the stored names over the error state when the listing worked", () => {
+    const html = renderToString(
+      <ProjectSettingsPage
+        project={settingsProject}
+        isOwner={true}
+        secrets={secrets}
+        secretsUnavailable={false}
+        canManageSecrets={true}
+        user={user}
+      />,
+    );
+
+    expect(html).toContain("VERCEL_TOKEN");
+    expect(html).not.toContain("Could not load this project");
+  });
 });

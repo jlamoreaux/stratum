@@ -59,3 +59,63 @@ export const MAX_SUBREQUESTS = 2_048;
  * straddling the cut.
  */
 export const MAX_LOG_TAIL = 16_384;
+
+/**
+ * Memory one Worker isolate has, in bytes. Not configurable — it is the
+ * platform's per-isolate limit, and exceeding it kills the isolate outright
+ * rather than throwing something a `finally` could catch.
+ */
+export const ISOLATE_MEMORY_BYTES = 128 * 1024 * 1024;
+
+/**
+ * How many deploy messages one isolate may run at once — the
+ * `max_concurrency` every `stratum-deploys` consumer in `wrangler.toml` must
+ * be set to.
+ *
+ * **It is 1 because concurrent queue invocations share one isolate's
+ * {@link ISOLATE_MEMORY_BYTES}, and an OOM kill is not catchable.** The Vercel
+ * target inlines the whole tree in one JSON request body
+ * (`src/deploy/targets/vercel.ts`), so one accepted deployment peaks at
+ * `MAX_TOTAL_BYTES` of raw bytes plus a base64 copy plus the serialized body —
+ * roughly 92 MiB. Two of those at once is ~183 MiB: the isolate dies *before*
+ * `runOneDeployment` reaches the `finally` that writes a terminal status, and
+ * every row it was holding is stranded at `running` with no lease to recover.
+ *
+ * The price, stated so nobody "optimizes" it back: this also serializes
+ * Cloudflare Pages and Workers deploys, which are nowhere near that peak. That
+ * is the accepted cost of a bound that holds whatever mix of targets a merge
+ * fans out to — a Vercel-only byte limit would have to be re-derived every time
+ * a target changes how it buffers, and would reject trees that deploy fine
+ * today. Raising this requires cutting the per-deploy peak first (a streamed
+ * request body), not the other way round.
+ */
+export const MAX_DEPLOY_CONCURRENCY = 1;
+
+/**
+ * Wall-clock budget for one deployment attempt, after which the runner gives up
+ * and writes a terminal `failed` row.
+ *
+ * **Invariant, and the reason this constant exists:**
+ *
+ * ```
+ * DEPLOY_ATTEMPT_DEADLINE_MS < DEFAULT_DEPLOY_LEASE_MS
+ *                           <= visibility_timeout_ms (wrangler.toml)
+ *                           <= QUEUE_CONSUMER_WALL_MS
+ * ```
+ *
+ * Every `<` and `<=` is load bearing. Without the first one, the storage lease
+ * (`DEFAULT_DEPLOY_LEASE_MS` in `src/storage/deployments.ts`) can expire while
+ * the first runner is still uploading to the provider, and `claimDeployment`
+ * will then hand a *genuinely running* row to a second consumer — the double
+ * deploy the lease exists to prevent. Bounding the runner below the lease makes
+ * "the lease expired" mean "no runner is alive", which is what every reclaim
+ * decision already assumes.
+ */
+export const DEPLOY_ATTEMPT_DEADLINE_MS = 10 * 60 * 1000;
+
+/**
+ * Cloudflare's wall-clock ceiling on one queue-consumer invocation. Recorded
+ * here because it is the outermost term of the ordering above and nothing else
+ * in the codebase states it.
+ */
+export const QUEUE_CONSUMER_WALL_MS = 15 * 60 * 1000;

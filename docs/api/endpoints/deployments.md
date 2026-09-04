@@ -17,13 +17,32 @@ split:
 No route on either router returns a secret value. There is no read path for a
 stored secret anywhere in the API.
 
+## An agent token gets `403` from a secret route and `401` from approve
+
+Both routes refuse an agent identity, but with different status codes, and the
+difference is deliberate rather than an inconsistency to be normalized away:
+
+| Caller | Secret routes | `POST /api/deployments/{id}/approve` |
+|---|---|---|
+| Anonymous / no credential | `401` | `401` |
+| Agent token (`stratum_agent_…`) | `403 Agent credentials cannot manage deploy secrets` | `401 Only authenticated users can approve a deployment` |
+| User without the required access | `403` | `403 Project access denied` |
+
+A secret route checks `agentId` **first**, so an agent is a recognized principal
+being told what it may not do — "we know exactly who you are, and this is not
+yours": `403`. Approve checks only for a `userId`, which an agent token never
+sets, so an agent falls into the same branch as an unauthenticated caller —
+"we do not know who you are *as a user*": `401`. Neither code is retryable with
+the same credential; both mean "use a user identity".
+
 ## Deploy secrets
 
 ### List secret names
 `GET /api/projects/{namespace}/{slug}/secrets`
 
-Requires **project admin** and a non-agent identity. Returns names and
-metadata only:
+Requires **project admin** and a non-agent identity: `403` for an agent token
+(and for a user who is not an admin), `401` for a caller with no user identity
+at all. Returns names and metadata only:
 
 ```json
 { "secrets": [
@@ -97,10 +116,23 @@ token is refused. This is the same guarantee (and the same limitation) as a
 human review verdict: a user's scoped API token and MCP OAuth grants are
 accepted, so it means "not an agent", not "a human at a keyboard".
 
+- `401` — no `userId` on the request. This covers both an anonymous caller and
+  an agent token, because an agent token sets `agentId` and never `userId`;
+  unlike the secret routes, this check does not look at `agentId` at all. See
+  [the note above](#an-agent-token-gets-403-from-a-secret-route-and-401-from-approve).
+- `403` — a user identity that cannot write to the deployment's project.
 - `409 DEPLOYMENT_NOT_PENDING` — the row already left `pending_approval`
   (a second approver lands here rather than deploying the commit twice).
 - `503 DEPLOY_QUEUE_UNAVAILABLE` — the instance has no `DEPLOY_QUEUE` binding.
   Checked *before* the status flip, since approval is not repeatable.
+
+**A failed enqueue is not an error.** If the queue send is rejected after the
+row has moved to `queued`, the request is written to the event outbox and the
+call still succeeds — the five-minute sweep starts it. This is deliberate: the
+row is already `queued`, so `approve` would refuse a second attempt and
+`retry` only accepts terminal rows, which made the old "try again" advice
+impossible to act on. A `500` now means the outbox write failed too, i.e.
+nothing durable was recorded.
 
 Audited as `deployment.approved`. A form-encoded caller gets a `302` back to
 the deployment page.
@@ -117,6 +149,11 @@ identity is accepted. Answers `201` with the new row.
   row would start `queued` and route around the approval gate.
 - `409 DEPLOYMENT_RETRY_EXISTS` — someone else already created this attempt.
 - `503 DEPLOY_QUEUE_UNAVAILABLE` — as above.
+
+A failed enqueue is recorded to the outbox and still answers `201`, for the
+same reason as approve: the new attempt row already exists and is `queued`, so
+a repeat call would only collide with the unique index on
+`(project, name, commit, attempt)`.
 
 The originating change id is carried onto the retry, so the "was this change
 reverted?" check still applies to it. Audited as `deployment.retried`.

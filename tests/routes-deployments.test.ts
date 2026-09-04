@@ -47,6 +47,13 @@ vi.mock("../src/storage/project-secrets", async (importActual) => {
 });
 vi.mock("../src/storage/state", () => ({ getProjectByPath: vi.fn(), getProjectById: vi.fn() }));
 vi.mock("../src/storage/audit", () => ({ recordAudit: vi.fn(async () => ({ success: true })) }));
+// The outbox that makes a failed enqueue recoverable. Mocked rather than run
+// against a real database because what these routes owe the caller is *that*
+// the request was made durable, not how the row is shaped.
+vi.mock("../src/storage/events", async (importActual) => {
+  const actual = await importActual<typeof import("../src/storage/events")>();
+  return { ...actual, insertEvent: vi.fn() };
+});
 vi.mock("../src/storage/users", () => ({ getUserByToken: vi.fn(), getUser: vi.fn() }));
 vi.mock("../src/storage/agents", () => ({ getAgentByToken: vi.fn() }));
 
@@ -59,6 +66,7 @@ import {
   insertDeployment,
   listDeployments,
 } from "../src/storage/deployments";
+import { insertEvent } from "../src/storage/events";
 import {
   DEPLOY_SECRET_KEY_MISSING,
   deleteSecret,
@@ -146,6 +154,20 @@ async function call(path: string, init: RequestInit = {}): Promise<Response> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+
+  vi.mocked(insertEvent).mockResolvedValue({
+    success: true,
+    data: {
+      id: "evt_1",
+      type: "deploy.enqueue",
+      project: PROJECT.name,
+      actorType: "system",
+      payload: {},
+      status: "pending",
+      attempts: 0,
+      createdAt: "2026-01-02T00:00:00.000Z",
+    },
+  });
 
   vi.mocked(getUserByToken).mockImplementation(async (_db, token) => {
     const id = token === OWNER_TOKEN ? "usr_owner" : "usr_outsider";
@@ -676,6 +698,46 @@ describe("approve", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  // The row has already left `pending_approval` by the time the send is
+  // attempted, and only a queue message can move it any further: approve
+  // refuses a `queued` row and `claimDeployment` runs from the consumer. The
+  // old "retry it" was advice that could not succeed, so the request has to be
+  // made durable instead.
+  it("records the request for recovery when the queue refuses it", async () => {
+    send.mockRejectedValueOnce(new Error("queue unavailable"));
+
+    const res = await call("/api/deployments/dep_1/approve", {
+      method: "POST",
+      headers: { ...asOwner, "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(insertEvent).toHaveBeenCalledWith(
+      env.DB,
+      expect.any(Object),
+      expect.objectContaining({
+        type: "deploy.enqueue",
+        projectId: "prj_owner",
+        payload: { kind: "deployment", projectId: "prj_owner", deploymentId: "dep_1" },
+      }),
+    );
+  });
+
+  it("reports the failure only when the request could not be recorded either", async () => {
+    send.mockRejectedValueOnce(new Error("queue unavailable"));
+    vi.mocked(insertEvent).mockResolvedValue({
+      success: false,
+      error: new AppError("D1 unavailable", "DATABASE_ERROR", 500),
+    });
+
+    const res = await call("/api/deployments/dep_1/approve", {
+      method: "POST",
+      headers: { ...asOwner, "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(500);
+  });
+
   it("404s an id from another project", async () => {
     vi.mocked(findDeploymentById).mockResolvedValue({
       success: true,
@@ -739,6 +801,29 @@ describe("retry", () => {
       env.DB,
       expect.any(Object),
       expect.objectContaining({ action: "deployment.retried" }),
+    );
+  });
+
+  // The retry row exists and is `queued`, so "try again" would only be refused
+  // by the unique index on (project, name, commit, attempt). The outbox row is
+  // what can still start it.
+  it("records the request for recovery when the queue refuses it", async () => {
+    send.mockRejectedValueOnce(new Error("queue unavailable"));
+
+    const res = await call("/api/deployments/dep_1/retry", {
+      method: "POST",
+      headers: { ...asOwner, "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(201);
+    expect(insertEvent).toHaveBeenCalledWith(
+      env.DB,
+      expect.any(Object),
+      expect.objectContaining({
+        type: "deploy.enqueue",
+        projectId: "prj_owner",
+        payload: { kind: "deployment", projectId: "prj_owner", deploymentId: "dep_2" },
+      }),
     );
   });
 

@@ -112,6 +112,11 @@ deploys:
 | `secrets` | no | Up to 16 secret names, each `^[A-Z][A-Z0-9_]{0,63}$`. Naming a secret here makes it **required**: a declared name that is not stored fails the deploy. You do not have to list the target's own secrets — they are loaded either way. |
 | `requiresApproval` | no | Boolean (a quoted `"false"` is rejected, not coerced). `true` holds the deployment at `pending_approval` until someone approves it. |
 
+**A policy file may declare at most 16 `deploys:` entries.** Anything beyond
+the sixteenth is not run and is reported as a single `failed` deployment row
+naming how many were declared — siblings run sequentially inside one Worker
+invocation, so an unbounded list would be an unbounded merge.
+
 **Unknown fields are rejected, not ignored.** An entry containing
 `requireApproval` (missing the "s") is refused with a reason naming the field,
 rather than being silently rebuilt without it — which would turn a deploy you
@@ -126,8 +131,30 @@ cloudflare-pages, cloudflare-workers, vercel)`). A deploy that was written and
 never runs means production quietly stopped updating, so it is reported where
 you will see it — on the project's Deployments page.
 
-A policy file that fails to parse at all produces one `failed` row pointing at
-the file, in addition to blocking merges.
+### The malformed-policy row is a post-merge fallback, not the merge block
+
+A policy file that fails to parse at all produces one `failed` deployment row
+(named `(unresolved)`) pointing at the file. That row is **not** the merge gate
+reporting itself — it is a separate, later check, and the distinction matters
+because the two look at different commits:
+
+- **Before the merge**, the gate parses the project's *current* policy. A file
+  that does not parse blocks the merge outright, and no deployment row exists
+  because no merge happened.
+- **After a merge**, the deploy runner re-parses the policy out of the *pinned
+  merge commit's* tree, so configuration and code always come from the same
+  commit. If **that** commit's policy is the unparseable one, there is nothing
+  to deploy and nothing to name, so the failure is recorded as an
+  `(unresolved)` row reading `Policy file .stratum/policy.yaml is present but
+  invalid (…); no deploy configuration could be read from it.` rather than
+  being dropped in silence.
+
+The two reads happen at different times against different trees, so they can
+disagree — which is exactly when this row shows up. Treat it as "the commit
+that was deployed had a broken policy", not as a second copy of the merge
+error. Fixing the project's current policy unblocks merges; it does not
+retroactively change a row already recorded against an older commit, and it
+does not re-run that deploy. Retry it once the fix is merged.
 
 ## Targets and their secrets
 
@@ -236,7 +263,7 @@ runner decrypts them.
 - **Over the API:**
 
   ```bash
-  curl -X PUT https://your-instance.workers.dev/api/projects/acme/site/secrets/CLOUDFLARE_API_TOKEN \
+  curl -X PUT https://your-instance.workers.dev/api/projects/@acme/site/secrets/CLOUDFLARE_API_TOKEN \
     -H "Authorization: Bearer $STRATUM_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"value":"…"}'
@@ -345,6 +372,7 @@ so they judge the bytes actually being uploaded.
 | Deployment lease / queue visibility timeout | 15 minutes |
 | Secret value | 4,096 bytes |
 | Secrets named per deploy entry | 16 |
+| `deploys:` entries per policy file | 16 |
 
 Exceeding one is a `failed` deployment naming the number, e.g. `too many files:
 2431 exceeds the 2000-file deploy limit`. An empty selection is also a failure
@@ -406,7 +434,7 @@ production consumer.
 | `POST /api/projects/{namespace}/{slug}/secrets` | Form-friendly create/replace (`name`, `value` in the body). |
 | `DELETE /api/projects/{namespace}/{slug}/secrets/{name}` | Project admin, agents refused. |
 | `POST /api/projects/{namespace}/{slug}/secrets/{name}/delete` | Form-friendly delete. |
-| `GET /api/projects/{namespace}/{slug}/deployments` | Anyone who can read the project. `log_tail` is included only for writers. Filters: `name`, `status`, `limit` (default 50, max 200), `offset`. |
+| `GET /api/projects/{namespace}/{slug}/deployments` | Anyone who can read the project. `logTail` is included only for writers. Filters: `name`, `status`, `limit` (default 50, max 200), `offset`. |
 | `GET /api/deployments/{id}` | Anyone who can read the deployment's project; unknown or unreadable ids answer 404 alike. |
 | `POST /api/deployments/{id}/approve` | Project writer, **user identity required**. |
 | `POST /api/deployments/{id}/retry` | Project writer; agents allowed. |

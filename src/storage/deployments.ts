@@ -78,9 +78,25 @@ export type DeploymentTarget = DeployTargetName | typeof UNRESOLVED_TARGET;
 /**
  * How long a claim holds the row before another consumer may reclaim it.
  *
- * Must not exceed the deploy queue's `visibility_timeout_ms`: a redelivery that
- * arrived while the lease was still valid could not claim the row and the
- * deployment would stall until the message was exhausted.
+ * This sits in the middle of an ordering that must not be disturbed:
+ *
+ * ```
+ * DEPLOY_ATTEMPT_DEADLINE_MS < DEFAULT_DEPLOY_LEASE_MS
+ *                           <= visibility_timeout_ms (wrangler.toml)
+ *                           <= QUEUE_CONSUMER_WALL_MS
+ * ```
+ *
+ * The upper bounds keep a redelivery from arriving while the lease is still
+ * valid, which would leave the deployment unclaimable until the message was
+ * exhausted. The lower bound is what makes the lease *safe*: the runner
+ * (`src/deploy/limits.ts`) gives up strictly before the lease can expire, so an
+ * expired lease means no runner is alive rather than "the first runner is still
+ * uploading". Without it {@link claimDeployment} can hand a genuinely running
+ * row to a second consumer and the same commit deploys twice.
+ *
+ * The three companion constants live in `src/deploy/limits.ts` and are not
+ * imported here on purpose — storage does not depend on the deploy package —
+ * so the ordering is asserted in the test suite instead.
  */
 export const DEFAULT_DEPLOY_LEASE_MS = 15 * 60 * 1000;
 

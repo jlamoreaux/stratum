@@ -17,6 +17,16 @@ const DEPLOY_ENTRY_KEYS = new Set(["name", "target", "secrets", "dir", "requires
 const MAX_SECRETS_PER_DEPLOY = 16;
 const MAX_DIR_LENGTH = 255;
 
+/**
+ * Most `deploys:` entries one policy file may declare.
+ *
+ * Siblings from one merge run sequentially inside a single Worker invocation,
+ * sharing its CPU, memory and subrequest budget, and every entry — accepted or
+ * rejected — becomes a persisted `deployments` row. Without a cap a policy file
+ * could turn one merge into an unbounded number of rows and provider calls.
+ */
+const MAX_DEPLOY_ENTRIES = 16;
+
 /** Longest policy-supplied value echoed into a rejection reason (which is persisted and rendered). */
 const MAX_QUOTED_LENGTH = 64;
 
@@ -60,7 +70,19 @@ export function sanitizeDeploys(raw: unknown): SanitizedDeploys {
 
   const seenNames = new Set<string>();
 
-  raw.forEach((entry, index) => {
+  // The excess is reported as one rejection rather than one per entry: a file
+  // declaring thousands of deploys must not turn into thousands of failed rows.
+  // Rejected, not thrown — the caller persists this like any other rejection.
+  let entries = raw;
+  if (raw.length > MAX_DEPLOY_ENTRIES) {
+    entries = raw.slice(0, MAX_DEPLOY_ENTRIES);
+    rejected.push({
+      name: null,
+      reason: `deploys: at most ${MAX_DEPLOY_ENTRIES} entries are allowed, but ${raw.length} were declared; entries ${MAX_DEPLOY_ENTRIES + 1}-${raw.length} were not run`,
+    });
+  }
+
+  entries.forEach((entry, index) => {
     const at = `deploys[${index}]`;
 
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {

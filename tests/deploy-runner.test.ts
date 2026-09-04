@@ -707,3 +707,101 @@ deploys:
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+describe("the wall-clock deadline that keeps the lease honest", () => {
+  // The runner has to give up before `DEFAULT_DEPLOY_LEASE_MS` can expire.
+  // Otherwise the lease lapses under a live upload and `claimDeployment` hands
+  // the row to a second consumer — the same commit deployed twice.
+  it("abandons a provider that never answers, leaving a terminal row", async () => {
+    await storeSecrets({ VERCEL_TOKEN, VERCEL_PROJECT_ID: VERCEL_PROJECT });
+    let seen: RequestInit | undefined;
+    const hangs: DeployFetch = vi.fn(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          seen = init;
+          init.signal?.addEventListener("abort", () => reject(new Error("cut off")));
+        }),
+    );
+
+    // Long enough that the run is certainly inside the provider call when the
+    // deadline fires, short enough not to slow the suite down.
+    await run(MERGE_MESSAGE, { fetch: hangs, deadlineMs: 200 });
+
+    const row = onlyRow();
+    expect(row.status).toBe("failed");
+    expect(row.reason).toContain("did not finish");
+    // Terminal *and* unlocked: nothing is left for a reclaim to race.
+    expect(row.lease_expires_at).toBeNull();
+    expect(row.completed_at).not.toBeNull();
+    // The upload is genuinely cut off rather than left running behind a
+    // resolved race, so it cannot land after the row says it failed.
+    expect(seen?.signal?.aborted).toBe(true);
+  });
+
+  it("does not disturb a provider that answers in time", async () => {
+    await storeSecrets({ VERCEL_TOKEN, VERCEL_PROJECT_ID: VERCEL_PROJECT });
+
+    await run(MERGE_MESSAGE, { deadlineMs: 60_000 });
+
+    expect(onlyRow().status).toBe("succeeded");
+  });
+});
+
+describe("every rejected deploys entry keeps its own row", () => {
+  // The PRD asks for one persisted `failed` row per rejected entry, each naming
+  // its entry and reason — that is the whole point of `sanitizeDeploys`
+  // returning rejections instead of dropping them. Two unnamed entries used to
+  // collapse into a single row on the unique index, and one reason was lost.
+  it("persists one failed row per rejection", async () => {
+    const policy = `evaluators:
+  - type: diff
+
+deploys:
+  - target: vercel
+  - target: netlify
+`;
+
+    await run(MERGE_MESSAGE, { readFiles: readsTree(tree(policy)) });
+
+    const all = rows();
+    expect(all).toHaveLength(2);
+    expect(all.every((row) => row.status === "failed")).toBe(true);
+    expect(new Set(all.map((row) => row.name)).size).toBe(2);
+
+    const reasons = all.map((row) => row.reason ?? "");
+    expect(reasons.some((reason) => reason.includes("deploys[0]"))).toBe(true);
+    expect(reasons.some((reason) => reason.includes("deploys[1]"))).toBe(true);
+    expect(reasons.some((reason) => reason.includes("netlify"))).toBe(true);
+  });
+
+  // The sharper case: a duplicate name is rejected *because* another entry is
+  // legitimately using it, so the rejection row and the accepted row want the
+  // same (project, name, commit, attempt) key. The rejection must not take it —
+  // the accepted deploy would then never be created, and never run.
+  it("never takes the row an accepted deploy of the same name needs", async () => {
+    await storeSecrets({ VERCEL_TOKEN, VERCEL_PROJECT_ID: VERCEL_PROJECT });
+    const policy = `evaluators:
+  - type: diff
+
+deploys:
+  - name: production
+    target: vercel
+  - name: production
+    target: vercel
+`;
+    const fetch = vercelAccepts();
+
+    await run(MERGE_MESSAGE, { readFiles: readsTree(tree(policy)), fetch });
+
+    const all = rows();
+    expect(all).toHaveLength(2);
+
+    const accepted = all.find((row) => row.name === "production");
+    expect(accepted?.status).toBe("succeeded");
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    const rejected = all.find((row) => row.name !== "production");
+    expect(rejected?.status).toBe("failed");
+    expect(rejected?.reason).toContain("duplicate deploy name");
+  });
+});

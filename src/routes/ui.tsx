@@ -2210,6 +2210,7 @@ app.get("/:namespace/:slug/settings", async (c) => {
       isOwner={isOwner}
       canManageSecrets={showSecrets}
       secrets={secretsResult?.success ? secretsResult.data : []}
+      secretsUnavailable={secretsResult !== null && !secretsResult.success}
       {...(secretError !== undefined ? { secretError } : {})}
       user={userResult}
     />,

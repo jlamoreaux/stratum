@@ -58,6 +58,15 @@ export const BACKUP_TABLES: readonly string[] = [
   // plaintext was never stored and no route can read one back, so a restore
   // without it means every deploying project is silently broken until each
   // token is re-pasted by hand. Both declare no foreign keys, so order is free.
+  //
+  // RESTORE DEPENDENCY: these rows are ciphertext only. They are decryptable
+  // *solely* by the `DEPLOY_SECRET_KEY` in force when they were written — that
+  // key is a Wrangler secret and is NOT in any backup. Restoring these rows
+  // into an instance with a different (or missing) key yields rows that look
+  // present in the UI but fail every deploy with "Could not decrypt project
+  // secret…". Preserve `DEPLOY_SECRET_KEY` alongside the backups, or plan on
+  // every project re-entering its secrets after the restore. See
+  // `docs/runbooks/backup-restore.md`.
   "project_secrets",
   "deployments",
 ];

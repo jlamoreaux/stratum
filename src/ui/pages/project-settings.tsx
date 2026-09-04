@@ -22,6 +22,13 @@ interface ProjectSettingsProps {
    */
   secrets?: ProjectSecretSummary[];
   /**
+   * The secret listing failed. Rendered as its own state because an empty list
+   * and a failed lookup are different facts: "you have none" versus "we could
+   * not tell", and showing the former after a storage error invites an admin to
+   * re-paste credentials that are already stored.
+   */
+  secretsUnavailable?: boolean;
+  /**
    * Deploy credentials are admin-only and refused to agent identities, which is
    * stricter than the write access this page otherwise requires.
    */
@@ -35,6 +42,7 @@ export const ProjectSettingsPage: FC<ProjectSettingsProps> = ({
   project,
   isOwner,
   secrets,
+  secretsUnavailable,
   canManageSecrets,
   secretError,
   user,
@@ -142,7 +150,13 @@ export const ProjectSettingsPage: FC<ProjectSettingsProps> = ({
             </button>
           </form>
 
-          {secrets === undefined || secrets.length === 0 ? (
+          {secretsUnavailable ? (
+            <p class="settings-help settings-help-error" style="margin-top: 1rem;">
+              Could not load this project's secrets. They are still stored — this is a read failure,
+              not an empty list. Reload the page; adding a secret under an existing name would
+              replace it.
+            </p>
+          ) : secrets === undefined || secrets.length === 0 ? (
             <p class="settings-help" style="margin-top: 1rem;">
               No deploy secrets stored for this project.
             </p>

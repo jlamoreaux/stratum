@@ -276,6 +276,55 @@ describe("sanitizeDeploys — rejected entries", () => {
   });
 });
 
+describe("sanitizeDeploys — entry-count cap", () => {
+  const entry = (index: number) => ({ name: `deploy-${index}`, target: "vercel" });
+
+  it("accepts a file declaring exactly the cap", () => {
+    const { accepted, rejected } = sanitizeDeploys(
+      Array.from({ length: 16 }, (_, index) => entry(index)),
+    );
+
+    expect(accepted).toHaveLength(16);
+    expect(rejected).toEqual([]);
+  });
+
+  it("runs only the first 16 entries and rejects the excess", () => {
+    const { accepted, rejected } = sanitizeDeploys(
+      Array.from({ length: 20 }, (_, index) => entry(index)),
+    );
+
+    expect(accepted.map((d) => d.name)).toEqual(
+      Array.from({ length: 16 }, (_, index) => `deploy-${index}`),
+    );
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.name).toBeNull();
+    expect(rejected[0]?.reason).toContain("at most 16 entries");
+    expect(rejected[0]?.reason).toContain("20 were declared");
+    expect(rejected[0]?.reason).toContain("entries 17-20");
+  });
+
+  it("reports the excess once, not once per entry — a huge file cannot flood the history", () => {
+    // Every rejection becomes a persisted `deployments` row, so the cap must not
+    // itself be the thing that writes thousands of them.
+    const { accepted, rejected } = sanitizeDeploys(
+      Array.from({ length: 500 }, (_, index) => entry(index)),
+    );
+
+    expect(accepted).toHaveLength(16);
+    expect(rejected).toHaveLength(1);
+  });
+
+  it("still validates the entries it does keep", () => {
+    const raw: unknown[] = Array.from({ length: 20 }, (_, index) => entry(index));
+    raw[0] = { name: "bad", target: "netlify" };
+
+    const { accepted, rejected } = sanitizeDeploys(raw);
+
+    expect(accepted).toHaveLength(15);
+    expect(rejected.map((r) => r.name)).toEqual([null, "bad"]);
+  });
+});
+
 describe("parsePolicyContent", () => {
   it("parses YAML and JSON to the same policy without any fetch", () => {
     const yaml = parsePolicyContent(

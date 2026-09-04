@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { StratumEvent } from "../queue/events";
 import { recordAudit } from "../storage/audit";
 import { getProjectByPath } from "../storage/state";
 import {
@@ -24,26 +25,38 @@ const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
 const app = new Hono<{ Bindings: Env }>();
 
-/** Event types a webhook may subscribe to. */
-const SUBSCRIBABLE_EVENTS = [
-  "change.created",
-  "change.evaluated",
-  "change.merged",
-  "change.rejected",
-  "change.reverted",
-  "change.commented",
-  "change.reviewed",
-  "project.created",
-  "project.imported",
-  "workspace.created",
-  "sync.completed",
-  "issue.opened",
-  "issue.commented",
-  "issue.closed",
-  "deployment.requested",
-  "deployment.succeeded",
-  "deployment.failed",
-];
+/**
+ * Event types a webhook may subscribe to.
+ *
+ * Keyed by `StratumEvent["type"]` rather than written as a bare string array so
+ * the two cannot drift: adding a variant to the event union without listing it
+ * here is a missing-property error, and listing a type the union does not have
+ * is an excess-property error. Both fail the build instead of silently making
+ * an event unsubscribable (or advertising one that can never fire).
+ *
+ * Object key order is the order the list is rendered and reported in.
+ */
+const SUBSCRIBABLE_EVENT_TYPES: Record<StratumEvent["type"], true> = {
+  "change.created": true,
+  "change.evaluated": true,
+  "change.merged": true,
+  "change.rejected": true,
+  "change.reverted": true,
+  "change.commented": true,
+  "change.reviewed": true,
+  "project.created": true,
+  "project.imported": true,
+  "workspace.created": true,
+  "sync.completed": true,
+  "issue.opened": true,
+  "issue.commented": true,
+  "issue.closed": true,
+  "deployment.requested": true,
+  "deployment.succeeded": true,
+  "deployment.failed": true,
+};
+
+const SUBSCRIBABLE_EVENTS: string[] = Object.keys(SUBSCRIBABLE_EVENT_TYPES);
 
 interface ProjectAccess {
   project: ProjectEntry;

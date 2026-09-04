@@ -3,12 +3,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../src/deploy/runner", () => ({
   runDeployMessage: vi.fn(async () => ({ success: true, data: { deployments: [] } })),
 }));
+// The outbox recovery tests assert that an internal work row never reaches a
+// subscriber, so webhook delivery is observed rather than performed.
+vi.mock("../src/queue/webhook-delivery", () => ({
+  deliverEventToWebhooks: vi.fn(async () => {}),
+}));
 
 import { runDeployMessage } from "../src/deploy/runner";
-import { enqueueMergeDeploy, handleDeployQueue } from "../src/queue/deploy-queue";
+import {
+  DEPLOY_ENQUEUE_EVENT_TYPE,
+  enqueueMergeDeploy,
+  handleDeployQueue,
+} from "../src/queue/deploy-queue";
+import { sweepStaleEvents } from "../src/queue/event-consumer";
+import { deliverEventToWebhooks } from "../src/queue/webhook-delivery";
 import type { Env, Message, MessageBatch } from "../src/types";
 import { AppError } from "../src/utils/errors";
 import { createLogger } from "../src/utils/logger";
+import { makeSqliteD1 } from "./helpers/sqlite-d1";
 
 interface StubMessage {
   message: Message<unknown>;
@@ -328,5 +340,144 @@ describe("enqueueMergeDeploy", () => {
       }),
     ).resolves.toBeUndefined();
     expect(send).toHaveBeenCalled();
+  });
+});
+
+/**
+ * The durability half of this queue: a `send` that fails must not lose the
+ * request. Real SQLite, because the outbox row is the whole guarantee.
+ */
+describe("a deploy request whose send failed", () => {
+  let db: D1Database;
+  let raw: ReturnType<typeof makeSqliteD1>["raw"];
+
+  const rejects = () =>
+    vi.fn(async () => {
+      throw new Error("queue unavailable");
+    });
+
+  interface OutboxRow {
+    id: string;
+    type: string;
+    project: string;
+    project_id: string | null;
+    status: string;
+    payload: string;
+  }
+
+  function outbox(): OutboxRow[] {
+    return raw
+      .prepare("SELECT id, type, project, project_id, status, payload FROM events")
+      .all() as unknown as OutboxRow[];
+  }
+
+  beforeEach(() => {
+    const made = makeSqliteD1();
+    db = made.db;
+    raw = made.raw;
+    vi.clearAllMocks();
+  });
+
+  // The merge path is the one a sweep over `deployments` could never fix: the
+  // runner creates rows only *after* it consumes the message, so a dropped send
+  // leaves nothing at all behind.
+  it("is recorded in the outbox when the merge enqueue fails", async () => {
+    await enqueueMergeDeploy(
+      { DB: db, DEPLOY_QUEUE: { send: rejects() } } as unknown as Env,
+      logger,
+      {
+        projectId: "proj_1",
+        changeId: "chg_1",
+        commitSha: "sha_1",
+        postMergeStatus: "passed",
+        mergedAt: MERGED_AT,
+      },
+    );
+
+    const rows = outbox();
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as OutboxRow;
+    expect(row.type).toBe(DEPLOY_ENQUEUE_EVENT_TYPE);
+    expect(row.status).toBe("pending");
+    expect(row.project_id).toBe("proj_1");
+    expect(JSON.parse(row.payload)).toEqual({
+      kind: "merge",
+      projectId: "proj_1",
+      changeId: "chg_1",
+      commitSha: "sha_1",
+      mergedAt: MERGED_AT,
+    });
+  });
+
+  it("writes nothing when the send succeeds", async () => {
+    await enqueueMergeDeploy(
+      { DB: db, DEPLOY_QUEUE: { send: vi.fn(async () => {}) } } as unknown as Env,
+      logger,
+      {
+        projectId: "proj_1",
+        changeId: "chg_1",
+        commitSha: "sha_1",
+        postMergeStatus: "passed",
+        mergedAt: MERGED_AT,
+      },
+    );
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  // End to end: the row the failed send left behind is what the five-minute
+  // sweep turns back into a deploy queue message. Nothing here runs the deploy
+  // on the events queue — the handler only forwards.
+  it("is recovered by the outbox sweep and forwarded to the deploy queue", async () => {
+    await enqueueMergeDeploy(
+      { DB: db, DEPLOY_QUEUE: { send: rejects() } } as unknown as Env,
+      logger,
+      {
+        projectId: "proj_1",
+        changeId: "chg_1",
+        commitSha: "sha_1",
+        postMergeStatus: "passed",
+        mergedAt: MERGED_AT,
+      },
+    );
+
+    // Age the row past the sweep's staleness window.
+    raw.prepare("UPDATE events SET created_at = ?").run("2026-01-01T00:00:00.000Z");
+
+    const send = vi.fn(async () => {});
+    // No EVENTS_QUEUE bound, so the sweep processes the row inline — the same
+    // handlers a queue delivery would run.
+    await sweepStaleEvents({ DB: db, DEPLOY_QUEUE: { send } } as unknown as Env, logger);
+
+    expect(send).toHaveBeenCalledWith({
+      kind: "merge",
+      projectId: "proj_1",
+      changeId: "chg_1",
+      commitSha: "sha_1",
+      mergedAt: MERGED_AT,
+    });
+    expect((outbox()[0] as OutboxRow).status).toBe("processed");
+    // An internal work row is not a notification: a `*` webhook subscriber must
+    // never see one.
+    expect(deliverEventToWebhooks).not.toHaveBeenCalled();
+  });
+
+  it("stays pending when the forward fails again, so a later sweep retries it", async () => {
+    await enqueueMergeDeploy(
+      { DB: db, DEPLOY_QUEUE: { send: rejects() } } as unknown as Env,
+      logger,
+      {
+        projectId: "proj_1",
+        changeId: "chg_1",
+        commitSha: "sha_1",
+        postMergeStatus: "passed",
+        mergedAt: MERGED_AT,
+      },
+    );
+    raw.prepare("UPDATE events SET created_at = ?").run("2026-01-01T00:00:00.000Z");
+
+    await sweepStaleEvents({ DB: db, DEPLOY_QUEUE: { send: rejects() } } as unknown as Env, logger);
+
+    expect((outbox()[0] as OutboxRow).status).toBe("pending");
   });
 });

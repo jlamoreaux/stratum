@@ -68,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public API reference. Without the optional `CLOUDFLARE_WORKERS_SUBDOMAIN`
   secret a Cloudflare deploy succeeds with no URL. And a project that only wants
   deploys must still write an `evaluators:` block, because a policy file without
-  one is malformed and blocks every merge. Limits (2,000 files, 25 MiB total,
-  10 MiB per file) are enforced before the first provider request, so a deploy
-  never publishes half a tree. Full reference:
+  one is malformed and blocks every merge. Limits (16 `deploys:` entries per
+  policy file, 2,000 files, 25 MiB total, 10 MiB per file) are enforced before
+  the first provider request, so a deploy never publishes half a tree. Full reference:
   [Deployments](docs/user-guide/deployments.md).
 - **`stratum login` signs you in through the browser.** The CLI had one way to
   authenticate — `--key`, with a token you first created by hand in the settings
@@ -238,6 +238,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants as well as scoped tokens.
 
 ### Fixed
+- **A post-merge deploy cannot be lost or run twice.** Four fixes to the new
+  deployment path, all invisible until they bite: the deploy queue ran two
+  messages per isolate, and two concurrent Vercel deploys exceeded the isolate's
+  memory before a terminal status could be written, stranding rows at `running`
+  (`max_concurrency` is now 1); the runner had no deadline, so its storage lease
+  could expire mid-upload and let a second consumer publish the same commit (it
+  now gives up strictly before the lease can); a queue send that failed silently
+  dropped the deploy — after a merge there was no row to recover at all, and
+  after approve or retry the row sat `queued` forever while the response advised
+  a retry that could not work (the request is now recorded durably and picked up
+  by the existing five-minute sweep); and several rejected `deploys:` entries
+  collapsed into one row, so only one of their reasons survived — a rejection
+  sharing a name with a valid entry could even take that entry's row and stop it
+  deploying. Every rejected entry now gets its own `failed` row.
 - **The header fits a phone.** Signed in, the nav's five links were laid out in
   one unwrappable row, so below about 460px the row ran past the viewport, the
   page scrolled sideways, and the wordmark and "logout" were clipped off either
