@@ -87,24 +87,29 @@ button.nav-auth-link {
  * collapses its links behind a "menu" button below 640px; one without it (the
  * docs site, the signed-out app) keeps them inline, since a lone "sign in"
  * fits. The toggle is a checkbox so the menu works with no client script: the
- * label is the button, and the checked state shows the links. The input is
- * visually hidden rather than display:none so it keeps its place in the tab
- * order, and the label shows its focus ring.
+ * label is the button, and the checked state shows the links. Below 640px the
+ * input is visually hidden rather than display:none so it keeps its place in
+ * the tab order and the label shows its focus ring; at wider widths it is
+ * display:none, because a control with no visible label must not be reachable
+ * by Tab.
  */
-.nav-menu-toggle {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
+.nav-menu-toggle { display: none; }
 .nav-menu-button { display: none; }
 .nav-menu-close { display: none; }
 
 @media (max-width: 640px) {
   .nav { padding: 0.6rem 1rem; }
+
+  .nav-menu-toggle {
+    display: block;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 
   .nav-menu-button {
     display: inline-block;

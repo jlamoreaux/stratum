@@ -102,15 +102,22 @@ const projectRef = (project: ProjectEntry) => ({
 async function getCurrentUser(
   c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } },
   logger: ReturnType<typeof createLogger>,
-): Promise<{ id: string; email: string; username: string } | null> {
+): Promise<{ id: string; email: string; username: string; displayName?: string } | null> {
   const userId = c.get("userId");
   if (!userId) return null;
   const result = await getUser(c.env.DB, userId, logger);
   if (!result.success) return null;
 
   const user = result.data;
-  // Username is always present - enforced by database schema and validation
-  return { id: user.id, email: user.email, username: user.username };
+  // Username is always present - enforced by database schema and validation.
+  // The display name rides along so the header shows it on every page, not
+  // only on Settings.
+  return {
+    id: user.id,
+    email: user.email,
+    username: user.username,
+    ...(user.displayName !== undefined ? { displayName: user.displayName } : {}),
+  };
 }
 
 /**

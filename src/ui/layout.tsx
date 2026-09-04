@@ -51,7 +51,8 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, c
                 A checkbox, not a button: the phone menu's open/closed state
                 has to live somewhere with no client script, and :checked is
                 the only state CSS can read. The label is the visible button;
-                the input is visually hidden but kept in the tab order.
+                on phones the input is visually hidden but kept in the tab
+                order, and at wider widths both are display:none.
               */}
               <input type="checkbox" id="nav-menu" class="nav-menu-toggle" />
               <label for="nav-menu" class="nav-menu-button">
