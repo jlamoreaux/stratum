@@ -23,6 +23,7 @@ interface LayoutProps {
   children?: unknown;
 }
 
+/** The page chrome shared by every server-rendered page: header nav, main column, footer, and the CSP-nonced scripts. */
 export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, children }) => {
   const current = (item: NavItem) => (active === item ? "page" : undefined);
   return (

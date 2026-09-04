@@ -164,6 +164,7 @@ const OAuthGrantRow: FC<{ grant: OAuthGrantSummary }> = ({ grant }) => (
   </tr>
 );
 
+/** One API token with its status, scope and expiry, and a revoke form while it is active. */
 const ApiTokenRow: FC<{ token: ApiTokenSummary; now: number }> = ({ token, now }) => {
   const status = tokenStatus(token, now);
   return (
@@ -276,6 +277,7 @@ const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
   </div>
 );
 
+/** The whole settings page: jump links, then one card per section in `SECTIONS` order. */
 export const SettingsPage: FC<SettingsPageProps> = ({
   user,
   canRenameUsername,

@@ -2,6 +2,7 @@ import type { FC } from "hono/jsx";
 import type { InviteCodeStatus, InviteCodesResult } from "../../beta/gate";
 import { formatDate } from "../format";
 
+/** The referral link for `code`, or null when there is no origin to build it on (the bare code is shown instead). */
 function shareLink(base: string | undefined, code: string): string | null {
   if (!base) return null;
   return `${base.replace(/\/$/, "")}/?ref=${encodeURIComponent(code)}`;
@@ -45,6 +46,7 @@ const COPY_CODE_SCRIPT = `
 })();
 `;
 
+/** One invite code: its link or bare code, whether it is still available, and a copy button only while it is. */
 const InviteCodeRow: FC<{ entry: InviteCodeStatus; index: number; shareBaseUrl?: string }> = ({
   entry,
   index,

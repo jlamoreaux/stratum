@@ -31,6 +31,7 @@ interface UserRow {
   display_name?: string | null;
 }
 
+/** Maps a users row to the public `User`, omitting nullable columns that are unset rather than carrying nulls. */
 function rowToUser(row: UserRow): User {
   const user: User = {
     id: row.id,

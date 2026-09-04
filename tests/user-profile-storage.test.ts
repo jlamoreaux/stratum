@@ -45,6 +45,7 @@ const row = (id: string, username: string): UserRow => ({
   telemetry_opt_out: 0,
 });
 
+/** A users table in memory that answers the SQL prefixes the storage layer issues and enforces the UNIQUE username. */
 function makeUsersD1(rows: UserRow[]): D1Database {
   function makeStmt(sql: string, bindings: unknown[]) {
     const upper = sql.trim().toUpperCase();
@@ -148,6 +149,7 @@ describe("renameUser", () => {
  * the subquery is right.
  */
 describe("renameUser against namespace claims", () => {
+  /** One user, alice, in the real schema. */
   function seedUser(db: D1Database, raw: ReturnType<typeof makeSqliteD1>["raw"]) {
     raw
       .prepare(

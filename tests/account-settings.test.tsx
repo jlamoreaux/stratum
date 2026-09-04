@@ -69,6 +69,7 @@ const noClaims = { success: true as const, data: false };
 const hasClaims = { success: true as const, data: true };
 const claimsUnreadable = { success: false as const, error: new Error("d1 down") as never };
 
+/** Bindings the settings routes touch; every store they read is mocked at module level. */
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
     ARTIFACTS: {} as Env["ARTIFACTS"],
@@ -95,6 +96,7 @@ function makeApp(userId: string | null = "usr_1", via: "session" | "token" = "se
 
 const get = (path = "/settings") => new Request(`http://localhost${path}`);
 
+/** A form submission, as the browser sends it. */
 function post(path: string, fields: Record<string, string>): Request {
   return new Request(`http://localhost${path}`, {
     method: "POST",
@@ -103,6 +105,7 @@ function post(path: string, fields: Record<string, string>): Request {
   });
 }
 
+/** The referral service answering with `codes`. */
 function codesResponse(codes: unknown[]): Response {
   return new Response(JSON.stringify({ codes }), { status: 200 });
 }

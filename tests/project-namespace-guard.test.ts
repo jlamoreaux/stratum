@@ -48,6 +48,7 @@ const unreadable = { success: false as const, error: new Error("d1") as never };
 const deleted = { success: true as const, data: undefined };
 const notDeleted = { success: false as const, error: new Error("kv") as never };
 
+/** Bindings the guard touches, with a spy on the Artifacts delete. `db` defaults to an inert stub for tests that never reach a claim. */
 function makeEnv(db: D1Database = {} as D1Database) {
   const artifactsDelete = vi.fn(async () => undefined);
   return {
