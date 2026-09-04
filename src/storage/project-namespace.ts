@@ -1,8 +1,10 @@
-import type { Env, User } from "../types";
+import type { Env, ProjectEntry, User } from "../types";
 import { getArtifactsRepoName, getUserNamespace } from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
+import { type DeletionTarget, captureDeletionTarget } from "./deletion";
+import { createDeletionJob } from "./deletion-jobs";
 import { deleteProject, getProjectByPath } from "./state";
 import { getUser } from "./users";
 
@@ -192,8 +194,8 @@ async function dropStaleClaim(
 }
 
 /**
- * After a personal project has been written under `namespace`, confirm that
- * its owner still carries that username, and withdraw the project if not.
+ * After a personal project has been written to KV, confirm that its owner
+ * still carries its namespace, and withdraw the project if not.
  *
  * This is the creation side of the ordering described at the top of the
  * file: the claim went into D1 before the KV write, so if the owner's name
@@ -210,12 +212,12 @@ async function dropStaleClaim(
  * an org's slug is its own.
  */
 export async function confirmOwnerNamespace(
-  env: Pick<Env, "DB" | "STATE" | "ARTIFACTS">,
+  env: Env,
   ownerId: string,
-  namespace: string,
-  slug: string,
+  project: ProjectEntry,
   logger: Logger,
 ): Promise<Result<void, AppError>> {
+  const { namespace, slug } = project;
   const owner = await readOwner(env.DB, ownerId, logger);
   if (owner === null) {
     logger.warn("Owner could not be re-read after creating a project; withdrawing it", {
@@ -223,7 +225,7 @@ export async function confirmOwnerNamespace(
       namespace,
       slug,
     });
-    const withdrawn = await withdraw(env, namespace, slug, logger);
+    const withdrawn = await withdraw(env, project, logger);
     if (!withdrawn.success) return withdrawn;
     return err(
       new AppError(
@@ -242,7 +244,7 @@ export async function confirmOwnerNamespace(
     slug,
     current: owner.username,
   });
-  const withdrawn = await withdraw(env, namespace, slug, logger);
+  const withdrawn = await withdraw(env, project, logger);
   if (!withdrawn.success) return withdrawn;
   return err(
     new AppError(
@@ -282,32 +284,18 @@ async function readOwner(db: D1Database, ownerId: string, logger: Logger): Promi
  * create, whereas the reverse order could leave a reachable project with no
  * repository. The KV delete is retried once; an entry that still cannot be
  * removed stays reachable under a namespace its owner may not hold, so it is
- * logged at error level as an operator signal and reported as a server error,
- * with the repository and the claim left in place for it.
+ * handed to the durable deletion pipeline (scheduleWithdrawal) and reported
+ * as a server error, with the repository and the claim left for that job.
  */
 async function withdraw(
-  env: Pick<Env, "DB" | "STATE" | "ARTIFACTS">,
-  namespace: string,
-  slug: string,
+  env: Env,
+  project: ProjectEntry,
   logger: Logger,
 ): Promise<Result<void, AppError>> {
+  const { namespace, slug } = project;
   let removed = await deleteProject(env.STATE, namespace, slug, logger);
   if (!removed.success) removed = await deleteProject(env.STATE, namespace, slug, logger);
-  if (!removed.success) {
-    logger.error(
-      "Project could not be withdrawn and remains under a namespace its owner may not hold",
-      removed.error,
-      { namespace, slug },
-    );
-    return err(
-      new AppError(
-        "The project could not be withdrawn after its namespace changed. Contact support with its name.",
-        "STORAGE_ERROR",
-        500,
-        { namespace, slug },
-      ),
-    );
-  }
+  if (!removed.success) return scheduleWithdrawal(env, project, removed.error, logger);
   try {
     await env.ARTIFACTS.delete(getArtifactsRepoName(namespace, slug));
   } catch (error) {
@@ -321,4 +309,78 @@ async function withdraw(
   // passes, after which ownerHasClaims finds no project behind it and drops it.
   await releaseNamespaceClaim(env.DB, namespace, slug, logger);
   return ok(undefined);
+}
+
+/**
+ * Hand a project whose KV entry could not be removed to the deletion jobs
+ * that the five-minute sweep re-drives: the same cascade a user-requested
+ * delete goes through, so the entry, the repository and the D1 rows keyed
+ * under the namespace all go, with retries and an operator trail. The
+ * inventory is captured the normal way when it can be; the project is seconds
+ * old, so when the capture itself fails (KV is what just failed) a target
+ * built from the entry alone is complete except for the collision scan, which
+ * is assumed positive so the cascade never touches rows keyed by a bare name
+ * another tenant might share. A job that cannot be recorded either leaves the
+ * project reachable with nothing tracking it, which is the one outcome that
+ * needs a person: it is logged at error level and reported as such.
+ */
+async function scheduleWithdrawal(
+  env: Env,
+  project: ProjectEntry,
+  cause: AppError,
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  const { namespace, slug } = project;
+  const captured = await captureDeletionTarget(env, project, logger);
+  const target: DeletionTarget = captured.success
+    ? captured.data
+    : {
+        projectId: project.id,
+        namespace,
+        slug,
+        name: project.name,
+        workspaceNames: [],
+        forkRepoNames: [],
+        projectRepoName: getArtifactsRepoName(namespace, slug),
+        changeIds: [],
+        webhookIds: [],
+        issueIds: [],
+        nameCollision: true,
+      };
+  const job = await createDeletionJob(env.DB, logger, {
+    kind: "project",
+    target,
+    targetId: project.id,
+  });
+  if (!job.success) {
+    logger.error(
+      "Project could not be withdrawn or scheduled for removal and remains under a namespace its owner may not hold",
+      job.error,
+      { namespace, slug, projectId: project.id, cause: cause.message },
+    );
+    return err(
+      new AppError(
+        "The project could not be withdrawn after its namespace changed. Contact support with its name.",
+        "STORAGE_ERROR",
+        500,
+        { namespace, slug },
+      ),
+    );
+  }
+  logger.warn("Project could not be withdrawn directly; its removal is scheduled", {
+    namespace,
+    slug,
+    projectId: project.id,
+    jobId: job.data.job.id,
+    capturedInventory: captured.success,
+    cause: cause.message,
+  });
+  return err(
+    new AppError(
+      "The project could not be withdrawn after its namespace changed; its removal is scheduled. Try again in a few minutes.",
+      "STORAGE_ERROR",
+      500,
+      { namespace, slug },
+    ),
+  );
 }

@@ -9,12 +9,17 @@
  * withdrawn is a server error, never a silently kept entry.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Env } from "../src/types";
 import type { Logger } from "../src/utils/logger";
 import { makeSqliteD1 } from "./helpers/sqlite-d1";
 
 vi.mock("../src/storage/users", () => ({ getUser: vi.fn() }));
 vi.mock("../src/storage/state", () => ({ deleteProject: vi.fn(), getProjectByPath: vi.fn() }));
+vi.mock("../src/storage/deletion", () => ({ captureDeletionTarget: vi.fn() }));
+vi.mock("../src/storage/deletion-jobs", () => ({ createDeletionJob: vi.fn() }));
 
+import { captureDeletionTarget } from "../src/storage/deletion";
+import { createDeletionJob } from "../src/storage/deletion-jobs";
 import {
   CLAIM_GRACE_MS,
   claimNamespace,
@@ -24,6 +29,7 @@ import {
 } from "../src/storage/project-namespace";
 import { deleteProject, getProjectByPath } from "../src/storage/state";
 import { getUser } from "../src/storage/users";
+import type { ProjectEntry } from "../src/types";
 
 const logger: Logger = {
   trace: vi.fn(),
@@ -57,10 +63,41 @@ function makeEnv(db: D1Database = {} as D1Database) {
       DB: db,
       STATE: {} as KVNamespace,
       ARTIFACTS: { delete: artifactsDelete } as never,
-    },
+    } as unknown as Env,
     artifactsDelete,
   };
 }
+
+const project: ProjectEntry = {
+  id: "prj_1",
+  name: "proj",
+  slug: "proj",
+  namespace: "@alice",
+  ownerId: "usr_1",
+  ownerType: "user",
+  remote: "https://artifacts.example.com/repos/alice__proj",
+  createdAt: "2026-01-01T00:00:00.000Z",
+};
+const inventory = {
+  success: true as const,
+  data: {
+    projectId: "prj_1",
+    namespace: "@alice",
+    slug: "proj",
+    name: "proj",
+    workspaceNames: [],
+    forkRepoNames: [],
+    projectRepoName: "alice__proj",
+    changeIds: [],
+    webhookIds: [],
+    issueIds: [],
+    nameCollision: false,
+  },
+};
+const scheduled = {
+  success: true as const,
+  data: { job: { id: "del_1" }, created: true } as never,
+};
 
 const aliceProj = { ownerId: "usr_1", namespace: "@alice", slug: "proj" };
 const kv = {} as KVNamespace;
@@ -73,11 +110,13 @@ const found = { success: true as const, data: { id: "prj_1" } as never };
 const later = () => Date.now() + CLAIM_GRACE_MS + 1000;
 
 const confirm = (env: ReturnType<typeof makeEnv>["env"]) =>
-  confirmOwnerNamespace(env, "usr_1", "@alice", "proj", logger);
+  confirmOwnerNamespace(env, "usr_1", project, logger);
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(deleteProject).mockResolvedValue(deleted);
+  vi.mocked(captureDeletionTarget).mockResolvedValue(inventory);
+  vi.mocked(createDeletionJob).mockResolvedValue(scheduled);
 });
 
 describe("confirmOwnerNamespace", () => {
@@ -158,7 +197,7 @@ describe("confirmOwnerNamespace", () => {
     expect(claims.success && claims.data).toBe(false);
   });
 
-  it("keeps the claim, like the repository, when the entry cannot be removed", async () => {
+  it("keeps the claim, like the repository, for the scheduled removal", async () => {
     vi.mocked(getUser).mockResolvedValue(owner("alice-two"));
     vi.mocked(deleteProject).mockResolvedValue(notDeleted);
     const { db } = makeSqliteD1();
@@ -181,13 +220,66 @@ describe("confirmOwnerNamespace", () => {
     expect(artifactsDelete).toHaveBeenCalled();
   });
 
-  it("keeps the repository and reports a server error when the entry cannot be removed", async () => {
+  // An entry that will not go is still reachable, so it is handed to the
+  // deletion jobs the sweep re-drives, and the repository stays for that job.
+  it("schedules a durable removal, keeping the repository, when the entry cannot be removed", async () => {
     vi.mocked(getUser).mockResolvedValue(owner("alice-two"));
     vi.mocked(deleteProject).mockResolvedValue(notDeleted);
     const { env, artifactsDelete } = makeEnv();
     const result = await confirm(env);
     expect(result.success).toBe(false);
     expect(!result.success && result.error.statusCode).toBe(500);
+    expect(!result.success && result.error.message).toContain("scheduled");
+    expect(artifactsDelete).not.toHaveBeenCalled();
+    expect(captureDeletionTarget).toHaveBeenCalledWith(env, project, logger);
+    expect(createDeletionJob).toHaveBeenCalledWith(env.DB, logger, {
+      kind: "project",
+      target: inventory.data,
+      targetId: "prj_1",
+    });
+  });
+
+  it("builds the deletion target from the entry when the inventory cannot be captured", async () => {
+    vi.mocked(getUser).mockResolvedValue(owner("alice-two"));
+    vi.mocked(deleteProject).mockResolvedValue(notDeleted);
+    vi.mocked(captureDeletionTarget).mockResolvedValue({
+      success: false,
+      error: new Error("kv down") as never,
+    });
+    const { env } = makeEnv();
+    const result = await confirm(env);
+    expect(!result.success && result.error.message).toContain("scheduled");
+    expect(createDeletionJob).toHaveBeenCalledWith(
+      env.DB,
+      logger,
+      expect.objectContaining({
+        kind: "project",
+        targetId: "prj_1",
+        target: expect.objectContaining({
+          projectId: "prj_1",
+          namespace: "@alice",
+          slug: "proj",
+          projectRepoName: "alice__proj",
+          // Unknown, so assumed: the cascade must not touch rows keyed by a
+          // bare name another tenant might share.
+          nameCollision: true,
+        }),
+      }),
+    );
+  });
+
+  it("reports the operator case when the removal cannot be scheduled either", async () => {
+    vi.mocked(getUser).mockResolvedValue(owner("alice-two"));
+    vi.mocked(deleteProject).mockResolvedValue(notDeleted);
+    vi.mocked(createDeletionJob).mockResolvedValue({
+      success: false,
+      error: new Error("d1 down") as never,
+    });
+    const { env, artifactsDelete } = makeEnv();
+    const result = await confirm(env);
+    expect(result.success).toBe(false);
+    expect(!result.success && result.error.statusCode).toBe(500);
+    expect(!result.success && result.error.message).toContain("Contact support");
     expect(artifactsDelete).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalled();
   });

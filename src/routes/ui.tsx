@@ -537,7 +537,7 @@ app.post("/settings/username", async (c) => {
   if (claims.data) {
     logger.warn("Rename refused - account holds a project claim", {});
     return refuse(
-      "Your username cannot be changed while you own projects: every project URL is keyed under it.",
+      "Your username cannot be changed while you own projects: every project URL is keyed under it. If you have just deleted your last project, allow up to 15 minutes.",
       403,
     );
   }

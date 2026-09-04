@@ -149,7 +149,6 @@ describe("renameUser", () => {
  * the subquery is right.
  */
 describe("renameUser against namespace claims", () => {
-  /** One user, alice, in the real schema. */
   function seedUser(db: D1Database, raw: ReturnType<typeof makeSqliteD1>["raw"]) {
     raw
       .prepare(

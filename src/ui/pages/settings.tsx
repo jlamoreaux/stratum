@@ -262,7 +262,8 @@ const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
         </label>
         <p class="settings-help">
           Your namespace: <code>@{user.username}/…</code> in every project and clone URL. It can be
-          changed only while you own no projects.
+          changed only while you own no projects; after deleting your last project, allow up to 15
+          minutes.
         </p>
         <button type="submit" class="btn">
           Change username
@@ -271,7 +272,7 @@ const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
     ) : (
       <p class="settings-help">
         Your username is the namespace in every project and clone URL, so it cannot be changed while
-        you own projects.
+        you own projects. If you have just deleted your last project, allow up to 15 minutes.
       </p>
     )}
   </div>

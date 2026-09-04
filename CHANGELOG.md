@@ -38,7 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Migration `045_user_display_name.sql` adds the column, and
   `046_namespace_claims.sql` adds the D1 table that records each project's
   namespace before its entry is written, so a rename and a project creation
-  that cross cannot both go through.
+  that cross cannot both go through; a record is trusted for 15 minutes, so
+  the username form can take that long to reappear after the last project is
+  deleted.
 - **Browsers now report Content Security Policy violations to the server.**
   Every page's policy names `/csp-report` (via `report-to` and, for browsers
   without the Reporting API, `report-uri`), and the Worker logs each report at

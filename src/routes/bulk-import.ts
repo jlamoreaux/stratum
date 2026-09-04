@@ -223,7 +223,7 @@ export async function processRepoImport(
 
     // The owner's username was read when the bulk job started; see
     // confirmOwnerNamespace for the rename it may have crossed since.
-    const confirmed = await confirmOwnerNamespace(env, ownerId, namespace, slug, logger);
+    const confirmed = await confirmOwnerNamespace(env, ownerId, project, logger);
     if (!confirmed.success) {
       job && job.failedRepos++;
       return { success: false, error: confirmed.error.message, repo: url };

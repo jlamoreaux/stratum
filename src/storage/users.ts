@@ -299,7 +299,7 @@ export async function renameUser(
       }
       return err(
         new AppError(
-          "Your username cannot be changed while you own projects: every project URL is keyed under it.",
+          "Your username cannot be changed while you own projects: every project URL is keyed under it. If you have just deleted your last project, allow up to 15 minutes.",
           "FORBIDDEN",
           403,
           { userId },

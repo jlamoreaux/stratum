@@ -277,7 +277,7 @@ app.post("/", async (c) => {
   // The username on this request was read at auth time, before the repository
   // was created; see confirmOwnerNamespace for the rename it may have crossed.
   if (owner.type === "user") {
-    const confirmed = await confirmOwnerNamespace(c.env, owner.id, namespace, slug, logger);
+    const confirmed = await confirmOwnerNamespace(c.env, owner.id, project, logger);
     if (!confirmed.success) return appError(confirmed.error);
   }
 
@@ -685,7 +685,7 @@ app.post(
 
       // Same guard as project creation. The import job row created above is
       // never queued in this case; it ages out with cleanupOldImports.
-      const confirmed = await confirmOwnerNamespace(c.env, userId, namespace, slug, logger);
+      const confirmed = await confirmOwnerNamespace(c.env, userId, project, logger);
       if (!confirmed.success) return appError(confirmed.error);
 
       // Queue the actual import job for background processing using the queue if available
