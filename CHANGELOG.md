@@ -29,6 +29,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than folded into this change.
 
 ### Added
+- **Stratum can deploy a merged change.** A new `deploys:` block in
+  `.stratum/policy.yaml` names one or more deploys, each with a `target`
+  (`cloudflare-pages`, `cloudflare-workers`, or `vercel`), an optional `dir` to
+  publish, the `secrets` it needs, and an optional `requiresApproval` gate.
+  After a change merges *and* the post-merge check declines to revert it, the
+  merged tree is read at the pinned merge commit — configuration and code are
+  therefore provably the same commit — and published to the provider. Every
+  attempt is a row you can see: status, reason, provider URL, duration, and (for
+  project writers) a redacted log tail, on a new deployments page and at
+  `GET /api/projects/{namespace}/{slug}/deployments`. `deployment.requested`,
+  `deployment.succeeded` and `deployment.failed` are subscribable from a project
+  webhook.
+
+  Credentials live in a new **per-project secret store**, encrypted with AES-GCM
+  under a `DEPLOY_SECRET_KEY` the instance holds as a Wrangler secret, with the
+  project id and secret name bound as additional authenticated data. There is no
+  read path: no API, UI, or CLI surface returns a stored value, and only the
+  deploy runner decrypts one. Managing secrets requires a project admin who is
+  **not** an agent — an agent token is refused on every secret route even when
+  its owner owns the project, because a deploy credential is the one thing an
+  agent identity is never trusted with. Approving a gated deployment likewise
+  refuses agent identities; as with a human review verdict, that means "not an
+  agent", not "a human at a keyboard" — a user's scoped API token and MCP OAuth
+  grants are accepted. A finished deployment can be retried as a new attempt,
+  which carries the originating change id so a change reverted in the meantime
+  is still refused.
+
+  The honest boundaries, documented rather than buried: **there is no build
+  step** — v1 publishes the tree exactly as committed, so commit your built
+  output or use the `vercel` target, which builds the uploaded source remotely.
+  There are no preview deploys of unmerged changes, no rollback (retrying an
+  earlier successful deployment is the recovery path), and no Netlify support. A
+  `vercel` deployment recorded as `succeeded` means **accepted for build**:
+  Vercel builds asynchronously and Stratum deliberately does not poll it. The
+  `cloudflare-pages` target is implemented against Workers Static Assets rather
+  than Pages Direct Upload, whose asset endpoints are absent from Cloudflare's
+  public API reference. Without the optional `CLOUDFLARE_WORKERS_SUBDOMAIN`
+  secret a Cloudflare deploy succeeds with no URL. And a project that only wants
+  deploys must still write an `evaluators:` block, because a policy file without
+  one is malformed and blocks every merge. Limits (2,000 files, 25 MiB total,
+  10 MiB per file) are enforced before the first provider request, so a deploy
+  never publishes half a tree. Full reference:
+  [Deployments](docs/user-guide/deployments.md).
+- **`stratum login` signs you in through the browser.** The CLI had one way to
+  authenticate — `--key`, with a token you first created by hand in the settings
+  UI and pasted into a terminal. It now runs the OAuth 2.1 authorization-code
+  flow that native apps use (RFC 8252): it registers itself as a public client,
+  proves possession of the code with PKCE, and receives the redirect on a
+  loopback listener bound to an ephemeral port on `127.0.0.1`. There is no token
+  to create and none to paste, and the grant appears under **Settings →
+  Connected applications** alongside your editors, revocable like any other.
+  This uses the authorization server Stratum already ran for MCP clients; no
+  server-side change was needed. `--read-only` requests a read-only session, and
+  the **granted** scope (not the requested one) is printed at login and by
+  `stratum status`, so a narrowed grant is visible immediately rather than at the
+  first write. Sessions renew themselves silently.
+- **`stratum logout`.** Revokes the session with the host, then clears the local
+  credential — and still clears it locally when the host cannot be reached.
+  Revocation is reported as delivered, never as confirmed: RFC 7009 §2.2 has the
+  server answer `200` whether or not anything matched.
+
 - **Display name and username editing on Settings.** The Account section now
   has a display name (free-form, shown in the header instead of the username,
   changeable any time) and, while the account owns no projects, a username

@@ -15,6 +15,7 @@ import { recordAudit } from "../storage/audit";
 import { listComments, listReviews } from "../storage/change-reviews";
 import { getChange, listChanges } from "../storage/changes";
 import { getChangeCostSummary } from "../storage/costs";
+import { type Deployment, getDeployment, listDeployments } from "../storage/deployments";
 import { listEvalRuns } from "../storage/eval-runs";
 import { listProjectEvents } from "../storage/events";
 import type { RefResolutionFailure } from "../storage/git-ops";
@@ -34,6 +35,7 @@ import { getLabelsForIssues, listIssueLabels } from "../storage/issue-labels";
 import { getIssueByNumber, listIssues } from "../storage/issues";
 import { type OAuthGrantSummary, listGrantsForUser, revokeGrantForUser } from "../storage/oauth";
 import { ownerHasClaims } from "../storage/project-namespace";
+import { listSecretNames } from "../storage/project-secrets";
 import { getProvenance } from "../storage/provenance";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import {
@@ -62,6 +64,7 @@ import { ActivityPage } from "../ui/pages/activity";
 import { BranchesPage } from "../ui/pages/branches";
 import { ChangeDetailPage } from "../ui/pages/change-detail";
 import { ChangesPage } from "../ui/pages/changes";
+import { DeploymentDetailPage, DeploymentsPage } from "../ui/pages/deployments";
 import { ErrorPage } from "../ui/pages/error";
 import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
@@ -85,6 +88,7 @@ import type { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { createLogger } from "../utils/logger";
 import { isValidNamespace, isValidSlug } from "../utils/validation";
+import { canManageSecrets, secretErrorMessage } from "./deployments";
 import { DEFAULT_COMMENTS_PAGE, DEFAULT_ISSUES_PAGE } from "./issues";
 import { SUBSCRIBABLE_EVENTS } from "./webhooks";
 
@@ -103,6 +107,20 @@ const projectRef = (project: ProjectEntry) => ({
   slug: project.slug,
   ...(project.visibility !== undefined ? { visibility: project.visibility } : {}),
 });
+
+/**
+ * Drops `logTail` for anyone who cannot write to the project.
+ *
+ * It holds a redacted provider payload, and redaction is literal-substring
+ * matching a public-project reader should not get to probe. The JSON API strips
+ * the same field on the same rule (`toResponse` in routes/deployments.ts); the
+ * page never assumes the field is present either way.
+ */
+function stripLogTail(deployment: Deployment, canWrite: boolean): Deployment {
+  if (canWrite) return deployment;
+  const { logTail: _logTail, ...rest } = deployment;
+  return rest;
+}
 
 // Helper to get current user info
 async function getCurrentUser(
@@ -2038,6 +2056,107 @@ app.get("/:namespace/:slug/sync", async (c) => {
   );
 });
 
+/**
+ * Loads a project for a page that has already validated `:namespace`/`:slug`,
+ * answering the shared 404 page on any failure so a caller can `return` it
+ * directly.
+ */
+async function loadProjectPage(
+  c: Context<{ Bindings: Env }>,
+  logger: Logger,
+): Promise<{ project: ProjectEntry; user: PageUser } | { response: Response }> {
+  const namespace = c.req.param("namespace") ?? "";
+  const slug = c.req.param("slug") ?? "";
+  const [user, projectResult] = await Promise.all([
+    getCurrentUser(c, logger),
+    getProjectByPath(c.env.STATE, namespace, slug, logger),
+  ]);
+  if (!projectResult.success) {
+    return {
+      response: await c.html(
+        errorPage(404, `Project '${namespace}/${slug}' not found.`, user),
+        404,
+      ),
+    };
+  }
+  return { project: projectResult.data, user };
+}
+
+// GET /:namespace/:slug/deployments — Post-merge deploy history
+//
+// Readable by anyone who can read the project, like Activity. `logTail` is the
+// one field that is not: it carries a redacted provider payload, so it is
+// stripped for non-writers here exactly as `GET /api/.../deployments` strips it.
+app.get("/:namespace/:slug/deployments", async (c) => {
+  const { namespace, slug } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const logger = createLogger({ path: c.req.path, userId });
+
+  if (!isValidNamespace(namespace) || !isValidSlug(slug)) return c.notFound();
+
+  const loaded = await loadProjectPage(c, logger);
+  if ("response" in loaded) return loaded.response;
+  const { project, user } = loaded;
+
+  if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, user), 404);
+  }
+  const canWrite = await canWriteProject(c.env.DB, project, userId, agentOwnerId);
+
+  const result = await listDeployments(c.env.DB, logger, { projectId: project.id });
+  if (!result.success) {
+    logger.error("Failed to list deployments", result.error);
+    return c.html(errorPage(500, "Error loading deployments. Please try again.", user), 500);
+  }
+
+  return c.html(
+    <DeploymentsPage
+      project={projectRef(project)}
+      deployments={result.data.map((deployment) => stripLogTail(deployment, canWrite))}
+      canWrite={canWrite}
+      user={user}
+    />,
+  );
+});
+
+// GET /:namespace/:slug/deployments/:id — One attempt, with its log tail
+app.get("/:namespace/:slug/deployments/:id", async (c) => {
+  const { namespace, slug, id } = c.req.param();
+  const userId = c.get("userId");
+  const agentOwnerId = c.get("agentOwnerId");
+  const logger = createLogger({ path: c.req.path, userId });
+
+  if (!isValidNamespace(namespace) || !isValidSlug(slug)) return c.notFound();
+
+  const loaded = await loadProjectPage(c, logger);
+  if ("response" in loaded) return loaded.response;
+  const { project, user } = loaded;
+
+  if (!(await canReadProject(c.env.DB, project, userId, agentOwnerId))) {
+    return c.html(errorPage(404, `Project '${namespace}/${slug}' not found.`, user), 404);
+  }
+  const canWrite = await canWriteProject(c.env.DB, project, userId, agentOwnerId);
+
+  const result = await getDeployment(c.env.DB, logger, { projectId: project.id, deploymentId: id });
+  if (!result.success) {
+    logger.error("Failed to get deployment", result.error);
+    return c.html(errorPage(500, "Error loading deployment. Please try again.", user), 500);
+  }
+  if (!result.data) {
+    return c.html(errorPage(404, `Deployment '${id}' not found.`, user), 404);
+  }
+
+  return c.html(
+    <DeploymentDetailPage
+      project={projectRef(project)}
+      deployment={stripLogTail(result.data, canWrite)}
+      canWrite={canWrite}
+      user={user}
+    />,
+  );
+});
+
 // GET /:namespace/:slug/settings — Project settings (writers only; danger zone owner-only)
 app.get("/:namespace/:slug/settings", async (c) => {
   const { namespace, slug } = c.req.param();
@@ -2065,6 +2184,22 @@ app.get("/:namespace/:slug/settings", async (c) => {
   const isOwner = project.ownerType === "user" && project.ownerId === userId;
   const sourceUrl = getProjectSourceUrl(project);
 
+  // Deploy credentials are admin-only *and* refused to agent identities, which
+  // is stricter than the write access the rest of this page needs. The rule
+  // itself lives with the routes that enforce it, so what this page renders and
+  // what those routes allow cannot drift apart.
+  const showSecrets = await canManageSecrets(c.env.DB, project, {
+    userId,
+    agentId: c.get("agentId"),
+  });
+  const secretsResult = showSecrets ? await listSecretNames(c.env.DB, logger, project.id) : null;
+  if (secretsResult && !secretsResult.success) {
+    logger.error("Failed to list project secrets", secretsResult.error);
+  }
+  // The secret forms post to the API router and come back here with the reason
+  // as a fixed code; anything not in that closed set resolves to no message.
+  const secretError = secretErrorMessage(c.req.query("secretError"));
+
   return c.html(
     <ProjectSettingsPage
       project={{
@@ -2073,6 +2208,9 @@ app.get("/:namespace/:slug/settings", async (c) => {
         ...(sourceUrl !== undefined ? { sourceUrl } : {}),
       }}
       isOwner={isOwner}
+      canManageSecrets={showSecrets}
+      secrets={secretsResult?.success ? secretsResult.data : []}
+      {...(secretError !== undefined ? { secretError } : {})}
       user={userResult}
     />,
   );

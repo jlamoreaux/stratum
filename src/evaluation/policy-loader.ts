@@ -1,6 +1,7 @@
 import YAML from "yaml";
+import { sanitizeDeploys } from "../deploy/config";
 import { readFileFromRepo } from "../storage/git-ops";
-import type { Logger } from "../utils/logger";
+import { type Logger, defaultLogger } from "../utils/logger";
 import {
   MAX_COMMAND_LENGTH,
   MAX_PHASE_TIMEOUT_MS,
@@ -30,10 +31,13 @@ export function diffTouchesProtectedConfig(diff: string): boolean {
   return PROTECTED_CONFIG_FILES.some((path) => diff.includes(`diff --git a/${path} b/${path}`));
 }
 
-type PolicyLoad =
+/** Outcome of parsing policy-file bytes: the file either yields a policy or it does not. */
+export type PolicyParse =
   | { status: "ok"; policy: EvalPolicy }
-  | { status: "absent" }
   | { status: "malformed"; reason: string };
+
+/** `PolicyParse` plus the one outcome only a *fetch* can produce. */
+type PolicyLoad = PolicyParse | { status: "absent" };
 
 export async function loadPolicy(
   remote: string,
@@ -77,7 +81,139 @@ export async function loadPolicy(
 function malformedPolicy(path: string, reason: string, logger: Logger): EvalPolicy {
   const configError = `Policy file ${path} is present but invalid (${reason}); merges are blocked until it is fixed.`;
   logger.error("Malformed policy file — failing merge gate closed", undefined, { path, reason });
-  return { ...DEFAULT_POLICY, configError };
+  return {
+    ...DEFAULT_POLICY,
+    configError,
+    // A malformed file has no usable `deploys`, and leaving that as an absent
+    // field would mean a single YAML typo silently stops production updating —
+    // the quietest possible failure. Deliberately *not* salvaged: the parse
+    // failed, so there is no way to tell which half of the file the typo
+    // corrupted, and a truncated document can yield a structurally valid
+    // `deploys` list that says something the author never wrote. Instead the
+    // policy carries one rejection, which the deploy runner persists as a named
+    // failed deployment pointing at the file.
+    deployRejections: [
+      {
+        name: null,
+        reason: `Policy file ${path} is present but invalid (${reason}); no deploy configuration could be read from it.`,
+      },
+    ],
+  };
+}
+
+/**
+ * Parse and sanitize the bytes of a policy file.
+ *
+ * Split out of `readAndParsePolicy` so parsing is separable from fetching: the
+ * deploy runner reads the tree *pinned at a merge commit* and must parse the
+ * policy out of those bytes. Re-reading via `loadPolicy` would take the branch
+ * tip instead, letting a newer policy apply to an older tree.
+ *
+ * Never throws: a sanitization failure is returned as `malformed`.
+ */
+export function parsePolicyContent(
+  content: string,
+  format: "json" | "yaml",
+  logger: Logger = defaultLogger,
+): PolicyParse {
+  let parsed: unknown;
+  try {
+    parsed = format === "json" ? JSON.parse(content) : YAML.parse(content);
+  } catch (e) {
+    return { status: "malformed", reason: e instanceof Error ? e.message : "parse error" };
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("evaluators" in parsed) ||
+    !Array.isArray((parsed as Record<string, unknown>).evaluators)
+  ) {
+    return { status: "malformed", reason: "missing or non-array 'evaluators'" };
+  }
+
+  const raw = parsed as Record<string, unknown>;
+
+  // Sanitization gets its own catch. A throw in here is a statement about
+  // *this file* — a YAML alias cycle, say — not a transient read blip, and
+  // the caller's "treat as absent" would fall back to the permissive
+  // default with no `configError`, silently discarding the file's merge
+  // protection. Fail closed instead.
+  try {
+    const merge = sanitizeMergePolicy(raw.merge);
+    const {
+      merge: _unsanitized,
+      configError: _ce,
+      // Destructured out for the same reason `merge` is: the spread below
+      // copies whatever the file said into these fields, so leaving them in
+      // would hand downstream code the *unsanitized* parsed value, by
+      // reference. Both are rebuilt further down.
+      deploys: _rawDeploys,
+      deployRejections: _rawRejections,
+      ...policy
+    } = {
+      ...DEFAULT_POLICY,
+      ...(parsed as Partial<EvalPolicy>),
+    };
+
+    // Rebuilt rather than taken from the spread: every entry must be a fresh
+    // object owned by this policy, so nothing downstream can reach back into
+    // the parsed input (or, via `DEFAULT_POLICY`'s own array, into the module
+    // default) by mutating what it was handed.
+    const declared = raw.evaluators as unknown[];
+    const evaluators = declared
+      .map((entry) => sanitizeEvaluator(entry, logger))
+      .filter((entry): entry is EvaluatorConfig => entry !== null);
+
+    // Any dropped entry fails the gate closed — not just the case where every
+    // entry was dropped. An entry the author wrote is a gate they meant to
+    // have; silently discarding one while its siblings survive removes that
+    // gate and lets the change through on the remaining ones, which is the
+    // permissive fallback `malformedPolicy` exists to prevent. A `webhook`
+    // whose `url` was typo'd is the concrete case: it used to reach
+    // `WebhookEvaluator` and block on an unusable URL.
+    //
+    // Note this only counts entries that are structurally unusable. An
+    // unrecognised `type` is copied through and rejected downstream by
+    // `buildEvaluators`, so a policy naming a future evaluator type does not
+    // trip this.
+    if (evaluators.length < declared.length) {
+      return {
+        status: "malformed",
+        reason: `${declared.length - evaluators.length} unusable entr${
+          declared.length - evaluators.length === 1 ? "y" : "ies"
+        } in 'evaluators'`,
+      };
+    }
+    policy.evaluators = evaluators;
+
+    // Assigned unconditionally: the spread above already put the *raw* value
+    // in `policy.minScore`, so skipping the assignment on rejection would
+    // leave it there — and `-Infinity` or the string "-5" both make
+    // `score >= minScore` true for every score, disabling the gate.
+    policy.minScore = clampScore(raw.minScore, logger) ?? DEFAULT_POLICY.minScore;
+
+    // Rebuilt for the same reason `evaluators` is, and assigned only from the
+    // sanitizer's output — never from the spread. A rejected entry does *not*
+    // fail the file closed the way a dropped evaluator does; it is carried on
+    // the policy so the deploy runner can persist it as a named failed
+    // deployment. `sanitizeDeploys` explains why the two differ.
+    const { accepted, rejected } = sanitizeDeploys(raw.deploys);
+
+    const sanitized: EvalPolicy = { ...policy };
+    if (merge) sanitized.merge = merge;
+    if (accepted.length > 0) sanitized.deploys = accepted;
+    if (rejected.length > 0) sanitized.deployRejections = rejected;
+
+    return { status: "ok", policy: sanitized };
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    logger.error("Policy sanitization threw — failing merge gate closed", undefined, {
+      format,
+      reason,
+    });
+    return { status: "malformed", reason };
+  }
 }
 
 async function readAndParsePolicy(
@@ -95,90 +231,11 @@ async function readAndParsePolicy(
     const content = contentResult.data;
     if (content === null || content === undefined) return { status: "absent" };
 
-    let parsed: unknown;
-    try {
-      parsed = format === "json" ? JSON.parse(content) : YAML.parse(content);
-    } catch (e) {
-      return { status: "malformed", reason: e instanceof Error ? e.message : "parse error" };
-    }
-
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("evaluators" in parsed) ||
-      !Array.isArray((parsed as Record<string, unknown>).evaluators)
-    ) {
-      return { status: "malformed", reason: "missing or non-array 'evaluators'" };
-    }
-
-    const raw = parsed as Record<string, unknown>;
-
-    // Sanitization gets its own catch. A throw in here is a statement about
-    // *this file* — a YAML alias cycle, say — not a transient read blip, and
-    // the outer handler's "treat as absent" would fall back to the permissive
-    // default with no `configError`, silently discarding the file's merge
-    // protection. Fail closed instead.
-    try {
-      const merge = sanitizeMergePolicy(raw.merge);
-      const {
-        merge: _unsanitized,
-        configError: _ce,
-        ...policy
-      } = {
-        ...DEFAULT_POLICY,
-        ...(parsed as Partial<EvalPolicy>),
-      };
-
-      // Rebuilt rather than taken from the spread: every entry must be a fresh
-      // object owned by this policy, so nothing downstream can reach back into
-      // the parsed input (or, via `DEFAULT_POLICY`'s own array, into the module
-      // default) by mutating what it was handed.
-      const declared = raw.evaluators as unknown[];
-      const evaluators = declared
-        .map((entry) => sanitizeEvaluator(entry, logger))
-        .filter((entry): entry is EvaluatorConfig => entry !== null);
-
-      // Any dropped entry fails the gate closed — not just the case where every
-      // entry was dropped. An entry the author wrote is a gate they meant to
-      // have; silently discarding one while its siblings survive removes that
-      // gate and lets the change through on the remaining ones, which is the
-      // permissive fallback `malformedPolicy` exists to prevent. A `webhook`
-      // whose `url` was typo'd is the concrete case: it used to reach
-      // `WebhookEvaluator` and block on an unusable URL.
-      //
-      // Note this only counts entries that are structurally unusable. An
-      // unrecognised `type` is copied through and rejected downstream by
-      // `buildEvaluators`, so a policy naming a future evaluator type does not
-      // trip this.
-      if (evaluators.length < declared.length) {
-        return {
-          status: "malformed",
-          reason: `${declared.length - evaluators.length} unusable entr${
-            declared.length - evaluators.length === 1 ? "y" : "ies"
-          } in 'evaluators'`,
-        };
-      }
-      policy.evaluators = evaluators;
-
-      // Assigned unconditionally: the spread above already put the *raw* value
-      // in `policy.minScore`, so skipping the assignment on rejection would
-      // leave it there — and `-Infinity` or the string "-5" both make
-      // `score >= minScore` true for every score, disabling the gate.
-      policy.minScore = clampScore(raw.minScore, logger) ?? DEFAULT_POLICY.minScore;
-
-      return { status: "ok", policy: merge ? { ...policy, merge } : policy };
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      logger.error("Policy sanitization threw — failing merge gate closed", undefined, {
-        path,
-        reason,
-      });
-      return { status: "malformed", reason };
-    }
+    return parsePolicyContent(content, format, logger);
   } catch (e) {
     // A transient repo-read blip — treat as absent so it doesn't block every
-    // merge. Sanitization failures no longer reach here; they are handled above
-    // and fail closed.
+    // merge. Sanitization failures cannot reach here; `parsePolicyContent`
+    // handles them itself and fails closed.
     logger.warn("Policy load failed; treating as absent", {
       path,
       error: e instanceof Error ? e.message : String(e),

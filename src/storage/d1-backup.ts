@@ -53,6 +53,13 @@ export const BACKUP_TABLES: readonly string[] = [
   "audit_log",
   "deletion_jobs",
   "commit_metrics",
+  // Post-merge deployments (migration 047). `project_secrets` holds the
+  // encrypted provider credentials and is the only copy that exists — the
+  // plaintext was never stored and no route can read one back, so a restore
+  // without it means every deploying project is silently broken until each
+  // token is re-pasted by hand. Both declare no foreign keys, so order is free.
+  "project_secrets",
+  "deployments",
 ];
 
 /**

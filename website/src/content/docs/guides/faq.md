@@ -39,16 +39,24 @@ invariants GitHub doesn't have:
 ## Does Stratum replace GitHub Actions?
 
 No. Stratum has no native CI runner — no workflows, hosted runners, matrix
-builds, artifacts, caching, scheduled jobs, CI secrets store, deployment
-environments, or status-check aggregation (it does not collect external CI
-check results the way a GitHub PR's checks tab does). Its code execution is
-limited to the evaluation pipeline: the
-sandbox evaluator (needs the optional `SANDBOX` binding; fails closed without
-it), the `webhook` evaluator (a synchronous call-out to CI *you* host, which
-must answer within the request timeout — default 10s), and the post-merge
-smoke command run in a sandbox. Bring your own CI and wire it in via the
-webhook evaluator, or use layer mode and keep running GitHub Actions on the
+builds, artifacts, caching, scheduled jobs, deployment environments, or
+status-check aggregation (it does not collect external CI check results the way
+a GitHub PR's checks tab does). Its code execution is limited to the evaluation
+pipeline: the sandbox evaluator (needs the optional `SANDBOX` binding; fails
+closed without it), the `webhook` evaluator (a synchronous call-out to CI *you*
+host, which must answer within the request timeout — default 10s), and the
+post-merge smoke command run in a sandbox. Bring your own CI and wire it in via
+the webhook evaluator, or use layer mode and keep running GitHub Actions on the
 promoted PRs. See [CI Integration](/guides/ci-integration/).
+
+Two things on that list have since arrived in a narrow form. Stratum now has an
+**encrypted per-project secret store** — but it is deploy-only: the deploy
+runner is its sole reader, and the webhook evaluator's `secret` still lives
+literally in the policy file. And it can **deploy the merged tree** to
+Cloudflare or Vercel from a `deploys:` block, with an optional approval gate
+and a retry. That is not deployment environments: there is no
+staging/production separation, no per-environment variables, no build step, no
+preview deploy, and no rollback. See [Deployments](/guides/deployments/).
 
 ## Do I have to leave GitHub to use it?
 

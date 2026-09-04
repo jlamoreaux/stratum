@@ -1,6 +1,6 @@
 ---
 title: Endpoints
-description: "The Stratum REST API surface — projects, branches, workspaces, changes, reviews, issues, agents, users, and organizations."
+description: "The Stratum REST API surface — projects, branches, workspaces, changes, reviews, issues, deployments, agents, users, and organizations."
 ---
 
 An overview of the REST API by resource. The complete, authoritative surface —
@@ -227,6 +227,58 @@ Issues linked to a change close **automatically** when that change merges.
 
 `POST /api/projects/{namespace}/{slug}/issues/{number}/comments`
 `GET /api/projects/{namespace}/{slug}/issues/{number}/comments`
+
+## Deployments and deploy secrets
+
+Post-merge deployments and the encrypted per-project secret store that feeds
+them. See [Deployments](/guides/deployments/) for the `deploys:` policy block,
+the targets, and the limits.
+
+**No endpoint returns a stored secret value**, and every secret route refuses
+agent identities — even an agent whose owner is a project admin.
+
+### List secret names
+
+`GET /api/projects/{namespace}/{slug}/secrets`
+
+Project admin only. Names and metadata, never values.
+
+### Create or replace a secret
+
+`PUT /api/projects/{namespace}/{slug}/secrets/{name}`
+`POST /api/projects/{namespace}/{slug}/secrets` (form-friendly)
+
+Names match `^[A-Z][A-Z0-9_]{0,63}$`; values are capped at 4096 bytes.
+
+### Delete a secret
+
+`DELETE /api/projects/{namespace}/{slug}/secrets/{name}`
+`POST /api/projects/{namespace}/{slug}/secrets/{name}/delete` (form-friendly)
+
+### List deployments
+
+`GET /api/projects/{namespace}/{slug}/deployments`
+
+Readable by anyone who can read the project. Filter with `name`, `status`,
+`limit` (default 50, max 200) and `offset`. `logTail` is included only for
+project writers.
+
+### Get a deployment
+
+`GET /api/deployments/{id}`
+
+### Approve a deployment
+
+`POST /api/deployments/{id}/approve`
+
+Releases a `pending_approval` deployment. Requires project write access and a
+**user** identity — agent tokens are refused.
+
+### Retry a deployment
+
+`POST /api/deployments/{id}/retry`
+
+Re-runs a finished deployment as a new attempt. Agents are allowed here.
 
 ## Agents
 

@@ -146,6 +146,13 @@ vi.mock("../src/queue/events", () => ({
   emitEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
+// The default matches what the real module does for the policies these tests
+// use — no postMergeCommand, so nothing runs. Tests of the deploy trigger
+// override it, because that trigger keys off this result.
+vi.mock("../src/merge/post-merge", () => ({
+  runPostMergeCheck: vi.fn(async () => ({ status: "skipped" })),
+}));
+
 vi.mock("../src/storage/users", () => ({
   getUserByToken: vi.fn(),
   // Agent auth resolves the agent's owner via getUser (fail-closed on the
@@ -177,6 +184,7 @@ import {
   loadPolicy,
 } from "../src/evaluation";
 import { resetCircuitBreakersForTests } from "../src/github/client";
+import { runPostMergeCheck } from "../src/merge/post-merge";
 import { emitEvent } from "../src/queue/events";
 import { getAgent, getAgentByToken } from "../src/storage/agents";
 import { recordAudit } from "../src/storage/audit";
@@ -1658,6 +1666,107 @@ describe("POST /api/changes/:id/merge", () => {
       env,
     );
     expect(res.status).toBe(200);
+  });
+
+  /**
+   * The deploy trigger hangs off the post-merge RESULT, not the change.merged
+   * event, because a failed post-merge check auto-reverts the merge. Anyone who
+   * "simplifies" this onto the event reintroduces deploying reverted code.
+   */
+  describe("post-merge deploy trigger", () => {
+    let send: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      send = vi.fn(async () => {});
+      env.DEPLOY_QUEUE = { send } as unknown as Env["DEPLOY_QUEUE"];
+      vi.mocked(getChange).mockResolvedValue({
+        success: true,
+        data: { ...mockChange, status: "accepted" },
+      });
+      vi.mocked(runPostMergeCheck).mockResolvedValue({ status: "skipped" });
+    });
+
+    afterEach(() => {
+      // Restore the module default for the rest of the file.
+      vi.mocked(runPostMergeCheck).mockResolvedValue({ status: "skipped" });
+    });
+
+    it("enqueues the merged commit after a clean post-merge check", async () => {
+      vi.mocked(runPostMergeCheck).mockResolvedValue({ status: "passed" });
+
+      const res = await app.fetch(
+        request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      // `mergedAt` is the merge time the route just stamped on the change. The
+      // deployment row is ordered by it rather than by when the queue delivers
+      // the message, because the queue promises no ordering.
+      expect(send).toHaveBeenCalledWith({
+        kind: "merge",
+        projectId: mockProject.id,
+        changeId: "chg_abc123",
+        commitSha: "sha_merged",
+        mergedAt: expect.any(String),
+      });
+    });
+
+    it("does not enqueue when the post-merge check reverted the merge", async () => {
+      vi.mocked(runPostMergeCheck).mockResolvedValue({
+        status: "reverted",
+        reason: "smoke test failed",
+        revertCommit: "sha_revert",
+      });
+
+      const res = await app.fetch(
+        request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it("does not enqueue when the post-merge check failed", async () => {
+      vi.mocked(runPostMergeCheck).mockResolvedValue({
+        status: "failed",
+        reason: "smoke test failed",
+      });
+
+      await app.fetch(request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH), env);
+
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it("enqueues only after the post-merge check has run", async () => {
+      const order: string[] = [];
+      vi.mocked(runPostMergeCheck).mockImplementation(async () => {
+        order.push("post-merge");
+        return { status: "passed" };
+      });
+      send.mockImplementation(async () => {
+        order.push("enqueue");
+      });
+
+      await app.fetch(request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH), env);
+
+      expect(order).toEqual(["post-merge", "enqueue"]);
+    });
+
+    it("still reports the merge when the queue send fails", async () => {
+      send.mockRejectedValue(new Error("queue unavailable"));
+
+      const res = await app.fetch(
+        request("POST", "/api/changes/chg_abc123/merge", undefined, USER_AUTH),
+        env,
+      );
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { merged: boolean; commit: string };
+      expect(body.merged).toBe(true);
+      expect(body.commit).toBe("sha_merged");
+    });
   });
 });
 

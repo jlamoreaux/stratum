@@ -189,7 +189,7 @@ curl -X POST .../api/projects/@you/my-project/changes -d '{"workspace": "fix-bug
 curl -X POST .../api/changes/<change-id>/merge
 ```
 
-The full surface — 86 paths, 107 operations — is specified in
+The full surface — 93 paths, 116 operations — is specified in
 [`docs/api/openapi.yml`](docs/api/openapi.yml), with per-resource guides under
 [`docs/api/endpoints/`](docs/api/endpoints/README.md).
 
@@ -286,6 +286,14 @@ diff analysis · webhook for external CI · LLM review via the Workers AI bindin
 test execution · per-evaluator evidence and estimated resource costs (LLM tokens, sandbox
 time, git ops) · branch protection · provenance recorded per merged commit.
 
+**Post-merge deployments**
+A `deploys:` block in `.stratum/policy.yaml` publishes the merged tree to Cloudflare
+(static assets or a Worker script) or Vercel · encrypted per-project deploy secrets that
+no API ever reads back and that agent identities cannot manage · an optional approval gate
+per deploy · retry as a new attempt · supersession when a newer merge lands first ·
+deployment events on the webhook stream. There is no build step — see
+[Known limitations](#known-limitations).
+
 **Import and sync**
 Import from GitHub, GitLab, and Bitbucket · bidirectional GitHub sync (inbound webhooks,
 outbound PR promotion) with conflict resolution · bulk import · queue-backed with
@@ -308,7 +316,7 @@ tested restore path · deletion jobs · admin metrics API · durable event outbo
 queue consumer and a stale-event sweep · workspace TTL sweep.
 
 **Interfaces**
-Server-rendered web UI · REST API (86 paths) · remote MCP server at `/mcp` with an
+Server-rendered web UI · REST API (93 paths) · remote MCP server at `/mcp` with an
 OAuth 2.1 authorization server (dynamic client registration, PKCE, rotating refresh
 tokens) · `@stratum/cli` at full API parity · `@stratum/agent` reference agent.
 
@@ -325,6 +333,11 @@ tokens) · `@stratum/cli` at full API parity · `@stratum/agent` reference agent
   viable. Keep LFS repos on GitHub and use layer mode.
 - **Git submodules are rejected**, not supported — a gitlink or `.gitmodules` fails import,
   gated push, and change creation rather than corrupting the tree silently.
+- **Deploys have no build step** — v1 publishes the tree **exactly as committed**. There's
+  no install, bundle, or framework build, so commit your built output (and point `dir:` at
+  it) or use the `vercel` target, which builds the uploaded source remotely. There's also
+  no preview deploy of an unmerged change and no rollback: retrying an earlier successful
+  deployment is the recovery path. Netlify isn't supported.
 - **Scale** — git operations run in-memory on the Worker; large repos will hit Worker limits.
 - **Synchronous evaluation** — the evaluator suite runs inline at change creation, so change
   creation latency includes it.
@@ -381,6 +394,7 @@ Published at [docs.usestratum.dev](https://docs.usestratum.dev), built from
 **Users** — [Getting started](docs/user-guide/getting-started.md) ·
 [Importing from GitHub](docs/user-guide/importing.md) ·
 [CI integration](docs/user-guide/ci-integration.md) ·
+[Deployments](docs/user-guide/deployments.md) ·
 [Troubleshooting](docs/user-guide/troubleshooting.md) ·
 [FAQ](docs/user-guide/faq.md)
 

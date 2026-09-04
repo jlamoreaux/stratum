@@ -40,6 +40,9 @@ const SUBSCRIBABLE_EVENTS = [
   "issue.opened",
   "issue.commented",
   "issue.closed",
+  "deployment.requested",
+  "deployment.succeeded",
+  "deployment.failed",
 ];
 
 interface ProjectAccess {
