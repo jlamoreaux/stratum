@@ -503,7 +503,7 @@ describe("OAuth signup: choosing a username", () => {
       expect(html).toContain("octo@example.com");
       expect(html).toContain("GitHub");
       expect(html).toContain("@Octo_Cat");
-      expect(html).toContain("cannot be changed later");
+      expect(html).toContain("fixed while you own projects");
       expect(html).not.toContain('name="inviteCode"');
     });
 

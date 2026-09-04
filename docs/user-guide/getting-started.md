@@ -27,9 +27,12 @@ Sign in with any of:
 
 All three resolve to the same email-identity account, so you can mix methods.
 Every method asks you to choose a **username** the first time: it is your
-namespace (`@you/project` in every URL and clone URL) and cannot be changed
-later. GitHub and Google sign-in suggest one from your handle or email address
-and let you pick another before the account exists.
+namespace (`@you/project` in every URL and clone URL). You can change it in
+Settings while you own no projects; while any exists it is fixed, because
+every project is keyed under it (after deleting your last project, allow up to
+15 minutes before the form reappears). GitHub and Google sign-in suggest one from
+your handle or email address and let you pick another before the account
+exists. A separate display name, shown in the header, can be changed any time.
 
 ### Self-hosting
 

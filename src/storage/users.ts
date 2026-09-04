@@ -26,8 +26,12 @@ interface UserRow {
   // `SELECT *` as deleting_at, so the auth hot path learns the telemetry
   // preference without a second round-trip.
   telemetry_opt_out: number;
+  // Added in migration 045; NULL until the user sets one. Optional in the type
+  // because stub/legacy reads may omit the column entirely.
+  display_name?: string | null;
 }
 
+/** Maps a users row to the public `User`, omitting nullable columns that are unset rather than carrying nulls. */
 function rowToUser(row: UserRow): User {
   const user: User = {
     id: row.id,
@@ -36,6 +40,7 @@ function rowToUser(row: UserRow): User {
     tokenHash: row.token_hash,
     createdAt: row.created_at,
   };
+  if (row.display_name != null && row.display_name !== "") user.displayName = row.display_name;
   if (row.github_id !== null) user.githubId = row.github_id;
   if (row.github_username !== null) user.githubUsername = row.github_username;
   // `deleting_at` may be absent when a stub/legacy read omits the column.
@@ -224,6 +229,94 @@ export async function setUserTelemetryOptOut(
     return err(
       new AppError("Failed to update telemetry preference", "STORAGE_ERROR", 500, { userId }),
     );
+  }
+}
+
+/**
+ * Set or clear the display name. `null` clears it, so the header falls back to
+ * the username. The caller trims and bounds the value; this only stores it.
+ */
+export async function setUserDisplayName(
+  db: D1Database,
+  userId: string,
+  displayName: string | null,
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  logger.debug("Setting display name", { userId, cleared: displayName === null });
+  try {
+    await db
+      .prepare("UPDATE users SET display_name = ? WHERE id = ?")
+      .bind(displayName, userId)
+      .run();
+    return ok(undefined);
+  } catch (error) {
+    logger.error("Failed to set display name", error instanceof Error ? error : undefined, {
+      userId,
+    });
+    return err(new AppError("Failed to set display name", "STORAGE_ERROR", 500, { userId }));
+  }
+}
+
+/**
+ * Change a username.
+ *
+ * The username is the namespace in every project URL, clone URL, KV project
+ * key and backing repository name, and nothing here rewrites those. So the
+ * change is refused once the account has created a project — checked inside
+ * the UPDATE itself against `namespace_claims`, which creation writes before
+ * a project's KV entry (see storage/project-namespace.ts), so a claim and a
+ * rename racing each other resolve in D1 rather than across two stores. The
+ * caller also lists KV for projects that predate claims. This validates the
+ * new name and enforces uniqueness; a taken name comes back as a 409 rather
+ * than a 500, since it is the user's to fix.
+ */
+export async function renameUser(
+  db: D1Database,
+  userId: string,
+  newUsername: string,
+  logger: Logger,
+): Promise<Result<string, AppError>> {
+  const validation = validateUsername(newUsername, logger);
+  if (!validation.success) {
+    return err(
+      new AppError(validation.error[0]?.message ?? "Invalid username", "VALIDATION_ERROR", 400),
+    );
+  }
+  const username = validation.data;
+  logger.debug("Renaming user", { userId, username });
+  try {
+    const result = await db
+      .prepare(
+        "UPDATE users SET username = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM namespace_claims WHERE owner_id = ?)",
+      )
+      .bind(username, userId, userId)
+      .run();
+    if ((result.meta?.changes ?? 0) === 0) {
+      // Nothing changed: either the row is gone or a claim held the name.
+      const exists = await db.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first();
+      if (exists === null) {
+        return err(new AppError(`User '${userId}' not found`, "NOT_FOUND", 404, { userId }));
+      }
+      return err(
+        new AppError(
+          "Your username cannot be changed while you own projects: every project URL is keyed under it. If you have just deleted your last project, allow up to 15 minutes.",
+          "FORBIDDEN",
+          403,
+          { userId },
+        ),
+      );
+    }
+    logger.info("User renamed", { userId, username });
+    return ok(username);
+  } catch (error) {
+    // idx_users_username is UNIQUE; D1 reports a collision as a constraint error.
+    if (error instanceof Error && /UNIQUE|constraint/i.test(error.message)) {
+      return err(
+        new AppError("That username is already taken.", "CONFLICT", 409, { userId, username }),
+      );
+    }
+    logger.error("Failed to rename user", error instanceof Error ? error : undefined, { userId });
+    return err(new AppError("Failed to rename user", "STORAGE_ERROR", 500, { userId }));
   }
 }
 

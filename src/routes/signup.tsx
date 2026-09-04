@@ -421,7 +421,7 @@ app.get("/", (c) => {
 
                   <div class="form-group">
                     <label class="form-label" for="username">
-                      Username <span>(your unique identifier)</span>
+                      Username <span>(your namespace — fixed while you own projects)</span>
                     </label>
                     <input
                       type="text"

@@ -28,6 +28,8 @@ export type AuditAction =
   | "branch.created"
   | "branch.deleted"
   | "telemetry.preference_changed"
+  | "user.display_name_changed"
+  | "user.renamed"
   // MCP OAuth grants (#349). Recorded on the consent decision and on revocation
   // so "which editor did I connect, and when did I disconnect it" is answerable
   // from the trail rather than only from the live grant list.

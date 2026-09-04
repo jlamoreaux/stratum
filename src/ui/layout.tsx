@@ -1,14 +1,31 @@
 import type { FC } from "hono/jsx";
 
+/**
+ * A closed union rather than a free string: the header renders exactly these
+ * links, so a page cannot claim an "active" link that does not exist, and
+ * adding a link means adding it here where the compiler lists every caller.
+ */
+export type NavItem = "new" | "settings";
+
 interface LayoutProps {
   title: string;
-  user?: { id: string; email: string; username: string } | null | undefined;
+  user?:
+    | { id: string; email: string; username: string; displayName?: string | undefined }
+    | null
+    | undefined;
   /** Auto-reload the page every N seconds (status polling without client JS). */
   refreshSeconds?: number;
+  /**
+   * Set by the page, not derived from the request path: the layout does not
+   * see the URL, and a page under /new/import is still "new" to the reader.
+   */
+  active?: NavItem;
   children?: unknown;
 }
 
-export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, children }) => {
+/** The page chrome shared by every server-rendered page: header nav, main column, footer, and the CSP-nonced scripts. */
+export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, children }) => {
+  const current = (item: NavItem) => (active === item ? "page" : undefined);
   return (
     <html lang="en">
       <head>
@@ -29,17 +46,33 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, children 
           <a class="nav-brand" href="/">
             stratum
           </a>
+          {user && (
+            <>
+              {/*
+                A checkbox, not a button: the phone menu's open/closed state
+                has to live somewhere with no client script, and :checked is
+                the only state CSS can read. The label is the visible button;
+                on phones the input is visually hidden but kept in the tab
+                order, and at wider widths both are display:none.
+              */}
+              <input type="checkbox" id="nav-menu" class="nav-menu-toggle" />
+              <label for="nav-menu" class="nav-menu-button">
+                <span class="nav-menu-open">menu</span>
+                <span class="nav-menu-close">close</span>
+              </label>
+            </>
+          )}
           <div class="nav-auth">
             {user ? (
               <>
-                <span class="nav-user">{user.username ?? user.email}</span>
-                <a href="/new" class="nav-auth-link">
+                {/* Identity, not navigation: who is signed in. The account page is "settings". */}
+                <span class="nav-user" title={`@${user.username}`}>
+                  {user.displayName ?? user.username ?? user.email}
+                </span>
+                <a href="/new" class="nav-auth-link" aria-current={current("new")}>
                   new project
                 </a>
-                <a href="/profile" class="nav-auth-link">
-                  profile
-                </a>
-                <a href="/settings" class="nav-auth-link">
+                <a href="/settings" class="nav-auth-link" aria-current={current("settings")}>
                   settings
                 </a>
                 <form method="post" action="/auth/logout" class="nav-logout-form">

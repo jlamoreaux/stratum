@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than folded into this change.
 
 ### Added
+- **Display name and username editing on Settings.** The Account section now
+  has a display name (free-form, shown in the header instead of the username,
+  changeable any time) and, while the account owns no projects, a username
+  form. The username is the namespace every project URL, clone URL and backing
+  repository is keyed under, so while any project exists it is fixed and the
+  page says so instead of offering a form; the signup forms now say the same.
+  Migration `045_user_display_name.sql` adds the column, and
+  `046_namespace_claims.sql` adds the D1 table that records each project's
+  namespace before its entry is written, so a rename and a project creation
+  that cross cannot both go through; a record is trusted for 15 minutes, so
+  the username form can take that long to reappear after the last project is
+  deleted.
 - **Browsers now report Content Security Policy violations to the server.**
   Every page's policy names `/csp-report` (via `report-to` and, for browsers
   without the Reporting API, `report-uri`), and the Worker logs each report at
@@ -59,11 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The same page collects an invite code while the closed beta is on, so OAuth
   signup is no longer refused under the gate — it presents a code like the
   magic-link form does, and is admitted (codes minted, emailed) the same way.
-- **A profile page, and invite codes you can actually find.** `/profile` (linked
-  from the header, next to settings) shows your account identity — username,
-  email, member since, and any linked GitHub account — plus the invite codes
-  issued to your account, each with a share link and whether it has been
-  redeemed. Codes previously existed only in the one email sent at signup, which
+- **Invite codes you can actually find.** Settings, under Account, shows your
+  account identity — username, email, member since, and any linked GitHub
+  account — plus the invite codes issued to your account, each with a share
+  link and whether it has been redeemed. (This first shipped as a separate
+  `/profile` page, since folded into Settings; the URL redirects.) Codes
+  previously existed only in the one email sent at signup, which
   is best-effort and skipped entirely when the instance has no email binding
   configured, so a lost or never-sent email meant unreachable codes; they can now
   be read back from the referral service on demand. The listing keys off
@@ -123,6 +136,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user), so an agent's feedback channel is change comments.
 
 ### Changed
+- **Profile is folded into Settings.** The two pages opened with the same
+  Account card and each pointed at the other for the rest. Settings now holds
+  everything — identity, invite codes, privacy, tokens, connected apps, agents,
+  danger zone — with jump links under the heading, and `/profile` redirects to
+  it. The header drops the *profile* link, marks the link for the page you are
+  on, and shows the display name when one is set.
+- **Settings copy is shorter and the page reads on a phone.** The four
+  paragraphs of help copy are each a sentence or two; the analytics list sits
+  behind an "exactly what is sent" disclosure. The help copy, list, checkbox
+  and forms get the spacing the global reset had removed, the native select
+  and checkbox are styled to match the inputs, form controls and the phone
+  menu's rows are at least 40px tall, card headings are `h2` under the page's
+  `h1`, and dates read "Sep 2, 2026" instead of a locale-dependent "9/2/2026".
+  Rotate and Disable on the legacy key are plain buttons: red is reserved for
+  the danger zone.
 - **OAuth and MCP route logs carry the request id.** The routes built their
   own loggers and dropped the id the auth middleware minted, so a middleware
   rejection and the route's own line for the same request could not be joined.
@@ -149,6 +177,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants as well as scoped tokens.
 
 ### Fixed
+- **The header fits a phone.** Signed in, the nav's five links were laid out in
+  one unwrappable row, so below about 460px the row ran past the viewport, the
+  page scrolled sideways, and the wordmark and "logout" were clipped off either
+  edge. Below 640px the links now collapse behind a "menu" button next to the
+  wordmark and open as a full-width list beneath it. The toggle is a checkbox
+  driven purely by CSS, so it works with scripts disabled and keeps its place in
+  the tab order. Wider screens, the signed-out header and the docs site's header
+  (which shares this stylesheet) are unchanged.
+- **Settings tables and the invite table fit a phone.** The API token,
+  connected-app and agent tables were not in the sideways-scrolling wrapper the
+  invite table used, so a settings page with two tokens was 741px wide at a
+  390px viewport. All four now scroll inside the card. The invite share link,
+  which was allowed to break at any character and wrapped to 300px-tall rows,
+  stays on one line inside that scroll; an email in the Account list wraps
+  instead of running past the card edge.
 - **Claude Code can connect to the MCP server.** `claude mcp add` registers
   `http://localhost:<port>/callback` as its OAuth redirect, and the
   authorization server refused the name outright — only the loopback IP

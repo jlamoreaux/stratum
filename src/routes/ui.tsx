@@ -33,6 +33,7 @@ import { listIssueComments } from "../storage/issue-comments";
 import { getLabelsForIssues, listIssueLabels } from "../storage/issue-labels";
 import { getIssueByNumber, listIssues } from "../storage/issues";
 import { type OAuthGrantSummary, listGrantsForUser, revokeGrantForUser } from "../storage/oauth";
+import { ownerHasClaims } from "../storage/project-namespace";
 import { getProvenance } from "../storage/provenance";
 import { readRepoSnapshot } from "../storage/repo-snapshot";
 import {
@@ -40,18 +41,21 @@ import {
   getProjectByPath,
   getWorkspace,
   listProjects,
+  listProjectsByNamespace,
   listWorkspaces,
 } from "../storage/state";
 import { getProjectSourceUrl, getSyncStatus } from "../storage/sync";
 import {
   disableLegacyToken,
   getUser,
+  renameUser,
   rotateUserToken,
+  setUserDisplayName,
   setUserTelemetryOptOut,
 } from "../storage/users";
 import { listDeliveries, listWebhooks } from "../storage/webhooks";
 import type { ApiTokenScope, Env, ProjectEntry } from "../types";
-import { projectDefaultBranch } from "../types";
+import { getUserNamespace, projectDefaultBranch } from "../types";
 import { parseUnifiedDiff } from "../ui/components/diff-view";
 import { getFileContent, isValidFilePath } from "../ui/file-content";
 import { ActivityPage } from "../ui/pages/activity";
@@ -63,15 +67,20 @@ import { FileViewerPage } from "../ui/pages/file-viewer";
 import { HomePage } from "../ui/pages/home";
 import { IssueDetailPage, IssuesPage, NewIssuePage } from "../ui/pages/issues";
 import { NewProjectPage } from "../ui/pages/new-project";
-import { ProfilePage } from "../ui/pages/profile";
 import { ProjectSettingsPage } from "../ui/pages/project-settings";
 import { RepoPage } from "../ui/pages/repo";
-import { type FreshCredential, type SettingsNotice, SettingsPage } from "../ui/pages/settings";
+import {
+  type FreshCredential,
+  type SettingsNotice,
+  SettingsPage,
+  type UsernameChange,
+} from "../ui/pages/settings";
 import { SyncPage } from "../ui/pages/sync";
 import { TagsPage } from "../ui/pages/tags";
 import { WebhooksPage } from "../ui/pages/webhooks";
 import { WorkspacesPage } from "../ui/pages/workspaces";
 import { canReadProject, canWriteProject, filterMemberProjects } from "../utils/authz";
+import { MAX_DISPLAY_NAME_LENGTH, normalizeDisplayName } from "../utils/display-name";
 import type { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { createLogger } from "../utils/logger";
@@ -99,15 +108,22 @@ const projectRef = (project: ProjectEntry) => ({
 async function getCurrentUser(
   c: { get: (key: "userId") => string | undefined; env: { DB: D1Database } },
   logger: ReturnType<typeof createLogger>,
-): Promise<{ id: string; email: string; username: string } | null> {
+): Promise<{ id: string; email: string; username: string; displayName?: string } | null> {
   const userId = c.get("userId");
   if (!userId) return null;
   const result = await getUser(c.env.DB, userId, logger);
   if (!result.success) return null;
 
   const user = result.data;
-  // Username is always present - enforced by database schema and validation
-  return { id: user.id, email: user.email, username: user.username };
+  // Username is always present - enforced by database schema and validation.
+  // The display name rides along so the header shows it on every page, not
+  // only on Settings.
+  return {
+    id: user.id,
+    email: user.email,
+    username: user.username,
+    ...(user.displayName !== undefined ? { displayName: user.displayName } : {}),
+  };
 }
 
 /**
@@ -224,6 +240,7 @@ type AccountUser = {
   id: string;
   email: string;
   username: string;
+  displayName?: string;
   createdAt: string;
   githubUsername?: string;
 };
@@ -242,13 +259,15 @@ async function getAccountUser(
   const result = await getUser(c.env.DB, userId, logger);
   if (!result.success) return null;
 
-  const { id, email, username, createdAt, githubUsername, telemetryOptOut } = result.data;
+  const { id, email, username, displayName, createdAt, githubUsername, telemetryOptOut } =
+    result.data;
   return {
     user: {
       id,
       email,
       username,
       createdAt,
+      ...(displayName !== undefined ? { displayName } : {}),
       ...(githubUsername !== undefined ? { githubUsername } : {}),
     },
     telemetryOptOut: telemetryOptOut === true,
@@ -332,6 +351,37 @@ async function loadOAuthGrants(
   };
 }
 
+/**
+ * Whether the username may change: only while the account owns no projects.
+ * The claims table in D1 is the strongly consistent answer for every project
+ * created since it existed; the KV listing covers projects that predate it.
+ * Fails closed — if either cannot be read, the form is withheld rather than
+ * offered on a guess, but as "unavailable", so the page asks for a retry
+ * instead of blaming projects the account may not own.
+ */
+async function usernameChangeState(
+  env: Pick<Env, "DB" | "STATE">,
+  user: { id: string; username: string },
+  logger: ReturnType<typeof createLogger>,
+): Promise<UsernameChange> {
+  const claims = await ownerHasClaims(env, user.id, logger);
+  if (!claims.success) {
+    logger.error("Could not read namespace claims for the settings page", claims.error);
+    return "unavailable";
+  }
+  if (claims.data) return "blocked";
+  const projects = await listProjectsByNamespace(
+    env.STATE,
+    getUserNamespace(user.username),
+    logger,
+  );
+  if (!projects.success) {
+    logger.error("Could not list projects for the settings page", projects.error);
+    return "unavailable";
+  }
+  return projects.data.length === 0 ? "allowed" : "blocked";
+}
+
 /** The settings page plus everything it lists, in one round of loads. */
 async function renderSettings(
   c: Context<{ Bindings: Env }>,
@@ -340,10 +390,17 @@ async function renderSettings(
   logger: ReturnType<typeof createLogger>,
   extras: { freshToken?: FreshCredential; notice?: SettingsNotice } = {},
 ) {
-  const [agents, tokens, grants] = await Promise.all([
+  const [agents, tokens, grants, usernameChange, invites] = await Promise.all([
     loadAgentSummaries(c.env.DB, user.id, logger),
     loadApiTokens(c.env.DB, user.id, logger),
     loadOAuthGrants(c.env.DB, user.id, logger),
+    usernameChangeState(c.env, user, logger),
+    // Keyed off the service URL alone, not `betaGateEnabled`: codes minted while
+    // the gate was on stay redeemable after it is switched off, so gating the
+    // listing on the gate would hide real codes from the users holding them.
+    referralServiceConfigured(c.env)
+      ? fetchInviteCodes(c.env, user.id, logger)
+      : Promise.resolve(undefined),
   ]);
   // A notice about the action just taken outranks a listing's own failure —
   // the caller needs to know what their POST did first.
@@ -351,6 +408,11 @@ async function renderSettings(
   return (
     <SettingsPage
       user={user}
+      usernameChange={usernameChange}
+      {...(invites !== undefined ? { invites } : {})}
+      {...(c.env.REFERRAL_SERVICE_URL !== undefined
+        ? { shareBaseUrl: c.env.REFERRAL_SERVICE_URL }
+        : {})}
       agents={agents}
       apiTokens={tokens.tokens}
       oauthGrants={grants.grants}
@@ -377,6 +439,11 @@ async function renderSettings(
  */
 const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
   "token-revoked": { kind: "success", message: "That API token has been revoked." },
+  "display-name-saved": { kind: "success", message: "Display name saved." },
+  "username-changed": {
+    kind: "success",
+    message: "Username changed. Your new namespace applies to everything you create from now on.",
+  },
   "connection-revoked": {
     kind: "success",
     message: "That application has been disconnected. Its access stopped immediately.",
@@ -388,30 +455,10 @@ const SETTINGS_NOTICES: Record<string, SettingsNotice> = {
   },
 };
 
-// GET /profile — Account identity and the caller's own invite codes
-app.get("/profile", async (c) => {
-  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
-  const access = await requireAccountSession(c, logger);
-  if ("response" in access) return access.response;
-
-  // Keyed off the service URL alone, not `betaGateEnabled`: codes minted while
-  // the gate was on stay redeemable after it is switched off, so gating the
-  // listing on the gate would hide real codes from the users holding them.
-  const invites = referralServiceConfigured(c.env)
-    ? await fetchInviteCodes(c.env, access.user.id, logger)
-    : undefined;
-
-  return c.html(
-    <ProfilePage
-      user={access.user}
-      {...(invites !== undefined ? { invites } : {})}
-      {...(c.env.REFERRAL_SERVICE_URL !== undefined
-        ? { shareBaseUrl: c.env.REFERRAL_SERVICE_URL }
-        : {})}
-      nonce={c.get("cspNonce") ?? ""}
-    />,
-  );
-});
+// GET /profile — Folded into Settings (#profile-settings merge): the two pages
+// opened with the same Account card and each pointed at the other. Kept as a
+// redirect so old links and the docs' `/profile` keep working.
+app.get("/profile", (c) => c.redirect("/settings#account", 302));
 
 // GET /settings — Account, privacy, API token, and agent token management
 app.get("/settings", async (c) => {
@@ -429,6 +476,152 @@ app.get("/settings", async (c) => {
     ...(notice !== undefined ? { notice } : {}),
   });
   return c.html(page);
+});
+
+// POST /settings/account — Set or clear the display name
+app.post("/settings/account", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user, telemetryOptOut } = access;
+
+  const form = await c.req.parseBody();
+  const raw = typeof form.displayName === "string" ? form.displayName : "";
+  const displayName = normalizeDisplayName(raw);
+  if (displayName.length > MAX_DISPLAY_NAME_LENGTH) {
+    const page = await renderSettings(c, user, telemetryOptOut, logger, {
+      notice: {
+        kind: "error",
+        message: `A display name can be at most ${MAX_DISPLAY_NAME_LENGTH} characters.`,
+      },
+    });
+    return c.html(page, 400);
+  }
+
+  const saved = await setUserDisplayName(
+    c.env.DB,
+    user.id,
+    displayName === "" ? null : displayName,
+    logger,
+  );
+  if (!saved.success) {
+    logger.error("Failed to save display name", saved.error);
+    return c.html(issuePageError(500, user), 500);
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "user.display_name_changed",
+    actorType: "user",
+    actorId: user.id,
+  });
+  return c.redirect("/settings?notice=display-name-saved#account", 302);
+});
+
+// POST /settings/username — Change the username, only while nothing is keyed under it
+//
+// The username is the namespace in every project URL, clone URL, KV project
+// key and backing repository name, none of which is rewritten here. So the
+// rename is refused outright once the account owns a project, and the check
+// fails closed when the listing cannot be read.
+app.post("/settings/username", async (c) => {
+  const logger = createLogger({ path: c.req.path, userId: c.get("userId") });
+  const access = await requireAccountSession(c, logger);
+  if ("response" in access) return access.response;
+  const { user, telemetryOptOut } = access;
+
+  const form = await c.req.parseBody();
+  const requested = typeof form.username === "string" ? form.username.trim().toLowerCase() : "";
+  if (requested === user.username) return c.redirect("/settings#account", 302);
+
+  const refuse = async (message: string, status: 400 | 403 | 409) => {
+    const page = await renderSettings(c, user, telemetryOptOut, logger, {
+      notice: { kind: "error", message },
+    });
+    return c.html(page, status);
+  };
+
+  // D1 first: a claim is written before any project's KV entry, so this read
+  // is authoritative for everything created since claims existed. The KV
+  // listing after it covers older projects, best effort.
+  const claims = await ownerHasClaims(c.env, user.id, logger);
+  if (!claims.success) {
+    logger.error("Could not read namespace claims before a rename", claims.error);
+    return c.html(issuePageError(500, user), 500);
+  }
+  if (claims.data) {
+    logger.warn("Rename refused - account holds a project claim", {});
+    return refuse(
+      "Your username cannot be changed while you own projects: every project URL is keyed under it. If you have just deleted your last project, allow up to 15 minutes.",
+      403,
+    );
+  }
+  const projects = await listProjectsByNamespace(
+    c.env.STATE,
+    getUserNamespace(user.username),
+    logger,
+  );
+  if (!projects.success) {
+    logger.error("Could not list projects before a rename", projects.error);
+    return c.html(issuePageError(500, user), 500);
+  }
+  if (projects.data.length > 0) {
+    logger.warn("Rename refused - account owns projects", { projects: projects.data.length });
+    return refuse(
+      "Your username cannot be changed while you own projects: every project URL is keyed under it.",
+      403,
+    );
+  }
+
+  const renamed = await renameUser(c.env.DB, user.id, requested, logger);
+  if (!renamed.success) {
+    // 403: a claim landed between the check above and the UPDATE — the race
+    // this table exists to decide, decided against the rename.
+    const status = renamed.error.statusCode;
+    if (status === 400 || status === 403 || status === 409) {
+      return refuse(renamed.error.message, status);
+    }
+    logger.error("Failed to rename user", renamed.error);
+    return c.html(issuePageError(500, user), 500);
+  }
+
+  // The listing and the UPDATE span two stores with nothing to serialize them,
+  // so a project created in between — by this user in another tab, or by an
+  // agent acting as them — would sit under a namespace no account owns. Look
+  // again now that the name has changed: anything under the old namespace was
+  // created in that window, so put the name back rather than leave it orphaned.
+  // A project created from here on reads the new username. What remains is a
+  // creation that read the old name before the UPDATE and wrote KV after this
+  // check, a window the width of that one request; and KV listings are only
+  // eventually consistent across edges, which no check here can close.
+  const late = await listProjectsByNamespace(c.env.STATE, getUserNamespace(user.username), logger);
+  if (!late.success || late.data.length > 0) {
+    const reverted = await renameUser(c.env.DB, user.id, user.username, logger);
+    if (!reverted.success) {
+      logger.error("Rename could not be reverted after a late project", reverted.error);
+      return c.html(issuePageError(500, user), 500);
+    }
+    if (!late.success) {
+      // Nothing is known about the old namespace, so the name was put back on
+      // caution; that is our failure to report, not a project to blame.
+      logger.error("Could not list projects after a rename; reverted", late.error);
+      return c.html(issuePageError(500, user), 500);
+    }
+    logger.warn("Rename reverted - a project appeared under the old namespace", {
+      projects: late.data.length,
+    });
+    return refuse(
+      "A project was created under your account while the username was changing, so the change was undone.",
+      409,
+    );
+  }
+
+  await recordAudit(c.env.DB, logger, {
+    action: "user.renamed",
+    actorType: "user",
+    actorId: user.id,
+    detail: { from: user.username, to: renamed.data },
+  });
+  return c.redirect("/settings?notice=username-changed#account", 302);
 });
 
 /** Same bounds as `POST /api/users/me/tokens`, applied to form fields. */

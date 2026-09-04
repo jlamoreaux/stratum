@@ -32,10 +32,6 @@ export const NAV_CSS = `
 
 .nav a { text-decoration: none; }
 
-@media (max-width: 600px) {
-  .nav { padding: 0.6rem 1rem; }
-}
-
 .nav-brand {
   font-size: 1.1rem;
   font-weight: 700;
@@ -61,6 +57,7 @@ export const NAV_CSS = `
   font-size: 0.9rem;
   padding: 0.25rem 0.5rem;
   border-radius: 4px;
+  white-space: nowrap;
   transition: background 0.15s;
 }
 
@@ -69,9 +66,86 @@ export const NAV_CSS = `
   text-decoration: none;
 }
 
+/* The link to the page the reader is on: quiet, not clickable-blue. */
+.nav-auth-link[aria-current="page"] {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
 .nav-logout-form { display: inline; }
 button.nav-auth-link {
   background: none; border: none; cursor: pointer;
   font-family: inherit; font-size: 0.9rem; line-height: inherit;
+}
+
+/*
+ * The phone menu. A nav that carries the toggle (the app, when signed in)
+ * collapses its links behind a "menu" button below 640px; one without it (the
+ * docs site, the signed-out app) keeps them inline, since a lone "sign in"
+ * fits. The toggle is a checkbox so the menu works with no client script: the
+ * label is the button, and the checked state shows the links. Below 640px the
+ * input is visually hidden rather than display:none so it keeps its place in
+ * the tab order and the label shows its focus ring; at wider widths it is
+ * display:none, because a control with no visible label must not be reachable
+ * by Tab.
+ */
+.nav-menu-toggle { display: none; }
+.nav-menu-button { display: none; }
+.nav-menu-close { display: none; }
+
+@media (max-width: 640px) {
+  .nav { padding: 0.6rem 1rem; }
+
+  .nav-menu-toggle {
+    display: block;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .nav-menu-button {
+    display: inline-block;
+    color: var(--accent-text);
+    font-size: 0.9rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .nav-menu-button:hover { background: var(--accent); }
+  .nav-menu-toggle:focus-visible ~ .nav-menu-button {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
+  }
+  .nav-menu-toggle:checked ~ .nav-menu-button .nav-menu-open { display: none; }
+  .nav-menu-toggle:checked ~ .nav-menu-button .nav-menu-close { display: inline; }
+
+  .nav-menu-toggle ~ .nav-auth {
+    display: none;
+    flex-basis: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    margin-top: 0.35rem;
+    padding-top: 0.35rem;
+    border-top: 1px solid var(--border);
+  }
+  .nav-menu-toggle:checked ~ .nav-auth { display: flex; }
+  .nav-menu-toggle ~ .nav-auth .nav-user { padding: 0.5rem; }
+  .nav-menu-toggle ~ .nav-auth .nav-logout-form { display: block; }
+  /* Full-width rows at least 44px tall, so a thumb hits one link and not two. */
+  .nav-menu-toggle ~ .nav-auth .nav-auth-link {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 2.75rem;
+    padding: 0.5rem;
+    text-align: left;
+  }
 }
 `;
