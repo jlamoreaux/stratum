@@ -12,6 +12,8 @@ production at it.
 
 ## Contents
 
+- [Quickstart](#quickstart)
+- [If your first deploy didn't work](#if-your-first-deploy-didnt-work)
 - [Before you start: your policy still needs `evaluators:`](#before-you-start-your-policy-still-needs-evaluators)
 - [How a deploy is triggered](#how-a-deploy-is-triggered)
 - [The `deploys:` configuration reference](#the-deploys-configuration-reference)
@@ -24,6 +26,138 @@ production at it.
 - [Operating a Stratum instance with deploys enabled](#operating-a-stratum-instance-with-deploys-enabled)
 - [API](#api)
 - [Limitations](#limitations-read-this-before-you-rely-on-it)
+
+## Quickstart
+
+Zero to a live deploy. Step 1 is once per instance, steps 2–4 once per project;
+after that merging is the whole workflow. Each step links to its reference
+section for the detail this skips.
+
+### 1. Confirm the instance can deploy — once, by whoever runs it
+
+Two things the application cannot provision for itself, and neither failure is
+obvious from the UI:
+
+| Missing | What you see |
+|---|---|
+| `DEPLOY_SECRET_KEY` | Storing a secret fails; every deploy fails with `DEPLOY_SECRET_KEY is not configured on this instance…` |
+| the `DEPLOY_QUEUE` binding | **Nothing at all** — a merge never enqueues a deploy, so no row is written and no error is shown |
+
+```bash
+wrangler secret put DEPLOY_SECRET_KEY --env production
+wrangler queues create stratum-deploys
+wrangler queues create stratum-deploys-dlq
+```
+
+On an instance you do not operate, ask its operator — there is no way to check
+from the UI. Detail, including why rotating the key is destructive:
+[Operating a Stratum instance](#operating-a-stratum-instance-with-deploys-enabled).
+
+### 2. Collect the provider values
+
+The secret **names** are fixed — the deploy reads these exact names from the
+project store.
+
+**Cloudflare** (`cloudflare-pages` and `cloudflare-workers`):
+
+| Secret | Where to get it |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) → **Create Token** → **Custom token**. One permission is enough: **Account ▸ Workers Scripts ▸ Edit**. Shown once — copy it immediately. |
+| `CLOUDFLARE_ACCOUNT_ID` | The id in any dashboard URL: `dash.cloudflare.com/<account-id>/…` |
+| `CLOUDFLARE_WORKERS_SUBDOMAIN` | **Workers & Pages** → your `<subdomain>.workers.dev`. Optional, but without it the deploy succeeds and records **no URL**. |
+
+**Vercel**:
+
+| Secret | Where to get it |
+|---|---|
+| `VERCEL_TOKEN` | Vercel → **Account Settings → Tokens**. |
+| `VERCEL_PROJECT_ID` | The Vercel project's **Settings → General → Project ID**, or `vercel project ls`. |
+| `VERCEL_TEAM_ID` | Optional, but required in practice for a team-scoped token — without it the API resolves against your personal account. |
+
+### 3. Store them on the project
+
+*Project → Settings → Deploy secrets*, or:
+
+```bash
+curl -X PUT https://your-instance.workers.dev/api/projects/@acme/site/secrets/CLOUDFLARE_API_TOKEN \
+  -H "Authorization: Bearer $STRATUM_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"value":"…"}'
+```
+
+Must be a project admin, and **not an agent** — agent tokens are refused on
+every secret route. There is no read path: nothing returns a stored value.
+More: [Storing a secret](#storing-a-secret).
+
+### 4. Declare the deploy
+
+Commit one of these as `.stratum/policy.yaml`. **The `evaluators:` block is not
+optional** — a policy file without it is malformed, and a malformed policy
+blocks *every merge in the project*, with an error about evaluators that will
+not obviously point back here. See
+[Before you start](#before-you-start-your-policy-still-needs-evaluators).
+
+```yaml
+# Static site: publishes ./public as committed.
+evaluators:
+  - type: diff
+deploys:
+  - name: site
+    target: cloudflare-pages
+    dir: public
+    secrets: [CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_WORKERS_SUBDOMAIN]
+```
+
+```yaml
+# Worker script: uploads the .js/.mjs files in the tree.
+evaluators:
+  - type: diff
+deploys:
+  - name: api
+    target: cloudflare-workers
+    secrets: [CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID]
+```
+
+```yaml
+# Vercel: uploads the source; Vercel builds it. Human approval before it ships.
+evaluators:
+  - type: diff
+deploys:
+  - name: production
+    target: vercel
+    requiresApproval: true
+    secrets: [VERCEL_TOKEN, VERCEL_PROJECT_ID]
+```
+
+Remember there is **no build step**: Cloudflare targets publish the tree as
+committed, so commit your built output. `vercel` is the exception — it uploads
+the source and Vercel builds it.
+
+### 5. Merge a change, then watch it
+
+Deploys run after a merge survives the post-merge check — not on the merge
+event itself, so a change that gets auto-reverted never deploys. Watch it at
+*Project → Deploys*. First run reaches `succeeded`, `failed`, or
+`pending_approval` if you set `requiresApproval`.
+
+## If your first deploy didn't work
+
+Matched against the exact text a deployment records, so you can search for what
+you actually see.
+
+| What you see | What it means | Fix |
+|---|---|---|
+| **No deployment row at all** | The merge never enqueued: no `deploys:` matched, or the instance has no `DEPLOY_QUEUE` binding | Check the policy is on the **default branch**; then step 1 |
+| Status `skipped` | Deploys are configured for the project but none applied to this merge | Expected, not a failure — `skipped` never means an error |
+| `Missing project secret X — add it in project settings` | The policy names a secret the store doesn't have | Add it (step 3); names are case-sensitive |
+| `DEPLOY_SECRET_KEY is not configured on this instance…` | Instance prerequisite missing | Step 1 |
+| `Could not decrypt project secret… may have been rotated` | `DEPLOY_SECRET_KEY` changed after the secret was stored | Re-enter every secret for the project — there is no re-encryption path |
+| `Policy file … is present but invalid` | YAML didn't parse, or `evaluators:` is missing | Fix the file; note this also blocks merges |
+| `Could not read the tree at <sha>` | The merge commit is unreachable — force-push, auto-revert, or re-import | Merge again; the commit is pinned, so Stratum will not deploy a different tree |
+| `403`/`401` from the provider | Token lacks permission, or is scoped to the wrong account/team | Cloudflare: **Workers Scripts ▸ Edit**. Vercel: set `VERCEL_TEAM_ID` for a team token |
+| `503 DEPLOY_QUEUE_UNAVAILABLE` on Approve or Retry | No `DEPLOY_QUEUE` binding | Step 1 |
+| `succeeded` but no URL on the row | `CLOUDFLARE_WORKERS_SUBDOMAIN` isn't stored | Store it — the deploy itself worked |
+| `succeeded` but the site is unchanged (Vercel) | `succeeded` means **accepted for build**; Stratum does not poll | Check the build in Vercel — a post-handoff build failure is invisible here |
 
 ## Before you start: your policy still needs `evaluators:`
 
