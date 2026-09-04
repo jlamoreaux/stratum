@@ -1,3 +1,6 @@
+// Type-only: erased at compile time, so parameterizing DEPLOY_QUEUE with the
+// runner's message union cannot create a runtime import cycle.
+import type { DeployQueueMessage } from "./deploy/runner";
 import type { MagicLinkRateLimiter } from "./queue/magic-link-limiter";
 import type { LoggerContext } from "./utils/logger";
 export type { LoggerContext };
@@ -169,6 +172,17 @@ export interface Env {
   ENVIRONMENT?: string;
   /** Comma-separated extra CORS origin allowlist (beyond same-origin). Optional. */
   ALLOWED_ORIGINS?: string;
+  /** Master key for the per-project deploy secret store: provider credentials
+   * are AES-GCM encrypted under a key derived from it. Optional because a
+   * self-hoster who never deploys never needs one — but a project that HAS
+   * configured a deploy fails loudly (a `failed` deployment naming the missing
+   * key) rather than silently not deploying. Rotating it makes every existing
+   * ciphertext undecryptable, so secrets must be re-entered after a rotation. */
+  DEPLOY_SECRET_KEY?: string;
+  /** Post-merge deployments. Deliberately NOT the events queue: a deploy is a
+   * minutes-long job, and the shared `stratum-events` consumer awaits each
+   * message in turn, so a slow deploy there would stall webhook delivery. */
+  DEPLOY_QUEUE?: Queue<DeployQueueMessage>;
   EVENTS_QUEUE?: Queue;
   IMPORT_QUEUE?: Queue<ImportJobMessage | SyncJobMessage>;
 }

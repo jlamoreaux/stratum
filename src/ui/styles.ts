@@ -546,6 +546,30 @@ ${NAV_CSS}
 .webhook-delivery-meta { color: var(--text-muted); }
 .webhook-delivery-time { color: var(--text-muted); margin-left: auto; }
 .btn-small, .btn-sm { font-size: 0.75rem; padding: 0.25rem 0.6rem; min-height: 2rem; }
+
+/* Deployments.
+   skipped and superseded share the muted treatment on purpose: neither is a
+   failure, and colouring them like one would make "nothing was configured to
+   deploy" look like a broken build. */
+.badge-pending-approval { background: var(--warning-surface); color: var(--warning-text); }
+.badge-running { background: var(--accent); color: var(--accent-text); }
+.badge-succeeded { background: var(--success-surface); color: var(--success-text); }
+.badge-superseded { background: var(--bg-raised); color: var(--text-muted); }
+.badge-skipped { background: var(--bg-raised); color: var(--text-muted); }
+.deploy-attempt { color: var(--text-muted); font-size: 0.8rem; }
+.deploy-target-none { color: var(--text-muted); font-style: italic; }
+.deploy-reason { margin: 1rem 0 0; color: var(--text-body); overflow-wrap: anywhere; }
+.deploy-log {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.75rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-body); margin: 0;
+}
+.secret-form { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-end; }
+.secret-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--text-body); }
+.secret-form input {
+  background: var(--bg-card); border: 1px solid var(--border-strong); color: #eee;
+  padding: 0.5rem; border-radius: 4px; font-family: inherit;
+}
 .btn-link { background: none; border-color: transparent; color: var(--accent-text); }
 
 /* Issues */

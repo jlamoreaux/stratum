@@ -34,7 +34,13 @@ export type AuditAction =
   // so "which editor did I connect, and when did I disconnect it" is answerable
   // from the trail rather than only from the live grant list.
   | "oauth.authorized"
-  | "oauth.revoked";
+  | "oauth.revoked"
+  // Post-merge deployments. The secret entries record only the name — the value
+  // is never read back anywhere, and an audit row is not the place to start.
+  | "secret.written"
+  | "secret.deleted"
+  | "deployment.approved"
+  | "deployment.retried";
 
 export interface AuditEntry {
   id: string;

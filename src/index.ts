@@ -7,6 +7,7 @@ import { configGuardMiddleware } from "./middleware/config-guard";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
+import { handleDeployQueue } from "./queue/deploy-queue";
 import { handleEventQueue } from "./queue/event-consumer";
 import type { EventQueueMessage } from "./queue/events";
 import { handleImportQueue } from "./queue/import-queue";
@@ -19,6 +20,7 @@ import { bulkImportRouter } from "./routes/bulk-import";
 import { changesRouter } from "./routes/changes";
 import { cspReportRouter } from "./routes/csp-report";
 import { deletionJobsRouter } from "./routes/deletion-jobs";
+import { deploymentsRouter, projectDeploymentsRouter } from "./routes/deployments";
 import { emailAuthRouter } from "./routes/email-auth";
 import { gitHttpRouter } from "./routes/git-http";
 import { healthRouter } from "./routes/health";
@@ -176,7 +178,12 @@ app.route("/auth/signup/complete", oauthSignupRouter);
 app.route("/auth/sessions", sessionRouter);
 app.route("/api/projects", webhooksRouter);
 app.route("/api/projects", issuesRouter);
+// Ahead of projectsRouter: both claim /api/projects, and Hono matches in mount
+// order, so the narrower :namespace/:slug/{secrets,deployments} paths have to be
+// offered first or the broader project routes shadow them.
+app.route("/api/projects", projectDeploymentsRouter);
 app.route("/api/projects", projectsRouter);
+app.route("/api/deployments", deploymentsRouter);
 app.route("/api/workspaces", workspacesRouter);
 app.route("/api/users", usersRouter);
 app.route("/api/agents", agentsRouter);
@@ -243,6 +250,8 @@ export default {
       await handleImportQueue(batch as MessageBatch<ImportJobMessage | SyncJobMessage>, env);
     } else if (queueName.startsWith("stratum-events")) {
       await handleEventQueue(batch as MessageBatch<EventQueueMessage>, env);
+    } else if (queueName.startsWith("stratum-deploys")) {
+      await handleDeployQueue(batch, env);
     } else {
       // Unknown queue - ack all messages to prevent retries
       logger.warn("Unknown queue", { queue: queueName });

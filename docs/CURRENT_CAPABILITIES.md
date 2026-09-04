@@ -29,6 +29,19 @@ limitation recorded below.
   advanced since it was evaluated (409 STALE_WORKSPACE).
 - Post-merge smoke command in a sandbox with auto-revert (forward revert commit,
   change marked `reverted`, `change.reverted` event).
+- Post-merge deployments in `.stratum/policy.yaml` (`deploys:`): a named list of
+  deploys, each with a `target` (`cloudflare-pages`, `cloudflare-workers`,
+  `vercel`), an optional `dir`, declared `secrets`, and an optional
+  `requiresApproval` gate. Triggered only when the post-merge check did not
+  revert or fail, run from a queue consumer against the tree at the pinned merge
+  commit, with per-project AES-GCM-encrypted secrets (`DEPLOY_SECRET_KEY`
+  required; project admins only, agents refused), supersession of older deploys
+  of the same name, retry as a new attempt, and `deployment.requested` /
+  `deployment.succeeded` / `deployment.failed` events. **No build step, no
+  preview deploy, and no rollback** — see `user-guide/deployments.md`. A batch
+  merge (`changes/merge-batch`) triggers neither the post-merge check nor a
+  deploy. The deploy DLQ (`stratum-deploys-dlq`) has no consumer: dead-lettered
+  messages sit there for manual inspection.
 - Human reviews (approve / request changes) move the change state machine and are
   human-only; agents cannot approve work.
 
@@ -59,7 +72,9 @@ limitation recorded below.
 - Server-rendered (Hono JSX): dashboard, repo browser with collapsible file tree,
   syntax-highlighted file viewer (dependency-free lexer), commit log, changes with
   diff viewer + evaluator evidence + costs + reviews + comments, issues, activity,
-  webhooks management, settings. Open changes poll via meta refresh.
+  webhooks management, deployments (history, log tail for writers, Approve and
+  Retry buttons), deploy-secret management in project settings, settings. Open
+  changes poll via meta refresh.
 
 ## Tooling
 

@@ -117,7 +117,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for queue in stratum-events-staging stratum-imports-staging; do
+          for queue in stratum-events-staging stratum-imports-staging stratum-deploys-staging stratum-deploys-dlq-staging; do
             if out=$(npx wrangler queues create "$queue" 2>&1); then
               echo "✓ Created queue $queue"
             elif echo "$out" | grep -qiE "already (exists|taken)|11009"; then

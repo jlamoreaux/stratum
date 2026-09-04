@@ -69,6 +69,8 @@ tags:
     description: Project issues
   - name: webhooks
     description: Outbound project webhooks
+  - name: deployments
+    description: Post-merge deployments and the per-project deploy secret store
   - name: orgs
     description: Organizations, members, and teams
   - name: users
@@ -1059,7 +1061,8 @@ paths:
                     change.rejected, change.reverted, change.commented,
                     change.reviewed, project.created, project.imported,
                     workspace.created, sync.completed, issue.opened,
-                    issue.commented, issue.closed
+                    issue.commented, issue.closed, deployment.requested,
+                    deployment.succeeded, deployment.failed
       responses:
         "201":
           description: Webhook created (includes the secret, shown once)
@@ -1207,6 +1210,408 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /api/projects/{namespace}/{slug}/secrets:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: listProjectSecrets
+      tags: [deployments]
+      summary: List deploy secret names (values never returned)
+      description: |
+        Requires **project admin**, and the caller must not be an agent: an
+        agent token is refused on every secret route even when its owner owns
+        the project. There is no read path for a stored secret value anywhere
+        in the API.
+      responses:
+        "200":
+          description: Secret names and metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secrets:
+                    type: array
+                    items: { $ref: "#/components/schemas/ProjectSecret" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: putProjectSecretForm
+      tags: [deployments]
+      summary: Create or replace a deploy secret (form-friendly alias)
+      description: |
+        The browser's way in to the PUT below, which an HTML form cannot issue;
+        the secret's name travels in the body. Same authorization gate. A
+        form-encoded caller is redirected back to the project settings page
+        with a fixed error code rather than a caller-supplied message.
+
+        The content type is what selects the response shape, not just the
+        parser: `application/json` is answered with JSON, and anything else is
+        treated as a browser form and answered with a `302`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, value]
+              properties:
+                name:
+                  type: string
+                  pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+                value:
+                  type: string
+                  description: At most 4096 bytes. Never returned by any endpoint.
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [name, value]
+              properties:
+                name:
+                  type: string
+                  pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+                  description: >
+                    Surrounding whitespace is trimmed before validation. A name
+                    that does not match the pattern redirects with
+                    `?secretError=name` instead of returning `400`.
+                value:
+                  type: string
+                  description: >
+                    At most 4096 bytes; must not be empty (an empty value
+                    redirects with `?secretError=value`). Never returned by any
+                    endpoint.
+          multipart/form-data:
+            schema:
+              type: object
+              required: [name, value]
+              properties:
+                name:
+                  type: string
+                  pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+                value:
+                  type: string
+                  description: At most 4096 bytes. Never returned by any endpoint.
+      responses:
+        "200":
+          description: Secret stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { $ref: "#/components/schemas/ProjectSecret" }
+        "302":
+          description: Form-encoded caller redirected back to project settings
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: >
+            Storage failed, or the instance has no DEPLOY_SECRET_KEY configured
+            (`DEPLOY_SECRET_KEY_MISSING`), without which secrets cannot be encrypted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/projects/{namespace}/{slug}/secrets/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+    put:
+      operationId: putProjectSecret
+      tags: [deployments]
+      summary: Create or replace a deploy secret
+      description: |
+        Requires project admin and a non-agent identity. Encrypted at rest with
+        the project id and secret name bound as additional authenticated data;
+        only the deploy runner ever decrypts it. Audited as `secret.written`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  type: string
+                  description: At most 4096 bytes. Never returned by any endpoint.
+      responses:
+        "200":
+          description: Secret stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { $ref: "#/components/schemas/ProjectSecret" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: >
+            Storage failed, or the instance has no DEPLOY_SECRET_KEY configured
+            (`DEPLOY_SECRET_KEY_MISSING`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      operationId: deleteProjectSecret
+      tags: [deployments]
+      summary: Delete a deploy secret
+      description: Requires project admin and a non-agent identity. Audited as `secret.deleted`.
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  name: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/secrets/{name}/delete:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: deleteProjectSecretForm
+      tags: [deployments]
+      summary: Delete a deploy secret (form-friendly alias)
+      description: |
+        Browsers cannot issue DELETE. Same gate as the DELETE above; a
+        form-encoded caller is redirected back to project settings even when the
+        name was already gone.
+      responses:
+        "200":
+          description: Deleted (JSON caller)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  name: { type: string }
+        "302":
+          description: Form-encoded caller redirected back to project settings
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/projects/{namespace}/{slug}/deployments:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Slug"
+    get:
+      operationId: listDeployments
+      tags: [deployments]
+      summary: List post-merge deployments, newest first
+      description: |
+        Readable by anyone who can read the project (anonymously, on a public
+        project). `logTail` is included **only** for callers with project write
+        access — it holds a redacted provider payload.
+      parameters:
+        - name: name
+          in: query
+          schema: { type: string }
+          description: Only deployments for this `deploys:` entry name
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending_approval, queued, running, succeeded, failed, superseded, skipped]
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Deployments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployments:
+                    type: array
+                    items: { $ref: "#/components/schemas/Deployment" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/deployments/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getDeployment
+      tags: [deployments]
+      summary: Get one deployment
+      description: |
+        The URL carries no project, so the row's own project is authorized. A
+        deployment in a project the caller cannot read answers `404` rather than
+        `403`, so an id cannot be confirmed by probing. `logTail` is included
+        only for project writers.
+      responses:
+        "200":
+          description: The deployment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployment: { $ref: "#/components/schemas/Deployment" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/deployments/{id}/approve:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: approveDeployment
+      tags: [deployments]
+      summary: Approve a deployment awaiting approval
+      description: |
+        Moves a `pending_approval` deployment to `queued` and enqueues it.
+        Requires project **write** access and a **user** identity — an agent
+        token is refused. Like a human review verdict, the guarantee is "not an
+        agent identity": a user's scoped API token and MCP OAuth grants are
+        accepted, so this is not evidence of a human at a keyboard.
+
+        Audited as `deployment.approved`. A form-encoded caller receives a
+        `302` back to the deployment page instead of JSON.
+      responses:
+        "200":
+          description: Approved and enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployment: { $ref: "#/components/schemas/Deployment" }
+        "302":
+          description: Form-encoded caller redirected to the deployment page
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The deployment is not awaiting approval (`DEPLOYMENT_NOT_PENDING`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Deployments are not enabled on this instance (`DEPLOY_QUEUE_UNAVAILABLE`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/deployments/{id}/retry:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: retryDeployment
+      tags: [deployments]
+      summary: Re-run a finished deployment as a new attempt
+      description: |
+        Creates a new row for the same commit with `attempt` incremented and
+        enqueues it; the original row is kept. Requires project write access,
+        and unlike approve an agent identity is accepted. The originating
+        change id is carried over, so the "was this change reverted?" check
+        still applies. Audited as `deployment.retried`.
+      responses:
+        "201":
+          description: Retry attempt created and enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployment: { $ref: "#/components/schemas/Deployment" }
+        "302":
+          description: Form-encoded caller redirected to the new deployment page
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            The deployment is not in a terminal status
+            (`DEPLOYMENT_NOT_RETRYABLE`) — a `pending_approval` row in
+            particular cannot be retried, since the retry would start `queued`
+            and route around the approval gate — or this attempt already exists
+            (`DEPLOYMENT_RETRY_EXISTS`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Deployments are not enabled on this instance (`DEPLOY_QUEUE_UNAVAILABLE`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/projects/{namespace}/{slug}/issues:
     parameters:
@@ -4168,6 +4573,74 @@ components:
         active: { type: boolean }
         createdBy: { type: string }
         createdAt: { type: string, format: date-time }
+
+    ProjectSecret:
+      type: object
+      required: [name, createdBy, updatedBy, createdAt, updatedAt]
+      description: >
+        A deploy secret as anyone other than the deploy runner may ever see it.
+        The value is deliberately absent: no endpoint returns it.
+      properties:
+        name: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,63}$" }
+        createdBy: { type: string }
+        updatedBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Deployment:
+      type: object
+      required: [id, projectId, project, commitSha, name, target, attempt, status, requestedByType, createdAt]
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        project: { type: string }
+        changeId:
+          type: string
+          description: Absent for a deploy not traceable to a change
+        commitSha: { type: string }
+        name:
+          type: string
+          description: >
+            The `deploys:` entry name, or "(unresolved)" for a row that never
+            selected one — a rejected entry, an unreadable tree, or a merge with
+            nothing configured
+        target:
+          type: string
+          enum: [cloudflare-pages, cloudflare-workers, vercel, unresolved]
+        attempt:
+          type: integer
+          description: 1 for the original; incremented by each retry
+        status:
+          type: string
+          enum: [pending_approval, queued, running, succeeded, failed, superseded, skipped]
+          description: >
+            `skipped` means only that nothing was configured to deploy. Every
+            operator error (missing secret, unset DEPLOY_SECRET_KEY, limit
+            exceeded, provider error) is `failed` with a reason. For the
+            `vercel` target, `succeeded` means "accepted for build" — Vercel
+            builds asynchronously and Stratum does not poll it.
+        reason: { type: string }
+        url:
+          type: string
+          description: >
+            Absent when the provider returned none. The Cloudflare targets derive
+            it from the optional CLOUDFLARE_WORKERS_SUBDOMAIN secret, so without
+            that secret a deployment succeeds with no URL.
+        logTail:
+          type: string
+          description: >
+            Redacted, truncated provider payload (16 KiB). Returned **only** to
+            callers with project write access.
+        durationMs: { type: number }
+        leaseExpiresAt: { type: string, format: date-time }
+        requestedByType:
+          type: string
+          enum: [user, agent, system]
+        requestedById: { type: string }
+        approvedBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
 
     WebhookDelivery:
       type: object

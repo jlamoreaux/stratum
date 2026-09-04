@@ -13,6 +13,7 @@ import { getUser } from "../storage/users";
 import type { Env, Message, MessageBatch } from "../types";
 import type { Logger } from "../utils/logger";
 import { createLogger } from "../utils/logger";
+import { forwardDeployRequest, isInternalEventType } from "./deploy-queue";
 import type { EventQueueMessage } from "./events";
 import { autoCloseLinkedIssues } from "./issue-autoclose";
 import { deliverEventToWebhooks } from "./webhook-delivery";
@@ -134,6 +135,13 @@ const issueAutoCloseHandler: EventHandler = {
   },
 };
 
+const deployForwardHandler: EventHandler = {
+  name: "deploy-forward",
+  async handle(env, event, logger) {
+    await forwardDeployRequest(env, event, logger);
+  },
+};
+
 /**
  * Ordered handler registry. Every handler runs for every event and decides
  * internally whether the event type concerns it. Issue auto-close runs
@@ -141,15 +149,26 @@ const issueAutoCloseHandler: EventHandler = {
  */
 const handlers: EventHandler[] = [analyticsHandler, issueAutoCloseHandler, webhookHandler];
 
+/**
+ * Handlers for an *internal* outbox row — one that carries work rather than a
+ * domain notification, and whose only job is to reach the queue that owns that
+ * work. The registry above is deliberately not consulted for these: a webhook
+ * subscribed to `*` would otherwise receive a recovery record as though it were
+ * something that happened to the project, and analytics would count it as a
+ * product event.
+ */
+const internalHandlers: EventHandler[] = [deployForwardHandler];
+
 /** Exported for tests. Runs the ordered handlers, resuming past completed ones. */
 export async function processEvent(env: Env, event: EventRecord, logger: Logger): Promise<void> {
+  const active = isInternalEventType(event.type) ? internalHandlers : handlers;
   // Resume from where a prior attempt left off: skip handlers already recorded as
   // completed, and persist progress after each success so a later failure doesn't
   // re-run (and re-emit) the ones that already ran. On failure, stop — running a
   // later handler on an inconsistent earlier state would defeat the ordering.
   const completed = [...(event.completedHandlers ?? [])];
   const completedSet = new Set(completed);
-  for (const handler of handlers) {
+  for (const handler of active) {
     if (completedSet.has(handler.name)) continue;
     await handler.handle(env, event, logger);
     completed.push(handler.name);

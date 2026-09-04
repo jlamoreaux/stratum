@@ -48,6 +48,49 @@ export interface EvalPolicy {
    * as fail-closed (blocks) rather than silently running on the default, so a
    * typo in a stricter policy can't quietly downgrade governance. */
   configError?: string;
+  /**
+   * Post-merge deploys declared under `deploys:`, after sanitization. Only
+   * entries that passed every rule in `sanitizeDeploys` appear here; anything
+   * rejected is in `deployRejections` instead, never silently absent.
+   */
+  deploys?: DeployConfig[];
+  /**
+   * Deploy entries the policy declared but that could not be used, with the
+   * reason. Carried on the policy rather than logged and dropped because each
+   * one becomes a persisted *failed* deployment: a deploy the author wrote and
+   * that never runs must be visible, not a `logger.warn` nobody reads.
+   */
+  deployRejections?: DeployRejection[];
+}
+
+/** Deploy targets the runner can drive. Each is a provider HTTP API. */
+export type DeployTargetName = "cloudflare-pages" | "cloudflare-workers" | "vercel";
+
+/**
+ * One entry of the `deploys:` list in `.stratum/policy.yaml`.
+ *
+ * Produced only by `sanitizeDeploys` (`src/deploy/config.ts`) — a value of this
+ * type is always a freshly built object, never a slice of the parsed policy
+ * file, so nothing downstream can reach back into user-supplied input.
+ */
+export interface DeployConfig {
+  /** `^[a-z][a-z0-9-]{0,31}$`, unique within the list. Identifies the deploy target across merges. */
+  name: string;
+  target: DeployTargetName;
+  /** Names of project secrets the target needs. Values live in D1, never in the policy file. */
+  secrets?: string[];
+  /** Output directory to publish, relative to the repo root. Consumed by `cloudflare-pages`. */
+  dir?: string;
+  /** Always set by the sanitizer, so an approval gate is never `undefined` downstream. */
+  requiresApproval?: boolean;
+}
+
+/** A `deploys:` entry that was rejected, and why. Becomes a failed deployment row. */
+export interface DeployRejection {
+  /** The entry's declared `name`, or null when it had no usable one. */
+  name: string | null;
+  /** Human-readable, safe to persist and render: derived from the policy file, never from a secret. */
+  reason: string;
 }
 
 /**

@@ -114,6 +114,7 @@ export default defineConfig({
             { label: "Code review", slug: "guides/code-review" },
             { label: "Issues", slug: "guides/issues" },
             { label: "CI integration", slug: "guides/ci-integration" },
+            { label: "Deployments", slug: "guides/deployments" },
             { label: "CLI", slug: "guides/cli" },
             { label: "MCP server", slug: "guides/mcp" },
             { label: "Troubleshooting", slug: "guides/troubleshooting" },

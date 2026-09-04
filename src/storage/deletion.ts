@@ -60,7 +60,21 @@ const PROJECT_SCOPED_TABLES = [
   "cost_records",
   "commit_metrics",
   "issues",
+  "deployments",
 ] as const;
+
+/**
+ * Project-scoped tables that postdate migration 025 and therefore have NO bare
+ * `project` name column — they were never written by the pre-025 code paths, so
+ * `project_id` is the only identifier a row can carry. They need their own list
+ * because the name-form fallback above would be a `no such column: project`
+ * error here, which the cascade would report as a failed deletion.
+ *
+ * `project_secrets` holds encrypted production credentials. Omitting it would
+ * leave a deleted project's provider tokens in D1 permanently, reachable by no
+ * UI and cleaned up by nothing.
+ */
+const PROJECT_ID_ONLY_TABLES = ["project_secrets"] as const;
 
 /** Tables keyed by the globally-unique (namespace, slug) tuple. */
 const NS_SLUG_TABLES = ["sync_history", "import_jobs", "import_metrics", "failed_imports"] as const;
@@ -438,6 +452,13 @@ export async function deleteProjectCascade(
     for (const table of PROJECT_SCOPED_TABLES) {
       await deleteProjectScopedTable(env.DB, table, target, residuals);
     }
+    // Unaffected by nameCollision: with no `project` column there is no way for
+    // a row of another tenant's to be selected by name in the first place.
+    for (const table of PROJECT_ID_ONLY_TABLES) {
+      await env.DB.prepare(`DELETE FROM ${table} WHERE project_id = ?`)
+        .bind(target.projectId)
+        .run();
+    }
 
     // 2) Tables keyed by the globally-unique (namespace, slug) tuple.
     for (const table of NS_SLUG_TABLES) {
@@ -585,6 +606,13 @@ export async function verifyProjectDeleted(
       if (n > 0) residuals.push(`d1:${table}:${n}-rows`);
     }
 
+    for (const table of PROJECT_ID_ONLY_TABLES) {
+      const n = await countRows(env.DB, `SELECT COUNT(*) AS n FROM ${table} WHERE project_id = ?`, [
+        target.projectId,
+      ]);
+      if (n > 0) residuals.push(`d1:${table}:${n}-rows`);
+    }
+
     for (const table of NS_SLUG_TABLES) {
       const n = await countRows(
         env.DB,
@@ -634,6 +662,17 @@ const IDENTITY_COLUMNS: readonly [table: string, column: string][] = [
   ["change_reviews", "reviewer_id"],
   ["webhooks", "created_by"],
   ["changes", "agent_id"],
+  // Deploy rows survive an erasure whenever the project is org-owned, so the
+  // "who rotated this credential" and "who approved this production deploy"
+  // trails would otherwise keep naming a deleted account indefinitely. The
+  // secret VALUES are not touched here — those go with the project cascade,
+  // which is the only thing that may destroy another tenant's deploy config.
+  ["project_secrets", "created_by"],
+  ["project_secrets", "updated_by"],
+  // Only matches a user id; a deployment requested by an agent carries that
+  // agent's id under requested_by_type = 'agent' and is left alone.
+  ["deployments", "requested_by_id"],
+  ["deployments", "approved_by"],
 ];
 
 /**

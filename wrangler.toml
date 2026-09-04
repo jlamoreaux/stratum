@@ -98,6 +98,13 @@ queue = "stratum-events"
 binding = "IMPORT_QUEUE"
 queue = "stratum-imports"
 
+# Post-merge deployments. Create both queues before the first deploy:
+#   wrangler queues create stratum-deploys
+#   wrangler queues create stratum-deploys-dlq
+[[queues.producers]]
+binding = "DEPLOY_QUEUE"
+queue = "stratum-deploys"
+
 [[queues.consumers]]
 queue = "stratum-events"
 
@@ -106,6 +113,31 @@ queue = "stratum-imports"
 max_batch_size = 1  # Process imports one at a time for resource management
 max_retries = 3     # Retry failed imports up to 3 times
 retry_delay = 30    # Wait 30 seconds between retries
+
+# Every knob is set explicitly because the defaults are wrong for a deploy:
+# a batch of 10 would share one invocation's subrequest budget between ten
+# provider uploads, and 3 retries on a message the consumer only ever retries
+# for an *indeterminate* failure just delays the DLQ.
+#
+# visibility_timeout_ms bounds one deployment: MAX_SUBREQUESTS provider requests
+# for a tree of up to MAX_TOTAL_BYTES, both in `src/deploy/limits.ts`. Raise
+# those limits and this MUST rise with them — a run that outlives its lease is
+# redelivered while still uploading, and the second copy races the first.
+#
+# max_concurrency is 1, and must stay 1: concurrent invocations share one
+# isolate's 128 MiB, one Vercel deploy peaks near 92 MiB of that (the tree, its
+# base64 copy, and the request body), and an OOM kill happens *before* the
+# runner's `finally` can write a terminal status. See MAX_DEPLOY_CONCURRENCY in
+# `src/deploy/limits.ts` for the arithmetic and for the price — this serializes
+# Cloudflare deploys too.
+[[queues.consumers]]
+queue = "stratum-deploys"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 2
+retry_delay = 60
+visibility_timeout_ms = 900000  # 15 min; see src/deploy/limits.ts
+dead_letter_queue = "stratum-deploys-dlq"
 
 # "0 4 * * *"   — daily backup, on its OWN trigger so the ~15-min invocation
 #                 budget is never shared with (and starved by) the sync/TTL work
@@ -168,6 +200,7 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # GOOGLE_CLIENT_SECRET =
 # EMAIL_FROM_ADDRESS = "noreply@yourdomain.com"  # for magic link emails
 # REFERRAL_SERVICE_SECRET =  # closed-beta gate shared secret (must match the referral service)
+# DEPLOY_SECRET_KEY =  # master key for per-project deploy secrets; rotating it makes every stored secret undecryptable
 
 # =============================================================================
 # [env.production] — the maintainer's hosted instance (app.usestratum.dev).
@@ -243,6 +276,10 @@ queue = "stratum-events"
 binding = "IMPORT_QUEUE"
 queue = "stratum-imports"
 
+[[env.production.queues.producers]]
+binding = "DEPLOY_QUEUE"
+queue = "stratum-deploys"
+
 [[env.production.queues.consumers]]
 queue = "stratum-events"
 
@@ -251,6 +288,18 @@ queue = "stratum-imports"
 max_batch_size = 1
 max_retries = 3
 retry_delay = 30
+
+# See the top-level stratum-deploys consumer for why each knob is set:
+# visibility_timeout_ms is tied to the bounds in `src/deploy/limits.ts`, and
+# max_concurrency = 1 is the isolate-memory bound (MAX_DEPLOY_CONCURRENCY).
+[[env.production.queues.consumers]]
+queue = "stratum-deploys"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 2
+retry_delay = 60
+visibility_timeout_ms = 900000  # 15 min; see src/deploy/limits.ts
+dead_letter_queue = "stratum-deploys-dlq"
 
 [env.production.triggers]
 crons = ["0 4 * * *", "0 6 * * *", "*/5 * * * *"]
@@ -374,6 +423,10 @@ queue = "stratum-events-staging"
 binding = "IMPORT_QUEUE"
 queue = "stratum-imports-staging"
 
+[[env.staging.queues.producers]]
+binding = "DEPLOY_QUEUE"
+queue = "stratum-deploys-staging"
+
 [[env.staging.queues.consumers]]
 queue = "stratum-events-staging"
 
@@ -382,6 +435,21 @@ queue = "stratum-imports-staging"
 max_batch_size = 1
 max_retries = 3
 retry_delay = 30
+
+# Suffixed like the queues above, and for the same reason: a shared
+# "stratum-deploys" would hand staging's deploy messages to the production
+# consumer, whose D1 has no matching deployments row. Its DLQ is suffixed too.
+# See the top-level consumer for the knobs; visibility_timeout_ms is tied to
+# the bounds in `src/deploy/limits.ts`, and max_concurrency = 1 is the
+# isolate-memory bound (MAX_DEPLOY_CONCURRENCY).
+[[env.staging.queues.consumers]]
+queue = "stratum-deploys-staging"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 2
+retry_delay = 60
+visibility_timeout_ms = 900000  # 15 min; see src/deploy/limits.ts
+dead_letter_queue = "stratum-deploys-dlq-staging"
 
 [[env.staging.send_email]]
 name = "EMAIL"

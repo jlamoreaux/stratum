@@ -7,6 +7,7 @@ export type ProjectTab =
   | "activity"
   | "branches"
   | "tags"
+  | "deployments"
   | "settings";
 
 export interface ProjectRef {
@@ -42,6 +43,10 @@ export const ProjectHeader: FC<ProjectHeaderProps> = ({ project, active, canWrit
     // sections together rather than burying branches under Code.
     { key: "branches", label: "Branches", href: `${base}/branches` },
     { key: "tags", label: "Tags", href: `${base}/tags` },
+    // Deploy history follows the same read rules as Activity, so it is a tab
+    // rather than a Settings sub-page — only the credentials it uses are
+    // admin-only, and those live under Settings.
+    { key: "deployments", label: "Deploys", href: `${base}/deployments` },
     ...(canWrite
       ? [{ key: "settings" as const, label: "Settings", href: `${base}/settings` }]
       : []),

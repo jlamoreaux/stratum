@@ -6,14 +6,16 @@ editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/user-guide/ci-in
 
 Stratum has **no native CI runner** — there are no workflow files, no hosted
 build agents, and no GitHub Actions replacement. What Stratum *does* run for
-you is its evaluation and merge pipeline, and it gives you exactly three ways
-to execute code as part of that pipeline. This page inventories them honestly
-and shows how to wire an external CI system you host into the evaluation gate.
+you is its evaluation and merge pipeline, and it gives you a small, fixed set
+of ways to get code executed as part of that pipeline. This page inventories
+them honestly and shows how to wire an external CI system you host into the
+evaluation gate.
 
 ## The complete code-execution inventory
 
-Stratum can execute code in exactly three places, all driven by
-`.stratum/policy.yaml`:
+Stratum causes code to run in exactly four places, all driven by
+`.stratum/policy.yaml`. The first three run inside Stratum's own pipeline; the
+fourth hands your code to a hosting provider that runs it:
 
 ### 1. The sandbox evaluator
 
@@ -85,8 +87,24 @@ automatically reverted unless `merge.autoRevert: false`. Like the sandbox
 evaluator, this requires the `SANDBOX` binding; without it the check is
 skipped with a warning.
 
-That's it. Everything else — building artifacts, deploying, scheduled jobs —
-must live in a system you run outside Stratum.
+### 4. `deploys:` — publishing the merged tree to a provider
+
+After a merge survives the post-merge check, each entry in the policy's
+`deploys:` list uploads the merged tree to a hosting provider —
+Cloudflare (static assets or a Worker script) or Vercel — using credentials
+stored in the project's encrypted secret store. Stratum does not execute that
+code itself; the provider does, once it is published.
+
+There is **no build step**: the tree is deployed exactly as committed. Commit
+your built output, or use the `vercel` target, which builds the uploaded source
+remotely. A deploy can be gated behind an approval
+(`requiresApproval: true`), and a failed one can be retried, but there is no
+rollback and no preview environment. See
+[Deployments](/guides/deployments/) for the full configuration reference, the
+per-target secrets, and the limits.
+
+That's it. Everything else — building artifacts, scheduled jobs, matrix runs,
+artifact retention — must live in a system you run outside Stratum.
 
 ## The webhook evaluator contract
 
@@ -271,8 +289,16 @@ To set expectations, Stratum has none of the following today:
 - Build artifacts (upload/download/retention)
 - Dependency/build caching
 - Scheduled jobs (cron workflows)
-- A secrets store for CI (the webhook `secret` lives in the policy file)
-- Deployment environments, approvals-per-environment, or deploy gates
+- A secrets store *for evaluators*. Stratum does have an encrypted per-project
+  secret store, but it is **deploy-only**: the deploy runner is the sole reader,
+  and nothing interpolates it into a policy file. The webhook evaluator's
+  `secret` still lives literally in `.stratum/policy.yaml`.
+- Deployment *environments* — no staging/production separation, no
+  per-environment variables, no environment protection rules. What exists is a
+  flat list of named deploys, each optionally gated by a single approval
+  (`requiresApproval: true`), plus a retry. There is no rollback, no preview
+  deploy of an unmerged change, and no build step. See
+  [Deployments](/guides/deployments/).
 - Status-check aggregation — Stratum does not collect external CI check
   results the way a GitHub PR's checks tab does. An external system reports a
   verdict only by answering the webhook evaluator synchronously; a check that
@@ -283,5 +309,6 @@ evaluator (for gating) or via GitHub sync in layer mode (for everything else).
 
 ## See also
 
+- [Deployments](/guides/deployments/) — the `deploys:` policy block, targets, secrets, and limits
 - [FAQ: Does Stratum replace GitHub Actions?](/guides/faq/#does-stratum-replace-github-actions)
 - `docs/CURRENT_CAPABILITIES.md` — the authoritative current state

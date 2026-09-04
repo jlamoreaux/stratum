@@ -5,6 +5,7 @@ import { GitHubClient } from "../github/client";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { runPostMergeCheck } from "../merge/post-merge";
 import { checkMergeProtection } from "../merge/protection";
+import { enqueueMergeDeploy } from "../queue/deploy-queue";
 import { emitEvent } from "../queue/events";
 import type { MergeOutcome } from "../queue/merge-queue";
 import {
@@ -672,6 +673,17 @@ app.post("/changes/:id/merge", async (c) => {
         )
       : { status: "skipped" as const };
 
+    // Deploys are triggered HERE, from the post-merge result — never from the
+    // `change.merged` event emitted above. That event fires before the check
+    // runs, and a post-merge failure auto-reverts the merge, so an
+    // event-triggered deploy would publish the commit Stratum just reverted.
+    await enqueueMergeDeploy(c.env, logger, {
+      projectId: change.projectId ?? project.id,
+      changeId: id,
+      commitSha: result.commit ?? "",
+      postMergeStatus: postMergeViaQueue.status,
+    });
+
     return okOrFormRedirect(c, id, {
       merged: true,
       changeId: id,
@@ -852,6 +864,21 @@ app.post("/changes/:id/merge", async (c) => {
     { changeId: id, mergeCommit: commit, policy: mergePolicy },
     logger,
   );
+
+  // Same ordering constraint as the queue path above: the deploy trigger hangs
+  // off the post-merge result, not the `change.merged` event, because a failed
+  // post-merge check reverts the merge.
+  await enqueueMergeDeploy(c.env, logger, {
+    projectId: change.projectId ?? project.id,
+    changeId: id,
+    commitSha: commit,
+    postMergeStatus: postMerge.status,
+    // The merge time this route already stamped on the change. Deployment rows
+    // are ordered by it rather than by when the queue delivers their message,
+    // and the post-merge check above can take minutes — long enough for a later
+    // merge to overtake this one on enqueue order alone.
+    mergedAt,
+  });
 
   return okOrFormRedirect(c, id, {
     merged: true,
