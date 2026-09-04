@@ -338,7 +338,6 @@ async function loadOAuthGrants(
   };
 }
 
-/** The settings page plus everything it lists, in one round of loads. */
 /**
  * Whether the username may change: only while nothing is keyed under it. Fails
  * closed — if the project listing cannot be read, the rename form is withheld
@@ -353,6 +352,7 @@ async function ownsNoProjects(
   return projects.success && projects.data.length === 0;
 }
 
+/** The settings page plus everything it lists, in one round of loads. */
 async function renderSettings(
   c: Context<{ Bindings: Env }>,
   user: AccountUser,
@@ -530,6 +530,31 @@ app.post("/settings/username", async (c) => {
     }
     logger.error("Failed to rename user", renamed.error);
     return c.html(issuePageError(500, user), 500);
+  }
+
+  // The listing and the UPDATE span two stores with nothing to serialize them,
+  // so a project created in between — by this user in another tab, or by an
+  // agent acting as them — would sit under a namespace no account owns. Look
+  // again now that the name has changed: anything under the old namespace was
+  // created in that window, so put the name back rather than leave it orphaned.
+  // A project created from here on reads the new username. What remains is a
+  // creation that read the old name before the UPDATE and wrote KV after this
+  // check, a window the width of that one request; and KV listings are only
+  // eventually consistent across edges, which no check here can close.
+  const late = await listProjectsByNamespace(c.env.STATE, user.username, logger);
+  if (!late.success || late.data.length > 0) {
+    const reverted = await renameUser(c.env.DB, user.id, user.username, logger);
+    if (!reverted.success) {
+      logger.error("Rename could not be reverted after a late project", reverted.error);
+      return c.html(issuePageError(500, user), 500);
+    }
+    logger.warn("Rename reverted - a project appeared under the old namespace", {
+      listed: late.success,
+    });
+    return refuse(
+      "A project was created under your account while the username was changing, so the change was undone.",
+      409,
+    );
   }
 
   await recordAudit(c.env.DB, logger, {

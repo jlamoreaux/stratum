@@ -334,6 +334,49 @@ describe("POST /settings/username", () => {
     expect(renameUser).not.toHaveBeenCalled();
   });
 
+  // The ownership check and the rename span KV and D1 with nothing to serialize
+  // them. A project created in that window is keyed under the old namespace, so
+  // the route looks again after renaming and puts the name back if one appeared.
+  it("reverts the rename when a project appears under the old namespace meanwhile", async () => {
+    vi.mocked(listProjectsByNamespace)
+      .mockResolvedValueOnce(noProjects)
+      .mockResolvedValueOnce(oneProject);
+    vi.mocked(renameUser)
+      .mockResolvedValueOnce({ success: true, data: "alice-two" })
+      .mockResolvedValueOnce({ success: true, data: "alice" });
+    const res = await makeApp().fetch(
+      post("/settings/username", { username: "alice-two" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("the change was undone");
+    expect(renameUser).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      "usr_1",
+      "alice",
+      expect.anything(),
+    );
+    expect(recordAudit).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ action: "user.renamed" }),
+    );
+  });
+
+  it("reverts as well when the second listing cannot be read", async () => {
+    vi.mocked(listProjectsByNamespace)
+      .mockResolvedValueOnce(noProjects)
+      .mockResolvedValueOnce({ success: false, error: new Error("kv down") as never });
+    vi.mocked(renameUser).mockResolvedValue({ success: true, data: "alice-two" });
+    const res = await makeApp().fetch(
+      post("/settings/username", { username: "alice-two" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(409);
+    expect(renameUser).toHaveBeenCalledTimes(2);
+  });
+
   it("fails closed when the project listing cannot be read", async () => {
     vi.mocked(listProjectsByNamespace).mockResolvedValue({
       success: false,
