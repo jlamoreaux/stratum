@@ -116,14 +116,27 @@ it mints never expires and cannot be revoked one at a time, so letting either
 rotate it would mean revoking them contained nothing — the credential could have
 issued itself a permanent replacement on the way out.
 
-## MCP OAuth grants
+## OAuth grants
 
-The remote MCP endpoint at `/mcp` is an OAuth 2.1 protected resource, and
-Stratum is the authorization server. An MCP client registers itself
+Stratum is an OAuth 2.1 authorization server, and the remote MCP endpoint at
+`/mcp` is a protected resource. A client registers itself
 ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)), sends the user to a
 consent screen, and receives an access token — so a user connects an editor
-without ever pasting a credential into it. See
-[the MCP guide](/guides/mcp/) for the full flow.
+without ever pasting a credential into it.
+
+Two first-party clients use this flow, and the grants they receive are the same
+kind of credential:
+
+- **MCP clients** (editors, agent frameworks) — see
+  [the MCP guide](/guides/mcp/).
+- **The CLI**, since `stratum login` — see [the CLI guide](/guides/cli/).
+  It registers as a public client with a loopback redirect
+  ([RFC 8252](https://datatracker.ietf.org/doc/html/rfc8252)) rather than an
+  https one, because it runs on the user's own machine.
+
+An OAuth access token authenticates **everywhere a user token does**, which is
+what keeps the MCP tools from drifting away from the API they wrap — with the
+carve-outs listed below.
 
 | | |
 |---|---|

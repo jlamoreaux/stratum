@@ -339,7 +339,10 @@ git clone https://github.com/stratum-eng/stratum.git
 cd stratum/cli && npm install && npm run build
 npm link   # puts the `stratum` binary on your PATH
 
-stratum login --host https://app.usestratum.dev --key stratum_user_xxxxx
+stratum login          # opens your browser; no token to create or paste
+
+# Headless (CI, containers), where there is no browser:
+# stratum login --host https://app.usestratum.dev --key stratum_user_xxxxx
 # or: export STRATUM_HOST=... STRATUM_API_KEY=...   (env overrides the config file)
 
 stratum status        # who am I

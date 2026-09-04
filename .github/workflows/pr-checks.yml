@@ -11,8 +11,14 @@ concurrency:
 
 jobs:
   packages:
-    name: CLI & Agent Packages
+    name: CLI & Agent Packages (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor each package declares in `engines`, and the version most
+        # contributors run. Testing only the latter lets the floor rot.
+        node: ["20", "22"]
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -20,15 +26,19 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
 
-      - name: CLI — install, typecheck, test, build
+      # Lint runs last, per AGENTS.md: Biome autofixes formatting, so putting it
+      # ahead of the correctness gates just reports style on code that may not
+      # compile.
+      - name: CLI — install, typecheck, test, build, lint
         working-directory: cli
         run: |
           npm install
           npm run typecheck
           npm test
           npm run build
+          npm run lint
 
       - name: Agent — install, typecheck, test, build
         working-directory: agent

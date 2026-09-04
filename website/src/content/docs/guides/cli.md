@@ -14,7 +14,7 @@ agent frameworks already understand.
 ## Installation
 
 The package is **not yet published to npm** — install it from the `cli/`
-directory of the repository (Node 18+):
+directory of the repository (Node 20+):
 
 ```bash
 git clone https://github.com/stratum-eng/stratum.git
@@ -26,30 +26,103 @@ npm link          # puts the `stratum` binary on your PATH
 ## Authentication
 
 ```bash
+stratum login
+```
+
+That is the whole thing: `login` opens your browser, you approve the CLI on
+Stratum's consent screen, and the tokens land in `~/.stratum/config.json`.
+There is no token to create by hand and none to paste.
+
+Under the hood it is the OAuth 2.1 authorization-code flow that native apps
+use (RFC 8252): the CLI registers itself as a public client
+([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)), proves possession of the code with
+PKCE, and receives the redirect on a loopback listener bound to an ephemeral
+port on `127.0.0.1`. Nothing is minted that you have to store, and the grant
+shows up under **Settings → Connected applications** alongside your editors,
+where it can be revoked like any other.
+
+The **granted** scope is printed at login and by `stratum status`, so a grant
+narrower than you asked for is visible immediately rather than at the first
+write that fails. By default the session is read **and** write, because most
+commands write. For a session that cannot change anything:
+
+```bash
+stratum login --read-only
+```
+
+Sign out, which asks the host to revoke the grant and then clears the local
+credential — and still clears it locally if the host is unreachable:
+
+```bash
+stratum logout
+```
+
+`logout` reports that the revocation request was *delivered*, not that the grant
+is gone: [RFC 7009 §2.2](https://datatracker.ietf.org/doc/html/rfc7009#section-2.2)
+has the server answer `200` whether or not anything matched. To confirm, check
+**Settings → Connected applications**.
+
+### Headless: CI, containers, and anywhere without a browser
+
+Without a terminal, `stratum login` refuses rather than opening a browser nobody
+can see. Two options:
+
+```bash
 stratum login --host https://app.usestratum.dev --key stratum_user_xxxxx
 ```
 
-Run it with no flags to be prompted for both values. Two things to know:
+or set `STRATUM_HOST` and `STRATUM_API_KEY`, which override the config file.
+`STRATUM_API_KEY` overrides on its own; `STRATUM_HOST` on its own retargets a
+stored **API token** only. With a browser session it is refused, because an
+OAuth grant belongs to the server that issued it and is worthless — and unsafe —
+anywhere else. Passing `--key` is also how you say "do not open a
+browser" on a machine that has one. Create the token from
+**Settings → API tokens**; token management deliberately requires a browser
+session, so a token can never mint another token.
 
-- **Credentials land in `~/.stratum/config.json` as plaintext JSON.** Treat
-  that file like the token itself. In CI, skip the file entirely and set
-  `STRATUM_HOST` and `STRATUM_API_KEY` — the environment variables override
-  the config file, each independently.
-- **`login` verifies the key exists, not what it can do.** It calls the
+> **Changed:** `stratum login --host <url>` *without* `--key` now opens a
+> browser instead of prompting for a key. A script that piped a key into that
+> prompt must pass `--key` or use the environment variables.
+
+Two things to know either way:
+
+- **Credentials land in `~/.stratum/config.json`.** The file is `0600` in a
+  `0700` directory — including on installs upgraded from a release that left it
+  world-readable — and is written atomically, so an interrupted write cannot
+  destroy a session. It is still plaintext: treat it like the token itself. In
+  CI, skip the file entirely and use the environment variables.
+- **`login --key` verifies the key exists, not what it can do.** It calls the
   host's `/health` endpoint with your key, and an invalid or mistyped key
-  fails there with `HTTP 401` before anything is saved. What login does *not*
+  fails there with `HTTP 401` before anything is saved. What it does *not*
   check is **scope**: a `read`-scoped token logs in fine and only fails on
-  the first write. `stratum status` confirms which account you are:
+  the first write. The browser flow has no such gap — you choose the scope at
+  login and `--read-only` is the only way to end up with less than you need.
+
+`stratum status` confirms which account you are:
 
 ```bash
 stratum status
 # Authenticated as you@example.com (usr_...)
 ```
 
-Most commands write, so use a `read_write` [API token](/reference/authentication/).
-A `read`-scoped token works for the listing commands but is refused with
-`403 TOKEN_SCOPE_INSUFFICIENT` on anything else. The CLI has no commands for
-creating or revoking tokens — that surface is deliberately
+### Sessions renew themselves
+
+An OAuth access token is good for an hour and the CLI refreshes it silently
+when it expires, rotating the stored refresh token each time. You stay signed
+in for up to 30 days of inactivity, and 180 days in total, after which
+`stratum login` asks for approval again. An API token, by contrast, lives
+until it expires or is revoked.
+
+Rotation is coordinated across processes with a lock file
+(`~/.stratum/config.lock`), so running several `stratum` commands at once is
+safe. It has to be: presenting a refresh token that has already been rotated is
+indistinguishable from a stolen one, and the server responds by revoking the
+whole grant.
+
+A read-only session — `--read-only`, or a `read`-scoped API token — is refused
+on every request that is not a `GET` or a `HEAD`, with
+`403 TOKEN_SCOPE_INSUFFICIENT`. Beyond `logout`, the CLI has no commands for
+creating or revoking API tokens: that surface is deliberately
 [session-only](/reference/authentication/#managing-tokens-requires-a-session), so
 it lives in the settings UI.
 

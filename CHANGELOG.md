@@ -197,6 +197,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user), so an agent's feedback channel is change comments.
 
 ### Changed
+
+- **`stratum login --host <url>` without `--key` now opens a browser** instead of
+  prompting for a key. Scripts that piped a key into the prompt must pass
+  `--key` (or set `STRATUM_HOST` and `STRATUM_API_KEY`). Without a TTY the
+  command now refuses with a message naming both, rather than spawning a browser
+  nobody can see or hanging on a prompt nobody can answer.
+- **A lone `STRATUM_HOST` no longer retargets a browser session.** It still
+  overrides the host for an API-token credential, but an OAuth grant belongs to
+  the server that issued it, so pointing one at a different host is now refused
+  with an explanatory error instead of sending that host a token it did not
+  issue. Set `STRATUM_API_KEY` alongside it, or run `stratum login --host …`.
+- **`cli/` requires Node 20+** (was 18). The loopback listener relies on
+  `server.close()` dropping idle keep-alive connections, which is Node 19+
+  behaviour; 18 was declared but never tested.
 - **Profile is folded into Settings.** The two pages opened with the same
   Account card and each pointed at the other for the rest. Settings now holds
   everything — identity, invite codes, privacy, tokens, connected apps, agents,
@@ -252,6 +266,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collapsed into one row, so only one of their reasons survived — a rejection
   sharing a name with a valid entry could even take that entry's row and stop it
   deploying. Every rejected entry now gets its own `failed` row.
+
+- **The CLI credential file is now `0600` in a `0700` directory on existing
+  installs, not only new ones.** It holds a bearer token in plaintext, and
+  earlier releases left it world-readable at `0644`. Passing `mode` to
+  `writeFile`/`mkdir` does not fix an existing file — POSIX honours `mode` only
+  when the call creates the node — so the write now goes through a temp file and
+  `rename`, which replaces the inode and carries the right permissions with it.
+- **A `stratum` session can no longer be destroyed by running two commands at
+  once.** Refresh tokens rotate on every use, and presenting a retired one is
+  treated as theft: the server revokes the whole grant, logging you out
+  everywhere. Two processes refreshing concurrently both held the same token, so
+  parallel commands after an idle hour would systematically do exactly that.
+  Rotation now takes a cross-process lock and re-reads the stored credential
+  inside it, so a process that waited adopts the winner's token instead of
+  replaying its own.
+- **A crash or `^C` while the CLI wrote its credential no longer loses the
+  session.** The file was truncated in place, and after a rotation the new
+  refresh token exists only on disk, so a torn write was unrecoverable. Writes
+  are now atomic.
+- **The CLI refuses to send credentials over plaintext or off-origin.** `--host`
+  must be `https` (loopback excepted), and every endpoint named in a host's
+  OAuth discovery document must share that host's origin, so a tampered document
+  cannot redirect the authorization code or refresh token elsewhere.
+- **OAuth requests no longer hang indefinitely.** Every call in the login and
+  refresh path carries a timeout; without one, an unreachable host hung not just
+  `login` but every command, because a refresh re-enters discovery.
+- **A stray request to the CLI's loopback port no longer cancels a login.** Any
+  page open in the browser can reach `127.0.0.1`; a request with a mismatched
+  `state` is now ignored and the listener keeps waiting, per RFC 8252.
+- **A failed token refresh reports its actual cause.** A network failure was
+  reported as `session expired`, sending users to re-authenticate over a problem
+  that re-authenticating could not fix.
 - **The header fits a phone.** Signed in, the nav's five links were laid out in
   one unwrappable row, so below about 460px the row ran past the viewport, the
   page scrolled sideways, and the wordmark and "logout" were clipped off either
