@@ -347,18 +347,18 @@ async function loadOAuthGrants(
 }
 
 /**
- * Whether the username may change: only until the account creates its first
- * project. The claims table in D1 is the strongly consistent answer for every
- * project created since it existed; the KV listing covers projects that
- * predate it. Fails closed — if either cannot be read, the rename form is
- * withheld rather than offered on a guess.
+ * Whether the username may change: only while the account owns no projects.
+ * The claims table in D1 is the strongly consistent answer for every project
+ * created since it existed; the KV listing covers projects that predate it.
+ * Fails closed — if either cannot be read, the rename form is withheld rather
+ * than offered on a guess.
  */
 async function mayRename(
   env: Pick<Env, "DB" | "STATE">,
   user: { id: string; username: string },
   logger: ReturnType<typeof createLogger>,
 ): Promise<boolean> {
-  const claims = await ownerHasClaims(env.DB, user.id, logger);
+  const claims = await ownerHasClaims(env, user.id, logger);
   if (!claims.success || claims.data) return false;
   const projects = await listProjectsByNamespace(
     env.STATE,
@@ -529,15 +529,15 @@ app.post("/settings/username", async (c) => {
   // D1 first: a claim is written before any project's KV entry, so this read
   // is authoritative for everything created since claims existed. The KV
   // listing after it covers older projects, best effort.
-  const claims = await ownerHasClaims(c.env.DB, user.id, logger);
+  const claims = await ownerHasClaims(c.env, user.id, logger);
   if (!claims.success) {
     logger.error("Could not read namespace claims before a rename", claims.error);
     return c.html(issuePageError(500, user), 500);
   }
   if (claims.data) {
-    logger.warn("Rename refused - account has created a project", {});
+    logger.warn("Rename refused - account holds a project claim", {});
     return refuse(
-      "Your username cannot be changed once you have created a project: every project URL is keyed under it.",
+      "Your username cannot be changed while you own projects: every project URL is keyed under it.",
       403,
     );
   }
@@ -553,7 +553,7 @@ app.post("/settings/username", async (c) => {
   if (projects.data.length > 0) {
     logger.warn("Rename refused - account owns projects", { projects: projects.data.length });
     return refuse(
-      "Your username cannot be changed once you have created a project: every project URL is keyed under it.",
+      "Your username cannot be changed while you own projects: every project URL is keyed under it.",
       403,
     );
   }

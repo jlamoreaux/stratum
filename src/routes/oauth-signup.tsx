@@ -252,7 +252,7 @@ app.get("/", async (c) => {
           <form class="signup-form" action={COMPLETE_SIGNUP_PATH} method="post" id="signupForm">
             <div class="form-group">
               <label class="form-label" for="username">
-                Username <span>(your namespace — fixed once you create a project)</span>
+                Username <span>(your namespace — fixed while you own projects)</span>
               </label>
               <input
                 type="text"

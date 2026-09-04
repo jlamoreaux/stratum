@@ -1,8 +1,8 @@
 /**
  * The Account section of `/settings`, which absorbed the old `/profile` page:
  * identity, the caller's own invite codes, and the two things about an account
- * that can change — the display name (any time) and the username (only until
- * the account creates its first project, since every project is keyed under it).
+ * that can change — the display name (any time) and the username (only while
+ * the account owns no projects, since every project is keyed under it).
  *
  * `vitest.config.ts` restricts coverage to `src/**\/*.ts`, so the `.tsx` route
  * and page contribute nothing to the ratchet — these assertions are the only
@@ -166,17 +166,17 @@ describe("GET /settings: account", () => {
     expect(html).toContain('value="Alice Liddell"');
   });
 
-  it("offers the username form only until the account creates a project", async () => {
+  it("offers the username form only while the account owns no projects", async () => {
     const withNone = await (await makeApp().fetch(get(), makeEnv())).text();
     expect(withNone).toContain('action="/settings/username"');
-    expect(withNone).toContain("until you create your first project");
+    expect(withNone).toContain("while you own no projects");
 
     // The claims table is the strongly consistent record of every project
     // created since it existed; a claim alone withholds the form.
     vi.mocked(ownerHasClaims).mockResolvedValue(hasClaims);
     const withClaim = await (await makeApp().fetch(get(), makeEnv())).text();
     expect(withClaim).not.toContain('action="/settings/username"');
-    expect(withClaim).toContain("cannot be changed once you have created a project");
+    expect(withClaim).toContain("cannot be changed while you own projects");
     expect(listProjectsByNamespace).toHaveBeenCalledTimes(1);
 
     // Projects that predate the table have no claim; the KV listing finds them.
@@ -363,7 +363,7 @@ describe("POST /settings/username", () => {
       makeEnv(),
     );
     expect(res.status).toBe(403);
-    expect(await res.text()).toContain("cannot be changed once you have created a project");
+    expect(await res.text()).toContain("cannot be changed while you own projects");
     expect(listProjectsByNamespace).not.toHaveBeenCalled();
     expect(renameUser).not.toHaveBeenCalled();
   });
@@ -375,7 +375,7 @@ describe("POST /settings/username", () => {
       makeEnv(),
     );
     expect(res.status).toBe(403);
-    expect(await res.text()).toContain("cannot be changed once you have created a project");
+    expect(await res.text()).toContain("cannot be changed while you own projects");
     expect(renameUser).not.toHaveBeenCalled();
   });
 
@@ -397,7 +397,7 @@ describe("POST /settings/username", () => {
       success: false,
       error: {
         statusCode: 403,
-        message: "Your username cannot be changed once you have created a project.",
+        message: "Your username cannot be changed while you own projects.",
       } as never,
     });
     const res = await makeApp().fetch(
@@ -405,7 +405,7 @@ describe("POST /settings/username", () => {
       makeEnv(),
     );
     expect(res.status).toBe(403);
-    expect(await res.text()).toContain("cannot be changed once you have created a project");
+    expect(await res.text()).toContain("cannot be changed while you own projects");
     expect(recordAudit).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),

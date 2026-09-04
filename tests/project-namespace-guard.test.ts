@@ -13,15 +13,16 @@ import type { Logger } from "../src/utils/logger";
 import { makeSqliteD1 } from "./helpers/sqlite-d1";
 
 vi.mock("../src/storage/users", () => ({ getUser: vi.fn() }));
-vi.mock("../src/storage/state", () => ({ deleteProject: vi.fn() }));
+vi.mock("../src/storage/state", () => ({ deleteProject: vi.fn(), getProjectByPath: vi.fn() }));
 
 import {
+  CLAIM_GRACE_MS,
   claimNamespace,
   confirmOwnerNamespace,
   ownerHasClaims,
   releaseNamespaceClaim,
 } from "../src/storage/project-namespace";
-import { deleteProject } from "../src/storage/state";
+import { deleteProject, getProjectByPath } from "../src/storage/state";
 import { getUser } from "../src/storage/users";
 
 const logger: Logger = {
@@ -62,6 +63,14 @@ function makeEnv(db: D1Database = {} as D1Database) {
 }
 
 const aliceProj = { ownerId: "usr_1", namespace: "@alice", slug: "proj" };
+const kv = {} as KVNamespace;
+const missing = {
+  success: false as const,
+  error: { statusCode: 404, message: "not found" } as never,
+};
+const found = { success: true as const, data: { id: "prj_1" } as never };
+/** Past the grace window, so every claim written "now" is checked against KV. */
+const later = () => Date.now() + CLAIM_GRACE_MS + 1000;
 
 const confirm = (env: ReturnType<typeof makeEnv>["env"]) =>
   confirmOwnerNamespace(env, "usr_1", "@alice", "proj", logger);
@@ -145,7 +154,7 @@ describe("confirmOwnerNamespace", () => {
     await claimNamespace(db, aliceProj, logger);
     const { env } = makeEnv(db);
     expect((await confirm(env)).success).toBe(false);
-    const claims = await ownerHasClaims(db, "usr_1", logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger);
     expect(claims.success && claims.data).toBe(false);
   });
 
@@ -156,7 +165,7 @@ describe("confirmOwnerNamespace", () => {
     await claimNamespace(db, aliceProj, logger);
     const { env } = makeEnv(db);
     expect((await confirm(env)).success).toBe(false);
-    const claims = await ownerHasClaims(db, "usr_1", logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger);
     expect(claims.success && claims.data).toBe(true);
   });
 
@@ -188,8 +197,8 @@ describe("namespace claims", () => {
   it("records a claim and reports it for its owner only", async () => {
     const { db } = makeSqliteD1();
     expect((await claimNamespace(db, aliceProj, logger)).success).toBe(true);
-    const alice = await ownerHasClaims(db, "usr_1", logger);
-    const bob = await ownerHasClaims(db, "usr_2", logger);
+    const alice = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger);
+    const bob = await ownerHasClaims({ DB: db, STATE: kv }, "usr_2", logger);
     expect(alice.success && alice.data).toBe(true);
     expect(bob.success && bob.data).toBe(false);
   });
@@ -205,7 +214,7 @@ describe("namespace claims", () => {
     const { db } = makeSqliteD1();
     await claimNamespace(db, aliceProj, logger);
     expect((await releaseNamespaceClaim(db, "@alice", "proj", logger)).success).toBe(true);
-    const claims = await ownerHasClaims(db, "usr_1", logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger);
     expect(claims.success && claims.data).toBe(false);
   });
 
@@ -219,11 +228,130 @@ describe("namespace claims", () => {
           first: async () => {
             throw new Error("D1 down");
           },
+          all: async () => {
+            throw new Error("D1 down");
+          },
         }),
       }),
     } as unknown as D1Database;
     expect((await claimNamespace(broken, aliceProj, logger)).success).toBe(false);
-    expect((await ownerHasClaims(broken, "usr_1", logger)).success).toBe(false);
+    expect((await ownerHasClaims({ DB: broken, STATE: kv }, "usr_1", logger)).success).toBe(false);
     expect((await releaseNamespaceClaim(broken, "@alice", "proj", logger)).success).toBe(false);
+  });
+});
+
+/**
+ * A claim's release is best effort, so past the grace window the claim is
+ * checked against KV rather than believed: a deleted or half-withdrawn project
+ * must not hold a username forever, and a live one must still hold it.
+ */
+describe("stale namespace claims", () => {
+  it("counts a fresh claim without consulting KV", async () => {
+    const { db } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger);
+    expect(claims.success && claims.data).toBe(true);
+    expect(getProjectByPath).not.toHaveBeenCalled();
+  });
+
+  it("counts an old claim whose project is in KV", async () => {
+    vi.mocked(getProjectByPath).mockResolvedValue(found);
+    const { db } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger, later());
+    expect(claims.success && claims.data).toBe(true);
+    expect(getProjectByPath).toHaveBeenCalledWith(kv, "@alice", "proj", logger);
+  });
+
+  it("drops an old claim with no project behind it and reports none", async () => {
+    vi.mocked(getProjectByPath).mockResolvedValue(missing);
+    const { db, raw } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger, later());
+    expect(claims.success && claims.data).toBe(false);
+    expect(raw.prepare("SELECT count(*) AS n FROM namespace_claims").get()).toEqual({ n: 0 });
+    // Dropped for good: the next check needs no KV read.
+    const again = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger, later());
+    expect(again.success && again.data).toBe(false);
+    expect(getProjectByPath).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps checking past a stale claim and counts a later live one", async () => {
+    vi.mocked(getProjectByPath).mockResolvedValueOnce(missing).mockResolvedValueOnce(found);
+    const { db } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    await claimNamespace(db, { ...aliceProj, slug: "other" }, logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger, later());
+    expect(claims.success && claims.data).toBe(true);
+  });
+
+  it("fails closed when KV cannot answer for an old claim", async () => {
+    vi.mocked(getProjectByPath).mockResolvedValue({
+      success: false,
+      error: { statusCode: 500, message: "kv down" } as never,
+    });
+    const { db, raw } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger, later());
+    expect(claims.success).toBe(false);
+    expect(raw.prepare("SELECT count(*) AS n FROM namespace_claims").get()).toEqual({ n: 1 });
+  });
+
+  it("treats a KV read that throws as unknown, not as absent", async () => {
+    vi.mocked(getProjectByPath).mockRejectedValue(new Error("kv exploded"));
+    const { db } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    const claims = await ownerHasClaims({ DB: db, STATE: kv }, "usr_1", logger, later());
+    expect(claims.success).toBe(false);
+  });
+
+  it("reports a stale claim it could not drop rather than a clean slate", async () => {
+    vi.mocked(getProjectByPath).mockResolvedValue(missing);
+    const { db } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    const noDelete = {
+      prepare: (sql: string) => {
+        if (sql.trim().toUpperCase().startsWith("DELETE")) {
+          return {
+            bind: () => ({
+              run: async () => {
+                throw new Error("D1 down");
+              },
+            }),
+          };
+        }
+        return db.prepare(sql);
+      },
+    } as unknown as D1Database;
+    const claims = await ownerHasClaims({ DB: noDelete, STATE: kv }, "usr_1", logger, later());
+    expect(claims.success).toBe(false);
+  });
+
+  it("leaves a claim refreshed by a re-creation of the same slug alone", async () => {
+    vi.mocked(getProjectByPath).mockResolvedValue(missing);
+    const { db, raw } = makeSqliteD1();
+    await claimNamespace(db, aliceProj, logger);
+    // Between the read and the drop, the same slug is claimed again: the row
+    // now carries a newer timestamp and must survive the drop.
+    const refreshing = {
+      prepare: (sql: string) => {
+        const stmt = db.prepare(sql);
+        if (!sql.trim().toUpperCase().startsWith("SELECT")) return stmt;
+        return {
+          bind: (...args: unknown[]) => ({
+            all: async <T>() => {
+              const rows = await stmt.bind(...args).all<T>();
+              raw
+                .prepare("UPDATE namespace_claims SET created_at = ? WHERE slug = ?")
+                .run("2099-01-01T00:00:00.000Z", "proj");
+              return rows;
+            },
+          }),
+        };
+      },
+    } as unknown as D1Database;
+    const claims = await ownerHasClaims({ DB: refreshing, STATE: kv }, "usr_1", logger, later());
+    expect(claims.success && claims.data).toBe(false);
+    expect(raw.prepare("SELECT count(*) AS n FROM namespace_claims").get()).toEqual({ n: 1 });
   });
 });

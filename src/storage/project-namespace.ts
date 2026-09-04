@@ -3,7 +3,7 @@ import { getArtifactsRepoName, getUserNamespace } from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
-import { deleteProject } from "./state";
+import { deleteProject, getProjectByPath } from "./state";
 import { getUser } from "./users";
 
 /*
@@ -17,10 +17,27 @@ import { getUser } from "./users";
  * it: a rename after a claim is refused; a claim after a rename is caught by
  * confirmOwnerNamespace, which re-reads the owner and withdraws the project.
  *
- * Claims outlive their projects: a username is fixed once its first project
- * exists, deleted or not, so an old namespace's URLs never resolve to someone
- * else. Only a project withdrawn during creation releases its claim.
+ * A claim is released when its project is withdrawn during creation, and the
+ * release is best effort: D1 can fail right after KV succeeded, and nothing
+ * durable retries it. So a claim is not trusted forever. Past CLAIM_GRACE_MS
+ * the KV entry is visible everywhere, and ownerHasClaims checks the claim
+ * against it, dropping one with no project behind it, whether the release
+ * failed or the project was deleted later. Within the window the claim is
+ * taken at its word, which is the whole point of having it.
  */
+
+/**
+ * How long a claim counts without a KV check. KV writes settle across edges
+ * within about a minute; fifteen keeps a wide margin and still bounds how long
+ * a deleted or half-withdrawn project can hold a username.
+ */
+export const CLAIM_GRACE_MS = 15 * 60 * 1000;
+
+interface ClaimRow {
+  namespace: string;
+  slug: string;
+  created_at: string;
+}
 
 /** Record that `ownerId` is creating `namespace/slug`. Same owner re-creating a deleted slug simply refreshes the row. */
 export async function claimNamespace(
@@ -72,23 +89,105 @@ export async function releaseNamespaceClaim(
   }
 }
 
-/** Whether `ownerId` has ever created a project: the strongly consistent half of "may this username change". */
+/**
+ * Whether `ownerId` holds a project under a claim: the strongly consistent
+ * half of "may this username change". A claim younger than CLAIM_GRACE_MS
+ * counts as it stands; an older one counts only if KV has its project, and a
+ * stale one is dropped on the way past so the rename's own UPDATE does not
+ * refuse on it. Fails closed: a claim that cannot be checked, or a stale one
+ * that cannot be dropped, is an error rather than a count either way.
+ * `now` is injectable for tests.
+ */
 export async function ownerHasClaims(
-  db: D1Database,
+  env: Pick<Env, "DB" | "STATE">,
   ownerId: string,
   logger: Logger,
+  now = Date.now(),
 ): Promise<Result<boolean, AppError>> {
+  let claims: ClaimRow[];
   try {
-    const row = await db
-      .prepare("SELECT 1 AS present FROM namespace_claims WHERE owner_id = ? LIMIT 1")
+    const result = await env.DB.prepare(
+      "SELECT namespace, slug, created_at FROM namespace_claims WHERE owner_id = ? ORDER BY created_at DESC",
+    )
       .bind(ownerId)
-      .first<{ present: number }>();
-    return ok(row !== null);
+      .all<ClaimRow>();
+    claims = result.results;
   } catch (error) {
     logger.error("Failed to read namespace claims", error instanceof Error ? error : undefined, {
       ownerId,
     });
     return err(new AppError("Failed to read namespace claims", "STORAGE_ERROR", 500, { ownerId }));
+  }
+  for (const claim of claims) {
+    // Newest first, so the first young claim answers without a KV read. An
+    // unparsable timestamp makes the age NaN, which fails the test and counts
+    // the claim as live: the safe side.
+    const age = now - Date.parse(claim.created_at);
+    if (!(age >= CLAIM_GRACE_MS)) return ok(true);
+    const present = await projectExists(env.STATE, claim.namespace, claim.slug, logger);
+    if (!present.success) return present;
+    if (present.data) return ok(true);
+    logger.warn("Dropping a namespace claim with no project behind it", { ownerId, ...claim });
+    const dropped = await dropStaleClaim(env.DB, claim, logger);
+    if (!dropped.success) return dropped;
+  }
+  return ok(false);
+}
+
+/** Whether KV holds the project: a 404 is a clean "no"; any other failure, a thrown read included, is unknown. */
+async function projectExists(
+  kv: KVNamespace,
+  namespace: string,
+  slug: string,
+  logger: Logger,
+): Promise<Result<boolean, AppError>> {
+  try {
+    const found = await getProjectByPath(kv, namespace, slug, logger);
+    if (found.success) return ok(true);
+    if (found.error.statusCode === 404) return ok(false);
+    return err(found.error);
+  } catch (error) {
+    logger.error(
+      "Failed to read the project behind a namespace claim",
+      error instanceof Error ? error : undefined,
+      { namespace, slug },
+    );
+    return err(
+      new AppError("Failed to read the project behind a namespace claim", "STORAGE_ERROR", 500, {
+        namespace,
+        slug,
+      }),
+    );
+  }
+}
+
+/**
+ * Remove exactly the row that was found stale. Matching on `created_at` too
+ * means a claim refreshed meanwhile by a re-creation of the same slug is left
+ * alone for the rename's UPDATE to see.
+ */
+async function dropStaleClaim(
+  db: D1Database,
+  claim: ClaimRow,
+  logger: Logger,
+): Promise<Result<void, AppError>> {
+  try {
+    await db
+      .prepare("DELETE FROM namespace_claims WHERE namespace = ? AND slug = ? AND created_at = ?")
+      .bind(claim.namespace, claim.slug, claim.created_at)
+      .run();
+    return ok(undefined);
+  } catch (error) {
+    logger.error(
+      "Failed to drop a stale namespace claim",
+      error instanceof Error ? error : undefined,
+      {
+        ...claim,
+      },
+    );
+    return err(
+      new AppError("Failed to drop a stale namespace claim", "STORAGE_ERROR", 500, { ...claim }),
+    );
   }
 }
 
@@ -218,8 +317,8 @@ async function withdraw(
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  // A claim left behind would fix a username for a project that never
-  // existed; the release is best effort, and a leftover only errs on the safe side.
+  // Best effort: a leftover claim errs on the safe side until CLAIM_GRACE_MS
+  // passes, after which ownerHasClaims finds no project behind it and drops it.
   await releaseNamespaceClaim(env.DB, namespace, slug, logger);
   return ok(undefined);
 }
