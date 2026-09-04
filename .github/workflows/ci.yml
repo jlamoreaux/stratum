@@ -47,10 +47,11 @@ jobs:
         with:
           node-version: "22"
 
-      - name: CLI — install, typecheck, test, build
+      - name: CLI — install, lint, typecheck, test, build
         working-directory: cli
         run: |
           npm install
+          npm run lint
           npm run typecheck
           npm test
           npm run build
