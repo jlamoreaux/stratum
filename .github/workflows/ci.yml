@@ -120,14 +120,19 @@ jobs:
           npx wrangler d1 migrations apply stratum-staging --remote --env=staging
           echo "✓ Migrations applied successfully"
 
-      # Staging binds its own -staging queues (see wrangler.toml); a deploy
-      # fails if a bound queue doesn't exist, so create them idempotently.
+      # A deploy fails outright on a bound queue that does not exist. The names
+      # come from wrangler.toml rather than a copy kept here, so binding a new
+      # queue cannot leave a deploy path un-provisioned.
       - name: Ensure Staging Queues Exist
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for queue in stratum-events-staging stratum-imports-staging stratum-deploys-staging stratum-deploys-dlq-staging; do
+          node scripts/wrangler-queues.mjs staging > /tmp/queues-staging.txt
+          # Redirect, not a pipe: a `while ... | read` loop runs in a subshell,
+          # where `exit 1` would end the subshell and let the step pass.
+          while read -r queue; do
+            [ -z "$queue" ] && continue
             if out=$(npx wrangler queues create "$queue" 2>&1); then
               echo "✓ Created queue $queue"
             elif echo "$out" | grep -qiE "already (exists|taken)|11009"; then
@@ -136,7 +141,7 @@ jobs:
               echo "$out"
               exit 1
             fi
-          done
+          done < /tmp/queues-staging.txt
 
       - name: Deploy to Cloudflare Staging
         id: deploy
@@ -207,16 +212,18 @@ jobs:
 
       # Production had no such step until deploys added two new queues: its
       # original queues predated CI, so nothing ever created one here and the
-      # gap stayed invisible. `wrangler deploy` fails outright on a bound queue
-      # that does not exist, which is how it surfaced — staging deployed and
-      # production did not. Lists every production queue, not just the new
-      # ones, so the next addition cannot reopen the same hole.
+      # gap stayed invisible until a bound queue was missing and the deploy
+      # failed. Names come from wrangler.toml so the two cannot drift.
       - name: Ensure Production Queues Exist
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for queue in stratum-events stratum-imports stratum-deploys stratum-deploys-dlq; do
+          node scripts/wrangler-queues.mjs production > /tmp/queues-production.txt
+          # Redirect, not a pipe: a `while ... | read` loop runs in a subshell,
+          # where `exit 1` would end the subshell and let the step pass.
+          while read -r queue; do
+            [ -z "$queue" ] && continue
             if out=$(npx wrangler queues create "$queue" 2>&1); then
               echo "✓ Created queue $queue"
             elif echo "$out" | grep -qiE "already (exists|taken)|11009"; then
@@ -225,7 +232,7 @@ jobs:
               echo "$out"
               exit 1
             fi
-          done
+          done < /tmp/queues-production.txt
 
       - name: Deploy to Cloudflare Production
         id: deploy

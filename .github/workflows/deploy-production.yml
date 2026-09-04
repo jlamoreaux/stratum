@@ -42,7 +42,11 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for queue in stratum-events stratum-imports stratum-deploys stratum-deploys-dlq; do
+          node scripts/wrangler-queues.mjs production > /tmp/queues-production.txt
+          # Redirect, not a pipe: a `while ... | read` loop runs in a subshell,
+          # where `exit 1` would end the subshell and let the step pass.
+          while read -r queue; do
+            [ -z "$queue" ] && continue
             if out=$(npx wrangler queues create "$queue" 2>&1); then
               echo "✓ Created queue $queue"
             elif echo "$out" | grep -qiE "already (exists|taken)|11009"; then
@@ -51,7 +55,7 @@ jobs:
               echo "$out"
               exit 1
             fi
-          done
+          done < /tmp/queues-production.txt
 
       - name: Deploy to Cloudflare
         env:
