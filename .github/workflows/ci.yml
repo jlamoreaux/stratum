@@ -205,6 +205,28 @@ jobs:
           npx wrangler d1 migrations apply stratum --remote --env=production
           echo "✓ Migrations applied successfully"
 
+      # Production had no such step until deploys added two new queues: its
+      # original queues predated CI, so nothing ever created one here and the
+      # gap stayed invisible. `wrangler deploy` fails outright on a bound queue
+      # that does not exist, which is how it surfaced — staging deployed and
+      # production did not. Lists every production queue, not just the new
+      # ones, so the next addition cannot reopen the same hole.
+      - name: Ensure Production Queues Exist
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for queue in stratum-events stratum-imports stratum-deploys stratum-deploys-dlq; do
+            if out=$(npx wrangler queues create "$queue" 2>&1); then
+              echo "✓ Created queue $queue"
+            elif echo "$out" | grep -qiE "already (exists|taken)|11009"; then
+              echo "✓ Queue $queue already exists"
+            else
+              echo "$out"
+              exit 1
+            fi
+          done
+
       - name: Deploy to Cloudflare Production
         id: deploy
         env:
