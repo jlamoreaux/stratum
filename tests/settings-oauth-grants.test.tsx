@@ -26,7 +26,7 @@ function render(opts: { grants: OAuthGrantSummary[]; unavailable: boolean }): st
   return renderToString(
     SettingsPage({
       user,
-      canRenameUsername: false,
+      usernameChange: "blocked",
       agents: [],
       apiTokens: [],
       oauthGrants: opts.grants,

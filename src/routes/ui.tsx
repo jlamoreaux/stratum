@@ -69,7 +69,12 @@ import { IssueDetailPage, IssuesPage, NewIssuePage } from "../ui/pages/issues";
 import { NewProjectPage } from "../ui/pages/new-project";
 import { ProjectSettingsPage } from "../ui/pages/project-settings";
 import { RepoPage } from "../ui/pages/repo";
-import { type FreshCredential, type SettingsNotice, SettingsPage } from "../ui/pages/settings";
+import {
+  type FreshCredential,
+  type SettingsNotice,
+  SettingsPage,
+  type UsernameChange,
+} from "../ui/pages/settings";
 import { SyncPage } from "../ui/pages/sync";
 import { TagsPage } from "../ui/pages/tags";
 import { WebhooksPage } from "../ui/pages/webhooks";
@@ -350,22 +355,31 @@ async function loadOAuthGrants(
  * Whether the username may change: only while the account owns no projects.
  * The claims table in D1 is the strongly consistent answer for every project
  * created since it existed; the KV listing covers projects that predate it.
- * Fails closed — if either cannot be read, the rename form is withheld rather
- * than offered on a guess.
+ * Fails closed — if either cannot be read, the form is withheld rather than
+ * offered on a guess, but as "unavailable", so the page asks for a retry
+ * instead of blaming projects the account may not own.
  */
-async function mayRename(
+async function usernameChangeState(
   env: Pick<Env, "DB" | "STATE">,
   user: { id: string; username: string },
   logger: ReturnType<typeof createLogger>,
-): Promise<boolean> {
+): Promise<UsernameChange> {
   const claims = await ownerHasClaims(env, user.id, logger);
-  if (!claims.success || claims.data) return false;
+  if (!claims.success) {
+    logger.error("Could not read namespace claims for the settings page", claims.error);
+    return "unavailable";
+  }
+  if (claims.data) return "blocked";
   const projects = await listProjectsByNamespace(
     env.STATE,
     getUserNamespace(user.username),
     logger,
   );
-  return projects.success && projects.data.length === 0;
+  if (!projects.success) {
+    logger.error("Could not list projects for the settings page", projects.error);
+    return "unavailable";
+  }
+  return projects.data.length === 0 ? "allowed" : "blocked";
 }
 
 /** The settings page plus everything it lists, in one round of loads. */
@@ -376,11 +390,11 @@ async function renderSettings(
   logger: ReturnType<typeof createLogger>,
   extras: { freshToken?: FreshCredential; notice?: SettingsNotice } = {},
 ) {
-  const [agents, tokens, grants, canRenameUsername, invites] = await Promise.all([
+  const [agents, tokens, grants, usernameChange, invites] = await Promise.all([
     loadAgentSummaries(c.env.DB, user.id, logger),
     loadApiTokens(c.env.DB, user.id, logger),
     loadOAuthGrants(c.env.DB, user.id, logger),
-    mayRename(c.env, user, logger),
+    usernameChangeState(c.env, user, logger),
     // Keyed off the service URL alone, not `betaGateEnabled`: codes minted while
     // the gate was on stay redeemable after it is switched off, so gating the
     // listing on the gate would hide real codes from the users holding them.
@@ -394,7 +408,7 @@ async function renderSettings(
   return (
     <SettingsPage
       user={user}
-      canRenameUsername={canRenameUsername}
+      usernameChange={usernameChange}
       {...(invites !== undefined ? { invites } : {})}
       {...(c.env.REFERRAL_SERVICE_URL !== undefined
         ? { shareBaseUrl: c.env.REFERRAL_SERVICE_URL }

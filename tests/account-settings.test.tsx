@@ -187,10 +187,14 @@ describe("GET /settings: account", () => {
   });
 
   // Fail closed: a store that could not be read is not evidence of no projects.
+  // But it is not evidence of projects either, so the page asks for a retry
+  // rather than telling the reader to delete something.
   it("withholds the username form when the claims or the project listing cannot be read", async () => {
     vi.mocked(ownerHasClaims).mockResolvedValue(claimsUnreadable);
     const noClaimsRead = await (await makeApp().fetch(get(), makeEnv())).text();
     expect(noClaimsRead).not.toContain('action="/settings/username"');
+    expect(noClaimsRead).toContain("could not be confirmed just now");
+    expect(noClaimsRead).not.toContain("cannot be changed while you own projects");
 
     vi.mocked(ownerHasClaims).mockResolvedValue(noClaims);
     vi.mocked(listProjectsByNamespace).mockResolvedValue({
@@ -199,6 +203,7 @@ describe("GET /settings: account", () => {
     });
     const noListing = await (await makeApp().fetch(get(), makeEnv())).text();
     expect(noListing).not.toContain('action="/settings/username"');
+    expect(noListing).toContain("could not be confirmed just now");
   });
 
   it("omits the invite section entirely when no referral service is configured", async () => {

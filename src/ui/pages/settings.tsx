@@ -47,13 +47,21 @@ export interface SettingsNotice {
   message: string;
 }
 
+/**
+ * Whether the username form is offered. "blocked" means the account owns
+ * projects (or did within the last claim window); "unavailable" means the
+ * check itself failed, which withholds the form all the same but is the
+ * reader's cue to retry rather than to go delete something.
+ */
+export type UsernameChange = "allowed" | "blocked" | "unavailable";
+
 interface SettingsPageProps {
   user: SettingsUser;
   /**
    * True while the account owns no projects — the only time the username can
    * change, since it is the namespace every project is keyed under.
    */
-  canRenameUsername: boolean;
+  usernameChange: UsernameChange;
   /** Absent when no referral service is configured; the card is then not rendered. */
   invites?: InviteCodesResult;
   /** Origin for invite share links, e.g. https://referral.usestratum.dev. */
@@ -200,9 +208,9 @@ const ApiTokenRow: FC<{ token: ApiTokenSummary; now: number }> = ({ token, now }
  * be edited only while the account owns nothing that would have to be
  * rewritten — after that the row is read-only and says why.
  */
-const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
+const AccountCard: FC<{ user: SettingsUser; usernameChange: UsernameChange }> = ({
   user,
-  canRenameUsername,
+  usernameChange,
 }) => (
   <div class="card" id="account">
     <h2>Account</h2>
@@ -243,7 +251,7 @@ const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
       </button>
     </form>
 
-    {canRenameUsername ? (
+    {usernameChange === "allowed" ? (
       <form method="post" action="/settings/username" class="settings-form">
         <label>
           Username
@@ -269,10 +277,15 @@ const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
           Change username
         </button>
       </form>
-    ) : (
+    ) : usernameChange === "blocked" ? (
       <p class="settings-help">
         Your username is the namespace in every project and clone URL, so it cannot be changed while
         you own projects. If you have just deleted your last project, allow up to 15 minutes.
+      </p>
+    ) : (
+      <p class="settings-help">
+        Whether your username can change could not be confirmed just now. Reload the page to try
+        again.
       </p>
     )}
   </div>
@@ -281,7 +294,7 @@ const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
 /** The whole settings page: jump links, then one card per section in `SECTIONS` order. */
 export const SettingsPage: FC<SettingsPageProps> = ({
   user,
-  canRenameUsername,
+  usernameChange,
   invites,
   shareBaseUrl,
   agents,
@@ -346,7 +359,7 @@ export const SettingsPage: FC<SettingsPageProps> = ({
         </div>
       )}
 
-      <AccountCard user={user} canRenameUsername={canRenameUsername} />
+      <AccountCard user={user} usernameChange={usernameChange} />
 
       {invites !== undefined && (
         <InviteCodesCard
