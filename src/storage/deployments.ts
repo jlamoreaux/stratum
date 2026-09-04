@@ -11,12 +11,16 @@
  *    racing the same row cannot both win. It is the *only* place a stale
  *    `running` row is reclaimed, and only the deploy consumer may call it.
  *
- * Every timestamp is an application-written ISO 8601 string. `datetime('now')`
- * produces `YYYY-MM-DD HH:MM:SS`, which sorts before the ISO form as TEXT
- * (' ' 0x20 < 'T' 0x54); a column mixing the two silently breaks every range
- * comparison, and `lease_expires_at` is range-compared on the claim path.
- * Mixing formats there would either strand a deployment forever or let a
- * consumer reclaim a live one and deploy the same commit twice. See
+ * Every timestamp is an application-written ISO 8601 string, canonicalised to
+ * UTC with a millisecond fraction by {@link resolveTimestamp} before it is
+ * bound. These columns are compared as TEXT, so a column holding more than one
+ * spelling of an instant sorts by bytes rather than by time: `datetime('now')`
+ * produces `YYYY-MM-DD HH:MM:SS`, which sorts before the ISO form (' ' 0x20 <
+ * 'T' 0x54) and is rejected outright, while an offset or fraction-less ISO form
+ * is accepted and rewritten. Either would break `lease_expires_at`, which is
+ * range-compared on the claim path — stranding a deployment forever or letting a
+ * consumer reclaim a live one and deploy the same commit twice — and
+ * `created_at`, which decides which of two merges publishes over the other. See
  * `migrations/042_api_tokens.sql`.
  *
  * Every query is scoped on `project_id` and never on the bare `project` name:
@@ -111,6 +115,12 @@ const DEFAULT_LIST_LIMIT = 50;
  * format that would silently corrupt `lease_expires_at` comparisons —
  * SQLite's `YYYY-MM-DD HH:MM:SS` — is also the one a caller is most likely to
  * reach for.
+ *
+ * This admits more than one spelling of the same instant on purpose (`Z` or a
+ * `±HH:MM` offset, with or without a fraction). Accepting them is safe *only*
+ * because {@link resolveTimestamp} rewrites every one to the canonical UTC form
+ * before it reaches a column; widening this pattern without that step would put
+ * text back into the columns whose byte order is not chronological.
  */
 const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -123,6 +133,14 @@ const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\
  * one definition of the format: a value that passes here is one
  * {@link insertDeployment} cannot reject, so no queue message can strand a
  * deploy on a timestamp that only fails at the last step.
+ *
+ * It deliberately only *validates*. Canonicalisation belongs at the storage
+ * boundary ({@link resolveTimestamp}) and nowhere else: a message in transit is
+ * never compared against a column, so normalising it early would add a second
+ * place that has to agree on the canonical form while fixing nothing. A guard
+ * also cannot return a rewritten value without ceasing to be a guard, and
+ * callers here (`resolveMergeTime`, `mergeTimeOf`) want to pass the operator's
+ * own timestamp through untouched.
  */
 export function isIsoTimestamp(value: unknown): value is string {
   return typeof value === "string" && ISO_8601.test(value) && !Number.isNaN(Date.parse(value));
@@ -264,13 +282,36 @@ function isUniqueViolation(error: unknown): boolean {
   return error instanceof Error && /UNIQUE constraint failed/i.test(error.message);
 }
 
-/** Validates a caller-supplied timestamp, or mints one, so no non-ISO value can reach a column. */
+/**
+ * Validates a caller-supplied timestamp and rewrites it to the one canonical
+ * form, or mints one, so no value whose byte order disagrees with its
+ * chronological order can reach a column.
+ *
+ * Validating alone is not enough. {@link ISO_8601} admits several spellings of a
+ * single instant, and SQLite compares these columns as TEXT, so storing the
+ * caller's spelling verbatim makes lexical order diverge from time order:
+ * `...T17:20:43-04:00` sorts *before* the identical instant written
+ * `...T21:20:43.000Z` (`1` < `2`), and `...T21:20:43Z` sorts *after*
+ * `...T21:20:43.000Z` (`.` 0x2E < `Z` 0x5A). Both comparisons that guard a
+ * deploy read this order: `created_at` in {@link supersedeOlder} and
+ * {@link findNewerSucceededDeployment} — which decide whether an older commit
+ * may publish over a newer one — and `lease_expires_at <= now` in
+ * {@link claimDeployment}, which decides whether a lease is dead. `created_at`
+ * in particular now carries the merge time, which arrives over the queue from a
+ * different code path than the one that wrote the rows it is compared against,
+ * so the two spellings genuinely do meet in one column.
+ *
+ * `Date#toISOString` gives UTC with a fixed-width millisecond fraction, so every
+ * accepted input collapses to a single fixed-width representation and byte order
+ * *is* chronological order.
+ */
 function resolveTimestamp(
   value: string | undefined,
   field: string,
 ): Result<string, ValidationError> {
   if (value === undefined) return ok(new Date().toISOString());
-  if (!ISO_8601.test(value) || Number.isNaN(Date.parse(value))) {
+  const parsed = Date.parse(value);
+  if (!ISO_8601.test(value) || Number.isNaN(parsed)) {
     return err(
       new ValidationError(
         `${field} must be an ISO 8601 timestamp (e.g. 2026-09-04T00:00:00.000Z); SQLite's 'YYYY-MM-DD HH:MM:SS' form sorts differently and breaks lease comparisons`,
@@ -278,7 +319,7 @@ function resolveTimestamp(
       ),
     );
   }
-  return ok(value);
+  return ok(new Date(parsed).toISOString());
 }
 
 function isTerminal(status: DeploymentStatus): status is TerminalDeploymentStatus {

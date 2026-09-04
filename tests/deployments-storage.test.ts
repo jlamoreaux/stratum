@@ -903,3 +903,257 @@ describe("findDeploymentById", () => {
     expect(result.success).toBe(false);
   });
 });
+
+/**
+ * Every column in this module is compared as TEXT, so the storage layer has to
+ * collapse the several spellings ISO 8601 allows for one instant down to a
+ * single one. Left un-normalised, `2026-09-04T17:20:43-04:00` sorts *before*
+ * the identical instant `2026-09-04T21:20:43.000Z` and `...:43Z` sorts *after*
+ * `...:43.000Z` ('.' 0x2E < 'Z' 0x5A) — and both of the comparisons that stop a
+ * commit deploying twice, or an older commit deploying over a newer one, read
+ * that order.
+ *
+ * These cases exist because a merge time now reaches `created_at` over the
+ * queue, from a producer that is not the code writing the rows it will be
+ * compared against, so the spellings genuinely do meet inside one column.
+ */
+describe("timestamp canonicalisation", () => {
+  /** The same instant, 2026-09-04T21:20:43Z, in every form the module accepts. */
+  const SAME_INSTANT = [
+    "2026-09-04T21:20:43.000Z",
+    "2026-09-04T21:20:43Z",
+    "2026-09-04T17:20:43-04:00",
+    "2026-09-04T23:20:43+02:00",
+  ];
+  const CANONICAL = "2026-09-04T21:20:43.000Z";
+
+  function readTimestamps(id: string): {
+    created_at: string;
+    started_at: string | null;
+    completed_at: string | null;
+  } {
+    const row = raw
+      .prepare("SELECT created_at, started_at, completed_at FROM deployments WHERE id = ?")
+      .get(id) as
+      | { created_at: string; started_at: string | null; completed_at: string | null }
+      | undefined;
+    if (!row) throw new Error(`no deployment ${id}`);
+    return row;
+  }
+
+  it("collapses equivalent instants to byte-identical strings", async () => {
+    const written: string[] = [];
+    for (const [index, form] of SAME_INSTANT.entries()) {
+      const deployment = await insert({ commitSha: index.toString().repeat(40), createdAt: form });
+      expect(deployment.createdAt).toBe(CANONICAL);
+      written.push(readTimestamps(deployment.id).created_at);
+    }
+    // Byte identity, not just equal instants: TEXT ordering is what reads these.
+    expect(new Set(written)).toEqual(new Set([CANONICAL]));
+  });
+
+  it("canonicalises every column it writes, not just created_at", async () => {
+    const deployment = await insert({ createdAt: "2026-09-04T17:20:43-04:00" });
+    const claimed = await claimDeployment(db, logger, {
+      projectId: PROJECT,
+      deploymentId: deployment.id,
+      leaseMs: 60_000,
+      now: "2026-09-04T23:20:43+02:00",
+    });
+    expect(claimed.success && claimed.data.claimed).toBe(true);
+    const written = await completeDeployment(db, logger, {
+      projectId: PROJECT,
+      deploymentId: deployment.id,
+      status: "succeeded",
+      completedAt: "2026-09-04T21:21:43Z",
+    });
+    expect(written.success && written.data).toBe(true);
+
+    expect(readTimestamps(deployment.id)).toEqual({
+      created_at: CANONICAL,
+      started_at: CANONICAL,
+      completed_at: "2026-09-04T21:21:43.000Z",
+    });
+  });
+
+  describe("supersedeOlder", () => {
+    it("keeps the newer commit when the older rows arrived in offset form", async () => {
+      // Genuinely older than the keeper, and its string also sorts lower.
+      const older = await insert({
+        commitSha: "a".repeat(40),
+        createdAt: "2026-09-04T13:20:43-04:00", // 17:20:43Z
+      });
+      // Genuinely *newer* than the keeper, but its unnormalised string sorts
+      // lower ("18" < "21") — so without canonicalisation the keeper retires the
+      // very commit it should be losing to.
+      const newer = await insert({
+        commitSha: "b".repeat(40),
+        createdAt: "2026-09-04T18:20:43-04:00", // 22:20:43Z
+      });
+      const keeper = await insert({ commitSha: "c".repeat(40), createdAt: CANONICAL });
+
+      const result = await supersedeOlder(db, logger, {
+        projectId: PROJECT,
+        name: "production",
+        keepDeploymentId: keeper.id,
+        createdAt: keeper.createdAt,
+        now: CANONICAL,
+      });
+
+      expect(result.success && result.data).toBe(1);
+      expect(readStatus(older.id).status).toBe("superseded");
+      expect(readStatus(newer.id).status).toBe("queued");
+    });
+
+    it("supersedes an older Z row when the keeper's own merge time arrived in offset form", async () => {
+      const older = await insert({ commitSha: "a".repeat(40), createdAt: CANONICAL });
+      const keeper = await insert({
+        commitSha: "b".repeat(40),
+        createdAt: "2026-09-04T17:20:44-04:00", // 21:20:44Z, one second newer
+      });
+
+      const result = await supersedeOlder(db, logger, {
+        projectId: PROJECT,
+        name: "production",
+        keepDeploymentId: keeper.id,
+        createdAt: keeper.createdAt,
+        now: keeper.createdAt,
+      });
+
+      expect(result.success && result.data).toBe(1);
+      expect(readStatus(older.id).status).toBe("superseded");
+    });
+
+    it("orders a fraction-less timestamp against a fractional one by time, not by bytes", async () => {
+      // 'Z' (0x5A) sorts after '.' (0x2E), so unnormalised the older row looks
+      // newer than a keeper half a second after it.
+      const older = await insert({ commitSha: "a".repeat(40), createdAt: "2026-09-04T21:20:43Z" });
+      const keeper = await insert({
+        commitSha: "b".repeat(40),
+        createdAt: "2026-09-04T21:20:43.500Z",
+      });
+
+      const result = await supersedeOlder(db, logger, {
+        projectId: PROJECT,
+        name: "production",
+        keepDeploymentId: keeper.id,
+        createdAt: keeper.createdAt,
+        now: keeper.createdAt,
+      });
+
+      expect(result.success && result.data).toBe(1);
+      expect(readStatus(older.id).status).toBe("superseded");
+    });
+  });
+
+  describe("findNewerSucceededDeployment", () => {
+    it("finds a newer succeeded row that was written in offset form", async () => {
+      const newer = await insert({
+        commitSha: "b".repeat(40),
+        status: "succeeded",
+        createdAt: "2026-09-04T17:20:44-04:00", // 21:20:44Z
+      });
+      const candidate = await insert({ commitSha: "a".repeat(40), createdAt: CANONICAL });
+
+      const result = await findNewerSucceededDeployment(db, logger, {
+        projectId: PROJECT,
+        name: "production",
+        createdAt: candidate.createdAt,
+        excludeDeploymentId: candidate.id,
+      });
+
+      expect(result.success && result.data?.id).toBe(newer.id);
+    });
+
+    it("finds a newer succeeded row when the candidate carries no fractional part", async () => {
+      const newer = await insert({
+        commitSha: "b".repeat(40),
+        status: "succeeded",
+        createdAt: "2026-09-04T21:20:43.500Z",
+      });
+      const candidate = await insert({
+        commitSha: "a".repeat(40),
+        createdAt: "2026-09-04T21:20:43Z",
+      });
+
+      const result = await findNewerSucceededDeployment(db, logger, {
+        projectId: PROJECT,
+        name: "production",
+        createdAt: candidate.createdAt,
+        excludeDeploymentId: candidate.id,
+      });
+
+      expect(result.success && result.data?.id).toBe(newer.id);
+    });
+
+    it("still finds nothing when the only other row is genuinely older in another form", async () => {
+      await insert({
+        commitSha: "b".repeat(40),
+        status: "succeeded",
+        createdAt: "2026-09-04T19:20:43+02:00", // 17:20:43Z, older
+      });
+      const candidate = await insert({ commitSha: "a".repeat(40), createdAt: CANONICAL });
+
+      const result = await findNewerSucceededDeployment(db, logger, {
+        projectId: PROJECT,
+        name: "production",
+        createdAt: candidate.createdAt,
+        excludeDeploymentId: candidate.id,
+      });
+
+      expect(result.success && result.data).toBeNull();
+    });
+  });
+
+  describe("claimDeployment", () => {
+    /** Claims the row at 21:20:43Z with a one-minute lease, expiring 21:21:43Z. */
+    async function claimAt(now: string): Promise<Deployment> {
+      const deployment = await insert({ createdAt: CANONICAL });
+      const claimed = await claimDeployment(db, logger, {
+        projectId: PROJECT,
+        deploymentId: deployment.id,
+        leaseMs: 60_000,
+        now,
+      });
+      if (!claimed.success || !claimed.data.claimed) throw new Error("expected a claim");
+      expect(claimed.data.deployment.leaseExpiresAt).toBe("2026-09-04T21:21:43.000Z");
+      return deployment;
+    }
+
+    it("does not reclaim a live lease when the clock arrives in offset form", async () => {
+      // 06:21:13 on the 5th in +09:00 is 21:21:13Z on the 4th — thirty seconds
+      // *before* the lease expires, but a later-sorting string than it.
+      const deployment = await claimAt("2026-09-04T17:20:43-04:00");
+
+      const result = await claimDeployment(db, logger, {
+        projectId: PROJECT,
+        deploymentId: deployment.id,
+        now: "2026-09-05T06:21:13+09:00",
+      });
+
+      expect(result.success).toBe(true);
+      if (!result.success || result.data.claimed) throw new Error("reclaimed a live lease");
+      expect(result.data.reason).toBe("not_claimable");
+      expect(readStatus(deployment.id).lease_expires_at).toBe("2026-09-04T21:21:43.000Z");
+    });
+
+    it("reclaims an expired lease when the clock arrives in offset form", async () => {
+      // 13:22:43 in -08:00 is 21:22:43Z, a minute past expiry — but an
+      // earlier-sorting string than the lease it must be allowed to reclaim.
+      const deployment = await claimAt("2026-09-04T21:20:43Z");
+
+      const result = await claimDeployment(db, logger, {
+        projectId: PROJECT,
+        deploymentId: deployment.id,
+        leaseMs: 60_000,
+        now: "2026-09-04T13:22:43-08:00",
+      });
+
+      expect(result.success).toBe(true);
+      if (!result.success || !result.data.claimed) throw new Error("expected a reclaim");
+      expect(result.data.deployment.leaseExpiresAt).toBe("2026-09-04T21:23:43.000Z");
+      // The row changed hands rather than restarting.
+      expect(result.data.deployment.startedAt).toBe(CANONICAL);
+    });
+  });
+});
