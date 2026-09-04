@@ -10,7 +10,7 @@ agent frameworks already understand.
 ## Installation
 
 The package is **not yet published to npm** — install it from the `cli/`
-directory of the repository (Node 18+):
+directory of the repository (Node 20+):
 
 ```bash
 git clone https://github.com/stratum-eng/stratum.git

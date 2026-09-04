@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertSecureHost, discover, expiresAtFrom, listenForCallback } from "../src/oauth.js";
+import {
+  SessionExpiredError,
+  assertSecureHost,
+  discover,
+  expiresAtFrom,
+  listenForCallback,
+  refreshTokens,
+} from "../src/oauth.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -127,6 +134,17 @@ describe("loopback callback listener", () => {
     }
   });
 
+  it("keeps listening after a matching state with no code", async () => {
+    const listener = await listenForCallback("st4te");
+    try {
+      expect(await get(listener.port, "/callback?state=st4te")).toBe(400);
+      await get(listener.port, "/callback?code=real&state=st4te");
+      await expect(listener.code).resolves.toEqual({ code: "real" });
+    } finally {
+      listener.close();
+    }
+  });
+
   it("surfaces an explicit denial", async () => {
     const listener = await listenForCallback("st4te");
     try {
@@ -195,5 +213,63 @@ describe("loopback binding", () => {
     } finally {
       listener.close();
     }
+  });
+});
+
+describe("refresh failure classification", () => {
+  const metadata = {
+    issuer: "https://s.example",
+    authorization_endpoint: "https://s.example/oauth/authorize",
+    token_endpoint: "https://s.example/oauth/token",
+  };
+  const params = { clientId: "c1", refreshToken: "stratum_mcprt_r", metadata };
+
+  function tokenEndpoint(body: unknown, status: number): void {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(body, status));
+  }
+
+  it("treats invalid_grant as an expired session", async () => {
+    tokenEndpoint({ error: "invalid_grant" }, 400);
+    await expect(refreshTokens("https://s.example", params)).rejects.toBeInstanceOf(
+      SessionExpiredError,
+    );
+  });
+
+  it("treats invalid_client as an expired session", async () => {
+    tokenEndpoint({ error: "invalid_client" }, 401);
+    await expect(refreshTokens("https://s.example", params)).rejects.toBeInstanceOf(
+      SessionExpiredError,
+    );
+  });
+
+  it("does NOT tell the user to log in again after a transient 503", async () => {
+    // Re-authenticating cannot fix a server fault, and "session expired" sends
+    // the user to do exactly that.
+    tokenEndpoint({ error: "temporarily_unavailable" }, 503);
+    const failure = await refreshTokens("https://s.example", params).catch((err: Error) => err);
+    expect(failure).not.toBeInstanceOf(SessionExpiredError);
+    expect((failure as Error).message).toMatch(/could not refresh/);
+  });
+
+  it("does NOT tell the user to log in again after a 429", async () => {
+    tokenEndpoint({ error: "slow_down" }, 429);
+    const failure = await refreshTokens("https://s.example", params).catch((err: Error) => err);
+    expect(failure).not.toBeInstanceOf(SessionExpiredError);
+  });
+
+  it("rejects a non-string access_token rather than sending `Bearer 12345`", async () => {
+    tokenEndpoint({ access_token: 12345, refresh_token: 678, expires_in: 3600 }, 200);
+    await expect(refreshTokens("https://s.example", params)).rejects.toThrow(/could not refresh/);
+  });
+
+  it("accepts a well-formed rotation", async () => {
+    tokenEndpoint(
+      { access_token: "stratum_mcp_new", refresh_token: "stratum_mcprt_new", expires_in: 3600 },
+      200,
+    );
+    await expect(refreshTokens("https://s.example", params)).resolves.toMatchObject({
+      accessToken: "stratum_mcp_new",
+      refreshToken: "stratum_mcprt_new",
+    });
   });
 });

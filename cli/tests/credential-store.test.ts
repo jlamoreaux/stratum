@@ -27,6 +27,10 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.doUnmock("node:os");
   vi.resetModules();
+  // `resetModules` does not undo `vi.spyOn(globalThis, "fetch")`, and no config
+  // enables `restoreMocks`. Without this a stubbed fetch leaks into later tests
+  // and hides real regressions.
+  vi.restoreAllMocks();
   await rm(home, { recursive: true, force: true });
 });
 
@@ -95,15 +99,23 @@ describe("atomic credential writes", () => {
     expect(survivor?.credential).toMatchObject({ refreshToken: "stratum_mcprt_r" });
   });
 
-  it("leaves no temp files behind on success or failure", async () => {
+  it("leaves no temp files behind, on success or on a failed write", async () => {
     const { writeConfig } = await loadConfigModule();
-    await writeConfig(oauthConfig);
     const { readdir } = await import("node:fs/promises");
+    await writeConfig(oauthConfig);
+
+    const poisoned = { ...oauthConfig, credential: { ...oauthConfig.credential } } as Record<
+      string,
+      unknown
+    >;
+    (poisoned.credential as Record<string, unknown>).self = poisoned;
+    await expect(writeConfig(poisoned as unknown as StratumConfig)).rejects.toThrow();
+
     const entries = await readdir(join(home, ".stratum"));
     expect(entries.filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 
-  it("never exposes a partially written file to a reader", async () => {
+  it("leaves parseable JSON once a write completes", async () => {
     const { writeConfig, readConfig } = await loadConfigModule();
     await writeConfig(oauthConfig);
     const raw = await readFile(join(home, ".stratum", "config.json"), "utf-8");

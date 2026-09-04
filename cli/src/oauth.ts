@@ -126,14 +126,27 @@ function assertSameOrigin(endpoint: string, origin: string, field: string): void
   }
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+/** A response whose body has already been read, so nothing is left to stall on. */
+interface TimedResponse {
+  ok: boolean;
+  status: number;
+  text: string;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<TimedResponse> {
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(new Error(`request to ${url} timed out`)),
     OAUTH_TIMEOUT_MS,
   );
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    // The body is read while the timer is still armed. Clearing it as soon as
+    // the headers land leaves a server free to send `200 OK` and then stall the
+    // body forever — which would hang not just `login` but every command, since
+    // a token refresh runs through here.
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, text };
   } finally {
     clearTimeout(timer);
   }
@@ -145,10 +158,9 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Re
  * tells the user nothing. Every OAuth response goes through here so the failure
  * names the actual problem.
  */
-async function readJson(response: Response, context: string): Promise<Record<string, unknown>> {
-  const body = await response.text();
+function readJson(response: TimedResponse, context: string): Record<string, unknown> {
   try {
-    const parsed: unknown = JSON.parse(body);
+    const parsed: unknown = JSON.parse(response.text);
     if (parsed === null || typeof parsed !== "object") throw new Error("not an object");
     return parsed as Record<string, unknown>;
   } catch {
@@ -191,11 +203,14 @@ export async function discover(host: string): Promise<AuthServerMetadata> {
       `${host} does not advertise OAuth (HTTP ${response.status} from ${url}). Use \`stratum login --key <token>\` against this host.`,
     );
   }
-  const metadata = (await readJson(response, `${host} OAuth discovery`).catch(() => {
+  let metadata: Partial<AuthServerMetadata>;
+  try {
+    metadata = readJson(response, `${host} OAuth discovery`) as Partial<AuthServerMetadata>;
+  } catch {
     throw new Error(
       `${host} does not advertise OAuth (its discovery endpoint did not return JSON). Use \`stratum login --key <token>\` against this host.`,
     );
-  })) as Partial<AuthServerMetadata>;
+  }
 
   if (!metadata.authorization_endpoint || !metadata.token_endpoint) {
     throw new Error(`${host} returned incomplete OAuth metadata`);
@@ -271,9 +286,12 @@ async function cachedClientUsable(
     }).toString(),
   }).catch(() => null);
   if (response === null) return false;
-  const body = await readJson(response, "client probe").catch(() => null);
-  if (body === null) return false;
-  return body.error !== "invalid_client";
+  try {
+    return readJson(response, "client probe").error !== "invalid_client";
+  } catch {
+    // Unparseable is inconclusive, and inconclusive fails closed.
+    return false;
+  }
 }
 
 /**
@@ -282,14 +300,24 @@ async function cachedClientUsable(
  * degrades to copy-and-paste rather than to a failed login.
  */
 function openBrowser(url: string): void {
+  // Windows deliberately avoids `cmd /c start`: cmd re-parses its argument and
+  // treats `&`, `|` and `^` as syntax, so a host whose authorization_endpoint
+  // carries those characters — same-origin is enforced, the path and query are
+  // not — could turn opening a browser into running a command. `rundll32` takes
+  // the URL as a single argument and never goes through a shell.
   const [command, args] =
     process.platform === "darwin"
       ? (["open", [url]] as const)
       : process.platform === "win32"
-        ? (["cmd", ["/c", "start", "", url]] as const)
+        ? (["rundll32", ["url.dll,FileProtocolHandler", url]] as const)
         : (["xdg-open", [url]] as const);
   try {
-    const child = spawn(command, [...args], { stdio: "ignore", detached: true });
+    const child = spawn(command, [...args], {
+      stdio: "ignore",
+      detached: true,
+      // Explicit: `spawn` must never hand these arguments to a shell.
+      shell: false,
+    });
     child.on("error", () => {});
     child.unref();
   } catch {

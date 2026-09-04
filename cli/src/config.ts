@@ -111,6 +111,31 @@ function lockPath(): string {
 }
 
 /**
+ * Flush the directory entry `rename` just created.
+ *
+ * Syncing the temp file's contents is only half of durability: the rename
+ * itself lives in the parent directory, and after a power cut that entry can be
+ * missing even though the data blocks were flushed. Post-rotation that is a
+ * lost session, because the refresh token exists nowhere else.
+ *
+ * Best effort — opening a directory for sync is not portable (Windows refuses),
+ * and a platform that cannot do it should not fail an otherwise good write.
+ */
+async function syncDirectory(dir: string): Promise<void> {
+  try {
+    const handle = await open(dir, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // Durability improves where the platform allows it and is unchanged where
+    // it does not; either way the credential is already renamed into place.
+  }
+}
+
+/**
  * Write the credential file atomically, and leave it readable only by its owner.
  *
  * Two properties, one mechanism. Writing a temp file and `rename`ing it over the
@@ -150,6 +175,7 @@ export async function writeConfig(config: StratumConfig): Promise<void> {
       await handle.close();
     }
     await rename(temp, configPath());
+    await syncDirectory(dir);
   } catch (err) {
     await rm(temp, { force: true });
     throw new Error(
@@ -159,14 +185,20 @@ export async function writeConfig(config: StratumConfig): Promise<void> {
 }
 
 /**
- * Both thresholds must clear the worst-case time spent holding the lock, which
- * is a discovery round trip plus a token round trip — two 30s timeouts, so 60s.
- * A stale threshold at or below that lets a HEALTHY holder be declared dead,
- * and two processes then present the same refresh token, which the server reads
- * as theft and answers by revoking the whole grant.
+ * Two ordering rules, and both matter:
+ *
+ * `LOCK_STALE_MS` > the worst-case hold — a discovery round trip plus a token
+ * round trip, two 30s timeouts, so 60s. A stale threshold at or below that lets
+ * a HEALTHY holder be declared dead, and two processes then present the same
+ * refresh token, which the server reads as theft and revokes the whole grant.
+ *
+ * `LOCK_TIMEOUT_MS` > `LOCK_STALE_MS` — a waiter has to outlive the staleness
+ * threshold to be the one that breaks an abandoned lock. Inverted, a process
+ * killed mid-rotation wedges every later command: waiters give up before the
+ * lock is old enough to remove, so nothing ever clears it.
  */
-const LOCK_TIMEOUT_MS = 90_000;
-const LOCK_STALE_MS = 180_000;
+const LOCK_STALE_MS = 120_000;
+const LOCK_TIMEOUT_MS = 150_000;
 const LOCK_POLL_MS = 50;
 
 function delay(ms: number): Promise<void> {
