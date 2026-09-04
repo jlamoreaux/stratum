@@ -39,7 +39,11 @@ import {
   updateImportStatus,
 } from "../storage/imports";
 import { getOrgAccessLevel, getOrgBySlug } from "../storage/orgs";
-import { confirmOwnerNamespace } from "../storage/project-namespace";
+import {
+  claimNamespace,
+  confirmOwnerNamespace,
+  releaseNamespaceClaim,
+} from "../storage/project-namespace";
 import { listProvenance } from "../storage/provenance";
 import { writeSnapshotFromRepo } from "../storage/repo-snapshot";
 import { getProjectByPath, listProjectsByNamespace, setProject } from "../storage/state";
@@ -256,9 +260,17 @@ app.post("/", async (c) => {
     visibility,
   };
 
+  // The claim goes into D1 before the KV entry so a username change cannot
+  // slip between the two; see storage/project-namespace.ts.
+  if (owner.type === "user") {
+    const claimed = await claimNamespace(c.env.DB, { ownerId: owner.id, namespace, slug }, logger);
+    if (!claimed.success) return appError(claimed.error);
+  }
+
   const setResult = await setProject(c.env.STATE, project, logger);
   if (!setResult.success) {
     logger.error("Failed to set project", setResult.error);
+    if (owner.type === "user") await releaseNamespaceClaim(c.env.DB, namespace, slug, logger);
     return internalError(setResult.error.message);
   }
 
@@ -660,9 +672,14 @@ app.post(
         importCompleted: false,
       };
 
+      // Claim before the KV write, as project creation does.
+      const claimed = await claimNamespace(c.env.DB, { ownerId: userId, namespace, slug }, logger);
+      if (!claimed.success) return appError(claimed.error);
+
       const setResult = await setProject(c.env.STATE, project, logger);
       if (!setResult.success) {
         logger.error("Failed to set project after import", setResult.error);
+        await releaseNamespaceClaim(c.env.DB, namespace, slug, logger);
         return internalError(setResult.error.message);
       }
 

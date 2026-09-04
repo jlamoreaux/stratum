@@ -4,8 +4,10 @@
  * username rejects a collision the way D1 does, with a constraint error.
  */
 import { describe, expect, it, vi } from "vitest";
+import { claimNamespace } from "../src/storage/project-namespace";
 import { getUser, renameUser, setUserDisplayName } from "../src/storage/users";
 import type { Logger } from "../src/utils/logger";
+import { makeSqliteD1 } from "./helpers/sqlite-d1";
 
 const mockLogger: Logger = {
   trace: vi.fn(),
@@ -136,6 +138,61 @@ describe("renameUser", () => {
   it("reports an unknown user as a 404", async () => {
     const renamed = await renameUser(makeUsersD1([]), "usr_9", "carol", mockLogger);
     expect(renamed.success).toBe(false);
+    expect(!renamed.success && renamed.error.statusCode).toBe(404);
+  });
+});
+
+/**
+ * The rename's refusal lives inside its UPDATE (`NOT EXISTS` over
+ * namespace_claims), so it needs the real schema: a stub cannot tell whether
+ * the subquery is right.
+ */
+describe("renameUser against namespace claims", () => {
+  function seedUser(db: D1Database, raw: ReturnType<typeof makeSqliteD1>["raw"]) {
+    raw
+      .prepare(
+        "INSERT INTO users (id, email, username, token_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run("usr_1", "alice@example.com", "alice", "hash-1", "2026-01-01T00:00:00.000Z");
+    return db;
+  }
+
+  it("renames while the account holds no claim", async () => {
+    const { db, raw } = makeSqliteD1();
+    seedUser(db, raw);
+    const renamed = await renameUser(db, "usr_1", "alice-two", mockLogger);
+    expect(renamed.success && renamed.data).toBe("alice-two");
+    const user = await getUser(db, "usr_1", mockLogger);
+    expect(user.success && user.data.username).toBe("alice-two");
+  });
+
+  it("refuses with a 403, in the same statement, once a claim exists", async () => {
+    const { db, raw } = makeSqliteD1();
+    seedUser(db, raw);
+    const claimed = await claimNamespace(
+      db,
+      { ownerId: "usr_1", namespace: "@alice", slug: "proj" },
+      mockLogger,
+    );
+    expect(claimed.success).toBe(true);
+    const renamed = await renameUser(db, "usr_1", "alice-two", mockLogger);
+    expect(renamed.success).toBe(false);
+    expect(!renamed.success && renamed.error.statusCode).toBe(403);
+    const user = await getUser(db, "usr_1", mockLogger);
+    expect(user.success && user.data.username).toBe("alice");
+  });
+
+  it("does not count another account's claims", async () => {
+    const { db, raw } = makeSqliteD1();
+    seedUser(db, raw);
+    await claimNamespace(db, { ownerId: "usr_2", namespace: "@bob", slug: "proj" }, mockLogger);
+    const renamed = await renameUser(db, "usr_1", "alice-two", mockLogger);
+    expect(renamed.success && renamed.data).toBe("alice-two");
+  });
+
+  it("still tells an unknown user apart from a claimed one", async () => {
+    const { db } = makeSqliteD1();
+    const renamed = await renameUser(db, "usr_9", "carol", mockLogger);
     expect(!renamed.success && renamed.error.statusCode).toBe(404);
   });
 });

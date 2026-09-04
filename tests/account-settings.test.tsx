@@ -1,8 +1,8 @@
 /**
  * The Account section of `/settings`, which absorbed the old `/profile` page:
  * identity, the caller's own invite codes, and the two things about an account
- * that can change — the display name (any time) and the username (only while
- * the account owns no projects, since every project is keyed under it).
+ * that can change — the display name (any time) and the username (only until
+ * the account creates its first project, since every project is keyed under it).
  *
  * `vitest.config.ts` restricts coverage to `src/**\/*.ts`, so the `.tsx` route
  * and page contribute nothing to the ratchet — these assertions are the only
@@ -44,9 +44,14 @@ vi.mock("../src/storage/oauth", async (importOriginal) => ({
 vi.mock("../src/storage/audit", () => ({
   recordAudit: vi.fn(async () => ({ success: true, data: undefined })),
 }));
+vi.mock("../src/storage/project-namespace", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/storage/project-namespace")>()),
+  ownerHasClaims: vi.fn(),
+}));
 
 import { uiRouter } from "../src/routes/ui";
 import { recordAudit } from "../src/storage/audit";
+import { ownerHasClaims } from "../src/storage/project-namespace";
 import { listProjectsByNamespace } from "../src/storage/state";
 import { getUser, renameUser, setUserDisplayName } from "../src/storage/users";
 
@@ -60,6 +65,9 @@ const liveUser = {
 
 const noProjects = { success: true as const, data: [] };
 const oneProject = { success: true as const, data: [{ id: "prj_1" }] as never };
+const noClaims = { success: true as const, data: false };
+const hasClaims = { success: true as const, data: true };
+const claimsUnreadable = { success: false as const, error: new Error("d1 down") as never };
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -103,6 +111,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.restoreAllMocks();
   vi.mocked(getUser).mockResolvedValue({ success: true, data: liveUser });
+  vi.mocked(ownerHasClaims).mockResolvedValue(noClaims);
   vi.mocked(listProjectsByNamespace).mockResolvedValue(noProjects);
 });
 
@@ -154,25 +163,39 @@ describe("GET /settings: account", () => {
     expect(html).toContain('value="Alice Liddell"');
   });
 
-  it("offers the username form only while the account owns no projects", async () => {
+  it("offers the username form only until the account creates a project", async () => {
     const withNone = await (await makeApp().fetch(get(), makeEnv())).text();
     expect(withNone).toContain('action="/settings/username"');
     expect(withNone).toContain("until you create your first project");
 
+    // The claims table is the strongly consistent record of every project
+    // created since it existed; a claim alone withholds the form.
+    vi.mocked(ownerHasClaims).mockResolvedValue(hasClaims);
+    const withClaim = await (await makeApp().fetch(get(), makeEnv())).text();
+    expect(withClaim).not.toContain('action="/settings/username"');
+    expect(withClaim).toContain("cannot be changed once you have created a project");
+    expect(listProjectsByNamespace).toHaveBeenCalledTimes(1);
+
+    // Projects that predate the table have no claim; the KV listing finds them.
+    vi.mocked(ownerHasClaims).mockResolvedValue(noClaims);
     vi.mocked(listProjectsByNamespace).mockResolvedValue(oneProject);
     const withOne = await (await makeApp().fetch(get(), makeEnv())).text();
     expect(withOne).not.toContain('action="/settings/username"');
-    expect(withOne).toContain("cannot be changed while you own projects");
   });
 
-  // Fail closed: a listing that could not be read is not evidence of no projects.
-  it("withholds the username form when the project listing cannot be read", async () => {
+  // Fail closed: a store that could not be read is not evidence of no projects.
+  it("withholds the username form when the claims or the project listing cannot be read", async () => {
+    vi.mocked(ownerHasClaims).mockResolvedValue(claimsUnreadable);
+    const noClaimsRead = await (await makeApp().fetch(get(), makeEnv())).text();
+    expect(noClaimsRead).not.toContain('action="/settings/username"');
+
+    vi.mocked(ownerHasClaims).mockResolvedValue(noClaims);
     vi.mocked(listProjectsByNamespace).mockResolvedValue({
       success: false,
       error: new Error("kv down") as never,
     });
-    const html = await (await makeApp().fetch(get(), makeEnv())).text();
-    expect(html).not.toContain('action="/settings/username"');
+    const noListing = await (await makeApp().fetch(get(), makeEnv())).text();
+    expect(noListing).not.toContain('action="/settings/username"');
   });
 
   it("omits the invite section entirely when no referral service is configured", async () => {
@@ -330,15 +353,61 @@ describe("POST /settings/username", () => {
     );
   });
 
-  it("refuses the rename once the account owns a project", async () => {
+  it("refuses the rename once the account has a namespace claim", async () => {
+    vi.mocked(ownerHasClaims).mockResolvedValue(hasClaims);
+    const res = await makeApp().fetch(
+      post("/settings/username", { username: "alice-two" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("cannot be changed once you have created a project");
+    expect(listProjectsByNamespace).not.toHaveBeenCalled();
+    expect(renameUser).not.toHaveBeenCalled();
+  });
+
+  it("refuses the rename when the KV listing finds a project that predates claims", async () => {
     vi.mocked(listProjectsByNamespace).mockResolvedValue(oneProject);
     const res = await makeApp().fetch(
       post("/settings/username", { username: "alice-two" }),
       makeEnv(),
     );
     expect(res.status).toBe(403);
-    expect(await res.text()).toContain("cannot be changed while you own projects");
+    expect(await res.text()).toContain("cannot be changed once you have created a project");
     expect(renameUser).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the claims cannot be read", async () => {
+    vi.mocked(ownerHasClaims).mockResolvedValue(claimsUnreadable);
+    const res = await makeApp().fetch(
+      post("/settings/username", { username: "alice-two" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(500);
+    expect(renameUser).not.toHaveBeenCalled();
+  });
+
+  // The pre-check and the UPDATE are two D1 statements; a claim written between
+  // them makes the UPDATE itself refuse, and that refusal is the user's answer,
+  // not a server error.
+  it("shows the refusal when a claim lands between the check and the update", async () => {
+    vi.mocked(renameUser).mockResolvedValue({
+      success: false,
+      error: {
+        statusCode: 403,
+        message: "Your username cannot be changed once you have created a project.",
+      } as never,
+    });
+    const res = await makeApp().fetch(
+      post("/settings/username", { username: "alice-two" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("cannot be changed once you have created a project");
+    expect(recordAudit).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ action: "user.renamed" }),
+    );
   });
 
   // The ownership check and the rename span KV and D1 with nothing to serialize

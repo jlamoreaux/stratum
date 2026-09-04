@@ -260,10 +260,14 @@ export async function setUserDisplayName(
  * Change a username.
  *
  * The username is the namespace in every project URL, clone URL, KV project
- * key and backing repository name, and nothing here rewrites those. So this is
- * only safe for an account that owns no projects, and the caller must check
- * that first; this validates the new name and enforces uniqueness. A taken name
- * comes back as a 409 rather than a 500, since it is the user's to fix.
+ * key and backing repository name, and nothing here rewrites those. So the
+ * change is refused once the account has created a project — checked inside
+ * the UPDATE itself against `namespace_claims`, which creation writes before
+ * a project's KV entry (see storage/project-namespace.ts), so a claim and a
+ * rename racing each other resolve in D1 rather than across two stores. The
+ * caller also lists KV for projects that predate claims. This validates the
+ * new name and enforces uniqueness; a taken name comes back as a 409 rather
+ * than a 500, since it is the user's to fix.
  */
 export async function renameUser(
   db: D1Database,
@@ -281,11 +285,25 @@ export async function renameUser(
   logger.debug("Renaming user", { userId, username });
   try {
     const result = await db
-      .prepare("UPDATE users SET username = ? WHERE id = ?")
-      .bind(username, userId)
+      .prepare(
+        "UPDATE users SET username = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM namespace_claims WHERE owner_id = ?)",
+      )
+      .bind(username, userId, userId)
       .run();
     if ((result.meta?.changes ?? 0) === 0) {
-      return err(new AppError(`User '${userId}' not found`, "NOT_FOUND", 404, { userId }));
+      // Nothing changed: either the row is gone or a claim held the name.
+      const exists = await db.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first();
+      if (exists === null) {
+        return err(new AppError(`User '${userId}' not found`, "NOT_FOUND", 404, { userId }));
+      }
+      return err(
+        new AppError(
+          "Your username cannot be changed once you have created a project: every project URL is keyed under it.",
+          "FORBIDDEN",
+          403,
+          { userId },
+        ),
+      );
     }
     logger.info("User renamed", { userId, username });
     return ok(username);

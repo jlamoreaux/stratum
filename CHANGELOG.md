@@ -31,11 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Display name and username editing on Settings.** The Account section now
   has a display name (free-form, shown in the header instead of the username,
-  changeable any time) and, while the account owns no projects, a username
-  form. The username is the namespace every project URL, clone URL and backing
-  repository is keyed under, so once a project exists it is fixed and the page
-  says so instead of offering a form; the signup forms now say the same.
-  Migration `045_user_display_name.sql` adds the column.
+  changeable any time) and, until the account creates its first project, a
+  username form. The username is the namespace every project URL, clone URL
+  and backing repository is keyed under, so once a project has been created it
+  is fixed and the page says so instead of offering a form; the signup forms
+  now say the same. Migration `045_user_display_name.sql` adds the column, and
+  `046_namespace_claims.sql` adds the D1 table that records each project's
+  namespace before its entry is written, so a rename and a project creation
+  that cross cannot both go through.
 - **Browsers now report Content Security Policy violations to the server.**
   Every page's policy names `/csp-report` (via `report-to` and, for browsers
   without the Reporting API, `report-uri`), and the Worker logs each report at

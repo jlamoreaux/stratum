@@ -269,8 +269,8 @@ const AccountCard: FC<{ user: SettingsUser; canRenameUsername: boolean }> = ({
       </form>
     ) : (
       <p class="settings-help">
-        Your username is the namespace in every project and clone URL, so it cannot be changed while
-        you own projects.
+        Your username is the namespace in every project and clone URL, so it cannot be changed once
+        you have created a project.
       </p>
     )}
   </div>

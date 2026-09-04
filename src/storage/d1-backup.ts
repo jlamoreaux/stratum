@@ -10,6 +10,10 @@ import { type Result, err, ok } from "../utils/result";
  */
 export const BACKUP_TABLES: readonly string[] = [
   "users",
+  // Which namespaces each account has ever created a project under (migration
+  // 046). Small, but it is the record that fixes a username; a restore without
+  // it would let an account rename over a namespace its projects still use.
+  "namespace_claims",
   // After `users`: the list is FK-ordered and api_tokens.user_id references it.
   // Included rather than excluded (unlike `magic_links`) because a restore that
   // silently invalidated every API credential is a worse failure than holding

@@ -11,7 +11,11 @@ import {
   resolveDefaultBranch,
 } from "../storage/git-providers";
 import { createImportJob, updateImportStatus } from "../storage/imports";
-import { confirmOwnerNamespace } from "../storage/project-namespace";
+import {
+  claimNamespace,
+  confirmOwnerNamespace,
+  releaseNamespaceClaim,
+} from "../storage/project-namespace";
 import { getProjectByPath, setProject } from "../storage/state";
 import type { ArtifactsCreateResult, BulkImportJob, Env, ProjectEntry } from "../types";
 import { getArtifactsRepoName, getUserNamespace } from "../types";
@@ -203,9 +207,17 @@ export async function processRepoImport(
       visibility,
     };
 
+    // Claim before the KV write, as project creation does.
+    const claimed = await claimNamespace(env.DB, { ownerId, namespace, slug }, logger);
+    if (!claimed.success) {
+      job && job.failedRepos++;
+      return { success: false, error: claimed.error.message, repo: url };
+    }
+
     const setResult = await setProject(env.STATE, project, logger);
     if (!setResult.success) {
       job && job.failedRepos++;
+      await releaseNamespaceClaim(env.DB, namespace, slug, logger);
       return { success: false, error: setResult.error.message, repo: url };
     }
 
