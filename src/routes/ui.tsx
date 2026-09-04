@@ -552,8 +552,14 @@ app.post("/settings/username", async (c) => {
       logger.error("Rename could not be reverted after a late project", reverted.error);
       return c.html(issuePageError(500, user), 500);
     }
+    if (!late.success) {
+      // Nothing is known about the old namespace, so the name was put back on
+      // caution; that is our failure to report, not a project to blame.
+      logger.error("Could not list projects after a rename; reverted", late.error);
+      return c.html(issuePageError(500, user), 500);
+    }
     logger.warn("Rename reverted - a project appeared under the old namespace", {
-      listed: late.success,
+      projects: late.data.length,
     });
     return refuse(
       "A project was created under your account while the username was changing, so the change was undone.",

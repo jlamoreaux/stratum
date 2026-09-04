@@ -371,7 +371,10 @@ describe("POST /settings/username", () => {
     );
   });
 
-  it("reverts as well when the second listing cannot be read", async () => {
+  // An unreadable second listing proves nothing about the old namespace, so
+  // the name is put back on caution and reported as our failure, not a 409
+  // that would blame a project nobody has seen.
+  it("reverts and reports a server error when the second listing cannot be read", async () => {
     vi.mocked(listProjectsByNamespace)
       .mockResolvedValueOnce(noProjects)
       .mockResolvedValueOnce({ success: false, error: new Error("kv down") as never });
@@ -380,8 +383,14 @@ describe("POST /settings/username", () => {
       post("/settings/username", { username: "alice-two" }),
       makeEnv(),
     );
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(500);
     expect(renameUser).toHaveBeenCalledTimes(2);
+    expect(renameUser).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "usr_1",
+      "alice",
+      expect.anything(),
+    );
   });
 
   it("fails closed when the project listing cannot be read", async () => {
