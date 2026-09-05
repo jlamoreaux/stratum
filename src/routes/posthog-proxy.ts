@@ -114,6 +114,16 @@ function guardLoop(request: Request): boolean {
   return request.headers.get(HOP_HEADER) !== null;
 }
 
+/**
+ * The headers to send upstream: the caller's, minus anything that would leak
+ * across the origin boundary, plus a truthful client IP.
+ *
+ * Everything not named in `STRIPPED_REQUEST_HEADERS` is passed through, so the
+ * SDK's own content negotiation keeps working. The two additions are the hop
+ * marker that `guardLoop` reads back, and `X-Forwarded-For` — set only from
+ * Cloudflare's own `CF-Connecting-IP`, never from an inbound value a caller
+ * could choose for themselves.
+ */
 function forwardedHeaders(request: Request): Headers {
   const headers = new Headers(request.headers);
   for (const name of STRIPPED_REQUEST_HEADERS) headers.delete(name);

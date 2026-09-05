@@ -56,6 +56,16 @@ export const NO_ANALYTICS_HEADER = "X-Stratum-No-Analytics";
  */
 const DENIED_PREFIXES = ["/oauth/authorize", "/settings", "/api", "/_ph"] as const;
 
+/**
+ * Is this response barred from carrying analytics?
+ *
+ * Checked against BOTH the matched route pattern and the concrete path,
+ * because a handler can be reached by either shape and a deny list that
+ * consults only one of them has a hole. Prefix rather than equality: the
+ * version of this that matched exactly covered `GET /settings`, which renders
+ * nothing secret, and missed the three `POST /settings/*` handlers that return
+ * a plaintext credential.
+ */
 function isDenied(route: string, path: string): boolean {
   return DENIED_PREFIXES.some(
     (prefix) =>
