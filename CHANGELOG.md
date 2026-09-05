@@ -70,8 +70,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signed-in user could see is not the one AGPL §13 asks of an operator running a
   modified instance. For callers who never receive HTML at all, every response
   also carries `Link: …; rel="license"` and `X-Source-Code` headers, so an agent
-  driving Stratum over `/mcp` or the REST API is offered the source too; git
-  smart-HTTP responses are left untouched. Self-hosters running modifications
+  driving Stratum over `/mcp` or the REST API is offered the source too — set
+  both before and after the handler runs, because a handler returning a raw
+  `Response` (as `/mcp` does on its main paths) replaces the context response
+  and does not inherit buffered headers. Git smart-HTTP responses are left
+  untouched. Self-hosters running modifications
   repoint `STRATUM_SOURCE_URL` in `src/version.ts`; there is nothing else to
   configure.
 - **Stratum can deploy a merged change.** A new `deploys:` block in

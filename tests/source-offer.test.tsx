@@ -173,6 +173,41 @@ describe("AGPL §13 source offer", () => {
     }
   });
 
+  /**
+   * A handler returning a raw `new Response(...)` replaces the context response
+   * wholesale, and Hono does not merge `c.header()`'s buffered values into it.
+   * `src/routes/mcp.ts` returns raw 202s and 204s on its main paths, so setting
+   * the headers only before `next()` left the one interface this offer most
+   * needed to reach without it.
+   */
+  it("reaches handlers that return a raw Response", async () => {
+    const raw = new Hono<{ Bindings: Env }>();
+    raw.use("*", sourceOfferMiddleware);
+    raw.get("/mcp-post", () => new Response(null, { status: 202 }));
+    raw.get("/mcp-delete", () => new Response(null, { status: 204 }));
+    raw.get("/with-body", () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    for (const path of ["/mcp-post", "/mcp-delete", "/with-body"]) {
+      const res = await raw.request(path);
+      expect(res.headers.get("X-Source-Code"), path).toBe(STRATUM_SOURCE_URL);
+      expect(res.headers.get("Link"), path).toContain('rel="license"');
+    }
+  });
+
+  it("still offers the source on an error response", async () => {
+    const boom = new Hono<{ Bindings: Env }>();
+    boom.use("*", sourceOfferMiddleware);
+    boom.get("/boom", () => {
+      throw new Error("boom");
+    });
+    boom.onError((err, c) => c.json({ error: err.message }, 500));
+
+    const res = await boom.request("/boom");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "boom" });
+    expect(res.headers.get("X-Source-Code")).toBe(STRATUM_SOURCE_URL);
+  });
+
   it("leaves git smart-HTTP responses alone", async () => {
     // git clients and proxies get exactly the bytes they expect, and a clone is
     // already receiving the source.

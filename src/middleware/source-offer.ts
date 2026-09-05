@@ -32,13 +32,33 @@ const isGitHttpPath = (path: string): boolean =>
   path.endsWith("/git-upload-pack") ||
   path.endsWith("/git-receive-pack");
 
+const LINK_HEADER = `<${LICENSE_URL}>; rel="license"`;
+
 export const sourceOfferMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
-  // Set before next() so the offer survives a downstream throw and rides on the
-  // error response too — an error page is still a network interaction.
-  if (!isGitHttpPath(c.req.path)) {
-    c.header("Link", `<${LICENSE_URL}>; rel="license"`);
-    c.header("X-Source-Code", STRATUM_SOURCE_URL);
+  if (isGitHttpPath(c.req.path)) {
+    await next();
+    return;
   }
 
-  await next();
+  // Twice, because neither placement alone covers every response.
+  //
+  // Before next(): `c.header()` buffers onto the context, which is what
+  // `c.json()`/`c.text()`/`c.html()` build their response from, and it survives
+  // a downstream throw that unwinds past this middleware entirely.
+  c.header("Link", LINK_HEADER);
+  c.header("X-Source-Code", STRATUM_SOURCE_URL);
+
+  try {
+    await next();
+  } finally {
+    // After next(): a handler returning a raw `new Response(...)` replaces the
+    // context response wholesale, and Hono does not merge the buffered headers
+    // into it — verified against this repo's Hono, not assumed. `/mcp` returns
+    // raw 202s and 204s on its main paths (`src/routes/mcp.ts`), so without
+    // this the one interface the offer most needed to reach would not have
+    // carried it. In `finally` so an error response is covered too; mutating
+    // `c.res.headers` here does not mask or alter the error itself.
+    c.res.headers.set("Link", LINK_HEADER);
+    c.res.headers.set("X-Source-Code", STRATUM_SOURCE_URL);
+  }
 };
