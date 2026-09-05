@@ -35,7 +35,16 @@ describe("docs site analytics gating", () => {
   });
 
   it("respects Do Not Track, the only control an anonymous docs visitor has", () => {
+    // In posthog-js 1.427.2 this also honours navigator.globalPrivacyControl,
+    // which is what makes it a real control rather than a legacy header check.
     expect(astroConfig).toContain("respect_dnt: true");
+  });
+
+  it("waits for the deferred bundle instead of calling init while it is undefined", () => {
+    // `defer` is ignored on an inline script, and these tags are in <head>, so
+    // without this the inline block throws ReferenceError on every docs page.
+    expect(astroConfig).toContain("DOMContentLoaded");
+    expect(astroConfig).toContain('typeof posthog === "undefined"');
   });
 });
 

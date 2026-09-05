@@ -106,7 +106,9 @@ async function handleAnalyticsProxy(request, url) {
 
   const sdkMatch = /^\/static\/(\d+\.\d+\.\d+)\/array\.js$/.exec(suffix);
   if (sdkMatch) {
-    if (request.method !== "GET") return noContent();
+    // Only the pinned version: serving any semver would make this a general
+    // jsDelivr proxy and defeat the pinning guarantee.
+    if (request.method !== "GET" || sdkMatch[1] !== SDK_VERSION) return noContent();
     const cacheKey = new Request(url.toString(), { method: "GET" });
     const cached = await caches.default.match(cacheKey);
     if (cached) return cached;
@@ -143,6 +145,10 @@ async function handleAnalyticsProxy(request, url) {
 
   let body;
   if (request.method === "POST") {
+    // Refuse before allocating; `arrayBuffer()` buffers the whole body, so a
+    // check afterwards bounds only what is forwarded, not what is held here.
+    const declared = Number(request.headers.get("content-length") ?? Number.NaN);
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return noContent();
     body = await request.arrayBuffer();
     if (body.byteLength > MAX_BODY_BYTES) return noContent();
   }

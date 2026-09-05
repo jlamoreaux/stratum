@@ -254,6 +254,8 @@ below describe how we configure it rather than what we choose to emit:
 | `$autocapture` | A link, button, or form control is interacted with |
 | `$rageclick` | The same spot is clicked repeatedly, if your PostHog project enables it |
 | `$identify` | A signed-in user is associated with their account |
+| `$set` | Person properties are recorded, as part of identifying |
+| `$create_alias` | A pre-sign-in anonymous session is linked to the account |
 
 Every event additionally carries `environment` — the label the operator set in
 `STRATUM_ENVIRONMENT`, so staging traffic can be told apart from production —

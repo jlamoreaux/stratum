@@ -13,9 +13,14 @@ const SITE = "https://docs.usestratum.dev";
  * on it.
  *
  * Unlike the app, docs URLs are public content and are sent as-is: which page
- * someone read is the entire question. There is no session here, so every
- * visitor is anonymous and Do Not Track is their only control — hence
- * `respect_dnt`. Session replay is not loaded on either property.
+ * someone read is the entire question. For the same reason `mask_all_text` and
+ * `mask_all_element_attributes` are deliberately NOT set here, though they are
+ * on the app: the link text and hrefs on this site are published documentation,
+ * so masking them would cost the answer to "which doc did they click" and
+ * protect nothing. There is no session here, so every visitor is anonymous and
+ * `respect_dnt` is their only control — in posthog-js 1.427.2 it honours
+ * `navigator.globalPrivacyControl` as well as the legacy DNT header. Session
+ * replay is not loaded on either property.
  */
 // Same name as the app's var, deliberately: two switches for one feature that
 // differ only by word order would be a trap. Read at build time via

@@ -33,6 +33,7 @@
 import { Hono } from "hono";
 import {
   PROXY_PREFIX,
+  SDK_VERSION,
   browserAnalyticsEnabled,
   isSelfReferential,
   resolvePostHogRegion,
@@ -165,10 +166,12 @@ posthogProxyRouter.get("/static/:version/array.js", async (c) => {
   // Nothing to serve on an instance that never injects the SDK.
   if (!browserAnalyticsEnabled(c.env)) return c.notFound();
 
-  const version = c.req.param("version");
-  // Anything that is not a plain semver would be attacker-controlled path
-  // material in a CDN URL.
-  if (!/^\d+\.\d+\.\d+$/.test(version)) return c.notFound();
+  // Only the pinned version, not any semver. Serving an arbitrary version would
+  // make this a general jsDelivr proxy and would defeat the pinning guarantee
+  // the AGENTS.md carve-out is granted on. Nothing legitimately asks for an
+  // older one: injected pages are `Cache-Control: no-store`, so no client holds
+  // a stale page naming a previous version.
+  if (c.req.param("version") !== SDK_VERSION) return c.notFound();
 
   const cacheKey = new Request(new URL(c.req.url).toString(), { method: "GET" });
   const cache = typeof caches !== "undefined" ? caches.default : undefined;
@@ -177,13 +180,16 @@ posthogProxyRouter.get("/static/:version/array.js", async (c) => {
 
   let upstream: Response;
   try {
-    upstream = await fetch(sdkUpstream(version));
+    upstream = await fetch(sdkUpstream(SDK_VERSION));
   } catch (err) {
-    logger.warn("SDK bundle fetch failed", { version, error: String(err) });
+    logger.warn("SDK bundle fetch failed", { version: SDK_VERSION, error: String(err) });
     return noContent();
   }
   if (!upstream.ok) {
-    logger.warn("SDK bundle unavailable upstream", { version, status: upstream.status });
+    logger.warn("SDK bundle unavailable upstream", {
+      version: SDK_VERSION,
+      status: upstream.status,
+    });
     return noContent();
   }
 
@@ -253,6 +259,15 @@ posthogProxyRouter.all("/*", async (c) => {
 
   let body: ArrayBuffer | undefined;
   if (request.method === "POST") {
+    // Refuse before allocating. `arrayBuffer()` buffers the whole body, so a
+    // check afterwards bounds only what is forwarded upstream, not what this
+    // Worker holds in memory.
+    const declared = Number(request.headers.get("content-length") ?? Number.NaN);
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      logger.warn("Refused an oversized beacon", { bytes: declared });
+      return noContent();
+    }
+    // Still checked after reading, for a chunked body that declared no length.
     body = await request.arrayBuffer();
     if (body.byteLength > MAX_BODY_BYTES) {
       logger.warn("Refused an oversized beacon", { bytes: body.byteLength });

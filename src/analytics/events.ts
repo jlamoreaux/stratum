@@ -175,6 +175,11 @@ export const WEB_EVENT_NAMES: readonly string[] = [
   "$autocapture",
   "$rageclick",
   "$identify",
+  // Emitted by identify() when it links an anonymous session to a person, and
+  // when it sets person properties. Not dropped, because dropping $create_alias
+  // would break the anonymous-to-identified stitching identify() exists for.
+  "$set",
+  "$create_alias",
 ];
 
 /** Every event name, for the docs-drift test and for operator reference. */

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
 - **Browser analytics, opt-in and redacted.** `app.usestratum.dev` and the docs
   site sent no browser events at all, so pageviews, autocaptured interactions
   and rageclicks were invisible and the docs-to-signup funnel could not be
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if that list and the code disagree.
 
 ### Fixed
+
 - **`api_request` reported the wrong route for most pages.** `routePath(c, -1)`
   returns the last *registered* route matching a path, not the one that
   answered it, and `uiRouter`'s `/:namespace/:slug` catch-all is mounted last —

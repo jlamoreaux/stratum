@@ -126,13 +126,36 @@ describe("web analytics injection", () => {
     // `/settings` covered only `GET /settings` — which renders nothing secret —
     // while POST /settings/tokens, /settings/rotate-token and /settings/agents,
     // the three that DO return a plaintext token, were instrumented.
-    for (const path of ["/settings/tokens", "/settings/rotate-token", "/settings/agents"]) {
-      const res = await app.fetch(
+    // Through a probe, not the real app: without a session those handlers
+    // answer 302, and the middleware bails on a redirect before `isDenied` ever
+    // runs — so asserting against the real app passed for the wrong reason and
+    // would have kept passing with the deny list deleted.
+    const probe = new Hono<{ Bindings: Env }>();
+    probe.use("*", (c, next) => {
+      c.set("cspNonce", "test-nonce");
+      return next();
+    });
+    probe.use("*", webAnalyticsMiddleware);
+    const denied = ["/settings/tokens", "/settings/rotate-token", "/settings/agents"];
+    for (const path of denied) {
+      probe.post(path, (c) => c.html("<html><body>plaintext token</body></html>"));
+    }
+    // A control, so the probe is proven capable of injecting in the first place.
+    probe.post("/ordinary", (c) => c.html("<html><body>hi</body></html>"));
+
+    for (const path of denied) {
+      const res = await probe.fetch(
         new Request(`http://localhost${path}`, { method: "POST" }),
         makeEnv(),
       );
+      expect(res.status, path).toBe(200);
       expect(await res.text(), path).not.toContain("posthog.init");
     }
+    const control = await probe.fetch(
+      new Request("http://localhost/ordinary", { method: "POST" }),
+      makeEnv(),
+    );
+    expect(await control.text()).toContain("posthog.init");
   });
 
   it("honours a handler's own opt-out header, and does not leak it to the client", async () => {

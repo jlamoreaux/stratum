@@ -166,7 +166,18 @@ export const webAnalyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = asyn
 
   const sdkTag = `<script nonce="${nonce}" src="${SDK_PATH}" defer></script>`;
   const bootstrapTag = `<script nonce="${nonce}" defer>${bootstrapScript(config)}</script>`;
-  const html = await c.res.text();
+  // The page is already rendered and valid at this point. Analytics must never
+  // be able to turn a successful response into an error, so a failed read is
+  // logged and the original response is left exactly as the handler built it.
+  let html: string;
+  try {
+    html = await c.res.text();
+  } catch (err) {
+    logger.warn("Could not read the response body for analytics injection", {
+      error: String(err),
+    });
+    return;
+  }
 
   c.res = new Response(injectBeforeBodyEnd(html, `${sdkTag}${bootstrapTag}`), {
     status: c.res.status,
