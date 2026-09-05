@@ -272,9 +272,10 @@ all.
 - **`mcp_request` carries the one free-text field.** `client_name` and
   `client_version` are whatever the connecting software calls itself in the MCP
   handshake, capped at 64 characters. They answer "which editors and agents
-  connect to Stratum". `tool` is reported only when it names a tool this build
-  defines; an unrecognised name is reported as `unknown` rather than echoed
-  back.
+  connect to Stratum". Everything else on the event is bounded: `tool` and
+  `mcp_method` are reported only when they name a tool or a JSON-RPC method
+  this build actually implements, and anything else — both are strings a client
+  can put anything in — is reported as `unknown` rather than echoed back.
 - **`error_occurred` never carries the exception message.** Messages quote
   their input. Only the error's type name (`TypeError`) is sent; the message
   stays in your own Workers logs.

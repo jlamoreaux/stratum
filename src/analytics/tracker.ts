@@ -100,7 +100,7 @@ const SUPPRESSED_ACTOR: AnalyticsActor = {
   attributed: false,
 };
 
-export class AnalyticsTracker {
+class AnalyticsTracker {
   private constructor(
     private readonly client: PostHogClient,
     private readonly actor: AnalyticsActor,
@@ -186,8 +186,16 @@ export class AnalyticsTracker {
     return capture;
   }
 
-  /** @internal Exposed for the factories below and for tests asserting suppression. */
-  static create(
+  /**
+   * The single construction seam, deliberately not reachable from outside this
+   * module: the class value is not exported (only its type is), so every
+   * tracker in the codebase comes from one of the preference-resolving
+   * factories below. A `static create` taking a caller-built actor would have
+   * let any module pass `optedOut: false` and skip the resolution this class
+   * exists to make unskippable — which is the comment-not-code version of the
+   * guarantee, and the exact failure this design replaced.
+   */
+  static build(
     env: Env,
     actor: AnalyticsActor,
     waitUntil?: (promise: Promise<unknown>) => void,
@@ -199,6 +207,18 @@ export class AnalyticsTracker {
       waitUntil,
     );
   }
+}
+
+/** The type is public — `webhook-delivery` and the MCP route pass trackers around. */
+export type { AnalyticsTracker };
+
+/** Module-private construction. See `AnalyticsTracker.build`. */
+function createTracker(
+  env: Env,
+  actor: AnalyticsActor,
+  waitUntil?: (promise: Promise<unknown>) => void,
+): AnalyticsTracker {
+  return AnalyticsTracker.build(env, actor, waitUntil);
 }
 
 /**
@@ -240,7 +260,7 @@ export function trackerForRequest(c: Context<{ Bindings: Env }>): AnalyticsTrack
   // It is captured personless rather than minting a profile for a credential.
   const attributed = distinctId !== ANONYMOUS_DISTINCT_ID;
 
-  return AnalyticsTracker.create(
+  return createTracker(
     c.env,
     {
       distinctId,
@@ -271,9 +291,9 @@ export async function trackerForUser(
   const user = await getUser(env.DB, userId, logger);
   if (!user.success) {
     logger.warn("User lookup failed for telemetry preference; suppressing event", { userId });
-    return AnalyticsTracker.create(env, SUPPRESSED_ACTOR, waitUntil);
+    return createTracker(env, SUPPRESSED_ACTOR, waitUntil);
   }
-  return AnalyticsTracker.create(
+  return createTracker(
     env,
     {
       distinctId: userId,
@@ -305,8 +325,8 @@ export async function trackerForEventActor(
   logger: Logger,
   waitUntil?: (promise: Promise<unknown>) => void,
 ): Promise<AnalyticsTracker> {
-  if (event.actorType === "system" || !event.actorId) {
-    return AnalyticsTracker.create(
+  if (event.actorType === "system") {
+    return createTracker(
       env,
       {
         distinctId: SYSTEM_DISTINCT_ID,
@@ -318,6 +338,20 @@ export async function trackerForEventActor(
     );
   }
 
+  // A user- or agent-authored row with no actor id: `change-flow.ts` builds
+  // `{ type: "user" }` with the id omitted when it has none. Treating that as
+  // system-authored would export a real person's activity under the `system`
+  // sentinel with no preference consulted — the opt-out defeated by a missing
+  // field. There is an actor and no way to reach their choice, so fail closed,
+  // exactly as an unresolvable lookup does below.
+  if (!event.actorId) {
+    logger.warn("Event actor has no id; suppressing analytics export", {
+      eventId: event.id,
+      actorType: event.actorType,
+    });
+    return createTracker(env, SUPPRESSED_ACTOR, waitUntil);
+  }
+
   let ownerId = event.actorId;
   if (event.actorType === "agent") {
     const agent = await getAgent(env.DB, event.actorId, logger);
@@ -326,7 +360,7 @@ export async function trackerForEventActor(
         eventId: event.id,
         actorId: event.actorId,
       });
-      return AnalyticsTracker.create(env, SUPPRESSED_ACTOR, waitUntil);
+      return createTracker(env, SUPPRESSED_ACTOR, waitUntil);
     }
     ownerId = agent.data.ownerId;
   }
@@ -337,10 +371,10 @@ export async function trackerForEventActor(
       eventId: event.id,
       ownerId,
     });
-    return AnalyticsTracker.create(env, SUPPRESSED_ACTOR, waitUntil);
+    return createTracker(env, SUPPRESSED_ACTOR, waitUntil);
   }
 
-  return AnalyticsTracker.create(
+  return createTracker(
     env,
     {
       // The owner, not the acting agent — see `AnalyticsActor.distinctId`. For
@@ -368,7 +402,7 @@ export function trackerForSystem(
   env: Env,
   waitUntil?: (promise: Promise<unknown>) => void,
 ): AnalyticsTracker {
-  return AnalyticsTracker.create(
+  return createTracker(
     env,
     { distinctId: SYSTEM_DISTINCT_ID, kind: "system", optedOut: false, attributed: false },
     waitUntil,

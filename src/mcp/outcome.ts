@@ -130,7 +130,7 @@ export function describeMcpAnalytics(
   if (!isJsonRpcRequest(message) || reply === null) return null;
 
   const props: SurfaceEventProperties["mcp_request"] = {
-    mcp_method: message.method,
+    mcp_method: boundedMethod(message.method),
     outcome: "ok",
   };
 
@@ -169,6 +169,30 @@ export function describeMcpAnalytics(
   }
 
   return props;
+}
+
+/**
+ * The JSON-RPC methods this server implements — the `handleMessage` switch in
+ * `./protocol`, spelled out so analytics can bound the value it exports.
+ *
+ * A request's `method` is caller-supplied free text: an authenticated client
+ * can POST any string and get `METHOD_NOT_FOUND` back, so exporting it verbatim
+ * would put arbitrary caller text in the analytics payload — the one thing the
+ * catalog's privacy rule forbids. Unrecognised methods collapse to `unknown`,
+ * which still answers the question worth asking ("are clients calling things we
+ * do not implement") without carrying whatever they typed.
+ */
+const KNOWN_MCP_METHODS: ReadonlySet<string> = new Set([
+  "initialize",
+  "notifications/initialized",
+  "notifications/cancelled",
+  "ping",
+  "tools/list",
+  "tools/call",
+]);
+
+function boundedMethod(method: string): string {
+  return KNOWN_MCP_METHODS.has(method) ? method : "unknown";
 }
 
 /** Cap on a client's self-reported name or version before it is exported. */

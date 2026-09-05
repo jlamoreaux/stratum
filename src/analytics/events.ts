@@ -112,32 +112,43 @@ export function domainEventName(type: string): string {
 }
 
 /**
- * Every event name this instance can send.
+ * Every domain event name this instance can send, as an exhaustive map.
  *
- * Domain names are spelled out rather than derived at runtime because a type
- * cannot be enumerated at runtime and the docs test needs the list. The
- * `DomainEventName` annotation is what keeps it honest: add a member to
- * `StratumEvent` without listing it here and this file stops typechecking.
+ * The names are spelled out because a type cannot be enumerated at runtime and
+ * the docs-drift test needs the list. `satisfies Record<DomainEventName, true>`
+ * is what keeps the list honest, and it has to be a Record rather than an
+ * array: an array annotated `DomainEventName[]` only checks that each entry is
+ * *a* valid name, so a new member of `StratumEvent` could be added, exported by
+ * `captureDomainEvent` (which derives the name from `event.type` at runtime),
+ * and never appear here or in the public FAQ. A Record demands every key.
+ *
+ * So: add a member to `StratumEvent` without adding it here, and this file
+ * stops compiling — which is the only reason the catalog can be trusted as the
+ * answer to "what leaves my instance".
  */
-export const DOMAIN_EVENT_NAMES: readonly DomainEventName[] = [
-  "stratum.change.created",
-  "stratum.change.evaluated",
-  "stratum.change.merged",
-  "stratum.change.rejected",
-  "stratum.change.reverted",
-  "stratum.change.commented",
-  "stratum.change.reviewed",
-  "stratum.project.created",
-  "stratum.project.imported",
-  "stratum.workspace.created",
-  "stratum.sync.completed",
-  "stratum.issue.opened",
-  "stratum.issue.commented",
-  "stratum.issue.closed",
-  "stratum.deployment.requested",
-  "stratum.deployment.succeeded",
-  "stratum.deployment.failed",
-];
+const DOMAIN_EVENTS = {
+  "stratum.change.created": true,
+  "stratum.change.evaluated": true,
+  "stratum.change.merged": true,
+  "stratum.change.rejected": true,
+  "stratum.change.reverted": true,
+  "stratum.change.commented": true,
+  "stratum.change.reviewed": true,
+  "stratum.project.created": true,
+  "stratum.project.imported": true,
+  "stratum.workspace.created": true,
+  "stratum.sync.completed": true,
+  "stratum.issue.opened": true,
+  "stratum.issue.commented": true,
+  "stratum.issue.closed": true,
+  "stratum.deployment.requested": true,
+  "stratum.deployment.succeeded": true,
+  "stratum.deployment.failed": true,
+} as const satisfies Record<DomainEventName, true>;
+
+export const DOMAIN_EVENT_NAMES: readonly DomainEventName[] = Object.keys(
+  DOMAIN_EVENTS,
+) as DomainEventName[];
 
 export const SURFACE_EVENT_NAMES: readonly SurfaceEventName[] = [
   "api_request",

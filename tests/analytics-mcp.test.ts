@@ -109,6 +109,31 @@ describe("describeMcpAnalytics", () => {
     expect(describeMcpAnalytics("not an object", null, TOOLS)).toBeNull();
   });
 
+  // A method name is caller-supplied free text: any authenticated client can
+  // POST an arbitrary string and get METHOD_NOT_FOUND back. Exporting it
+  // verbatim would put that text in the payload.
+  it("collapses an unrecognised method rather than exporting what the caller sent", () => {
+    const props = describeMcpAnalytics(
+      { jsonrpc: "2.0", id: 1, method: "acme/internal-secret-handshake" },
+      { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } },
+      TOOLS,
+    );
+    expect(props?.mcp_method).toBe("unknown");
+    expect(props?.outcome).toBe("rejected");
+    expect(JSON.stringify(props)).not.toContain("acme");
+  });
+
+  it("keeps the real name for every method the server implements", () => {
+    for (const method of ["initialize", "ping", "tools/list", "tools/call"]) {
+      const props = describeMcpAnalytics(
+        { jsonrpc: "2.0", id: 1, method },
+        { jsonrpc: "2.0", id: 1, result: {} },
+        TOOLS,
+      );
+      expect(props?.mcp_method).toBe(method);
+    }
+  });
+
   it("reports a non-tool method without a tool property", () => {
     const props = describeMcpAnalytics(
       { jsonrpc: "2.0", id: 1, method: "tools/list" },

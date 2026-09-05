@@ -148,7 +148,9 @@ describe("domainEventProperties", () => {
   });
 
   it("contributes nothing for an event type with no whitelist entry", () => {
-    expect(domainEventProperties(makeEvent({ type: "sync.completed", payload: { commit: "a" } })));
+    expect(
+      domainEventProperties(makeEvent({ type: "sync.completed", payload: { commit: "a" } })),
+    ).toEqual({});
     expect(domainEventProperties(makeEvent({ type: "project.created", payload: {} }))).toEqual({});
   });
 

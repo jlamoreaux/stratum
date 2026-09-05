@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  AnalyticsTracker,
-  trackerForEventActor,
-  trackerForSystem,
-  trackerForUser,
-} from "../src/analytics/tracker";
+import { trackerForEventActor, trackerForSystem, trackerForUser } from "../src/analytics/tracker";
 import type { EventRecord } from "../src/storage/events";
 import type { Env } from "../src/types";
 import { createLogger } from "../src/utils/logger";
@@ -182,6 +177,20 @@ describe("trackerForEventActor", () => {
     expect(captured).toHaveLength(0);
   });
 
+  // `change-flow.ts` builds `{ type: "user" }` with the id omitted when it has
+  // none. Reclassifying that as system-authored would export a real person's
+  // activity with no preference consulted — the opt-out defeated by a missing
+  // field rather than by a decision.
+  it("suppresses a user-authored event whose actor id is missing", async () => {
+    const captured = stubCapture();
+    const event = makeEvent({ actorType: "user", actorId: undefined });
+
+    await (await trackerForEventActor(env, event, logger)).captureDomainEvent(event);
+
+    expect(captured).toHaveLength(0);
+    expect(getUser).not.toHaveBeenCalled();
+  });
+
   it("captures a system-authored event personless, with no lookup", async () => {
     const captured = stubCapture();
     const event = makeEvent({ actorType: "system", actorId: undefined });
@@ -228,24 +237,30 @@ describe("AnalyticsTracker — event shape", () => {
 
   it("hands the capture to waitUntil when the runtime offers one", async () => {
     stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: optedInUser } as never);
     const waitUntil = vi.fn();
-    await AnalyticsTracker.create(
-      env,
-      { distinctId: "user_1", kind: "user", optedOut: false, attributed: true },
-      waitUntil,
-    ).capture("error_occurred", { route: "/api/changes", method: "GET", error_type: "TypeError" });
+
+    const tracker = await trackerForUser(env, "user_1", logger, waitUntil);
+    await tracker.capture("error_occurred", {
+      route: "/api/changes",
+      method: "GET",
+      error_type: "TypeError",
+    });
 
     expect(waitUntil).toHaveBeenCalledTimes(1);
   });
 
-  it("does not schedule anything for a suppressed actor", async () => {
+  it("does not schedule anything for an opted-out actor", async () => {
     stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: optedOutUser } as never);
     const waitUntil = vi.fn();
-    await AnalyticsTracker.create(
-      env,
-      { distinctId: "user_1", kind: "user", optedOut: true, attributed: true },
-      waitUntil,
-    ).capture("error_occurred", { route: "/api/changes", method: "GET", error_type: "TypeError" });
+
+    const tracker = await trackerForUser(env, "user_1", logger, waitUntil);
+    await tracker.capture("error_occurred", {
+      route: "/api/changes",
+      method: "GET",
+      error_type: "TypeError",
+    });
 
     expect(waitUntil).not.toHaveBeenCalled();
   });
