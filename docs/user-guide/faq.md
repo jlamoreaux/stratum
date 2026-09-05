@@ -212,23 +212,89 @@ top-level `[vars]`, so a top-level-only setting never reaches
 `wrangler deploy --env=production`. The instance switch always wins over an
 individual account's preference.
 
-Two kinds of event are sent, and only these:
+### What exactly is sent
 
-- **`api_request`**, one per request. Its properties are limited to the matched
-  route pattern (e.g. `/:namespace/:slug/files`), method, status, and latency —
-  never the concrete URL, so namespaces, repo slugs, change ids, and file paths
-  are not sent to PostHog. A request that never reached a registered route is
-  captured with `route: "*"`; a 404 is excluded entirely rather than captured as
-  `"*"`.
-- **`stratum.<event type>`**, one per repository activity (a change opening, a
-  merge). Its properties are limited to the event type, the actor type, and an
-  opaque project id — never the project's name.
+Every property on every event is either a **source-code literal** (a route
+pattern, an event type, a tool name) or a **bounded value** (a status code, a
+duration, a score, an enum). Names, paths, URLs, titles, refs, diffs, file
+contents, and request payloads are never sent. The one exception is noted
+against `mcp_request` below.
 
-Neither carries diffs, file contents, or request payloads.
+The list is exhaustive — `src/analytics/events.ts` is its single source of
+truth, and a test fails the build if this table and that file disagree.
 
-Events also carry identity attribution: the `distinctId` is the acting user or
-agent id (or `server` for unattributed requests, which are marked personless) so
-usage can be counted per account.
+| Event | Sent when | Properties |
+|-------|-----------|------------|
+| `api_request` | Once per request that matched a route | `method`, `route`, `status`, `latency_ms`, `surface`, `actor_type` |
+| `mcp_request` | Once per JSON-RPC message handled at `/mcp` | `mcp_method`, `outcome`, `tool`, `client_name`, `client_version`, `protocol_version` |
+| `auth_completed` | Once per completed sign-up or sign-in | `kind` (`signup`/`signin`), `provider` (`github`/`google`/`email`) |
+| `error_occurred` | Once per unhandled exception | `route`, `method`, `error_type` |
+| `background_job_completed` | Once per background job reaching a terminal state | `job`, `outcome`, `attempts` |
+| `stratum.<event type>` | Once per repository activity (a change opening, a merge, a deploy) | `project_id`, `actor_type`, plus the per-type properties below |
+
+Every event additionally carries `environment` — the label the operator set in
+`STRATUM_ENVIRONMENT`, so staging traffic can be told apart from production —
+and `$lib_version`, the Stratum version that sent it, so a change in a metric
+can be tied to the release that caused it. An event caused by an agent also
+carries `agent_id`.
+
+One person property is ever set: `signup_provider`, recorded once when an
+account is created. It is what lets a question like "accounts that signed up
+with GitHub in August" be asked at all. Your email address, username, and
+display name are never sent.
+
+The per-type properties on `stratum.*` events are the whole reason they are
+worth collecting, and they are whitelisted per event type:
+
+| Event type | Extra properties |
+|------------|------------------|
+| `stratum.change.evaluated` | `score`, `passed` |
+| `stratum.change.reviewed` | `verdict` (`approve`/`request_changes`/`comment`) |
+| `stratum.project.imported` | `source_provider` (`github`/`gitlab`/`bitbucket`/`other`) |
+| `stratum.issue.closed` | `linked_change` (boolean) |
+| `stratum.deployment.*` | `target` (`cloudflare`/`vercel`), `linked_change` (boolean) |
+
+Everything else in an event's payload is dropped: workspace names, commit
+shas, issue titles, import URLs, and deployment failure text all stay on your
+instance. An event type not listed above contributes no extra properties at
+all.
+
+### The details worth knowing
+
+- **Route patterns, never URLs.** `api_request` reports
+  `/:namespace/:slug/files`, not the path that was actually requested, so
+  namespaces, repo slugs, change ids, and file paths are not sent. A request
+  that never reached a registered route is captured with `route: "*"`; a 404 is
+  excluded entirely rather than captured as `"*"`.
+- **`surface`** says which part of Stratum served the request — `api`, `ui`,
+  `git`, `mcp`, `auth`, `admin`, or `internal`. It is derived from the route
+  pattern, so it inherits the same guarantee.
+- **`mcp_request` carries the one free-text field.** `client_name` and
+  `client_version` are whatever the connecting software calls itself in the MCP
+  handshake, capped at 64 characters. They answer "which editors and agents
+  connect to Stratum". Everything else on the event is bounded: `tool` and
+  `mcp_method` are reported only when they name a tool or a JSON-RPC method
+  this build actually implements, and anything else — both are strings a client
+  can put anything in — is reported as `unknown` rather than echoed back.
+- **`error_occurred` never carries the exception message.** Messages quote
+  their input. Only the error's type name (`TypeError`) is sent; the message
+  stays in your own Workers logs.
+- **Project ids, never project names.** A name identifies private source as
+  surely as a repo slug in a URL does. The opaque id groups events just as
+  well.
+
+Events also carry identity attribution: the `distinctId` is the acting user's
+id (or `server` for unattributed requests, and `system` for events no person
+caused — both marked personless) so usage can be counted per account.
+
+**An agent is attributed to the person who owns it**, not to itself. An agent
+token is a credential you minted, acting under your account — your opt-out
+already governs it, so your identity is what "who did this" means. The agent's
+own id rides along as `agent_id`, so the two stay distinguishable without an
+agent counting as a separate person.
+
+Domain events are dated from when the activity happened, not from when the
+queue got round to exporting them.
 
 ## Where are my invite codes?
 

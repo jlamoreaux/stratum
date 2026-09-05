@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from "hono";
 import { routePath } from "hono/route";
-import { createPostHogClient } from "../analytics/posthog";
+import { surfaceForRoute } from "../analytics/events";
+import { trackerForRequest } from "../analytics/tracker";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 
@@ -33,37 +34,16 @@ export const analyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (
     agentId,
   });
 
-  // Honor the caller's opt-out (#257). Deliberately placed after the debug log
-  // above: that log stays in the operator's own Workers logs and never leaves
-  // the instance, whereas this gate governs export to a third party.
-  //
-  // Every path that authenticates a caller publishes the preference alongside
-  // the identity: authMiddleware for the API and UI, and git-http's own
-  // `authenticate` for the smart-HTTP surface it owns. Note the latter sets the
-  // preference WITHOUT a userId, so this must not be gated on attribution.
-  if (c.get("telemetryOptOut") === true) return;
-
-  const distinctId = userId ?? agentId ?? "server";
-  const client = createPostHogClient(c.env);
-  const capture = client.capture({
-    event: "api_request",
-    distinctId,
-    properties: {
-      method: c.req.method,
-      route,
-      status: c.res.status,
-      latency_ms: latency,
-      // Unattributed events would otherwise accrete on a shared "server"
-      // person profile; capture them personless instead.
-      ...(distinctId === "server" ? { $process_person_profile: false } : {}),
-    },
+  // The caller's opt-out (#257) is enforced inside the tracker, which cannot be
+  // built without resolving it. Deliberately *after* the debug log above: that
+  // log stays in the operator's own Workers logs and never leaves the instance,
+  // whereas the tracker governs export to a third party.
+  trackerForRequest(c).capture("api_request", {
+    method: c.req.method,
+    route,
+    status: c.res.status,
+    latency_ms: latency,
+    surface: surfaceForRoute(route),
+    actor_type: userId ? "user" : agentId ? "agent" : "anonymous",
   });
-  try {
-    const ctx = c.executionCtx;
-    if (ctx?.waitUntil) {
-      ctx.waitUntil(capture);
-    }
-  } catch {
-    capture.catch(() => undefined);
-  }
 };

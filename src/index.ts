@@ -1,5 +1,8 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { setCookie } from "hono/cookie";
+import { routePath } from "hono/route";
+import { trackerForRequest } from "./analytics/tracker";
 import { githubWebhookRouter } from "./github/webhooks";
 import { analyticsMiddleware } from "./middleware/analytics";
 import { authMiddleware } from "./middleware/auth";
@@ -54,6 +57,22 @@ export { MagicLinkRateLimiter } from "./queue/magic-link-limiter";
 export { RepoDO } from "./queue/repo-do";
 
 const app = new Hono<{ Bindings: Env }>();
+
+/**
+ * The matched route pattern for an error, or `"*"` when there is none.
+ *
+ * `routePath` reads the matched-route registry, which a failure raised before
+ * routing (a middleware throwing) never populated. Falling back to the literal
+ * `"*"` keeps the concrete path — namespaces, slugs, file paths — out of the
+ * export, which is the same guarantee `analyticsMiddleware` makes.
+ */
+function errorRoute(c: Context<{ Bindings: Env }>): string {
+  try {
+    return routePath(c, -1);
+  } catch {
+    return "*";
+  }
+}
 
 app.use("*", securityHeadersMiddleware);
 app.use("*", configGuardMiddleware);
@@ -220,6 +239,20 @@ app.onError((err, c) => {
   logger.error(`Unhandled error: ${err.message}`, err instanceof Error ? err : undefined, {
     path: c.req.path,
     method: c.req.method,
+  });
+  // An unhandled exception never reaches `analyticsMiddleware`'s post-`next()`
+  // body — the rejection propagates straight past it to here — so a 500 born
+  // this way is invisible in `api_request` entirely. That is the gap this
+  // fills, and why it is a distinct event rather than a status code.
+  //
+  // The message is deliberately absent: exception messages quote their input,
+  // which on this codebase means SQL fragments, tokens, and file paths. The
+  // constructor name is the bounded part, and the message stays in the log
+  // line above where an operator can read it and a third party cannot.
+  trackerForRequest(c).capture("error_occurred", {
+    route: errorRoute(c),
+    method: c.req.method,
+    error_type: err instanceof Error ? err.constructor.name : "unknown",
   });
   // Belt-and-suspenders: the middleware registers headers before next(), but the
   // error boundary builds a fresh response, so re-assert the full set here via the

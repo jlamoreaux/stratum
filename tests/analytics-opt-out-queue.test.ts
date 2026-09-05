@@ -207,10 +207,10 @@ describe("telemetry opt-out — queue path", () => {
       };
       expect(JSON.stringify(properties)).not.toContain("acme/web");
       expect(properties.properties.project).toBeUndefined();
-      expect(properties.properties.projectId).toBe("prj_abc");
+      expect(properties.properties.project_id).toBe("prj_abc");
     });
 
-    it("omits projectId entirely on rows written before dual-write", async () => {
+    it("omits project_id entirely on rows written before dual-write", async () => {
       vi.mocked(getUser).mockResolvedValue({ success: true, data: liveUser });
 
       await processEvent(env, makeEvent({ projectId: undefined }), logger);
@@ -218,8 +218,8 @@ describe("telemetry opt-out — queue path", () => {
       const properties = mockCapture.mock.calls[0]?.[0] as {
         properties: Record<string, unknown>;
       };
-      expect("projectId" in properties.properties).toBe(false);
-      expect(properties.properties.actorType).toBe("user");
+      expect("project_id" in properties.properties).toBe(false);
+      expect(properties.properties.actor_type).toBe("user");
     });
   });
 });

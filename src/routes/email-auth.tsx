@@ -1,6 +1,8 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { setCookie } from "hono/cookie";
+import { captureAuthCompleted } from "../analytics/auth";
+import type { AuthKind } from "../analytics/events";
 import { admitAndDeliverCodes, betaGateEnabled, validateInviteCode } from "../beta/gate";
 import { getMagicLinkEmail } from "../email/templates";
 import { enforceSameOrigin } from "../middleware/csrf";
@@ -664,7 +666,15 @@ app.post("/verify", async (c) => {
       }
 
       // Create session and redirect to welcome/onboarding
-      return await createSessionAndRedirect(c, userId, emailHash, rememberMe, logger, "/welcome");
+      return await createSessionAndRedirect(
+        c,
+        userId,
+        emailHash,
+        rememberMe,
+        logger,
+        "/welcome",
+        "signup",
+      );
     }
 
     if (intent === "login") {
@@ -702,6 +712,10 @@ async function createSessionAndRedirect(
   rememberMe: boolean,
   logger: ReturnType<typeof createLogger>,
   defaultRedirect = "/",
+  // What this link did to the account, for the acquisition funnel. Not
+  // inferable here: the signup branch reaches this function twice, once having
+  // created the account and once having found it already present.
+  kind: AuthKind = "signin",
 ): Promise<Response> {
   const sessionLogger = logger.child({ userId });
   const sessionResult = await createSession(c.env.DB, userId, sessionLogger, rememberMe);
@@ -712,6 +726,7 @@ async function createSessionAndRedirect(
       actorId: userId,
       detail: { method: "magic-link" },
     });
+    await captureAuthCompleted(c, sessionLogger, { kind, provider: "email", userId });
   }
 
   if (!sessionResult.success) {

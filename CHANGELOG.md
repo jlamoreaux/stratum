@@ -198,6 +198,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Product analytics now answers questions instead of just counting requests.**
+  Telemetry sent two events with almost no properties: a request event carrying
+  a route pattern, and a repository-activity event carrying only its type, the
+  actor type, and a project id. It could count merges; it could not say what
+  fraction of changes pass evaluation, what reviewers decide, which deploy
+  targets fail, which MCP tools agents actually call, or how anyone signed up.
+  Four new events (`mcp_request`, `auth_completed`, `error_occurred`,
+  `background_job_completed`) and per-type properties on the `stratum.*` events
+  close that. `api_request` gains `surface` and `actor_type`, and every event
+  now carries an `environment` label so staging traffic stops polluting
+  production's numbers — set `STRATUM_ENVIRONMENT` in each `[env.<name>.vars]`
+  block (named environments do not inherit top-level `[vars]`). The privacy
+  rule is unchanged and now enforced in one place: every property is either a
+  source-code literal or a bounded value, never a name, path, URL, title, ref,
+  or free-text message. `docs/user-guide/faq.md` lists every event and every
+  property exhaustively, and a test fails the build if that list and the code
+  disagree.
+- **An agent no longer counts as a person in analytics.** Every agent token had
+  its own `distinctId`, so PostHog minted a person profile per credential —
+  splitting one human's history across several profiles, inflating the billed
+  person count, and making every user count, funnel, and retention curve wrong
+  by however many agents happened to be running. An agent acts under its
+  owner's account (the owner's opt-out already governs it), so its events are
+  now attributed to that owner, with the agent's own id carried as `agent_id`
+  so the breakdown is not lost.
+- **Domain events are dated from when the activity happened.** They were dated
+  from when the queue consumer exported them, which a retry or the five-minute
+  stale sweep can delay well past the fact — skewing every time series toward
+  whenever the queue drained. The outbox row's own timestamp is now sent.
+- **Every event carries `$lib_version`**, so a change in a metric can be tied to
+  the release that caused it instead of guessed against deploy times.
+- **A person profile now has something on it.** `signup_provider` is recorded
+  once per account, as `$set_once`, so a cohort like "accounts that signed up
+  with GitHub in August" is expressible — previously a person was an opaque id
+  with no properties at all. Email, username, and display name are still never
+  sent.
+- **Analytics property names are now consistently snake_case.** The `stratum.*`
+  events sent `projectId` and `actorType`; they now send `project_id` and
+  `actor_type`, matching `latency_ms` and every new property. Dashboards built
+  on the old names need updating — an insight can bridge the gap with
+  `coalesce(properties.project_id, properties.projectId)`.
+- **The per-account telemetry opt-out is now structurally impossible to skip.**
+  It lived at each `capture()` call site rather than in the client, which is how
+  the queue exporter originally shipped without honouring it at all. A new
+  `AnalyticsTracker` cannot be constructed without a resolved preference, so a
+  call site cannot forget one it never has to know about. Behaviour for existing
+  call sites is unchanged, including failing closed when the preference cannot
+  be read.
 - **`stratum login --host <url>` without `--key` now opens a browser** instead of
   prompting for a key. Scripts that piped a key into the prompt must pass
   `--key` (or set `STRATUM_HOST` and `STRATUM_API_KEY`). Without a TTY the

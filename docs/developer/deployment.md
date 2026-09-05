@@ -502,10 +502,12 @@ Set in `wrangler.toml`:
 POSTHOG_HOST = "https://app.posthog.com"
 OAUTH_REDIRECT_URI = "https://your-instance.workers.dev/auth/github/callback"
 STRATUM_TELEMETRY_DISABLED = "false"
+STRATUM_ENVIRONMENT = "production"
 
 [env.staging.vars]
 OAUTH_REDIRECT_URI = "https://your-instance-staging.workers.dev/auth/github/callback"
 STRATUM_TELEMETRY_DISABLED = "true"
+STRATUM_ENVIRONMENT = "staging"
 ```
 
 > **Named environments do not inherit top-level `[vars]` — they replace them.**
@@ -513,6 +515,11 @@ STRATUM_TELEMETRY_DISABLED = "true"
 > `wrangler deploy --env=production` or `--env=staging` (what `npm run
 > deploy:production` and `deploy:staging` run). Declare it in **each**
 > `[env.<name>.vars]` block you actually deploy, or the switch stays off.
+>
+> The same applies to `STRATUM_ENVIRONMENT`, which labels every analytics event
+> so staging traffic can be told apart from production's in one PostHog
+> project. An instance that leaves it unset reports `environment: "unknown"` —
+> harmless, but every funnel built across both deployments is then wrong.
 
 ### Per-Environment Configuration
 
