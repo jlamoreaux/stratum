@@ -109,6 +109,17 @@ See [`docs/README.md`](docs/README.md) for the full layout and conventions.
 Use the [issue templates](.github/ISSUE_TEMPLATE/). For anything security-related, **do not open a
 public issue** — follow [`SECURITY.md`](SECURITY.md).
 
-## License
+## License and the CLA
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+Stratum is split across two licenses — [AGPL-3.0-or-later](LICENSE) for the server and
+everything not listed otherwise, [Apache-2.0](cli/LICENSE) for `cli/` and `agent/`.
+[`LICENSING.md`](LICENSING.md) explains which is which and why.
+
+Your contribution goes out under the license of the directory it lands in. Beyond that,
+opening a pull request means agreeing to the [Contributor License Agreement](CLA.md), which
+the pull request template asks you to confirm. You keep your copyright; the agreement grants
+the maintainer the right to license your contribution under other terms as well, which is
+what makes a commercial license for Stratum possible. Read it once — it is short, and it is
+the Apache ICLA with the names changed.
+
+Contributions merged before 2026-09-05 were made under the MIT License and stay that way.

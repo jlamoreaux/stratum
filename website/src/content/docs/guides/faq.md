@@ -113,8 +113,9 @@ agent, not laundered through a human account.
 
 ## What does it cost, and what is metered?
 
-The software is MIT-licensed and free; self-hosted, you pay only for the
-Cloudflare resources you use (Workers, Artifacts, D1, KV, Queues, plus AI
+The software is free software (see the licensing question below) and costs
+nothing; self-hosted, you pay only for the Cloudflare resources you use
+(Workers, Artifacts, D1, KV, Queues, plus AI
 Gateway and Sandboxes if you enable those evaluators). Stratum meters estimated
 resource usage per change — LLM tokens, sandbox execution milliseconds, and git
 operations — and shows it alongside the evaluation evidence, so you can see what
@@ -186,6 +187,25 @@ backups, and Cloudflare Email for magic links.
 The [README Quick Start](https://github.com/stratum-eng/stratum/blob/main/README.md#quick-start) covers secrets,
 migrations, and deployment; keep production and staging in separate
 Artifacts namespaces.
+
+## What license is Stratum under, and what does self-hosting oblige me to?
+
+The server and web UI are **AGPL-3.0-or-later**; the `@stratum/cli` and
+`@stratum/agent` packages are **Apache-2.0**. Releases through v0.2.0 were MIT
+and stay MIT. [`LICENSING.md`](https://github.com/stratum-eng/stratum/blob/main/LICENSING.md) is the full account.
+
+Running an **unmodified** Stratum obliges you to nothing at all — no notice, no
+publication. If you **modify** Stratum and other people reach your instance over
+a network (your own developers count), AGPL §13 asks you to offer those users
+the source of the version you are running. Point `STRATUM_SOURCE_URL` in
+`src/version.ts` at the repository holding your changes and redeploy; the page
+footer then carries the offer, and that is the whole of the obligation.
+
+Nothing in the license reaches your own work. The repositories Stratum hosts,
+the changes it evaluates, your `.stratum/policy.yaml`, your custom evaluators
+consumed over the CI integration, and anything that talks to the REST API, the
+CLI, or `/mcp` are separate works under whatever license you choose. Commercial
+use, including running Stratum as a paid service, is permitted under the AGPL.
 
 ## How do backups work?
 

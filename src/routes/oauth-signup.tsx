@@ -26,6 +26,7 @@ import { recordAudit } from "../storage/audit";
 import { createSession, getSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername, linkGitHub } from "../storage/users";
 import type { Env } from "../types";
+import { SourceFooter } from "../ui/components/source-footer";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { type Logger, createLogger } from "../utils/logger";
 import { consumePostLoginRedirect } from "../utils/post-login-redirect";
@@ -327,6 +328,7 @@ app.get("/", async (c) => {
           </div>
         </main>
 
+        <SourceFooter />
         <script
           nonce={c.get("cspNonce") ?? ""}
           dangerouslySetInnerHTML={{ __html: COMPLETE_SIGNUP_SCRIPT }}
