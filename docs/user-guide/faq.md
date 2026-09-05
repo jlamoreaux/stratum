@@ -286,9 +286,14 @@ all.
 
 ### What the browser sends, and what it does not
 
-Browser analytics is held to the same promise as the server, but it takes more
-work to keep, because PostHog's SDK collects by default and this app's URLs and
-page titles are made of the things the promise forbids.
+**Everything in this section describes the Stratum application.** The
+documentation site is a separate deployment with separate rules, described
+after it — its pages are published documentation with no accounts and nothing
+private, so it deliberately does not redact what the application must.
+
+Browser analytics on the application is held to the same promise as the server,
+but it takes more work to keep, because PostHog's SDK collects by default and
+this app's URLs and page titles are made of the things the promise forbids.
 
 - **The same route patterns.** The server hands the SDK the route pattern it
   matched, and every URL-bearing property is rewritten to it before the event
@@ -314,9 +319,10 @@ page titles are made of the things the promise forbids.
   private repositories is worse than a missing metric.
 - **No session replay.** Stratum does not record sessions. It renders private
   source, and no masking configuration makes recording it a good idea.
-- **Do Not Track is respected**, and so is Global Privacy Control. This is the
-  only control a signed-out visitor has, since the per-account setting needs an
-  account.
+- **Do Not Track is respected**, and so is Global Privacy Control — the SDK
+  checks `navigator.doNotTrack`, `navigator.msDoNotTrack`, `window.doNotTrack`
+  and `navigator.globalPrivacyControl`. This is the only control a signed-out
+  visitor has, since the per-account setting needs an account.
 - **IP addresses.** This is the one thing the browser sends that the server
   never did. PostHog derives approximate location from it. Requests are
   proxied through your own instance at `/_ph/*`, so PostHog sees your Worker
@@ -334,7 +340,25 @@ page titles are made of the things the promise forbids.
   `POSTHOG_PUBLIC_KEY` is set, so an instance that never turned browser
   analytics on is not running a relay, and it refuses a beacon from an account
   that has opted out — which is what stops a browser tab opened *before* you
-  opted out from continuing to report.
+  opted out from continuing to report. That account check applies to the
+  application only; the documentation site has no accounts.
+
+### What the documentation site sends
+
+`docs.usestratum.dev` is built and deployed separately, and it is instrumented
+separately. The differences are deliberate:
+
+- **URLs are sent as they are**, not rewritten to route patterns. Which
+  documentation page someone read is the entire question there, and every one
+  of those URLs is public.
+- **Clicked link text and attributes are not masked**, for the same reason:
+  they are published documentation, so masking them would cost the answer and
+  protect nothing.
+- **There is no account**, so there is no per-account opt-out to honour and no
+  user is ever identified. `respect_dnt` is the only control, and it is on.
+- **No session replay**, the same as the application.
+- It is off unless `POSTHOG_PUBLIC_KEY` is present at build time, so a fork
+  building these docs ships nothing.
 
 ### The details worth knowing
 
