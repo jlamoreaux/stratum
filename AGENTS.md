@@ -16,8 +16,10 @@ client-side framework or a build step.
 `src/analytics/web-snippet.ts` for the app, which redacts every URL, title and element it
 sends, and an inline one in `website/astro.config.mjs` for the docs site, which does not — docs
 URLs are public content, and which page someone read is the whole question there. It is bound by the rule it is an exception to: no framework, no
-build step, nothing rendered or gated by it, and every page still works with it blocked or
-absent. Two things earned the exception and are the terms of keeping it. The bundle is
+build step, no application content or behaviour rendered or gated by it, and every page still
+works with it blocked or absent. (The script itself is of course rendered, and gated on
+`POSTHOG_PUBLIC_KEY` — that is the exception. What must never depend on it is anything a user
+came here to do.) Two things earned the exception and are the terms of keeping it. The bundle is
 **version-pinned and served from our own origin**, so third-party code cannot change size or
 behaviour in a release nobody here chose — an unpinned CDN script on pages that render private
 repositories under an authenticated session is the risk this rule exists to prevent, and
