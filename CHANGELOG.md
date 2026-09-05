@@ -215,6 +215,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or free-text message. `docs/user-guide/faq.md` lists every event and every
   property exhaustively, and a test fails the build if that list and the code
   disagree.
+- **An agent no longer counts as a person in analytics.** Every agent token had
+  its own `distinctId`, so PostHog minted a person profile per credential —
+  splitting one human's history across several profiles, inflating the billed
+  person count, and making every user count, funnel, and retention curve wrong
+  by however many agents happened to be running. An agent acts under its
+  owner's account (the owner's opt-out already governs it), so its events are
+  now attributed to that owner, with the agent's own id carried as `agent_id`
+  so the breakdown is not lost.
+- **Domain events are dated from when the activity happened.** They were dated
+  from when the queue consumer exported them, which a retry or the five-minute
+  stale sweep can delay well past the fact — skewing every time series toward
+  whenever the queue drained. The outbox row's own timestamp is now sent.
+- **Every event carries `$lib_version`**, so a change in a metric can be tied to
+  the release that caused it instead of guessed against deploy times.
+- **A person profile now has something on it.** `signup_provider` is recorded
+  once per account, as `$set_once`, so a cohort like "accounts that signed up
+  with GitHub in August" is expressible — previously a person was an opaque id
+  with no properties at all. Email, username, and display name are still never
+  sent.
 - **Analytics property names are now consistently snake_case.** The `stratum.*`
   events sent `projectId` and `actorType`; they now send `project_id` and
   `actor_type`, matching `latency_ms` and every new property. Dashboards built

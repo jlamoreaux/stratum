@@ -55,9 +55,25 @@ import { type PostHogClient, createPostHogClient } from "./posthog";
  * is why nothing outside this module builds a tracker without one.
  */
 export interface AnalyticsActor {
-  /** PostHog `distinct_id`. An opaque id, or a sentinel for unattributed traffic. */
+  /**
+   * PostHog `distinct_id` — always the **person**, never a credential.
+   *
+   * An agent is not a person. It is a token a human minted, acting under that
+   * human's account: the owner's opt-out already governs it, and their identity
+   * is what "who did this" means. Giving each agent its own distinct id would
+   * mint a person profile per token, which splits one human's history across
+   * several profiles, inflates the billed person count, and makes every user
+   * count, funnel, and retention curve wrong by however many agents happen to
+   * be running. So an agent's events are attributed to its owner, and
+   * `agentId` below preserves the breakdown that would otherwise be lost.
+   */
   distinctId: string;
   kind: ActorKind | "system";
+  /**
+   * The acting agent, when one is acting. Rides every event as `agent_id` so
+   * "which agent did this" stays answerable without agents becoming people.
+   */
+  agentId?: string;
   /** The resolved preference. `true` suppresses every capture on this tracker. */
   optedOut: boolean;
   /**
@@ -106,8 +122,16 @@ export class AnalyticsTracker {
   capture<K extends SurfaceEventName>(
     name: K,
     properties: SurfaceEventProperties[K],
+    /**
+     * Person properties to record the first time this person is seen.
+     *
+     * `$set_once`, never `$set`: these describe how someone arrived, so the
+     * first answer is the true one and a later event must not overwrite it.
+     * Only ever non-identifying — see `captureAuthCompleted`, the one caller.
+     */
+    setOnce?: AnalyticsProperties,
   ): Promise<void> {
-    return this.send(name, properties as AnalyticsProperties);
+    return this.send(name, properties as AnalyticsProperties, { ...(setOnce ? { setOnce } : {}) });
   }
 
   /**
@@ -118,25 +142,38 @@ export class AnalyticsTracker {
    * dropped by construction.
    */
   captureDomainEvent(event: EventRecord): Promise<void> {
-    return this.send(domainEventName(event.type), {
-      // The concrete project name is never sent: it identifies private source
-      // as surely as a repo slug in a URL does, which the request path already
-      // redacts. The opaque id groups just as well — except on rows written
-      // before dual-write, which have no projectId and group under nothing.
-      ...(event.projectId !== undefined ? { project_id: event.projectId } : {}),
-      actor_type: event.actorType,
-      ...domainEventProperties(event),
-    });
+    return this.send(
+      domainEventName(event.type),
+      {
+        // The concrete project name is never sent: it identifies private source
+        // as surely as a repo slug in a URL does, which the request path already
+        // redacts. The opaque id groups just as well — except on rows written
+        // before dual-write, which have no projectId and group under nothing.
+        ...(event.projectId !== undefined ? { project_id: event.projectId } : {}),
+        actor_type: event.actorType,
+        ...domainEventProperties(event),
+        // `createdAt`, not "now": see PostHogEvent.timestamp. A retry or the
+        // stale sweep can export this minutes to hours after the fact.
+      },
+      { timestamp: event.createdAt },
+    );
   }
 
-  private send(name: string, properties: AnalyticsProperties): Promise<void> {
+  private send(
+    name: string,
+    properties: AnalyticsProperties,
+    options: { timestamp?: string; setOnce?: AnalyticsProperties } = {},
+  ): Promise<void> {
     if (this.actor.optedOut) return Promise.resolve();
 
     const capture = this.client.capture({
       event: name,
       distinctId: this.actor.distinctId,
+      ...(options.timestamp !== undefined ? { timestamp: options.timestamp } : {}),
+      ...(options.setOnce !== undefined ? { setOnce: options.setOnce } : {}),
       properties: {
         ...this.instance,
+        ...(this.actor.agentId !== undefined ? { agent_id: this.actor.agentId } : {}),
         ...properties,
         ...(this.actor.attributed ? {} : { $process_person_profile: false }),
       },
@@ -192,14 +229,26 @@ function instanceProperties(env: Env): AnalyticsProperties {
 export function trackerForRequest(c: Context<{ Bindings: Env }>): AnalyticsTracker {
   const userId = c.get("userId") as string | undefined;
   const agentId = c.get("agentId") as string | undefined;
+  // `authMiddleware` resolves the owner to read their opt-out, and publishes it
+  // — so the person behind an agent request is already in hand here.
+  const agentOwnerId = c.get("agentOwnerId") as string | undefined;
   const optedOut = c.get("telemetryOptOut") === true;
 
-  const distinctId = userId ?? agentId ?? ANONYMOUS_DISTINCT_ID;
+  const distinctId = userId ?? agentOwnerId ?? ANONYMOUS_DISTINCT_ID;
   const kind: ActorKind = userId ? "user" : agentId ? "agent" : "anonymous";
+  // An agent whose owner could not be resolved has no person to attribute to.
+  // It is captured personless rather than minting a profile for a credential.
+  const attributed = distinctId !== ANONYMOUS_DISTINCT_ID;
 
   return AnalyticsTracker.create(
     c.env,
-    { distinctId, kind, optedOut, attributed: kind !== "anonymous" },
+    {
+      distinctId,
+      kind,
+      optedOut,
+      attributed,
+      ...(agentId !== undefined ? { agentId } : {}),
+    },
     getWaitUntil(c),
   );
 }
@@ -294,13 +343,14 @@ export async function trackerForEventActor(
   return AnalyticsTracker.create(
     env,
     {
-      // Attribution stays on the acting agent, not its owner: "which agent did
-      // this" is the question the id answers, and the owner's identity is
-      // already reachable from the agent record.
-      distinctId: event.actorId,
+      // The owner, not the acting agent — see `AnalyticsActor.distinctId`. For
+      // a user-authored event `ownerId` is the actor itself, so this is the
+      // same id either way.
+      distinctId: ownerId,
       kind: event.actorType,
       optedOut: owner.data.telemetryOptOut === true,
       attributed: true,
+      ...(event.actorType === "agent" ? { agentId: event.actorId } : {}),
     },
     waitUntil,
   );

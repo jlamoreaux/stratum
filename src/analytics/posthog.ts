@@ -7,10 +7,31 @@
  * instance-wide switch. Reaching for `createPostHogClient` directly is how the
  * per-user opt-out gets skipped — see the docblock on `AnalyticsTracker`.
  */
+import { STRATUM_VERSION } from "../version";
+
 export interface PostHogEvent {
   event: string;
   distinctId: string;
   properties?: Record<string, string | number | boolean>;
+  /**
+   * When the thing being reported actually happened, ISO-8601.
+   *
+   * Omit for anything captured inline with a request, where "now" is right.
+   * Supply it for anything captured from the queue: an outbox row is exported
+   * when a consumer gets to it, which a retry or the five-minute stale sweep
+   * can delay well past the minute the change was actually merged. Without
+   * this, those events land in the wrong bucket and every time series built on
+   * them is quietly skewed toward whenever the queue drained.
+   */
+  timestamp?: string;
+  /**
+   * Person properties to set on first sight only (`$set_once`).
+   *
+   * Not stored on the event itself — PostHog consumes them during ingestion to
+   * update the person, so they are queryable as `person.properties.*` and not
+   * as event properties.
+   */
+  setOnce?: Record<string, string | number | boolean>;
 }
 
 export class PostHogClient {
@@ -31,7 +52,15 @@ export class PostHogClient {
           api_key: this.apiKey,
           event: event.event,
           distinct_id: event.distinctId,
-          properties: { $lib: "stratum-server", ...event.properties },
+          ...(event.timestamp !== undefined ? { timestamp: event.timestamp } : {}),
+          properties: {
+            $lib: "stratum-server",
+            // Lets a metric change be attributed to the release that caused it,
+            // which is otherwise guesswork against deploy times.
+            $lib_version: STRATUM_VERSION,
+            ...event.properties,
+            ...(event.setOnce !== undefined ? { $set_once: event.setOnce } : {}),
+          },
         }),
       });
     } catch {

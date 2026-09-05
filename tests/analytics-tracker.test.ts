@@ -8,6 +8,7 @@ import {
 import type { EventRecord } from "../src/storage/events";
 import type { Env } from "../src/types";
 import { createLogger } from "../src/utils/logger";
+import { STRATUM_VERSION } from "../src/version";
 
 vi.mock("../src/storage/users", () => ({ getUser: vi.fn() }));
 vi.mock("../src/storage/agents", () => ({ getAgent: vi.fn() }));
@@ -140,7 +141,10 @@ describe("trackerForEventActor", () => {
     expect(getUser).toHaveBeenCalledWith(env.DB, "user_1", logger);
   });
 
-  it("attributes an agent event to the agent, not to its owner", async () => {
+  // An agent is a credential, not a person. Giving each one its own distinct id
+  // would mint a person profile per token, splitting one human's history across
+  // several profiles and making every user count and retention curve wrong.
+  it("attributes an agent event to its owner, keeping the agent as a property", async () => {
     const captured = stubCapture();
     vi.mocked(getAgent).mockResolvedValue({
       success: true,
@@ -152,8 +156,20 @@ describe("trackerForEventActor", () => {
     const tracker = await trackerForEventActor(env, event, logger);
     await tracker.captureDomainEvent(event);
 
-    expect(captured[0]?.distinct_id).toBe("agent_1");
+    expect(captured[0]?.distinct_id).toBe("user_1");
+    expect(captured[0]?.properties.agent_id).toBe("agent_1");
     expect(captured[0]?.properties.actor_type).toBe("agent");
+  });
+
+  it("does not tag a user-authored event with an agent id", async () => {
+    const captured = stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: optedInUser } as never);
+
+    const event = makeEvent({ actorType: "user", actorId: "user_1" });
+    await (await trackerForEventActor(env, event, logger)).captureDomainEvent(event);
+
+    expect(captured[0]?.distinct_id).toBe("user_1");
+    expect(captured[0]?.properties.agent_id).toBeUndefined();
   });
 
   it("fails closed when the agent lookup fails", async () => {
@@ -249,5 +265,74 @@ describe("AnalyticsTracker — event shape", () => {
         attempts: 5,
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("AnalyticsTracker — ingestion correctness", () => {
+  // An outbox row is exported when a consumer reaches it. A retry, or the
+  // five-minute stale sweep, can delay that well past the minute the change was
+  // actually merged — so without an explicit timestamp the event lands in the
+  // wrong bucket and every time series skews toward whenever the queue drained.
+  it("dates a domain event from the outbox row, not from delivery time", async () => {
+    const captured = stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: optedInUser } as never);
+
+    const event = makeEvent({ createdAt: "2026-01-01T00:00:00Z" });
+    await (await trackerForEventActor(env, event, logger)).captureDomainEvent(event);
+
+    expect((captured[0] as unknown as { timestamp?: string }).timestamp).toBe(
+      "2026-01-01T00:00:00Z",
+    );
+  });
+
+  it("does not backdate a request-path event", async () => {
+    const captured = stubCapture();
+    await trackerForSystem(env).capture("background_job_completed", {
+      job: "webhook-delivery",
+      outcome: "succeeded",
+    });
+
+    expect((captured[0] as unknown as { timestamp?: string }).timestamp).toBeUndefined();
+  });
+
+  it("stamps the server version so a metric change can be tied to a release", async () => {
+    const captured = stubCapture();
+    await trackerForSystem(env).capture("background_job_completed", {
+      job: "event-consumer",
+      outcome: "failed",
+    });
+
+    expect(captured[0]?.properties.$lib).toBe("stratum-server");
+    expect(captured[0]?.properties.$lib_version).toBe(STRATUM_VERSION);
+  });
+
+  it("sends person properties as $set_once so first-touch values are never overwritten", async () => {
+    const captured = stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: optedInUser } as never);
+
+    const tracker = await trackerForUser(env, "user_1", logger);
+    await tracker.capture(
+      "auth_completed",
+      { kind: "signup", provider: "github" },
+      { signup_provider: "github" },
+    );
+
+    const body = captured[0] as unknown as { $set_once?: Record<string, unknown> };
+    expect(captured[0]?.properties.$set_once).toEqual({ signup_provider: "github" });
+    expect(body.$set_once).toBeUndefined();
+  });
+
+  it("never sets person properties for an opted-out person", async () => {
+    const captured = stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: optedOutUser } as never);
+
+    const tracker = await trackerForUser(env, "user_1", logger);
+    await tracker.capture(
+      "auth_completed",
+      { kind: "signup", provider: "github" },
+      { signup_provider: "github" },
+    );
+
+    expect(captured).toHaveLength(0);
   });
 });

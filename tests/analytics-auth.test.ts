@@ -127,4 +127,25 @@ describe("captureAuthCompleted", () => {
       runInRequest({ kind: "signin", provider: "github", userId: "user_1" }),
     ).resolves.toBeUndefined();
   });
+
+  // Without a person property a profile is an opaque id, and no cohort can ask
+  // "accounts that signed up with GitHub". `$set_once`, so a later sign-in
+  // through another provider cannot rewrite how someone actually arrived.
+  it("records the signup provider as a first-touch person property", async () => {
+    const captured = stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: { id: "user_1" } } as never);
+
+    await runInRequest({ kind: "signup", provider: "github", userId: "user_1" });
+
+    expect(captured[0]?.properties.$set_once).toEqual({ signup_provider: "github" });
+  });
+
+  it("does not rewrite the signup provider on a later sign-in", async () => {
+    const captured = stubCapture();
+    vi.mocked(getUser).mockResolvedValue({ success: true, data: { id: "user_1" } } as never);
+
+    await runInRequest({ kind: "signin", provider: "google", userId: "user_1" });
+
+    expect(captured[0]?.properties.$set_once).toBeUndefined();
+  });
 });

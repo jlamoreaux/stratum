@@ -233,7 +233,15 @@ truth, and a test fails the build if this table and that file disagree.
 | `stratum.<event type>` | Once per repository activity (a change opening, a merge, a deploy) | `project_id`, `actor_type`, plus the per-type properties below |
 
 Every event additionally carries `environment` — the label the operator set in
-`STRATUM_ENVIRONMENT`, so staging traffic can be told apart from production.
+`STRATUM_ENVIRONMENT`, so staging traffic can be told apart from production —
+and `$lib_version`, the Stratum version that sent it, so a change in a metric
+can be tied to the release that caused it. An event caused by an agent also
+carries `agent_id`.
+
+One person property is ever set: `signup_provider`, recorded once when an
+account is created. It is what lets a question like "accounts that signed up
+with GitHub in August" be asked at all. Your email address, username, and
+display name are never sent.
 
 The per-type properties on `stratum.*` events are the whole reason they are
 worth collecting, and they are whitelisted per event type:
@@ -274,9 +282,18 @@ all.
   surely as a repo slug in a URL does. The opaque id groups events just as
   well.
 
-Events also carry identity attribution: the `distinctId` is the acting user or
-agent id (or `server` for unattributed requests, and `system` for events no
-person caused — both marked personless) so usage can be counted per account.
+Events also carry identity attribution: the `distinctId` is the acting user's
+id (or `server` for unattributed requests, and `system` for events no person
+caused — both marked personless) so usage can be counted per account.
+
+**An agent is attributed to the person who owns it**, not to itself. An agent
+token is a credential you minted, acting under your account — your opt-out
+already governs it, so your identity is what "who did this" means. The agent's
+own id rides along as `agent_id`, so the two stay distinguishable without an
+agent counting as a separate person.
+
+Domain events are dated from when the activity happened, not from when the
+queue got round to exporting them.
 
 ## Where are my invite codes?
 

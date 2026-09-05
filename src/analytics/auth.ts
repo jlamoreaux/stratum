@@ -46,10 +46,20 @@ export async function captureAuthCompleted(
 ): Promise<void> {
   const deliver = (async () => {
     const tracker = await trackerForUser(c.env, outcome.userId, logger);
-    await tracker.capture("auth_completed", {
-      kind: outcome.kind,
-      provider: outcome.provider,
-    });
+    await tracker.capture(
+      "auth_completed",
+      { kind: outcome.kind, provider: outcome.provider },
+      // Person properties, and only on the sign-up. `$set_once` is the point:
+      // "how did this person arrive" has one true answer, and a later sign-in
+      // through a different provider must not rewrite it.
+      //
+      // Without these a person profile is an opaque id with nothing on it, so
+      // no cohort can ask "accounts that signed up with GitHub in August" —
+      // the question every retention and activation comparison starts from.
+      // Deliberately not the email, username, or display name: the whole
+      // export is built on not sending those.
+      outcome.kind === "signup" ? { signup_provider: outcome.provider } : undefined,
+    );
   })().catch((error: unknown) => {
     // Analytics must never be able to fail a sign-in. `capture` already cannot
     // reject; this covers the preference lookup, which touches D1.

@@ -34,6 +34,7 @@ import type { Logger } from "../utils/logger";
 import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
 import { readTextWithLimit } from "../utils/request-body";
 import { requestLogger } from "../utils/request-logger";
+import { STRATUM_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -62,15 +63,11 @@ function recordOutcome(
 /**
  * Reported in the `initialize` handshake.
  *
- * Duplicated from `package.json` rather than imported: pulling JSON into the
- * Worker bundle would need `resolveJsonModule` and would ship the whole
- * manifest to the edge for one string. `tests/mcp-endpoint.test.ts` asserts the
- * two match, which is how this repo pins its other cross-file constants
- * (`tests/changelog.test.ts`, `tests/wrangler-migration-chain.test.ts`), so a
- * release bump that forgets this line fails CI rather than shipping a stale
- * version to every client's log.
+ * Re-exported from `src/version.ts`, which is also what stamps `$lib_version`
+ * on every analytics event — one constant, so the version a client is told and
+ * the version a metric is attributed to cannot disagree.
  */
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = STRATUM_VERSION;
 
 /**
  * Cap on a single JSON-RPC body.
