@@ -189,7 +189,10 @@ curl -X POST https://your-instance.workers.dev/api/projects/@you/react/import \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"url": "https://github.com/facebook/react", "branch": "main"}'
 
-# Fork a workspace, commit into it, then open an evaluation-gated change
+# Fork a workspace, commit into it, then open an evaluation-gated change.
+# The repeated "workspaces" segment is correct, not a typo: the router mounts at
+# /api/workspaces and declares /:namespace/:slug/workspaces. Project-scoped
+# though it is, this route does not live under /api/projects.
 curl -X POST .../api/workspaces/@you/my-project/workspaces -d '{"name": "fix-bug"}'
 curl -X POST .../api/workspaces/fix-bug/commit \
   -d '{"files": {"src/index.ts": "export const fixed = true;"}, "message": "Fix the bug", "projectId": "..."}'
