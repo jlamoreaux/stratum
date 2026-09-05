@@ -4,6 +4,7 @@ import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
 import { validateWebhookUrl } from "../utils/validation";
+import { DEFAULT_WEBHOOK_TIMEOUT_MS } from "./defaults";
 import { sanitizePolicy } from "./sanitize-policy";
 import type { EvalPolicy, EvalResult, EvaluationContext, Evaluator } from "./types";
 
@@ -50,7 +51,7 @@ export class WebhookEvaluator implements Evaluator {
       });
     }
 
-    const timeoutMs = config.timeoutMs ?? 10000;
+    const timeoutMs = config.timeoutMs ?? DEFAULT_WEBHOOK_TIMEOUT_MS;
     // The payload leaves the Worker, so strip credentials (webhook secrets)
     // from the policy first — the secret signs the request, it is not content.
     //

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CompositeEvaluator } from "../src/evaluation/composite-evaluator";
-import { DiffEvaluator } from "../src/evaluation/diff-evaluator";
+import { DiffEvaluator, parseDiff } from "../src/evaluation/diff-evaluator";
 import {
   MAX_COMMAND_LENGTH,
   MAX_PHASE_TIMEOUT_MS,
@@ -176,6 +176,148 @@ describe("DiffEvaluator", () => {
     if (result.success) {
       expect(result.data.passed).toBe(true);
     }
+  });
+
+  it("flags a deleted file that matches a forbidden pattern", async () => {
+    // The pre-image is the only side a deletion has: its post-image header is
+    // `+++ /dev/null`. Reading only post-image paths let a change delete
+    // anything a policy protected without tripping the pattern.
+    const diff = [
+      "diff --git a/src/auth/session.ts b/src/auth/session.ts",
+      "deleted file mode 100644",
+      "--- a/src/auth/session.ts",
+      "+++ /dev/null",
+      "@@ -1,2 +0,0 @@",
+      "-export const SESSION = 1;",
+      "-export default SESSION;",
+    ].join("\n");
+    const policy = makePolicy({
+      evaluators: [{ type: "diff", forbiddenPatterns: ["src/auth/"] }],
+      minScore: 1.0,
+    });
+
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.some((i) => i.includes("src/auth/session.ts"))).toBe(true);
+    }
+  });
+
+  it("flags both sides of a rename against a forbidden pattern", async () => {
+    // A 100%-similar rename carries no `---`/`+++` pair at all, so a policy
+    // that forbids a path would not see a file move out of it.
+    const diff = [
+      "diff --git a/src/auth/session.ts b/src/legacy/session.ts",
+      "similarity index 100%",
+      "rename from src/auth/session.ts",
+      "rename to src/legacy/session.ts",
+    ].join("\n");
+    const policy = makePolicy({
+      evaluators: [{ type: "diff", forbiddenPatterns: ["src/auth/"] }],
+      minScore: 1.0,
+    });
+
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.some((i) => i.includes("src/auth/session.ts"))).toBe(true);
+    }
+  });
+
+  it("does not let content that looks like a file header satisfy requiredPatterns", async () => {
+    // The added source line is `++ b/tests/covered.test.ts`, which a diff marks
+    // with one more `+`. Matched by prefix, that would register a test file the
+    // change never added — passing a policy that requires one.
+    const diff = [
+      "diff --git a/src/index.ts b/src/index.ts",
+      "--- a/src/index.ts",
+      "+++ b/src/index.ts",
+      "@@ -1,1 +1,3 @@",
+      " export const x = 1;",
+      "+++ b/tests/covered.test.ts",
+      "+// not a test file, just a line of text",
+    ].join("\n");
+    const policy = makePolicy({
+      evaluators: [{ type: "diff", requiredPatterns: ["tests/"] }],
+      minScore: 1.0,
+    });
+
+    const result = await evaluator.evaluate(diff, policy, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+      expect(result.data.issues?.some((i) => i.includes("required pattern"))).toBe(true);
+    }
+  });
+});
+
+describe("parseDiff", () => {
+  it("counts a content line that looks like a header", () => {
+    const diff = [
+      "diff --git a/notes.md b/notes.md",
+      "--- a/notes.md",
+      "+++ b/notes.md",
+      "@@ -1,1 +1,3 @@",
+      " intro",
+      "+++ b/fake.ts",
+      "--- a/fake.ts",
+    ].join("\n");
+
+    // One added and one removed line of content, and neither names a file.
+    expect(parseDiff(diff)).toEqual({ paths: ["notes.md"], changedLines: 2, fileCount: 1 });
+  });
+
+  it("reads the path of a mode-only change from its diff --git header", () => {
+    const diff = [
+      "diff --git a/scripts/deploy.sh b/scripts/deploy.sh",
+      "old mode 100644",
+      "new mode 100755",
+    ].join("\n");
+
+    expect(parseDiff(diff)).toEqual({
+      paths: ["scripts/deploy.sh"],
+      changedLines: 0,
+      fileCount: 1,
+    });
+  });
+
+  it("strips a quoted path and a trailing timestamp", () => {
+    const diff = [
+      "diff --git a/src/caf\u00e9.ts b/src/caf\u00e9.ts",
+      '--- "a/src/caf\u00e9.ts"\t2026-09-05 12:00:00',
+      '+++ "b/src/caf\u00e9.ts"\t2026-09-05 12:30:00',
+      "@@ -1,1 +1,1 @@",
+      "-const a = 1;",
+      "+const a = 2;",
+    ].join("\n");
+
+    expect(parseDiff(diff).paths).toEqual(["src/caf\u00e9.ts"]);
+  });
+
+  it("names both sides of a rename and neither side of a creation as /dev/null", () => {
+    const diff = [
+      "diff --git a/old.ts b/new.ts",
+      "similarity index 90%",
+      "rename from old.ts",
+      "rename to new.ts",
+      "diff --git a/added.ts b/added.ts",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/added.ts",
+      "@@ -0,0 +1,1 @@",
+      "+export const y = 2;",
+    ].join("\n");
+
+    expect(parseDiff(diff)).toEqual({
+      paths: ["old.ts", "new.ts", "added.ts"],
+      changedLines: 1,
+      fileCount: 2,
+    });
   });
 });
 

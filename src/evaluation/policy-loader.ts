@@ -2,6 +2,7 @@ import YAML from "yaml";
 import { sanitizeDeploys } from "../deploy/config";
 import { readFileFromRepo } from "../storage/git-ops";
 import { type Logger, defaultLogger } from "../utils/logger";
+import { DEFAULT_MIN_SCORE, DEFAULT_REQUIRE_ALL } from "./defaults";
 import {
   MAX_COMMAND_LENGTH,
   MAX_PHASE_TIMEOUT_MS,
@@ -13,8 +14,8 @@ import type { EvalPolicy, EvaluatorConfig, MergePolicy, SandboxEvaluatorConfig }
 
 const DEFAULT_POLICY: EvalPolicy = {
   evaluators: [{ type: "diff" }],
-  requireAll: true,
-  minScore: 0.7,
+  requireAll: DEFAULT_REQUIRE_ALL,
+  minScore: DEFAULT_MIN_SCORE,
 };
 
 /**

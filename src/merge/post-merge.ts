@@ -1,3 +1,4 @@
+import { DEFAULT_POST_MERGE_TIMEOUT_MS } from "../evaluation/defaults";
 import { materializeTree } from "../evaluation/sandbox-evaluator";
 import type { EvalPolicy } from "../evaluation/types";
 import { emitEvent } from "../queue/events";
@@ -8,7 +9,6 @@ import type { Env, ProjectEntry } from "../types";
 import { projectDefaultBranch } from "../types";
 import type { Logger } from "../utils/logger";
 
-const DEFAULT_POST_MERGE_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_IN_REASON = 500;
 
 export type PostMergeStatus = "skipped" | "passed" | "failed" | "reverted";

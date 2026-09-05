@@ -14,6 +14,7 @@
 - [MCP server](https://docs.usestratum.dev/guides/mcp/)
 - [Troubleshooting](https://docs.usestratum.dev/guides/troubleshooting/)
 - [FAQ](https://docs.usestratum.dev/guides/faq/)
+- [Policy reference](https://docs.usestratum.dev/reference/policy/)
 - [API reference](https://docs.usestratum.dev/reference/endpoints/)
 - [OpenAPI specification](https://docs.usestratum.dev/openapi.yml)
 - [Agent discovery](https://docs.usestratum.dev/reference/agent-discovery/)

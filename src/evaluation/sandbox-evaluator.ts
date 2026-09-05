@@ -5,6 +5,7 @@ import { ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
+import { DEFAULT_MIN_SCORE } from "./defaults";
 import {
   DEFAULT_COMMAND,
   DEFAULT_INSTALL_TIMEOUT_MS,
@@ -509,7 +510,7 @@ export class SandboxEvaluator implements Evaluator {
       MAX_TOTAL_BUDGET_MS,
       DEFAULT_TOTAL_BUDGET_MS,
     );
-    const minScore = policy.minScore ?? 0.7;
+    const minScore = policy.minScore ?? DEFAULT_MIN_SCORE;
 
     logger.debug("Sandbox config", { command, timeoutMs, installTimeoutMs, totalBudgetMs });
 

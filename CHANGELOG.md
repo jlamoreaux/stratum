@@ -42,6 +42,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   made under MIT and stay that way.
 
 ### Security
+- **A `forbiddenPatterns` rule could be walked past three ways.** The `diff`
+  evaluator read a change's file paths from `+++ b/` lines by prefix, which
+  missed two shapes of change entirely and could be fed a fourth. A **deletion**
+  writes `+++ /dev/null`, so its path was never checked — a change could delete
+  a file a policy protected and score clean. A **100%-similar rename** carries no
+  `---`/`+++` pair at all, so a file could leave a forbidden directory
+  unnoticed. And because a diff marks added lines with `+`, a source line
+  beginning `++` arrives as `+++…`: writing `++ b/tests/covered.ts` into any file
+  registered a path the change never touched, enough to satisfy a
+  `requiredPatterns` gate without adding the file, and enough to keep a line out
+  of the `maxLines` count.
+
+  Paths and line counts now come from a structural walk (`parseDiff`) that
+  recognises a file header by its position — inside the header block that opens
+  a file — rather than by prefix, the rule the secret scanner already followed
+  for the same reason. Patterns now see every path a change touches: the
+  pre-image of a deletion, both sides of a rename, the path of a mode-only
+  change, and the post-image of everything else. A pattern that matched nothing
+  before because the file was deleted rather than modified will now match, so a
+  policy with `forbiddenPatterns` may flag changes it previously let through —
+  which is the point.
+
+- **An out-of-range `llm.threshold` no longer changes what the gate means.** It
+  is clamped into `[0, 1]`, like every other numeric policy field. Unclamped, a
+  threshold above 1 was unreachable and silently blocked every change, and
+  `.nan` — a legal YAML scalar — made `score >= threshold` false for every
+  score, with no reason naming the typo.
 - **GitHub sign-in no longer trusts an unverified email.** The callback picked
   the primary address, verified or not, and fell back to *any* address on the
   account. That address then matched (and linked to) an existing Stratum
@@ -63,6 +90,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than folded into this change.
 
 ### Added
+- **A complete policy reference, and a test that keeps it honest.**
+  [`docs/api/policy.md`](docs/api/policy.md) documents every
+  `.stratum/policy.yaml` field, its type, its default, the bounds it is clamped
+  into, and what happens when it is wrong — plus the behaviours that decide real
+  merges: which paths a pattern sees, why one `diff` violation still passes the
+  default `minScore`, that `minScore` is not a floor on the aggregate, that
+  editing the policy file always needs a human approval, and what a policy
+  cannot enforce at all. Published at `/reference/policy/`.
+
+  The spec previously existed only inside step 3 of the getting-started
+  tutorial, so a reader who already knew Stratum had to scroll a walkthrough to
+  check a bound. Every default now lives in one module,
+  `src/evaluation/defaults.ts`, and `tests/policy-reference-docs.test.ts`
+  compares that module against the reference's table — a default that moves
+  without the doc fails the build, in either direction.
+
+- **ADR 008 records the merge gate's architecture**
+  ([`docs/adr/008-evaluation-and-merge-gate.md`](docs/adr/008-evaluation-and-merge-gate.md)):
+  why policy is sanitized into a typed value, why scoring and merge protection
+  are two passes against different clocks, why every failure mode fails closed
+  while a single out-of-range field is merely clamped, and why the LLM is one
+  evaluator with no special authority. The invariants each look like
+  over-cautious branches until you know what they defend against, which is how
+  they get refactored away.
 - **Every response offers its own source.** A footer carrying the running
   version, the license, and a link to the source now renders in the shared
   layout and on every standalone document — sign-in, sign-up, OAuth consent, the
@@ -348,6 +399,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants as well as scoped tokens.
 
 ### Fixed
+- **The docs site no longer publishes a broken link to a `.yaml` file.** The
+  mirror script rewrote repo-relative links ending in `.md` or `.yml`, so a link
+  to `.stratum/policy.yaml` — the one repo file these pages cite most — survived
+  as a relative path into a tree the site does not have.
 - **A post-merge deploy cannot be lost or run twice.** Four fixes to the new
   deployment path, all invisible until they bite: the deploy queue ran two
   messages per isolate, and two concurrent Vercel deploys exceeded the isolate's

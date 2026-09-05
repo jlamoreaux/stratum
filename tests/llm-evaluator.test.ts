@@ -27,6 +27,55 @@ function makePolicy(overrides: Partial<EvalPolicy> = {}): EvalPolicy {
   };
 }
 
+describe("LLMEvaluator — threshold clamping", () => {
+  it("a threshold above 1 is clamped to 1 rather than blocking every change", async () => {
+    // Unclamped, `threshold: 5` is unreachable: no verdict can satisfy it, so
+    // the evaluator blocks every change with no reason that names the typo.
+    const ai = makeMockAi(
+      JSON.stringify({ score: 1, passed: true, reason: "Perfect", issues: [] }),
+    );
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", threshold: 5 }] });
+
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(true);
+    }
+  });
+
+  it("a NaN threshold falls back to the default rather than failing every comparison", async () => {
+    // `.nan` is a legal YAML scalar, and `score >= NaN` is false for every
+    // score — the same silent block, reached from the policy file.
+    const ai = makeMockAi(JSON.stringify({ score: 0.9, passed: true, reason: "Good", issues: [] }));
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", threshold: Number.NaN }] });
+
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(true);
+    }
+  });
+
+  it("a negative threshold is clamped to 0, where the model's own verdict still governs", async () => {
+    const ai = makeMockAi(
+      JSON.stringify({ score: 0.9, passed: false, reason: "Found a bug", issues: ["bug"] }),
+    );
+    const evaluator = new LLMEvaluator(ai);
+    const policy = makePolicy({ evaluators: [{ type: "llm", threshold: -1 }] });
+
+    const result = await evaluator.evaluate("diff content", policy, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.passed).toBe(false);
+    }
+  });
+});
+
 describe("LLMEvaluator — valid JSON responses", () => {
   it("score 0.9 with threshold 0.7 → passed: true", async () => {
     const ai = makeMockAi(

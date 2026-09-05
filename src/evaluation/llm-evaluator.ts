@@ -4,21 +4,16 @@ import { ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
+import {
+  DEFAULT_LLM_MODEL,
+  DEFAULT_LLM_THRESHOLD,
+  DEFAULT_MAX_DIFF_CHARS,
+  MAX_DIFF_CHARS_CEILING,
+  MAX_DIFF_CHARS_FLOOR,
+  MAX_POLICY_CONTEXT_CHARS,
+} from "./defaults";
 import { sanitizePolicy } from "./sanitize-policy";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
-
-const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
-const DEFAULT_THRESHOLD = 0.7;
-const DEFAULT_MAX_DIFF_CHARS = 24_000;
-// Policy-supplied window bounds: the ceiling stops a hostile policy blowing the
-// model's context or the Worker's memory; the floor stops a tiny/fractional
-// value feeding the model an effectively empty diff that it would still score.
-const MAX_DIFF_CHARS_CEILING = 100_000;
-const MAX_DIFF_CHARS_FLOOR = 1_000;
-// The serialized policy shares the model's input budget with the diff; a
-// pathological policy must not blow the context (or starve the diff), so an
-// oversize one fails closed before any model call.
-const MAX_POLICY_CONTEXT_CHARS = 8_000;
 
 const SYSTEM_PROMPT = [
   "You are a rigorous code reviewer acting as an automated merge gate.",
@@ -43,8 +38,15 @@ export class LLMEvaluator implements Evaluator {
       const config = policy.evaluators.find((e) => e.type === "llm") as
         | { type: "llm"; model?: string; threshold?: number; maxDiffChars?: number }
         | undefined;
-      const model = config?.model ?? DEFAULT_MODEL;
-      const threshold = config?.threshold ?? DEFAULT_THRESHOLD;
+      const model = config?.model ?? DEFAULT_LLM_MODEL;
+      // Clamped, not trusted as written: a threshold above 1 is unreachable and
+      // would block every change, and a negative one makes `score >= threshold`
+      // true for every score the model can return — silently reducing this gate
+      // to whatever `passed` the model happened to emit.
+      const threshold =
+        typeof config?.threshold === "number" && Number.isFinite(config.threshold)
+          ? Math.min(1, Math.max(0, config.threshold))
+          : DEFAULT_LLM_THRESHOLD;
       const maxDiffChars =
         typeof config?.maxDiffChars === "number" && Number.isFinite(config.maxDiffChars)
           ? Math.min(

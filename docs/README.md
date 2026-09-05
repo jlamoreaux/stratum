@@ -17,6 +17,7 @@ docs/
 ├── api/                                # API Documentation
 │   ├── openapi.yml                     # OpenAPI 3.1.0 specification
 │   ├── authentication.md               # Authentication methods
+│   ├── policy.md                       # .stratum/policy.yaml reference
 │   ├── errors.md                       # Error codes reference
 │   └── endpoints/                      # Endpoint documentation
 │       ├── README.md                   # Overview
@@ -52,7 +53,8 @@ docs/
 │   ├── 004-high-frequency-agent-commits.md
 │   ├── 005-git-smart-http-proxy.md
 │   ├── 006-ssh-transport.md
-│   └── 007-sandbox-evaluator-threat-model.md
+│   ├── 007-sandbox-evaluator-threat-model.md
+│   └── 008-evaluation-and-merge-gate.md
 ├── research/                           # Research notes
 │   ├── github-alternatives-pain-points.md
 │   ├── master-plan-alignment.md
@@ -106,6 +108,7 @@ docs/
 - [Users](api/endpoints/users.md)
 
 **Reference:**
+- [Policy Reference](api/policy.md) - every `.stratum/policy.yaml` field, default, and bound
 - [Error Codes](api/errors.md)
 
 ### For Developers
@@ -129,6 +132,7 @@ docs/
 - [ADR 005: Native `git push` via a Smart-HTTP Proxy](adr/005-git-smart-http-proxy.md)
 - [ADR 006: SSH Transport for Git](adr/006-ssh-transport.md)
 - [ADR 007: Sandbox Evaluator Threat Model and Time Budget](adr/007-sandbox-evaluator-threat-model.md)
+- [ADR 008: The Evaluation and Merge Gate Architecture](adr/008-evaluation-and-merge-gate.md)
 
 **Historical Reference:**
 - [Archived Documents](archive/README.md) - Code reviews, audits, etc.
@@ -154,6 +158,7 @@ short stub that needs to be fleshed out.
 | API Endpoints - Agents | 🚧 Outline | Medium | 2026-08-25 |
 | API Endpoints - Organizations | 🚧 Outline | Medium | 2026-08-25 |
 | API Errors | ✅ Complete | Medium | 2026-08-31 |
+| API Policy Reference | ✅ Complete | Critical | 2026-09-05 |
 | User Guide - Getting Started | ✅ Complete | High | 2026-08-31 |
 | User Guide - Importing | ✅ Complete | High | 2026-08-31 |
 | User Guide - Code Review | ✅ Complete | High | 2026-08-31 |
@@ -167,7 +172,7 @@ short stub that needs to be fleshed out.
 | Developer - Database | 🚧 Outline | High | 2026-08-25 |
 | Developer - Queues | 🚧 Outline | Medium | 2026-08-25 |
 | Developer - Testing | 🚧 Outline | Medium | 2026-08-25 |
-| ADRs (001-007) | ✅ Complete | Low | 2026-08-31 |
+| ADRs (001-008) | ✅ Complete | Low | 2026-09-05 |
 
 **Legend:** ✅ Complete | 🚧 Outline / In Progress | 📋 Planned
 

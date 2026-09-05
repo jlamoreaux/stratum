@@ -36,6 +36,7 @@
     ["/guides/mcp/", "The MCP server — the eval-gated change flow for any MCP client"],
     ["/guides/troubleshooting/", "Troubleshooting"],
     ["/guides/faq/", "FAQ"],
+    ["/reference/policy/", "Every field .stratum/policy.yaml accepts, with defaults and bounds"],
     ["/reference/authentication/", "Bearer tokens, sessions, and the admin API key"],
     ["/reference/endpoints/", "REST API endpoint reference"],
     ["/reference/errors/", "Error codes"],

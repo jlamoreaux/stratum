@@ -104,6 +104,12 @@ npm run check:guides   # exit 1 if they are stale — this is what CI runs
 If your change alters behaviour a doc describes, update the doc in the same PR.
 See [`docs/README.md`](docs/README.md) for the full layout and conventions.
 
+Changing an evaluator's default or bound also means updating
+[`docs/api/policy.md`](docs/api/policy.md). Those values live in one module,
+`src/evaluation/defaults.ts`, and `tests/policy-reference-docs.test.ts` compares
+it against the reference's defaults table — so a default that moves without the
+doc fails the build rather than shipping a reference that quietly lies.
+
 ## Reporting bugs & requesting features
 
 Use the [issue templates](.github/ISSUE_TEMPLATE/). For anything security-related, **do not open a

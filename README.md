@@ -265,8 +265,10 @@ merge:
   autoRevert: true                      # revert the merge commit if it fails
 ```
 
-This repository runs under its own policy — [`.stratum/policy.yaml`](.stratum/policy.yaml)
-is the live, dogfooded example.
+Every field, default, and bound is in the
+[policy reference](docs/api/policy.md) — including what a policy *cannot*
+enforce. This repository runs under its own policy —
+[`.stratum/policy.yaml`](.stratum/policy.yaml) is the live, dogfooded example.
 
 ## What's included
 
@@ -391,6 +393,9 @@ See [`docs/developer/architecture.md`](docs/developer/architecture.md) for the f
 Published at [docs.usestratum.dev](https://docs.usestratum.dev), built from
 [`website/`](website/) (Astro Starlight).
 
+**Configuration** — [Policy reference](docs/api/policy.md) — every
+`.stratum/policy.yaml` field, default, and bound
+
 **Users** — [Getting started](docs/user-guide/getting-started.md) ·
 [Importing from GitHub](docs/user-guide/importing.md) ·
 [CI integration](docs/user-guide/ci-integration.md) ·
@@ -419,7 +424,9 @@ Published at [docs.usestratum.dev](https://docs.usestratum.dev), built from
 [ADR 003: D1 for import state](docs/adr/003-d1-for-import-state.md) ·
 [ADR 004: High-frequency agent commits](docs/adr/004-high-frequency-agent-commits.md) ·
 [ADR 005: Git smart-HTTP proxy](docs/adr/005-git-smart-http-proxy.md) ·
-[ADR 006: SSH transport](docs/adr/006-ssh-transport.md)
+[ADR 006: SSH transport](docs/adr/006-ssh-transport.md) ·
+[ADR 007: Sandbox evaluator threat model](docs/adr/007-sandbox-evaluator-threat-model.md) ·
+[ADR 008: Evaluation and merge gate](docs/adr/008-evaluation-and-merge-gate.md)
 
 ## Deployment
 

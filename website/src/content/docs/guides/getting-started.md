@@ -157,6 +157,10 @@ A malformed policy file **fails closed**: the merge gate blocks rather than
 silently falling back to defaults, so a typo in a stricter policy can't quietly
 downgrade your governance.
 
+This section covers the fields you will reach for first. The
+[policy reference](/reference/policy/) is the complete contract — every field,
+every default, every bound, and what each one does when it is wrong.
+
 ### The evaluators
 
 - **Secret scan — always on, always blocking.** You don't configure it and you
@@ -434,6 +438,7 @@ change whose id is streamed back in the push output. Otherwise, push to a
 
 ## Where to go next
 
+- [Policy reference](/reference/policy/) — every `.stratum/policy.yaml` field, default, and bound
 - [Code Review](/guides/code-review/) — comment threads, line anchors, and verdicts
 - [Issues](/guides/issues/) — the built-in tracker, and linking issues to changes
 - [CI Integration](/guides/ci-integration/) — bring your own CI via the webhook evaluator

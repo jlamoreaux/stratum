@@ -3,6 +3,14 @@
 Guidance for AI coding agents (and the humans reviewing them) working in this repository.
 Stratum treats agents as first-class contributors — this file is the contract.
 
+**What enforces what.** This file is *read*, not executed: nothing in Stratum's merge
+gate checks the conventions below, and a change that ignores them can still be green.
+What actually blocks a merge is CI (`pr-checks.yml`) and, on a Stratum instance, the
+evaluators in [`.stratum/policy.yaml`](.stratum/policy.yaml) — see the
+[policy reference](docs/api/policy.md) for what a policy can and cannot express. If a
+rule here matters enough to be binding, make it a lint rule, a test, or a `diff`
+pattern; otherwise it is guidance a reviewer has to enforce by reading.
+
 ## What this project is
 
 Stratum is a code-collaboration platform for the AI engineering era, built on Cloudflare
@@ -76,6 +84,10 @@ Mirror lint → typecheck → test locally before pushing.
   a direct edit to `website/src/content/docs/` is overwritten by the next sync. The rest of `docs/`
   (`developer/`, `adr/`, `runbooks/`) stays internal. This no longer goes stale silently:
   `docs.yml` watches `docs/**` and fails CI on drift via `npm run check:guides`.
+- **A change to an evaluator default or bound also updates `docs/api/policy.md`.** The
+  defaults live in `src/evaluation/defaults.ts` precisely so there is one place to
+  change; `tests/policy-reference-docs.test.ts` compares that module against the
+  reference's table and fails the build on drift, in either direction.
 - Highlight.js / type gotchas and the full ship flow live in `docs/developer/`.
 
 ## Operational rules (do not violate)

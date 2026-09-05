@@ -32,6 +32,7 @@ const GUIDES = [
 
 /** Pages published as /reference/<slug>/, keyed by their file in docs/api. */
 const REFERENCE = [
+  ["policy", "Every field .stratum/policy.yaml accepts — evaluators, scoring, merge protection, deploys, and every default and bound."],
   ["errors", "HTTP status codes and the machine-readable error codes Stratum returns."],
   ["authentication", "Named scoped API tokens, agent tokens, session cookies, anonymous access, and the admin API key."],
 ];
@@ -68,7 +69,10 @@ function rewriteLinks(text, srcDir) {
     if (/^(https?:|mailto:|\/|#)/.test(href)) return whole;
     const [path, hash] = href.split("#");
     const anchor = hash ? `#${hash}` : "";
-    if (!path || !/\.(md|yml)$/.test(path)) return whole;
+    // `.yaml` as well as `.yml`: the one repo file these pages link to most
+    // (`.stratum/policy.yaml`) spells it the long way, and an unrewritten link
+    // publishes as a relative path into a tree the site does not have.
+    if (!path || !/\.(md|ya?ml)$/.test(path)) return whole;
     const resolved = normalize(join(srcDir, path)).split("\\").join("/");
     const url = siteUrl(resolved);
     return url ? `[${label}](${url}${anchor})` : `[${label}](${REPO}/blob/main/${resolved}${anchor})`;

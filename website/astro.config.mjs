@@ -122,6 +122,10 @@ export default defineConfig({
           ],
         },
         {
+          label: "Configuration",
+          items: [{ label: "Policy reference", slug: "reference/policy" }],
+        },
+        {
           label: "API reference",
           items: [
             { label: "Authentication", slug: "reference/authentication" },
