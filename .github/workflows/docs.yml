@@ -63,6 +63,10 @@ jobs:
 
       - name: Build
         working-directory: website
+        # Absent on forks and in PR builds, which is the intent: the build must
+        # succeed without it and simply ship no analytics.
+        env:
+          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY }}
         run: npm run build
 
       - name: Deploy to Cloudflare

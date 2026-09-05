@@ -1,0 +1,124 @@
+import { describe, expect, it, vi } from "vitest";
+import app from "../src/index";
+import type { Env } from "../src/types";
+
+const KEY = "phc_test123";
+
+function makeEnv(overrides: Partial<Env> = {}): Env {
+  return {
+    ARTIFACTS: { get: vi.fn(), create: vi.fn() } as unknown as Env["ARTIFACTS"],
+    STATE: {
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => undefined),
+    } as unknown as KVNamespace,
+    DB: {} as D1Database,
+    POSTHOG_PUBLIC_KEY: KEY,
+    STRATUM_ENVIRONMENT: "test",
+    ...overrides,
+  } as unknown as Env;
+}
+
+/** A page that renders for an anonymous visitor, so no session plumbing is needed. */
+async function fetchSignup(env: Env): Promise<Response> {
+  return app.fetch(new Request("http://localhost/auth/signup"), env);
+}
+
+describe("web analytics injection", () => {
+  it("injects the SDK and bootstrap when every gate is open", async () => {
+    const html = await (await fetchSignup(makeEnv())).text();
+    expect(html).toContain("/_ph/static/");
+    expect(html).toContain("posthog.init");
+  });
+
+  it("injects nothing when no public key is configured", async () => {
+    // The default for every self-hoster, and for this repo's own local dev.
+    const html = await (await fetchSignup(makeEnv({ POSTHOG_PUBLIC_KEY: undefined }))).text();
+    expect(html).not.toContain("/_ph/static/");
+    expect(html).not.toContain("posthog.init");
+  });
+
+  it("injects nothing when the instance kill switch is set", async () => {
+    const env = makeEnv({ STRATUM_TELEMETRY_DISABLED: "true" });
+    const html = await (await fetchSignup(env)).text();
+    expect(html).not.toContain("posthog.init");
+  });
+
+  it("injects nothing when the key is not a project token", async () => {
+    // A personal key (phx_) would be a credential, not a public identifier.
+    const html = await (await fetchSignup(makeEnv({ POSTHOG_PUBLIC_KEY: "phx_secret" }))).text();
+    expect(html).not.toContain("posthog.init");
+    expect(html).not.toContain("phx_secret");
+  });
+
+  it("carries the request's CSP nonce on both injected tags", async () => {
+    // Without a matching nonce the tags are blocked by `script-src` and the only
+    // result is a pair of violation reports.
+    const res = await fetchSignup(makeEnv());
+    const nonce = /'nonce-([^']+)'/.exec(res.headers.get("Content-Security-Policy") ?? "")?.[1];
+    expect(nonce).toBeTruthy();
+    const html = await res.text();
+    const tags = html.match(/<script[^>]*>/g) ?? [];
+    const injected = tags.filter((t) => t.includes("/_ph/static/") || t.includes("defer"));
+    expect(injected.length).toBeGreaterThan(0);
+    expect(injected.filter((t) => !t.includes(`nonce="${nonce}"`))).toEqual([]);
+  });
+
+  it("reports the route pattern, never the concrete path", async () => {
+    const html = await (await fetchSignup(makeEnv())).text();
+    const config = /var cfg = (\{.*?\});/s.exec(html)?.[1];
+    expect(config).toBeTruthy();
+    expect(JSON.parse(config as string).route).toBe("/auth/signup");
+  });
+
+  it("marks injected responses no-store so a stale nonce is never cached", async () => {
+    const res = await fetchSignup(makeEnv());
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("leaves non-HTML responses alone", async () => {
+    const res = await app.fetch(new Request("http://localhost/health"), makeEnv());
+    expect(await res.text()).not.toContain("posthog.init");
+  });
+
+  it("leaves the stylesheet alone", async () => {
+    const res = await app.fetch(new Request("http://localhost/ui.css"), makeEnv());
+    expect(await res.text()).not.toContain("posthog.init");
+  });
+
+  it("never instruments a page that renders a secret", async () => {
+    // /settings reveals a freshly minted API token exactly once, and the
+    // webhook-created page under /api prints a signing secret beside a Copy
+    // button. Autocapture on either is a disclosure, so both are denied.
+    for (const path of ["/settings", "/api/projects/x/webhooks"]) {
+      const res = await app.fetch(new Request(`http://localhost${path}`), makeEnv());
+      expect(await res.text(), path).not.toContain("posthog.init");
+    }
+  });
+
+  it("never instruments the OAuth consent screen", async () => {
+    const res = await app.fetch(
+      new Request("http://localhost/oauth/authorize?client_id=a&state=b"),
+      makeEnv(),
+    );
+    expect(await res.text()).not.toContain("posthog.init");
+  });
+
+  it("does not instrument the proxy's own responses", async () => {
+    const res = await app.fetch(new Request("http://localhost/_ph/e"), makeEnv());
+    expect(await res.text()).not.toContain("posthog.init");
+  });
+
+  it("does not fire a browser pageview on a 404", async () => {
+    // `analyticsMiddleware` drops server-side 404s and the FAQ documents it;
+    // injecting here would put the two surfaces permanently out of agreement.
+    const res = await app.fetch(new Request("http://localhost/no-such-page"), makeEnv());
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("posthog.init");
+  });
+
+  it("never lets the public key reach a page that was not instrumented", async () => {
+    const env = makeEnv({ STRATUM_TELEMETRY_DISABLED: "true" });
+    const html = await (await fetchSignup(env)).text();
+    expect(html).not.toContain(KEY);
+  });
+});

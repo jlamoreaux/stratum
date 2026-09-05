@@ -7,6 +7,7 @@ import {
   ALL_EVENT_NAMES,
   DOMAIN_EVENT_NAMES,
   SURFACE_EVENT_NAMES,
+  WEB_EVENT_NAMES,
   domainEventName,
   domainEventProperties,
   importSourceProvider,
@@ -40,6 +41,16 @@ describe("analytics catalog", () => {
   // this suite exists to catch — the code shipping more than the docs admit.
   it("documents every surface event in the public FAQ", () => {
     for (const name of SURFACE_EVENT_NAMES) {
+      expect(FAQ, `\`${name}\` is missing from docs/user-guide/faq.md`).toContain(`\`${name}\``);
+    }
+  });
+
+  // Browser events reach PostHog without passing through any code in `src/`,
+  // so nothing else in this suite would notice them going undocumented. The
+  // FAQ says the list is exhaustive; this is what makes that true rather than
+  // aspirational.
+  it("documents every browser event in the public FAQ", () => {
+    for (const name of WEB_EVENT_NAMES) {
       expect(FAQ, `\`${name}\` is missing from docs/user-guide/faq.md`).toContain(`\`${name}\``);
     }
   });

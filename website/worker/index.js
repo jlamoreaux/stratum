@@ -79,10 +79,74 @@ const wantsMarkdown = (accept) =>
     return Number(q) > 0;
   });
 
+/** PostHog ingestion paths this site will relay, and nothing else. */
+const INGEST_PREFIXES = ["/e", "/i/v0/e", "/decide", "/flags", "/batch"];
+const PROXY_PREFIX = "/_ph";
+const SDK_VERSION = "1.427.2";
+
+/**
+ * Same-origin reverse proxy for analytics, mirroring `src/routes/posthog-proxy.ts`.
+ *
+ * Must run before the Markdown branch below, which would otherwise rewrite
+ * `/_ph/e` to `/_ph/e.md`, and before the assets binding, which would 404 it.
+ * Returns 204 rather than an error on any refusal: a telemetry beacon must
+ * never surface as a failure on the page.
+ */
+async function handleAnalyticsProxy(request, url) {
+  const suffix = url.pathname.slice(PROXY_PREFIX.length) || "/";
+  const noContent = () => new Response(null, { status: 204 });
+
+  const sdkMatch = /^\/static\/(\d+\.\d+\.\d+)\/array\.js$/.exec(suffix);
+  if (sdkMatch) {
+    const cached = await caches.default.match(request);
+    if (cached) return cached;
+    const upstream = await fetch(
+      `https://cdn.jsdelivr.net/npm/posthog-js@${sdkMatch[1]}/dist/array.js`,
+    ).catch(() => null);
+    if (!upstream?.ok) return noContent();
+    const response = new Response(upstream.body, {
+      status: 200,
+      headers: {
+        "content-type": "application/javascript; charset=UTF-8",
+        "cache-control": "public, max-age=31536000, immutable",
+      },
+    });
+    await caches.default.put(request, response.clone());
+    return response;
+  }
+
+  if (!["GET", "POST", "OPTIONS"].includes(request.method)) return noContent();
+  if (!INGEST_PREFIXES.some((p) => suffix === p || suffix.startsWith(`${p}/`))) return noContent();
+  if (request.headers.get("X-Stratum-Proxy")) return noContent();
+
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  headers.delete("authorization");
+  headers.delete("host");
+  headers.set("X-Stratum-Proxy", "1");
+  const clientIp = request.headers.get("CF-Connecting-IP");
+  if (clientIp) headers.set("X-Forwarded-For", clientIp);
+
+  const upstream = await fetch(`https://us.i.posthog.com${suffix}${url.search}`, {
+    method: request.method,
+    headers,
+    ...(request.method === "POST" ? { body: await request.arrayBuffer() } : {}),
+  }).catch(() => null);
+  if (!upstream) return noContent();
+
+  const responseHeaders = new Headers(upstream.headers);
+  responseHeaders.delete("set-cookie");
+  return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const publicMetadata = isPublicMetadata(url.pathname);
+
+    if (url.pathname === PROXY_PREFIX || url.pathname.startsWith(`${PROXY_PREFIX}/`)) {
+      return handleAnalyticsProxy(request, url);
+    }
 
     // A preflight only ever reaches these paths, and answering it here keeps the
     // assets binding from returning a 405 that reads to an agent as "gone".

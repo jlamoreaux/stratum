@@ -29,6 +29,8 @@ jobs:
 
       - name: Install and build
         working-directory: website
+        env:
+          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY }}
         run: |
           npm ci
           npm run build

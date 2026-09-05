@@ -158,8 +158,33 @@ export const SURFACE_EVENT_NAMES: readonly SurfaceEventName[] = [
   "background_job_completed",
 ];
 
+/**
+ * Events produced by PostHog's SDK in the browser, not by this codebase.
+ *
+ * They are listed here for one reason: `docs/user-guide/faq.md` tells
+ * self-hosters the event list is exhaustive, and a test holds that claim to
+ * account. Nothing in `src/` emits these — the SDK does, once
+ * `POSTHOG_PUBLIC_KEY` is set — so the list has to be maintained by hand
+ * against what `src/analytics/web-snippet.ts` enables. Turning on another SDK
+ * capture feature means adding its event here, or the FAQ becomes a false
+ * statement about what leaves the instance.
+ */
+export const WEB_EVENT_NAMES: readonly string[] = [
+  "$pageview",
+  "$pageleave",
+  "$autocapture",
+  "$web_vitals",
+  "$dead_click",
+  "$rageclick",
+  "$identify",
+];
+
 /** Every event name, for the docs-drift test and for operator reference. */
-export const ALL_EVENT_NAMES: readonly string[] = [...SURFACE_EVENT_NAMES, ...DOMAIN_EVENT_NAMES];
+export const ALL_EVENT_NAMES: readonly string[] = [
+  ...SURFACE_EVENT_NAMES,
+  ...DOMAIN_EVENT_NAMES,
+  ...WEB_EVENT_NAMES,
+];
 
 /** Git hosts Stratum imports from. Anything else is reported as `other`. */
 const KNOWN_SOURCE_HOSTS: ReadonlyMap<string, string> = new Map([

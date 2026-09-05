@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Browser analytics, opt-in and redacted.** `app.usestratum.dev` and the docs
+  site sent no browser events at all, so pageviews, Core Web Vitals, dead
+  clicks and rageclicks were invisible and the docs-to-signup funnel could not
+  be measured. Setting the new `POSTHOG_PUBLIC_KEY` var enables PostHog's SDK
+  in the browser. It is a **separate switch from `POSTHOG_API_KEY`** on
+  purpose: enabling server-side telemetry has never meant running third-party
+  JavaScript in your users' browsers or sending their IP addresses anywhere,
+  and it still does not. Unset, no analytics script is served to anyone.
+  The same promise the server makes is kept in the browser: URLs are rewritten
+  to route patterns, page titles and referrers are dropped, clicked-element
+  text and attributes are masked, unrecognised properties are dropped rather
+  than forwarded, Do Not Track and Global Privacy Control are respected, and
+  session replay is not shipped. The SDK is version-pinned and served from your
+  own origin through `/_ph/*`, which keeps it under your Content-Security-Policy
+  and stops content blockers biasing the numbers. `docs/user-guide/faq.md`
+  documents every browser event and every guarantee, and a test fails the build
+  if that list and the code disagree.
+
+### Fixed
+- **`api_request` reported the wrong route for most pages.** `routePath(c, -1)`
+  returns the last *registered* route matching a path, not the one that
+  answered it, and `uiRouter`'s `/:namespace/:slug` catch-all is mounted last —
+  so `/auth/signup`, `/settings`, `/new` and others were all recorded as
+  `/:namespace/:slug`. Route breakdowns and the `surface` derived from them
+  were correspondingly wrong. Both patterns are source-code literals, so
+  nothing private was ever exposed; the data was simply mislabelled. Historical
+  events are not corrected.
+
 ### Security
 - **GitHub sign-in no longer trusts an unverified email.** The callback picked
   the primary address, verified or not, and fell back to *any* address on the

@@ -10,6 +10,7 @@ import { configGuardMiddleware } from "./middleware/config-guard";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
+import { webAnalyticsMiddleware } from "./middleware/web-analytics";
 import { handleDeployQueue } from "./queue/deploy-queue";
 import { handleEventQueue } from "./queue/event-consumer";
 import type { EventQueueMessage } from "./queue/events";
@@ -34,6 +35,7 @@ import { mcpOAuthRouter } from "./routes/mcp-oauth";
 import { metricsRouter } from "./routes/metrics";
 import { oauthSignupRouter } from "./routes/oauth-signup";
 import { orgsRouter } from "./routes/orgs";
+import { posthogProxyRouter } from "./routes/posthog-proxy";
 import { projectsRouter } from "./routes/projects";
 import { restoreRouter } from "./routes/restore";
 import { reviewsRouter } from "./routes/reviews";
@@ -68,13 +70,20 @@ const app = new Hono<{ Bindings: Env }>();
  */
 function errorRoute(c: Context<{ Bindings: Env }>): string {
   try {
-    return routePath(c, -1);
+    // Defaults to `c.req.routeIndex` — the responding handler. See the note in
+    // `analyticsMiddleware`: the `-1` form reports the last *registered*
+    // matching route, which the `/:namespace/:slug` catch-all always wins.
+    return routePath(c) || "*";
   } catch {
     return "*";
   }
 }
 
 app.use("*", securityHeadersMiddleware);
+// Registered early so its post-`next()` work sees the final response, after
+// every other middleware has had its say. It reads `userId`/`telemetryOptOut`,
+// which `authMiddleware` below publishes before this runs.
+app.use("*", webAnalyticsMiddleware);
 app.use("*", configGuardMiddleware);
 app.use("*", analyticsMiddleware);
 app.use("*", authMiddleware);
@@ -141,6 +150,10 @@ app.get("/dev-login", async (c) => {
     return c.json({ error: "Dev login failed", details: error.message }, 500);
   }
 });
+
+// Mounted before uiRouter, whose `/:namespace/:slug` catch-all is registered
+// last and would otherwise swallow these paths.
+app.route("/_ph", posthogProxyRouter);
 
 app.get("/ui.css", (c) => {
   return c.text(CSS, 200, { "Content-Type": "text/css; charset=UTF-8" });

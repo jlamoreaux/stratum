@@ -5,6 +5,41 @@ import starlight from "@astrojs/starlight";
 import starlightLlmsTxt from "starlight-llms-txt";
 
 const SITE = "https://docs.usestratum.dev";
+
+/**
+ * Browser analytics for the docs site, off unless a project key is supplied at
+ * build time. A fork, a PR preview, or anyone running `npm run build` without
+ * the variable produces a site that sends nothing — the build must not depend
+ * on it.
+ *
+ * Unlike the app, docs URLs are public content and are sent as-is: which page
+ * someone read is the entire question. There is no session here, so every
+ * visitor is anonymous and Do Not Track is their only control — hence
+ * `respect_dnt`. Session replay is not loaded on either property.
+ */
+const POSTHOG_KEY = process.env.PUBLIC_POSTHOG_KEY ?? "";
+const SDK_VERSION = "1.427.2";
+const analyticsHead = POSTHOG_KEY.startsWith("phc_")
+  ? [
+      { tag: "script", attrs: { src: `/_ph/static/${SDK_VERSION}/array.js`, defer: true } },
+      {
+        tag: "script",
+        attrs: { defer: true },
+        content: `posthog.init(${JSON.stringify(POSTHOG_KEY)}, {
+  api_host: "/_ph",
+  ui_host: "https://us.posthog.com",
+  person_profiles: "identified_only",
+  disable_session_recording: true,
+  disable_external_dependency_loading: true,
+  respect_dnt: true,
+  capture_pageview: true,
+  capture_pageleave: true,
+  autocapture: true,
+  loaded: function (ph) { ph.register({ environment: "docs" }); },
+});`,
+      },
+    ]
+  : [];
 const DESCRIPTION =
   "The governance layer for AI-written code — evaluation-gated merges, provenance, and agent identities, built on Cloudflare Workers.";
 
@@ -52,6 +87,7 @@ export default defineConfig({
         }),
       ],
       head: [
+        ...analyticsHead,
         // JetBrains Mono, matching the app's typography.
         { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.googleapis.com" } },
         {
