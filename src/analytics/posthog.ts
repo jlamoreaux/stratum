@@ -1,3 +1,12 @@
+/**
+ * The PostHog transport.
+ *
+ * Deliberately thin, and deliberately not the thing you should be calling.
+ * Product code goes through `AnalyticsTracker` (`./tracker`), which is what
+ * resolves the acting user's opt-out; this file knows only about the
+ * instance-wide switch. Reaching for `createPostHogClient` directly is how the
+ * per-user opt-out gets skipped — see the docblock on `AnalyticsTracker`.
+ */
 export interface PostHogEvent {
   event: string;
   distinctId: string;
@@ -11,6 +20,7 @@ export class PostHogClient {
     private disabled: boolean,
   ) {}
 
+  /** Never rejects: a telemetry failure must not surface in a request or a queue handler. */
   async capture(event: PostHogEvent): Promise<void> {
     if (this.disabled || !this.apiKey) return;
     try {
@@ -31,19 +41,12 @@ export class PostHogClient {
 }
 
 /**
- * Build a PostHog client for this environment.
+ * Build a PostHog client for this environment, carrying the **instance** gate:
+ * `STRATUM_TELEMETRY_DISABLED`, or the absence of an API key.
  *
- * Two independent gates govern export, and only ONE of them lives in here:
- *
- * - The **instance** switch (`STRATUM_TELEMETRY_DISABLED`) travels with the
- *   client, so every call site inherits it for free.
- * - The **per-user** opt-out (#257) does NOT. Each call site must consult the
- *   acting user's preference itself — `src/middleware/analytics.ts` reads it
- *   from the auth context, `src/queue/event-consumer.ts` looks it up.
- *
- * That asymmetry is exactly how the queue exporter shipped without an opt-out.
- * If you add a third `capture()` call site, gate it on the actor's preference
- * or you will reintroduce the same hole.
+ * The **per-user** opt-out (#257) is not here and must not be added here — it
+ * needs an actor, and this function has none. `AnalyticsTracker` owns it, and
+ * owns it in a way a new call site cannot bypass.
  */
 export function createPostHogClient(env: {
   POSTHOG_API_KEY?: string;

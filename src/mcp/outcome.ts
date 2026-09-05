@@ -13,6 +13,7 @@
  * Kept as a pure function, separate from the transport-agnostic protocol
  * layer, so it is testable by handing it plain objects.
  */
+import type { SurfaceEventProperties } from "../analytics/events";
 import { type JsonRpcResponse, isJsonRpcRequest } from "./protocol";
 
 export interface McpOutcome {
@@ -104,4 +105,76 @@ export function describeMcpOutcome(message: unknown, reply: JsonRpcResponse | nu
     };
   }
   return { level: "debug", message: "MCP message handled", meta: { method } };
+}
+
+/**
+ * What to *export* about one MCP exchange, as opposed to what to log.
+ *
+ * Separate from `describeMcpOutcome` because the two answer different
+ * questions with different rules. A log line stays on the operator's own
+ * instance and may quote the error a model was shown; an analytics event
+ * leaves for a third party and may carry only bounded values. The overlap is
+ * real but the constraint is not shared, so merging them would mean one
+ * function whose output is safe for exactly one of its two consumers.
+ *
+ * Returns `null` for anything that did not run: a malformed message, and a
+ * notification (which `handleMessage` answers with no reply, without invoking
+ * the tool). Counting those as tool calls would overstate MCP usage with
+ * traffic that never reached a tool.
+ */
+export function describeMcpAnalytics(
+  message: unknown,
+  reply: JsonRpcResponse | null,
+  knownTools: ReadonlySet<string>,
+): SurfaceEventProperties["mcp_request"] | null {
+  if (!isJsonRpcRequest(message) || reply === null) return null;
+
+  const props: SurfaceEventProperties["mcp_request"] = {
+    mcp_method: message.method,
+    outcome: "ok",
+  };
+
+  if (message.method === "initialize") {
+    const params = (message.params ?? {}) as {
+      protocolVersion?: unknown;
+      clientInfo?: { name?: unknown; version?: unknown };
+    };
+    // Self-reported by the connecting software, so it is capped rather than
+    // trusted: "which editors and agents connect to Stratum" is the question
+    // the handshake answers, and a client that names itself at length is not
+    // going to make it more answerable. Documented in the public FAQ as the
+    // one free-text field any event carries.
+    const name = clientLabel(params.clientInfo?.name);
+    const version = clientLabel(params.clientInfo?.version);
+    const protocol = clientLabel(
+      (reply.result as { protocolVersion?: unknown } | undefined)?.protocolVersion,
+    );
+    if (name !== undefined) props.client_name = name;
+    if (version !== undefined) props.client_version = version;
+    if (protocol !== undefined) props.protocol_version = protocol;
+  }
+
+  if (message.method === "tools/call") {
+    // Reported only when it names a tool this build actually defines. An
+    // unrecognised name is a client's arbitrary string, and echoing it would
+    // put unbounded caller-supplied text into the export.
+    const requested = asString((message.params as { name?: unknown } | undefined)?.name);
+    props.tool = requested !== undefined && knownTools.has(requested) ? requested : "unknown";
+  }
+
+  if (reply.error !== undefined) {
+    props.outcome = "rejected";
+  } else if ((reply.result as { isError?: unknown } | undefined)?.isError === true) {
+    props.outcome = "tool_error";
+  }
+
+  return props;
+}
+
+/** Cap on a client's self-reported name or version before it is exported. */
+const MAX_CLIENT_LABEL = 64;
+
+function clientLabel(value: unknown): string | undefined {
+  const text = asString(value);
+  return text === undefined ? undefined : text.slice(0, MAX_CLIENT_LABEL);
 }

@@ -198,6 +198,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Product analytics now answers questions instead of just counting requests.**
+  Telemetry sent two events with almost no properties: a request event carrying
+  a route pattern, and a repository-activity event carrying only its type, the
+  actor type, and a project id. It could count merges; it could not say what
+  fraction of changes pass evaluation, what reviewers decide, which deploy
+  targets fail, which MCP tools agents actually call, or how anyone signed up.
+  Four new events (`mcp_request`, `auth_completed`, `error_occurred`,
+  `background_job_completed`) and per-type properties on the `stratum.*` events
+  close that. `api_request` gains `surface` and `actor_type`, and every event
+  now carries an `environment` label so staging traffic stops polluting
+  production's numbers — set `STRATUM_ENVIRONMENT` in each `[env.<name>.vars]`
+  block (named environments do not inherit top-level `[vars]`). The privacy
+  rule is unchanged and now enforced in one place: every property is either a
+  source-code literal or a bounded value, never a name, path, URL, title, ref,
+  or free-text message. `docs/user-guide/faq.md` lists every event and every
+  property exhaustively, and a test fails the build if that list and the code
+  disagree.
+- **Analytics property names are now consistently snake_case.** The `stratum.*`
+  events sent `projectId` and `actorType`; they now send `project_id` and
+  `actor_type`, matching `latency_ms` and every new property. Dashboards built
+  on the old names need updating — an insight can bridge the gap with
+  `coalesce(properties.project_id, properties.projectId)`.
+- **The per-account telemetry opt-out is now structurally impossible to skip.**
+  It lived at each `capture()` call site rather than in the client, which is how
+  the queue exporter originally shipped without honouring it at all. A new
+  `AnalyticsTracker` cannot be constructed without a resolved preference, so a
+  call site cannot forget one it never has to know about. Behaviour for existing
+  call sites is unchanged, including failing closed when the preference cannot
+  be read.
 - **`stratum login --host <url>` without `--key` now opens a browser** instead of
   prompting for a key. Scripts that piped a key into the prompt must pass
   `--key` (or set `STRATUM_HOST` and `STRATUM_API_KEY`). Without a TTY the

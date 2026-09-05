@@ -107,6 +107,13 @@ export interface Env {
   POSTHOG_API_KEY?: string;
   POSTHOG_HOST?: string;
   STRATUM_TELEMETRY_DISABLED?: string;
+  /**
+   * Which deployment this is ("production", "staging", a self-hoster's own
+   * label). Attached to every analytics event. Without it a staging deploy's
+   * traffic is indistinguishable from production's in the same PostHog
+   * project, and every funnel built on the data is quietly wrong.
+   */
+  STRATUM_ENVIRONMENT?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   GOOGLE_CLIENT_ID?: string;

@@ -1,3 +1,5 @@
+import type { AnalyticsTracker } from "../analytics/tracker";
+import { trackerForSystem } from "../analytics/tracker";
 import type { EventRecord } from "../storage/events";
 import {
   type Webhook,
@@ -45,6 +47,7 @@ async function deliverToWebhook(
   webhook: Webhook,
   event: EventRecord,
   logger: Logger,
+  tracker: AnalyticsTracker,
 ): Promise<void> {
   const payload: WebhookPayload = {
     id: event.id,
@@ -86,6 +89,11 @@ async function deliverToWebhook(
       durationMs: Date.now() - startedAt,
       ...(response.ok ? {} : { error: `Receiver responded ${response.status}` }),
     });
+    // The delivery log answers "did MY webhook fire" for one project owner.
+    // This answers the operator's version — "is outbound delivery healthy on
+    // this instance" — which the per-project log cannot, because nobody reads
+    // every project's log. Carries no URL, no ids, and no receiver response.
+    await trackDelivery(tracker, response.ok);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.warn("Webhook delivery failed", {
@@ -101,7 +109,16 @@ async function deliverToWebhook(
       error: message.slice(0, MAX_ERROR_LENGTH),
       durationMs: Date.now() - startedAt,
     });
+    await trackDelivery(tracker, false);
   }
+}
+
+/** One personless delivery outcome. The receiver's identity never leaves the instance. */
+function trackDelivery(tracker: AnalyticsTracker, ok: boolean): Promise<void> {
+  return tracker.capture("background_job_completed", {
+    job: "webhook-delivery",
+    outcome: ok ? "succeeded" : "failed",
+  });
 }
 
 /**
@@ -142,5 +159,10 @@ export async function deliverEventToWebhooks(
   );
   if (matching.length === 0) return;
 
-  await Promise.all(matching.map((webhook) => deliverToWebhook(env.DB, webhook, event, logger)));
+  // One tracker for the whole fan-out: it holds no per-delivery state, and
+  // building it per webhook would re-read the environment for each receiver.
+  const tracker = trackerForSystem(env);
+  await Promise.all(
+    matching.map((webhook) => deliverToWebhook(env.DB, webhook, event, logger, tracker)),
+  );
 }

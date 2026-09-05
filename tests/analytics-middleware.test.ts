@@ -186,3 +186,82 @@ describe("analyticsMiddleware", () => {
     expect(captured[0]?.properties.$process_person_profile).toBe(false);
   });
 });
+
+describe("analyticsMiddleware — segmentation properties", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("labels the surface that served the request", async () => {
+    const captured = stubCapture();
+    await makeApp().fetch(new Request("https://api.example.com/api/changes"), env);
+    await flushCapture();
+
+    expect(captured[0]?.properties.surface).toBe("api");
+  });
+
+  it("labels a UI page distinctly from the API", async () => {
+    const captured = stubCapture();
+    await makeApp().fetch(
+      new Request("https://api.example.com/@acme/secret-repo/blob/src/a.ts"),
+      env,
+    );
+    await flushCapture();
+
+    expect(captured[0]?.properties.surface).toBe("ui");
+  });
+
+  it("records how the caller was identified", async () => {
+    const captured = stubCapture();
+    await makeApp({ userId: "user-123" }).fetch(
+      new Request("https://api.example.com/api/changes"),
+      env,
+    );
+    await flushCapture();
+    expect(captured[0]?.properties.actor_type).toBe("user");
+
+    const agentCaptured = stubCapture();
+    await makeApp({ agentId: "agent-42" }).fetch(
+      new Request("https://api.example.com/api/changes"),
+      env,
+    );
+    await flushCapture();
+    expect(agentCaptured[0]?.properties.actor_type).toBe("agent");
+
+    const anonCaptured = stubCapture();
+    await makeApp().fetch(new Request("https://api.example.com/api/changes"), env);
+    await flushCapture();
+    expect(anonCaptured[0]?.properties.actor_type).toBe("anonymous");
+  });
+
+  it("stamps the operator's environment label", async () => {
+    const captured = stubCapture();
+    await makeApp().fetch(new Request("https://api.example.com/api/changes"), {
+      ...env,
+      STRATUM_ENVIRONMENT: "production",
+    } as Env);
+    await flushCapture();
+
+    expect(captured[0]?.properties.environment).toBe("production");
+  });
+
+  // The per-user opt-out now lives in the tracker rather than in this
+  // middleware. Pinned here because the middleware is where it used to live,
+  // and a refactor that loses it would otherwise fail no test in this file.
+  it("still honours the caller's opt-out", async () => {
+    const captured = stubCapture();
+    const app = new Hono<{ Bindings: Env }>();
+    app.use("*", async (c, next) => {
+      c.set("userId", "user-123");
+      c.set("telemetryOptOut", true);
+      await next();
+    });
+    app.use("*", analyticsMiddleware);
+    app.get("/api/changes", (c) => c.json({ ok: true }));
+
+    await app.fetch(new Request("https://api.example.com/api/changes"), env);
+    await flushCapture();
+
+    expect(captured).toHaveLength(0);
+  });
+});
