@@ -1,6 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { isGitHttpPath } from "../routes/git-http";
-import { isPostHogProxyPath } from "../routes/posthog-proxy";
+import { isPostHogProxyPath, isPostHogSdkPath } from "../routes/posthog-proxy";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 
@@ -51,12 +51,14 @@ export function rateLimitMiddleware(opts?: RateLimitOptions): MiddlewareHandler<
     // corrupts it, so the read side is exempt. Push (git-receive-pack) is a
     // metered WRITE and must NOT be exempt — otherwise writes bypass the limiter
     // entirely. Exempt only upload-pack RPCs and the upload-pack ref advertise.
+
     // Analytics shares no budget with the user's real requests. A pageview
     // costs a `/flags` call plus a capture POST, all keyed on the same user or
     // IP as their API traffic, so without this a busy session can rate-limit
     // itself out of the app it is being measured on. The proxy has its own
     // path allowlist, method allowlist and body cap.
-    if (isPostHogProxyPath(c.req.path)) {
+    // The SDK bundle route is deliberately NOT exempt — see isPostHogSdkPath.
+    if (isPostHogProxyPath(c.req.path) && !isPostHogSdkPath(c.req.path)) {
       await next();
       return;
     }

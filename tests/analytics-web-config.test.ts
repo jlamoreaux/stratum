@@ -7,6 +7,7 @@ import {
   resolvePostHogRegion,
   webAnalyticsConfig,
 } from "../src/analytics/web";
+import { isPostHogProxyPath, isPostHogSdkPath } from "../src/routes/posthog-proxy";
 
 /** A configuration where every gate is open, so each test closes exactly one. */
 function allowed(overrides: Partial<WebAnalyticsInput> = {}): WebAnalyticsInput {
@@ -141,6 +142,18 @@ describe("webAnalyticsConfig gates", () => {
   it("carries the route pattern through untouched", () => {
     const config = webAnalyticsConfig(allowed({ route: "/:namespace/:slug/blob/*" }));
     expect(config?.route).toBe("/:namespace/:slug/blob/*");
+  });
+});
+
+describe("rate-limit exemption scope", () => {
+  it("exempts ingestion but not the SDK bundle route", () => {
+    // The bundle route accepts any semver and does not cache a miss, so an
+    // exempt route would be an unauthenticated outbound-fetch amplifier billed
+    // to whoever deployed it. Ingestion must stay exempt so a busy session
+    // cannot rate-limit itself out of the app.
+    expect(isPostHogProxyPath("/_ph/e")).toBe(true);
+    expect(isPostHogSdkPath("/_ph/e")).toBe(false);
+    expect(isPostHogSdkPath("/_ph/static/1.427.2/array.js")).toBe(true);
   });
 });
 

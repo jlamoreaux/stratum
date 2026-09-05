@@ -160,6 +160,52 @@ describe("ingestion forwarding", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("refuses an oversized beacon", async () => {
+    const calls = stubUpstream(() => new Response("ok"));
+    const res = await app.fetch(
+      new Request("http://localhost/_ph/e", { method: "POST", body: "x".repeat(1_000_001) }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(204);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("never forwards the Referer, which carries the full page URL", async () => {
+    // Referrer-Policy: strict-origin-when-cross-origin sends the FULL url on a
+    // same-origin subresource request, and this proxy is same-origin — so
+    // without stripping, every beacon would carry the concrete repo path in a
+    // header, bypassing the snippet's redaction entirely.
+    const calls = stubUpstream(() => new Response("ok"));
+    await app.fetch(
+      new Request("http://localhost/_ph/e", {
+        method: "POST",
+        body: "{}",
+        headers: {
+          referer: "https://app.usestratum.dev/@alice/private-repo/blob/main/src/secret.ts?ref=abc",
+        },
+      }),
+      makeEnv(),
+    );
+    const forwarded = new Headers(calls[0]?.init?.headers);
+    expect(forwarded.get("referer")).toBeNull();
+    expect(JSON.stringify([...forwarded])).not.toContain("private-repo");
+  });
+
+  it("never forwards a caller-supplied X-Forwarded-For", async () => {
+    // Behind Cloudflare the edge rewrites it, but a self-hoster behind another
+    // proxy would otherwise let a caller choose their own country in PostHog.
+    const calls = stubUpstream(() => new Response("ok"));
+    await app.fetch(
+      new Request("http://localhost/_ph/e", {
+        method: "POST",
+        body: "{}",
+        headers: { "X-Forwarded-For": "198.51.100.1" },
+      }),
+      makeEnv(),
+    );
+    expect(new Headers(calls[0]?.init?.headers).get("X-Forwarded-For")).toBeNull();
+  });
+
   it("answers 204 rather than 500 when PostHog is unreachable", async () => {
     // Reaching the error boundary would emit an `error_occurred` event per
     // failed beacon: a telemetry storm caused by telemetry being down.

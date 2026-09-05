@@ -211,11 +211,11 @@ is not retroactive: events already sent are not deleted.
 **Browser analytics is separate, and off unless you turn it on.** Everything
 described above is sent by the server. A second, independent switch —
 `POSTHOG_PUBLIC_KEY` — additionally loads PostHog's JavaScript SDK in your
-users' browsers. It is a distinct key on purpose: enabling server-side
+users' browsers. The documentation site is built separately and reads the same
+variable at build time, so it is set in both places if you run both. It is a distinct key on purpose: enabling server-side
 telemetry has never meant running third-party code in your users' browsers or
 sending their IP addresses anywhere, and setting `POSTHOG_API_KEY` still does
-not. If `POSTHOG_PUBLIC_KEY` is unset, no analytics script is served, to
-anyone. It must be a PostHog **project** key (`phc_…`); anything else is
+not. If it is unset, no analytics script is served, to anyone. It must be a PostHog **project** key (`phc_…`); anything else is
 refused rather than published, because the value appears in every page of HTML
 and a personal API key (`phx_…`) pasted there would be a credential leak.
 
@@ -256,9 +256,7 @@ below describe how we configure it rather than what we choose to emit:
 | `$pageview` | A page is loaded |
 | `$pageleave` | A page is left |
 | `$autocapture` | A link, button, or form control is interacted with |
-| `$web_vitals` | Core Web Vitals are measured for a page |
-| `$dead_click` | A click lands on something that does nothing |
-| `$rageclick` | The same spot is clicked repeatedly |
+| `$rageclick` | The same spot is clicked repeatedly, if your PostHog project enables it |
 | `$identify` | A signed-in user is associated with their account |
 
 Every event additionally carries `environment` — the label the operator set in
@@ -311,6 +309,11 @@ page titles are made of the things the promise forbids.
   a click on a repository link would send the repository name as link text and
   its path as an `href`. You therefore see that a file link was clicked, not
   which file.
+- **No Core Web Vitals or dead-click tracking.** Both are implemented in code
+  posthog-js downloads at runtime, and Stratum blocks runtime downloads so the
+  only script your users receive is the pinned one served from your origin.
+  The trade is deliberate: unpinned third-party code on pages that render
+  private repositories is worse than a missing metric.
 - **No session replay.** Stratum does not record sessions. It renders private
   source, and no masking configuration makes recording it a good idea.
 - **Do Not Track is respected**, and so is Global Privacy Control. This is the

@@ -81,6 +81,8 @@ const wantsMarkdown = (accept) =>
 
 /** PostHog ingestion paths this site will relay, and nothing else. */
 const INGEST_PREFIXES = ["/e", "/i/v0/e", "/decide", "/flags", "/batch"];
+/** Matches src/routes/posthog-proxy.ts: without a cap this is a relay billed to us. */
+const MAX_BODY_BYTES = 1_000_000;
 const PROXY_PREFIX = "/_ph";
 const SDK_VERSION = "1.427.2";
 
@@ -96,9 +98,17 @@ async function handleAnalyticsProxy(request, url) {
   const suffix = url.pathname.slice(PROXY_PREFIX.length) || "/";
   const noContent = () => new Response(null, { status: 204 });
 
+  // Before the SDK branch, not after: `caches.default.put` throws for a
+  // non-GET request, so a POST to the bundle path would have become a 500 on a
+  // path whose entire contract is that a beacon never surfaces as a failure.
+  if (!["GET", "POST", "OPTIONS"].includes(request.method)) return noContent();
+  if (request.headers.get("X-Stratum-Proxy")) return noContent();
+
   const sdkMatch = /^\/static\/(\d+\.\d+\.\d+)\/array\.js$/.exec(suffix);
   if (sdkMatch) {
-    const cached = await caches.default.match(request);
+    if (request.method !== "GET") return noContent();
+    const cacheKey = new Request(url.toString(), { method: "GET" });
+    const cached = await caches.default.match(cacheKey);
     if (cached) return cached;
     const upstream = await fetch(
       `https://cdn.jsdelivr.net/npm/posthog-js@${sdkMatch[1]}/dist/array.js`,
@@ -111,26 +121,36 @@ async function handleAnalyticsProxy(request, url) {
         "cache-control": "public, max-age=31536000, immutable",
       },
     });
-    await caches.default.put(request, response.clone());
+    try {
+      await caches.default.put(cacheKey, response.clone());
+    } catch {
+      // An uncacheable upstream response must not turn the bundle into a 500.
+    }
     return response;
   }
 
-  if (!["GET", "POST", "OPTIONS"].includes(request.method)) return noContent();
   if (!INGEST_PREFIXES.some((p) => suffix === p || suffix.startsWith(`${p}/`))) return noContent();
-  if (request.headers.get("X-Stratum-Proxy")) return noContent();
 
   const headers = new Headers(request.headers);
   headers.delete("cookie");
   headers.delete("authorization");
+  headers.delete("referer");
   headers.delete("host");
+  headers.delete("x-forwarded-for");
   headers.set("X-Stratum-Proxy", "1");
   const clientIp = request.headers.get("CF-Connecting-IP");
   if (clientIp) headers.set("X-Forwarded-For", clientIp);
 
+  let body;
+  if (request.method === "POST") {
+    body = await request.arrayBuffer();
+    if (body.byteLength > MAX_BODY_BYTES) return noContent();
+  }
+
   const upstream = await fetch(`https://us.i.posthog.com${suffix}${url.search}`, {
     method: request.method,
     headers,
-    ...(request.method === "POST" ? { body: await request.arrayBuffer() } : {}),
+    ...(body !== undefined ? { body } : {}),
   }).catch(() => null);
   if (!upstream) return noContent();
 

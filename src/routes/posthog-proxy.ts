@@ -31,12 +31,7 @@
  * origin and billed to whoever deployed it.
  */
 import { Hono } from "hono";
-import {
-  PROXY_PREFIX,
-  SDK_VERSION,
-  isSelfReferential,
-  resolvePostHogRegion,
-} from "../analytics/web";
+import { PROXY_PREFIX, isSelfReferential, resolvePostHogRegion } from "../analytics/web";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 
@@ -86,8 +81,16 @@ function sdkUpstream(version: string): string {
  * browser attaches the Stratum session cookie to every analytics request;
  * httpOnly protects it from the SDK, not from us. Forwarding it would hand a
  * live session credential to a third party on every pageview.
+ *
+ * `Referer` is the subtle one, and it defeats every guarantee the snippet
+ * makes. `Referrer-Policy: strict-origin-when-cross-origin` — which
+ * `securityHeadersMiddleware` sets — sends the FULL url on a same-origin
+ * subresource request, and this proxy is same-origin. So each capture POST
+ * would arrive at PostHog carrying
+ * `/@alice/private-repo/blob/main/src/secret.ts?ref=deadbeef` in a header,
+ * bypassing `before_send` entirely at the transport layer.
  */
-const STRIPPED_REQUEST_HEADERS = ["cookie", "authorization", "x-stratum-token"];
+const STRIPPED_REQUEST_HEADERS = ["cookie", "authorization", "x-stratum-token", "referer"];
 
 /** A telemetry beacon must never fail a page, so failures answer 204. */
 function noContent(): Response {
@@ -115,6 +118,11 @@ function forwardedHeaders(request: Request): Headers {
   // making country and region breakdowns meaningless. It is a deliberate choice
   // to forward one more piece of client data than strictly necessary, and it is
   // documented in the FAQ rather than made silently.
+  // Dropped before the conditional set below: an inbound value is caller-chosen,
+  // and forwarding it would let anyone pick their own country in PostHog. Behind
+  // Cloudflare this is unreachable because the edge rewrites the header, but a
+  // self-hoster behind a different proxy — or local dev — is not behind that.
+  headers.delete("x-forwarded-for");
   const clientIp = request.headers.get("CF-Connecting-IP");
   if (clientIp) headers.set("X-Forwarded-For", clientIp);
   headers.set(HOP_HEADER, "1");
@@ -168,14 +176,24 @@ posthogProxyRouter.get("/static/:version/array.js", async (c) => {
   // Cloudflare's cache is per-colo, so this is a hit-rate improvement rather
   // than a guarantee; the immutable Cache-Control above is what actually keeps
   // the byte count down, by keeping it in the user's browser.
-  await cache?.put(cacheKey, response.clone());
+  // The only awaited call here that is not already funnelled to 204. An
+  // uncacheable upstream response makes `put` reject, and an unhandled
+  // rejection would turn the SDK script into a 500.
+  try {
+    await cache?.put(cacheKey, response.clone());
+  } catch (err) {
+    logger.debug("Could not cache the SDK bundle", { error: String(err) });
+  }
   return response;
 });
 
 /** Event capture and the per-pageview config call. */
 posthogProxyRouter.all("/*", async (c) => {
   const request = c.req.raw;
-  if (!ALLOWED_METHODS.has(request.method)) return noContent();
+  if (!ALLOWED_METHODS.has(request.method)) {
+    logger.warn("Refused a non-beacon method", { method: request.method });
+    return noContent();
+  }
   if (guardLoop(request)) {
     logger.warn("Refusing a request this proxy already forwarded");
     return noContent();
@@ -183,9 +201,15 @@ posthogProxyRouter.all("/*", async (c) => {
 
   const url = new URL(request.url);
   // The path below the prefix, e.g. "/e" from "/_ph/e".
-  const suffix = url.pathname.replace(/^\/_ph/, "") || "/";
+  const suffix = url.pathname.slice(PROXY_PREFIX.length) || "/";
   const allowed = INGEST_PREFIXES.some((p) => suffix === p || suffix.startsWith(`${p}/`));
-  if (!allowed) return noContent();
+  if (!allowed) {
+    // One of the three abuse signals this allowlist exists for. Logged so an
+    // operator can see someone probing the prefix as a relay, rather than
+    // finding out from a bill.
+    logger.warn("Refused a path outside the ingestion allowlist", { suffix });
+    return noContent();
+  }
 
   const region = resolvePostHogRegion(c.env.POSTHOG_HOST);
   if (isSelfReferential(region.ingest, url.origin)) {
@@ -196,7 +220,10 @@ posthogProxyRouter.all("/*", async (c) => {
   let body: ArrayBuffer | undefined;
   if (request.method === "POST") {
     body = await request.arrayBuffer();
-    if (body.byteLength > MAX_BODY_BYTES) return noContent();
+    if (body.byteLength > MAX_BODY_BYTES) {
+      logger.warn("Refused an oversized beacon", { bytes: body.byteLength });
+      return noContent();
+    }
   }
 
   const target = `${region.ingest}${suffix}${url.search}`;
@@ -227,4 +254,15 @@ export function isPostHogProxyPath(path: string): boolean {
   return path === PROXY_PREFIX || path.startsWith(`${PROXY_PREFIX}/`);
 }
 
-export { SDK_VERSION };
+/**
+ * Is this the SDK bundle route, as opposed to an ingestion beacon?
+ *
+ * The distinction exists for the rate limiter. Ingestion must be exempt, or a
+ * busy session rate-limits itself out of the app. The bundle route must NOT be:
+ * it takes any semver, and a version jsDelivr does not have returns 204 without
+ * caching, so an exempt route would be an unauthenticated outbound-fetch
+ * amplifier billed to whoever deployed it.
+ */
+export function isPostHogSdkPath(path: string): boolean {
+  return path.startsWith(`${PROXY_PREFIX}/static/`);
+}

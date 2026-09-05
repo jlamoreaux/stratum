@@ -173,8 +173,6 @@ export const WEB_EVENT_NAMES: readonly string[] = [
   "$pageview",
   "$pageleave",
   "$autocapture",
-  "$web_vitals",
-  "$dead_click",
   "$rageclick",
   "$identify",
 ];

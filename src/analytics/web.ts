@@ -31,6 +31,10 @@
  * below.
  */
 
+import { createLogger } from "../utils/logger";
+
+const logger = createLogger({ component: "WebAnalytics" });
+
 /** PostHog project tokens are public by design and always carry this prefix. */
 const PROJECT_TOKEN_PATTERN = /^phc_[A-Za-z0-9]+$/;
 
@@ -108,7 +112,10 @@ export function resolvePostHogRegion(host: string | undefined): PostHogRegion {
   } catch {
     // A malformed host is an operator error we cannot resolve, and guessing an
     // origin to forward to would be worse than falling back to the documented
-    // default. `POSTHOG_HOST` is validated nowhere else, so this is the floor.
+    // default. `POSTHOG_HOST` is validated nowhere else, so this warning is the
+    // only signal the operator gets that their events are not going where they
+    // think they are.
+    logger.warn("POSTHOG_HOST is not a valid URL; falling back to US cloud", { host: raw });
     return US_REGION;
   }
 
@@ -134,6 +141,9 @@ export function isSelfReferential(target: string, requestOrigin: string): boolea
   try {
     return new URL(target).origin === new URL(requestOrigin).origin;
   } catch {
+    // Fails open, so it must not fail quietly: this is a loop guard, and the
+    // proxy's hop header is the only thing left catching the case if it does.
+    logger.warn("Could not compare proxy target to request origin", { target, requestOrigin });
     return false;
   }
 }
@@ -189,7 +199,15 @@ export function webAnalyticsConfig(input: WebAnalyticsInput): WebAnalyticsConfig
   // had a signal. Publishing that value in every page would turn a silent
   // misconfiguration into credential disclosure, so a non-project token is
   // refused rather than shipped.
-  if (!PROJECT_TOKEN_PATTERN.test(token)) return null;
+  if (!PROJECT_TOKEN_PATTERN.test(token)) {
+    // The one refusal worth a log. An unset key and an opted-out user are
+    // ordinary states that would spam a line per request; a key that is present
+    // but the wrong shape is a misconfiguration the operator cannot otherwise
+    // diagnose — which is exactly the silence criticised above. The value is
+    // never logged: it may be the personal key this check exists to catch.
+    logger.warn("POSTHOG_PUBLIC_KEY is not a PostHog project token (phc_...); analytics disabled");
+    return null;
+  }
 
   // The per-user opt-out (#257). An opted-out user's page gets no SDK at all.
   if (input.optedOut) return null;

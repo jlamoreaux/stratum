@@ -45,7 +45,28 @@ export function serializeConfig(config: WebAnalyticsConfig): string {
 export function bootstrapScript(config: WebAnalyticsConfig): string {
   return `(function () {
   var cfg = ${serializeConfig(config)};
-  if (typeof posthog === "undefined") return;
+
+  // The SDK tag is \`defer\`red, but \`defer\` is ignored on an INLINE script —
+  // per the HTML spec it applies only to classic scripts with \`src\`. So this
+  // block runs the moment the parser reaches it, which is before the deferred
+  // bundle has executed and defined \`posthog\`. Calling init here would hit the
+  // undefined guard and return, and the whole feature would ship downloading a
+  // bundle it never uses, with no console error and no CSP report — the silent
+  // no-op this change exists to eliminate.
+  //
+  // Deferred scripts are guaranteed to run before DOMContentLoaded, so waiting
+  // for it orders us after the bundle while keeping the bundle non-blocking.
+  function start() {
+    if (typeof posthog === "undefined") return;
+    init();
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
+
+  function init() {
 
   // The only path string this page may report: built from the route PATTERN the
   // server matched, so it contains no namespace, repo slug, change id, file
@@ -67,15 +88,25 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
     // redaction. The full $referrer does not — see DROP.
     $referring_domain: 1, $initial_referring_domain: 1, $session_entry_referring_domain: 1,
     // Autocapture's element descriptors. Masked at capture time by
-    // mask_all_text / mask_all_element_attributes; scrubbed again below.
-    $elements: 1, $elements_chain: 1, $event_type: 1, $ce_version: 1,
+    // mask_all_text / mask_all_element_attributes, and scrubbed again below.
+    //
+    // $elements_chain is deliberately NOT kept: it is the same element data
+    // pre-serialized into a string, which cannot be scrubbed the way the array
+    // form can, so keeping it would mean trusting the capture-time masks alone.
+    // The SDK sends the array form here (elementsChainAsString is false), so
+    // dropping it costs nothing.
+    $elements: 1, $event_type: 1, $ce_version: 1,
     // Set by this bootstrap.
     environment: 1,
   };
 
   // Prefix-matched families whose members are named per-metric and cannot be
   // enumerated: $web_vitals_LCP_value, $feature/foo, $survey_response_2, ...
-  var KEEP_PREFIXES = ["$web_vitals_", "$feature/", "$feature_flag", "$dead_click", "$copy_autocapture"];
+  // $copy_autocapture is deliberately absent: it is the one family that can
+  // carry selected or copied page text rather than metadata, and this app's
+  // pages are private source. An allowlist is only as strong as its
+  // least-justified entry.
+  var KEEP_PREFIXES = ["$web_vitals_", "$feature/", "$feature_flag"];
 
   // Rewritten to the masked URL: absolute locations of a page in this app.
   var TO_URL = ["$current_url", "$initial_current_url", "$session_entry_url"];
@@ -109,13 +140,21 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
   // Defence in depth. mask_all_text and mask_all_element_attributes already
   // mask these at capture time, before before_send runs; this survives someone
   // later turning one of those off without reading this file.
+  // An allowlist, for the same reason the property filter is one. Deleting
+  // "text" and "attr__*" would have been a denylist inside a file whose whole
+  // argument is that denylists leak: an element carrying "href", "attributes"
+  // or "attr_id" would have passed straight through with the repo slug in it.
+  var ELEMENT_KEEP = { tag_name: 1, nth_child: 1, nth_of_type: 1, order: 1 };
+
   function scrubElements(elements) {
     if (!Array.isArray(elements)) return elements;
     for (var i = 0; i < elements.length; i++) {
       var el = elements[i];
       if (!el || typeof el !== "object") continue;
       for (var key in el) {
-        if (key === "text" || key === "$el_text" || key.indexOf("attr__") === 0) delete el[key];
+        if (Object.prototype.hasOwnProperty.call(el, key) && ELEMENT_KEEP[key] !== 1) {
+          delete el[key];
+        }
       }
     }
     return elements;
@@ -131,11 +170,8 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
         properties[key] = maskedUrl;
       } else if (TO_ROUTE.indexOf(key) !== -1) {
         properties[key] = cfg.route;
-      } else if (key === "$elements" || key === "$elements_chain") {
-        if (key === "$elements") properties[key] = scrubElements(properties[key]);
-        // $elements_chain is a pre-serialized string built from the same nodes
-        // mask_all_* already masked; there is nothing safe to parse here, so it
-        // rides on that guarantee alone.
+      } else if (key === "$elements") {
+        properties[key] = scrubElements(properties[key]);
       } else if (KEEP[key] !== 1 && !keepsByPrefix(key)) {
         // The allowlist's whole point: an unrecognised property is dropped, so
         // a future SDK release cannot introduce a leak this file never saw.
@@ -208,5 +244,6 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
       ph.register({ environment: cfg.environment });
     },
   });
+  }
 })();`;
 }

@@ -17,7 +17,11 @@ const SITE = "https://docs.usestratum.dev";
  * visitor is anonymous and Do Not Track is their only control — hence
  * `respect_dnt`. Session replay is not loaded on either property.
  */
-const POSTHOG_KEY = process.env.PUBLIC_POSTHOG_KEY ?? "";
+// Same name as the app's var, deliberately: two switches for one feature that
+// differ only by word order would be a trap. Read at build time via
+// `process.env` and inlined below, so Astro's `PUBLIC_` prefix convention —
+// which exists to expose a variable through `import.meta.env` — does not apply.
+const POSTHOG_KEY = process.env.POSTHOG_PUBLIC_KEY ?? "";
 const SDK_VERSION = "1.427.2";
 const analyticsHead = POSTHOG_KEY.startsWith("phc_")
   ? [
@@ -25,7 +29,13 @@ const analyticsHead = POSTHOG_KEY.startsWith("phc_")
       {
         tag: "script",
         attrs: { defer: true },
-        content: `posthog.init(${JSON.stringify(POSTHOG_KEY)}, {
+        content: `(function () {
+  // \`defer\` is ignored on an inline script, and these tags sit in <head>, so
+  // calling init here would run before the deferred bundle defines \`posthog\`.
+  // Deferred scripts run before DOMContentLoaded, so this orders us after it.
+  function start() {
+    if (typeof posthog === "undefined") return;
+    posthog.init(${JSON.stringify(POSTHOG_KEY)}, {
   api_host: "/_ph",
   ui_host: "https://us.posthog.com",
   person_profiles: "identified_only",
@@ -36,7 +46,14 @@ const analyticsHead = POSTHOG_KEY.startsWith("phc_")
   capture_pageleave: true,
   autocapture: true,
   loaded: function (ph) { ph.register({ environment: "docs" }); },
-});`,
+    });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
+})();`,
       },
     ]
   : [];

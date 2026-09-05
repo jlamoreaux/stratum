@@ -29,6 +29,9 @@ import { SDK_PATH, webAnalyticsConfig } from "../analytics/web";
 import { bootstrapScript } from "../analytics/web-snippet";
 import { isGitHttpPath } from "../routes/git-http";
 import type { Env } from "../types";
+import { createLogger } from "../utils/logger";
+
+const logger = createLogger({ component: "WebAnalytics" });
 
 /**
  * Any handler may set this to keep analytics off its response. Stripped before
@@ -37,21 +40,30 @@ import type { Env } from "../types";
 export const NO_ANALYTICS_HEADER = "X-Stratum-No-Analytics";
 
 /**
- * Route patterns never instrumented.
+ * Prefixes never instrumented, matched against both the route pattern and the
+ * concrete path.
  *
- * `/oauth/authorize` renders a consent screen under a deliberately different
- * CSP. `/settings` reveals an API token exactly once, at creation. `/api` is
- * not a UI surface, and the webhook-created page — which prints a signing
- * secret — is served from under it.
+ * Matched by PREFIX, not equality. `/settings` alone would have covered only
+ * `GET /settings`, which renders nothing secret — while `POST /settings/tokens`,
+ * `/settings/rotate-token` and `/settings/agents` are the three that return a
+ * plaintext credential, and every one of them would have been instrumented.
+ *
+ * `/oauth/authorize` is a consent screen running under a deliberately different
+ * CSP, whose query string carries `client_id`, `redirect_uri`, `state` and
+ * `code_challenge`. `/api` is not a UI surface, and the webhook-created page —
+ * which prints a signing secret beside a Copy button — is served from under it.
+ * `/_ph` is the analytics proxy, which must not instrument itself.
  */
-const DENIED_ROUTES = ["/oauth/authorize", "/settings"] as const;
-
-/** Prefixes never instrumented, matched against the concrete request path. */
-const DENIED_PREFIXES = ["/api", "/_ph"] as const;
+const DENIED_PREFIXES = ["/oauth/authorize", "/settings", "/api", "/_ph"] as const;
 
 function isDenied(route: string, path: string): boolean {
-  if (DENIED_ROUTES.some((denied) => route === denied || path === denied)) return true;
-  return DENIED_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+  return DENIED_PREFIXES.some(
+    (prefix) =>
+      route === prefix ||
+      route.startsWith(`${prefix}/`) ||
+      path === prefix ||
+      path.startsWith(`${prefix}/`),
+  );
 }
 
 /**
@@ -104,9 +116,17 @@ export const webAnalyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = asyn
   // `securityHeadersMiddleware`.
   if (isGitHttpPath(path)) return;
 
-  const optedOutByHandler = c.res.headers.has(NO_ANALYTICS_HEADER);
-  if (optedOutByHandler) c.res.headers.delete(NO_ANALYTICS_HEADER);
-  if (optedOutByHandler) return;
+  if (c.res.headers.has(NO_ANALYTICS_HEADER)) {
+    try {
+      c.res.headers.delete(NO_ANALYTICS_HEADER);
+    } catch {
+      // A response derived from `fetch` has immutable headers. Failing to strip
+      // an internal marker is cosmetic; failing to honour the opt-out it
+      // signals is not, so the return below happens either way.
+      logger.debug("Could not strip the no-analytics marker from an immutable response");
+    }
+    return;
+  }
 
   if (!isInjectableResponse(c.res, c.req.method)) return;
 
@@ -129,7 +149,7 @@ export const webAnalyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = asyn
     telemetryDisabled: c.env.STRATUM_TELEMETRY_DISABLED,
     environment: c.env.STRATUM_ENVIRONMENT,
     route,
-    userId: c.get("userId") as string | undefined,
+    userId: c.get("userId"),
     optedOut: c.get("telemetryOptOut") === true,
   });
   if (!config) return;
@@ -138,16 +158,22 @@ export const webAnalyticsMiddleware: MiddlewareHandler<{ Bindings: Env }> = asyn
   const bootstrapTag = `<script nonce="${nonce}" defer>${bootstrapScript(config)}</script>`;
   const html = await c.res.text();
 
-  const headers = new Headers(c.res.headers);
-  // The injected script carries a per-request nonce, and most UI pages set no
-  // cache header at all. Any CDN or operator "cache everything" rule would then
-  // serve a stale nonce, and the script would be blocked with no error anyone
-  // sees.
-  headers.set("Cache-Control", "no-store");
-  headers.delete("Content-Length");
-
   c.res = new Response(injectBeforeBodyEnd(html, `${sdkTag}${bootstrapTag}`), {
     status: c.res.status,
-    headers,
+    headers: c.res.headers,
   });
+
+  // Set AFTER the assignment, not before. Hono's `set res` copies every header
+  // from the outgoing response onto the replacement (see its context.js), so
+  // anything set on the `Headers` passed to the constructor is immediately
+  // overwritten by the handler's own value.
+  //
+  // Both of these matter. The injected script carries a per-request nonce and
+  // most UI pages set no cache header, so any CDN or operator "cache
+  // everything" rule would serve a stale nonce and the script would be blocked
+  // with no error anyone sees. And the body just grew, so a Content-Length
+  // inherited from the pre-injection response describes a shorter document than
+  // the one being sent.
+  c.res.headers.set("Cache-Control", "no-store");
+  c.res.headers.delete("Content-Length");
 };

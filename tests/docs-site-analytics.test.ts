@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
+import appWeb from "../src/analytics/web.ts?raw";
 // Raw imports rather than node:fs, matching tests/wrangler-telemetry-config.test.ts.
 // The docs site has no test runner of its own, so its two analytics-bearing
 // files are asserted from here — otherwise they would ship with no coverage at
@@ -11,7 +12,7 @@ describe("docs site analytics gating", () => {
   it("ships nothing unless a PostHog project key is supplied at build time", () => {
     // A fork, a PR preview, or anyone running `npm run build` must produce a
     // site that sends nothing. The build must never depend on the variable.
-    expect(astroConfig).toContain("process.env.PUBLIC_POSTHOG_KEY");
+    expect(astroConfig).toContain("process.env.POSTHOG_PUBLIC_KEY");
     expect(astroConfig).toContain('POSTHOG_KEY.startsWith("phc_")');
   });
 
@@ -35,6 +36,21 @@ describe("docs site analytics gating", () => {
 
   it("respects Do Not Track, the only control an anonymous docs visitor has", () => {
     expect(astroConfig).toContain("respect_dnt: true");
+  });
+});
+
+describe("SDK version pinning", () => {
+  it("pins the same version in all three places that hardcode it", () => {
+    // The app, the docs build, and the docs Worker each carry the literal.
+    // Nothing links them, so bumping one silently leaves the others serving a
+    // different bundle from the same-looking path.
+    const versions = [
+      /SDK_VERSION = "(\d+\.\d+\.\d+)"/.exec(appWeb)?.[1],
+      /SDK_VERSION = "(\d+\.\d+\.\d+)"/.exec(astroConfig)?.[1],
+      /SDK_VERSION = "(\d+\.\d+\.\d+)"/.exec(docsWorker)?.[1],
+    ];
+    expect(versions.every(Boolean)).toBe(true);
+    expect(new Set(versions).size).toBe(1);
   });
 });
 

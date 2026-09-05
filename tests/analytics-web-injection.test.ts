@@ -1,5 +1,7 @@
+import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import app from "../src/index";
+import { NO_ANALYTICS_HEADER, webAnalyticsMiddleware } from "../src/middleware/web-analytics";
 import type { Env } from "../src/types";
 
 const KEY = "phc_test123";
@@ -75,6 +77,30 @@ describe("web analytics injection", () => {
     expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
+  it("overrides a handler's own cacheable header, and corrects Content-Length", async () => {
+    // Hono's `set res` copies the outgoing response's headers onto the
+    // replacement, so setting these on the constructor's Headers was silently
+    // undone. A cached page would serve a stale nonce and block the script;
+    // a stale Content-Length describes a document shorter than the one sent.
+    const probe = new Hono<{ Bindings: Env }>();
+    probe.use("*", (c, next) => {
+      c.set("cspNonce", "test-nonce");
+      return next();
+    });
+    probe.use("*", webAnalyticsMiddleware);
+    probe.get("/cached", (c) =>
+      c.html("<html><body>hi</body></html>", 200, {
+        "Cache-Control": "public, max-age=300",
+        "Content-Length": "29",
+      }),
+    );
+    const res = await probe.fetch(new Request("http://localhost/cached"), makeEnv());
+    const body = await res.text();
+    expect(body).toContain("posthog.init");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Content-Length")).toBeNull();
+  });
+
   it("leaves non-HTML responses alone", async () => {
     const res = await app.fetch(new Request("http://localhost/health"), makeEnv());
     expect(await res.text()).not.toContain("posthog.init");
@@ -93,6 +119,54 @@ describe("web analytics injection", () => {
       const res = await app.fetch(new Request(`http://localhost${path}`), makeEnv());
       expect(await res.text(), path).not.toContain("posthog.init");
     }
+  });
+
+  it("never instruments the routes that render a plaintext credential", async () => {
+    // The regression this covers: DENIED_ROUTES matched by equality, so
+    // `/settings` covered only `GET /settings` — which renders nothing secret —
+    // while POST /settings/tokens, /settings/rotate-token and /settings/agents,
+    // the three that DO return a plaintext token, were instrumented.
+    for (const path of ["/settings/tokens", "/settings/rotate-token", "/settings/agents"]) {
+      const res = await app.fetch(
+        new Request(`http://localhost${path}`, { method: "POST" }),
+        makeEnv(),
+      );
+      expect(await res.text(), path).not.toContain("posthog.init");
+    }
+  });
+
+  it("honours a handler's own opt-out header, and does not leak it to the client", async () => {
+    const probe = new Hono<{ Bindings: Env }>();
+    probe.use("*", (c, next) => {
+      c.set("cspNonce", "test-nonce");
+      return next();
+    });
+    probe.use("*", webAnalyticsMiddleware);
+    probe.get("/secret", (c) =>
+      c.html("<html><body>token</body></html>", 200, { [NO_ANALYTICS_HEADER]: "1" }),
+    );
+    probe.get("/ordinary", (c) => c.html("<html><body>hi</body></html>"));
+
+    const denied = await probe.fetch(new Request("http://localhost/secret"), makeEnv());
+    expect(await denied.text()).not.toContain("posthog.init");
+    expect(denied.headers.get(NO_ANALYTICS_HEADER)).toBeNull();
+
+    const allowed = await probe.fetch(new Request("http://localhost/ordinary"), makeEnv());
+    expect(await allowed.text()).toContain("posthog.init");
+  });
+
+  it("injects even when the document has no closing body tag", async () => {
+    // Silent absence of analytics is the failure this whole change exists to
+    // fix, so a missing anchor must not reintroduce it.
+    const probe = new Hono<{ Bindings: Env }>();
+    probe.use("*", (c, next) => {
+      c.set("cspNonce", "test-nonce");
+      return next();
+    });
+    probe.use("*", webAnalyticsMiddleware);
+    probe.get("/fragment", (c) => c.html("<p>no body element here</p>"));
+    const res = await probe.fetch(new Request("http://localhost/fragment"), makeEnv());
+    expect(await res.text()).toContain("posthog.init");
   });
 
   it("never instruments the OAuth consent screen", async () => {

@@ -11,8 +11,11 @@ serverless Git. The web UI is **server-rendered JSX**: every page must work with
 disabled. A few inline scripts exist purely as progressive enhancement — never add a
 client-side framework or a build step.
 
-**The one exception is product analytics** (`src/analytics/web-snippet.ts`), which loads
-PostHog's SDK in the browser. It is bound by the rule it is an exception to: no framework, no
+**The one exception is product analytics**, which loads PostHog's SDK in the browser. It has
+**two** bootstraps, and an audit that reads only the first has read half of it:
+`src/analytics/web-snippet.ts` for the app, which redacts every URL, title and element it
+sends, and an inline one in `website/astro.config.mjs` for the docs site, which does not — docs
+URLs are public content, and which page someone read is the whole question there. It is bound by the rule it is an exception to: no framework, no
 build step, nothing rendered or gated by it, and every page still works with it blocked or
 absent. Two things earned the exception and are the terms of keeping it. The bundle is
 **version-pinned and served from our own origin**, so third-party code cannot change size or

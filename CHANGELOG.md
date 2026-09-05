@@ -9,10 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Browser analytics, opt-in and redacted.** `app.usestratum.dev` and the docs
-  site sent no browser events at all, so pageviews, Core Web Vitals, dead
-  clicks and rageclicks were invisible and the docs-to-signup funnel could not
-  be measured. Setting the new `POSTHOG_PUBLIC_KEY` var enables PostHog's SDK
-  in the browser. It is a **separate switch from `POSTHOG_API_KEY`** on
+  site sent no browser events at all, so pageviews, autocaptured interactions
+  and rageclicks were invisible and the docs-to-signup funnel could not be
+  measured. Setting the new `POSTHOG_PUBLIC_KEY` var enables PostHog's SDK in
+  the browser; the docs site reads the same variable at build time. Core Web
+  Vitals and dead-click tracking are **not** included: posthog-js implements
+  both in chunks it downloads at runtime, and those downloads are blocked so
+  that the only script a user receives is the pinned one served from your own
+  origin. It is a **separate switch from `POSTHOG_API_KEY`** on
   purpose: enabling server-side telemetry has never meant running third-party
   JavaScript in your users' browsers or sending their IP addresses anywhere,
   and it still does not. Unset, no analytics script is served to anyone.

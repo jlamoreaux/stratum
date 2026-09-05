@@ -36,6 +36,7 @@ interface FakePostHog {
 function runBootstrap(config: WebAnalyticsConfig = CONFIG): {
   options: InitOptions;
   ph: FakePostHog;
+  initCalledBeforeDomReady: boolean;
 } {
   let options: InitOptions | undefined;
   const posthog = {
@@ -44,9 +45,41 @@ function runBootstrap(config: WebAnalyticsConfig = CONFIG): {
     },
   };
   const win = { location: { origin: ORIGIN, href: `${ORIGIN}/@alice/private-repo` } };
-  // eslint-disable-next-line no-new-func
-  new Function("posthog", "window", bootstrapScript(config))(posthog, win);
-  if (!options) throw new Error("bootstrap did not call posthog.init");
+
+  // Models the real execution order. The SDK tag is deferred, so `posthog`
+  // does not exist while the parser is running the inline bootstrap; deferred
+  // scripts run before DOMContentLoaded, so the bundle is present by the time
+  // the listener fires. A bootstrap that calls init immediately would see
+  // `posthog === undefined`, return, and send nothing forever.
+  const listeners: Array<() => void> = [];
+  const doc = {
+    readyState: "loading",
+    addEventListener: (event: string, handler: () => void) => {
+      if (event === "DOMContentLoaded") listeners.push(handler);
+    },
+  };
+
+  // `posthog` is resolved as a GLOBAL, not passed in — that is what lets it be
+  // absent while the bootstrap is parsed and present once the deferred bundle
+  // has run. Passing it as a parameter would pin it to one value and hide the
+  // ordering bug this models.
+  const globals = globalThis as { posthog?: unknown };
+  globals.posthog = undefined;
+  let initCalledBeforeDomReady = false;
+
+  // Executing the emitted source is the point: a parallel TypeScript copy of
+  // the redaction would test itself rather than the string that ships.
+  try {
+    new Function("window", "document", bootstrapScript(config))(win, doc);
+    initCalledBeforeDomReady = options !== undefined;
+
+    // The deferred bundle has now executed and defined the global.
+    globals.posthog = posthog;
+    for (const fire of listeners) fire();
+  } finally {
+    globals.posthog = undefined;
+  }
+  if (!options) throw new Error("bootstrap did not call posthog.init after DOMContentLoaded");
 
   const ph: FakePostHog = {
     identified: [],
@@ -63,7 +96,7 @@ function runBootstrap(config: WebAnalyticsConfig = CONFIG): {
     },
   };
   options.loaded(ph);
-  return { options, ph };
+  return { options, ph, initCalledBeforeDomReady };
 }
 
 /** Every property this app could plausibly leak, plus the safe ones that must survive. */
@@ -204,6 +237,66 @@ describe("autocapture element scrubbing", () => {
     expect(elements[0]).not.toHaveProperty("text");
     expect(elements[0]).not.toHaveProperty("attr__href");
     expect(elements[0]?.tag_name).toBe("a");
+  });
+
+  it("keeps only structural element keys, dropping shapes a denylist would miss", () => {
+    // The earlier version deleted `text` and `attr__*` only, so an element
+    // carrying `href`, `attributes` or `attr_id` passed through with the repo
+    // slug intact — a denylist inside the file whose thesis is that denylists
+    // leak.
+    const { options } = runBootstrap();
+    const sent = options.before_send({
+      event: "$autocapture",
+      properties: {
+        $elements: [
+          {
+            tag_name: "a",
+            nth_child: 2,
+            href: "/@alice/private-repo",
+            attr_id: "repo-alice-private",
+            attributes: { "attr__data-slug": "private-repo" },
+          },
+        ],
+      },
+    }) as Record<string, unknown>;
+    const el = (
+      (sent.properties as Record<string, unknown>).$elements as Record<string, unknown>[]
+    )[0];
+    expect(el).toEqual({ tag_name: "a", nth_child: 2 });
+    expect(JSON.stringify(sent)).not.toContain("private-repo");
+  });
+
+  it("drops $elements_chain, which cannot be scrubbed once serialized", () => {
+    const { options } = runBootstrap();
+    const sent = options.before_send({
+      event: "$autocapture",
+      properties: { $elements_chain: 'a:href="/@alice/private-repo"nth_child="2"' },
+    }) as Record<string, unknown>;
+    expect(sent.properties).not.toHaveProperty("$elements_chain");
+  });
+
+  it("drops copy-autocapture properties, which can carry selected page text", () => {
+    const { options } = runBootstrap();
+    const sent = options.before_send({
+      event: "$copy_autocapture",
+      properties: { $copy_autocapture_value: "secret source code the user selected" },
+    }) as Record<string, unknown>;
+    expect(JSON.stringify(sent)).not.toContain("secret source code");
+  });
+});
+
+describe("script execution order", () => {
+  it("waits for the deferred SDK instead of running while it is still undefined", () => {
+    // `defer` is ignored on an inline script, so the bootstrap is parsed and
+    // run before the deferred bundle defines `posthog`. Calling init at that
+    // moment hits the undefined guard and returns — the page downloads the SDK
+    // and sends nothing, with no console error and no CSP report.
+    const { initCalledBeforeDomReady } = runBootstrap();
+    expect(initCalledBeforeDomReady).toBe(false);
+  });
+
+  it("registers its listener rather than assuming the SDK is present", () => {
+    expect(bootstrapScript(CONFIG)).toContain("DOMContentLoaded");
   });
 });
 
