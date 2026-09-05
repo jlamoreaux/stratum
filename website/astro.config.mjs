@@ -3,6 +3,7 @@ import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
 import starlight from "@astrojs/starlight";
 import starlightLlmsTxt from "starlight-llms-txt";
+import { isPostHogProjectKey } from "./analytics-key.mjs";
 
 const SITE = "https://docs.usestratum.dev";
 
@@ -29,7 +30,7 @@ const SITE = "https://docs.usestratum.dev";
 const POSTHOG_KEY = process.env.POSTHOG_PUBLIC_KEY ?? "";
 const SDK_VERSION = "1.427.2";
 /** @type {import("astro").AstroUserConfig["integrations"] extends any ? Array<{tag: "script", attrs?: Record<string, string | boolean | undefined>, content?: string}> : never} */
-const analyticsHead = POSTHOG_KEY.startsWith("phc_")
+const analyticsHead = isPostHogProjectKey(POSTHOG_KEY)
   ? [
       {
         tag: /** @type {const} */ ("script"),

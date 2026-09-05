@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
 import appWeb from "../src/analytics/web.ts?raw";
+// @ts-expect-error plain ESM helper shared by the docs build and its Worker
+import { isPostHogProjectKey } from "../website/analytics-key.mjs";
+import analyticsKey from "../website/analytics-key.mjs?raw";
 // Raw imports rather than node:fs, matching tests/wrangler-telemetry-config.test.ts.
 // The docs site has no test runner of its own, so its two analytics-bearing
 // files are asserted from here — otherwise they would ship with no coverage at
@@ -9,19 +12,31 @@ import astroConfig from "../website/astro.config.mjs?raw";
 import docsWorker from "../website/worker/index.js?raw";
 
 describe("docs site analytics gating", () => {
+  it("validates the key the same way in the build and in the Worker", () => {
+    // They diverged once: `startsWith("phc_")` in the build against a full
+    // pattern in the Worker, so `phc_bad-key` produced a site that loaded the
+    // SDK and then had every request refused by its own proxy.
+    expect(astroConfig).toContain("isPostHogProjectKey");
+    expect(docsWorker).toContain("isPostHogProjectKey");
+    expect(astroConfig).not.toContain('startsWith("phc_")');
+    expect(analyticsKey).toContain("/^phc_[A-Za-z0-9]+$/");
+  });
+
   it("ships nothing unless a PostHog project key is supplied at build time", () => {
     // A fork, a PR preview, or anyone running `npm run build` must produce a
     // site that sends nothing. The build must never depend on the variable.
     expect(astroConfig).toContain("process.env.POSTHOG_PUBLIC_KEY");
-    expect(astroConfig).toContain('POSTHOG_KEY.startsWith("phc_")');
+    expect(astroConfig).toContain("isPostHogProjectKey(POSTHOG_KEY)");
   });
 
   it("refuses a personal API key, which would be a credential in public HTML", () => {
     // PostHog's two key types differ by one letter and the value is embedded in
-    // every page, so the prefix check is the only thing standing between a
-    // paste error and a disclosure.
-    const gate = /POSTHOG_KEY\.startsWith\("phc_"\)\s*\?/.test(astroConfig);
-    expect(gate).toBe(true);
+    // every page, so this check is the only thing standing between a paste
+    // error and a disclosure.
+    expect(isPostHogProjectKey("phc_abc123")).toBe(true);
+    for (const bad of ["phx_secret", "sk_live", "phc_", "PHC_abc", "phc_bad-key", "", undefined]) {
+      expect(isPostHogProjectKey(bad), String(bad)).toBe(false);
+    }
   });
 
   it("pins the SDK version rather than tracking a floating bundle", () => {
@@ -81,7 +96,7 @@ describe("docs site proxy", () => {
     // must not run a PostHog relay — the FAQ promises exactly that, so without
     // this the docs half made the documentation false.
     expect(docsWorker).toContain("env.POSTHOG_PUBLIC_KEY");
-    expect(docsWorker).toMatch(/\/\^phc_\[A-Za-z0-9\]\+\$\/\.test\(key\)/);
+    expect(docsWorker).toContain("isPostHogProjectKey(env.POSTHOG_PUBLIC_KEY)");
   });
 
   it("forwards only PostHog ingestion paths", () => {
