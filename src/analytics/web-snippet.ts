@@ -68,6 +68,13 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
 
   function init() {
 
+  // Mirrors WEB_EVENT_NAMES in ../analytics/events.ts, which is what the FAQ
+  // is tested against.
+  var ALLOWED_EVENTS = {
+    $pageview: 1, $pageleave: 1, $autocapture: 1, $rageclick: 1, $identify: 1,
+    $set: 1, $create_alias: 1,
+  };
+
   // The only path string this page may report: built from the route PATTERN the
   // server matched, so it contains no namespace, repo slug, change id, file
   // path, ref or query string by construction. Same guarantee and same source
@@ -218,6 +225,16 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
 
     before_send: function (event) {
       if (!event) return event;
+
+      // The event-name allowlist. docs/user-guide/faq.md tells self-hosters the
+      // list of events is exhaustive, and until now that was true only because
+      // a constant in events.ts was maintained by hand. Several posthog-js
+      // captures are gated on the PROJECT's remote configuration rather than on
+      // anything in this repo — $copy_autocapture is the live example, and it
+      // can carry selected page text — so an operator flipping a switch in
+      // PostHog could start shipping an event the docs never mentioned.
+      // Dropping the unknown ones makes the promise self-enforcing.
+      if (ALLOWED_EVENTS[event.event] !== 1) return null;
       event.properties = redact(event.properties);
       event.$set = redact(event.$set);
       event.$set_once = redact(event.$set_once);

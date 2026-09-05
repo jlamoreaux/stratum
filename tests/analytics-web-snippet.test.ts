@@ -275,13 +275,27 @@ describe("autocapture element scrubbing", () => {
     expect(sent.properties).not.toHaveProperty("$elements_chain");
   });
 
-  it("drops copy-autocapture properties, which can carry selected page text", () => {
+  it("drops any event the FAQ does not document, whatever its properties", () => {
+    // Several posthog-js captures are gated on the PROJECT's remote config, not
+    // on anything in this repo — $copy_autocapture can carry selected page text
+    // — so an operator flipping a switch in PostHog could otherwise ship an
+    // event the docs never mentioned. This is what makes the FAQ's
+    // exhaustiveness claim self-enforcing rather than hand-maintained.
     const { options } = runBootstrap();
-    const sent = options.before_send({
-      event: "$copy_autocapture",
-      properties: { $copy_autocapture_value: "secret source code the user selected" },
-    }) as Record<string, unknown>;
-    expect(JSON.stringify(sent)).not.toContain("secret source code");
+    expect(
+      options.before_send({
+        event: "$copy_autocapture",
+        properties: { $copy_autocapture_value: "secret source code the user selected" },
+      }),
+    ).toBeNull();
+    expect(options.before_send({ event: "$some_future_event", properties: {} })).toBeNull();
+  });
+
+  it("still sends every event the FAQ does document", () => {
+    const { options } = runBootstrap();
+    for (const name of ["$pageview", "$pageleave", "$autocapture", "$rageclick", "$identify"]) {
+      expect(options.before_send({ event: name, properties: {} }), name).not.toBeNull();
+    }
   });
 });
 
