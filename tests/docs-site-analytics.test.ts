@@ -68,12 +68,20 @@ describe("docs site proxy", () => {
     // The Markdown branch would rewrite `/_ph/e` to `/_ph/e.md`, and the assets
     // binding would 404 it, so ordering here is load-bearing rather than
     // stylistic.
-    const proxyAt = docsWorker.indexOf("handleAnalyticsProxy(request, url)");
+    const proxyAt = docsWorker.indexOf("return handleAnalyticsProxy(");
     const markdownAt = docsWorker.indexOf("wantsMarkdown(request.headers.get");
     const assetsAt = docsWorker.indexOf("env.ASSETS.fetch(request)");
     expect(proxyAt).toBeGreaterThan(-1);
     expect(proxyAt).toBeLessThan(markdownAt);
     expect(proxyAt).toBeLessThan(assetsAt);
+  });
+
+  it("relays nothing when the deployment has no key", () => {
+    // Mirrors the app proxy's gate. A fork, or any build without the variable,
+    // must not run a PostHog relay — the FAQ promises exactly that, so without
+    // this the docs half made the documentation false.
+    expect(docsWorker).toContain("env.POSTHOG_PUBLIC_KEY");
+    expect(docsWorker).toMatch(/\/\^phc_\[A-Za-z0-9\]\+\$\/\.test\(key\)/);
   });
 
   it("forwards only PostHog ingestion paths", () => {

@@ -133,7 +133,16 @@ async function readBoundedBody(request) {
  * Returns 204 rather than an error on any refusal: a telemetry beacon must
  * never surface as a failure on the page.
  */
-async function handleAnalyticsProxy(request, url) {
+async function handleAnalyticsProxy(request, url, env) {
+  // The same gate the app proxy carries. Without it a docs deployment built
+  // with no key — the default for a fork, and for any PR build — still relays
+  // to PostHog, which contradicts the "off unless POSTHOG_PUBLIC_KEY is set"
+  // promise the FAQ makes and burns Worker time on traffic nobody asked for.
+  // The build bakes the key into the HTML; this var is what tells the Worker
+  // the same deployment has analytics on, and it is set by the deploy workflow.
+  const key = (env.POSTHOG_PUBLIC_KEY ?? "").trim();
+  if (!/^phc_[A-Za-z0-9]+$/.test(key)) return new Response(null, { status: 204 });
+
   const suffix = url.pathname.slice(PROXY_PREFIX.length) || "/";
   const noContent = () => new Response(null, { status: 204 });
 
@@ -206,7 +215,7 @@ export default {
     const publicMetadata = isPublicMetadata(url.pathname);
 
     if (url.pathname === PROXY_PREFIX || url.pathname.startsWith(`${PROXY_PREFIX}/`)) {
-      return handleAnalyticsProxy(request, url);
+      return handleAnalyticsProxy(request, url, env);
     }
 
     // A preflight only ever reaches these paths, and answering it here keeps the

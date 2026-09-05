@@ -28,11 +28,15 @@ const SITE = "https://docs.usestratum.dev";
 // which exists to expose a variable through `import.meta.env` — does not apply.
 const POSTHOG_KEY = process.env.POSTHOG_PUBLIC_KEY ?? "";
 const SDK_VERSION = "1.427.2";
+/** @type {import("astro").AstroUserConfig["integrations"] extends any ? Array<{tag: "script", attrs?: Record<string, string | boolean | undefined>, content?: string}> : never} */
 const analyticsHead = POSTHOG_KEY.startsWith("phc_")
   ? [
-      { tag: "script", attrs: { src: `/_ph/static/${SDK_VERSION}/array.js`, defer: true } },
       {
-        tag: "script",
+        tag: /** @type {const} */ ("script"),
+        attrs: { src: `/_ph/static/${SDK_VERSION}/array.js`, defer: true },
+      },
+      {
+        tag: /** @type {const} */ ("script"),
         attrs: { defer: true },
         content: `(function () {
   // \`defer\` is ignored on an inline script, and these tags sit in <head>, so
