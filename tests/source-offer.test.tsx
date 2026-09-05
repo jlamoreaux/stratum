@@ -1,7 +1,11 @@
 /// <reference types="vite/client" />
 import { renderToString } from "hono/jsx/dom/server";
 import { describe, expect, it } from "vitest";
-import { SourceFooter } from "../src/ui/components/source-footer";
+import {
+  SOURCE_FOOTER_HTML,
+  SOURCE_FOOTER_HTML_INLINE,
+  SourceFooter,
+} from "../src/ui/components/source-footer";
 import { Layout } from "../src/ui/layout";
 import { CSS } from "../src/ui/styles";
 import { STRATUM_SOURCE_URL, STRATUM_VERSION } from "../src/version";
@@ -64,37 +68,69 @@ describe("AGPL §13 source offer", () => {
   });
 
   /**
-   * The auth and OAuth-consent pages are their own HTML documents rather than
-   * `Layout` children, and they are the only Stratum an anonymous visitor may
-   * ever see. An offer that appears once you sign in is not the offer §13 asks
-   * for, so every standalone document has to carry it too.
+   * Every document Stratum serves has to carry the offer, so this sweeps all of
+   * `src/` rather than a list of files someone has to remember to extend. The
+   * first version of this test did hardcode five paths, and PR-Agent was right
+   * that it could not catch what it existed to catch: two template-string
+   * documents (the magic-link verify page and the webhook-created page) were
+   * already missing the offer and the suite stayed green.
+   *
+   * A "document" is a file emitting `</body>` — JSX or template string alike.
+   * The two exemptions are not pages Stratum serves: `src/email/templates.ts`
+   * is email bodies, and `src/templates/index.ts` is scaffolding written into
+   * projects *users* create. Both are listed explicitly so adding a third is a
+   * decision someone makes on purpose.
    */
-  it("appears on every standalone document, not just the shared layout", () => {
-    const standalone = import.meta.glob(
-      [
-        "../src/routes/login.tsx",
-        "../src/routes/signup.tsx",
-        "../src/routes/oauth-signup.tsx",
-        "../src/routes/mcp-oauth.tsx",
-        "../src/ui/layout.tsx",
-      ],
-      { query: "?raw", import: "default", eager: true },
-    ) as Record<string, string>;
+  const NOT_SERVED_PAGES = [
+    "../src/email/templates.ts", // emails, not pages served over the network
+    "../src/templates/index.ts", // scaffolding for user-created projects
+    "../src/ui/components/source-footer.tsx", // defines the offer; its `</body>` is prose
+  ];
 
-    for (const [path, contents] of Object.entries(standalone)) {
-      const documents = contents.split("</body>").length - 1;
-      const offers = contents.split("<SourceFooter />").length - 1;
-      expect(documents, `${path} should render at least one document`).toBeGreaterThan(0);
-      expect(offers, `${path} renders ${documents} document(s) but ${offers} offer(s)`).toBe(
-        documents,
+  it("appears on every document Stratum serves", () => {
+    const sources = import.meta.glob(["../src/**/*.ts", "../src/**/*.tsx"], {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }) as Record<string, string>;
+
+    const documents = Object.entries(sources).filter(
+      ([path, contents]) => contents.includes("</body>") && !NOT_SERVED_PAGES.includes(path),
+    );
+
+    // If this drops to zero the sweep has stopped sweeping, not passed.
+    expect(documents.length).toBeGreaterThanOrEqual(6);
+
+    for (const [path, contents] of documents) {
+      const bodies = contents.split("</body>").length - 1;
+      const offers =
+        contents.split("<SourceFooter />").length -
+        1 +
+        (contents.split("${SOURCE_FOOTER_HTML}").length - 1) +
+        (contents.split("${SOURCE_FOOTER_HTML_INLINE}").length - 1);
+      expect(offers, `${path} renders ${bodies} document(s) but ${offers} source offer(s)`).toBe(
+        bodies,
       );
     }
   });
 
-  it("renders the same offer wherever it is used", () => {
-    const html = renderToString(<SourceFooter />);
-    expect(html).toContain(`href="${STRATUM_SOURCE_URL}"`);
-    expect(html).toContain("AGPL-3.0");
-    expect(html).toContain(`stratum v${STRATUM_VERSION}`);
+  it("carries the same four facts in every rendering", () => {
+    const renderings = [
+      renderToString(<SourceFooter />),
+      SOURCE_FOOTER_HTML,
+      SOURCE_FOOTER_HTML_INLINE,
+    ];
+    for (const html of renderings) {
+      expect(html).toContain(`stratum v${STRATUM_VERSION}`);
+      expect(html).toContain("AGPL-3.0");
+      expect(html).toContain("https://www.gnu.org/licenses/agpl-3.0.html");
+      expect(html).toContain(STRATUM_SOURCE_URL);
+    }
+  });
+
+  it("keeps the raw-HTML rendering identical to the JSX one", () => {
+    // Same markup, not merely the same facts: the two class-based renderings
+    // sit next to each other in the same chrome, so a divergence would show.
+    expect(renderToString(<SourceFooter />)).toBe(SOURCE_FOOTER_HTML);
   });
 });

@@ -11,6 +11,7 @@ import { consumeMagicLink, createMagicLink } from "../storage/magic-links";
 import { createSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername } from "../storage/users";
 import type { Env } from "../types";
+import { SOURCE_FOOTER_HTML_INLINE } from "../ui/components/source-footer";
 import { hashToken } from "../utils/crypto";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { escapeHtml } from "../utils/html";
@@ -560,6 +561,7 @@ app.get("/verify", (c) => {
 <input type="hidden" name="token" value="${safeToken}">
 <button type="submit" style="padding:0.6rem 1.4rem;font-size:1rem;border:0;border-radius:0.5rem;background:#111;color:#fff;cursor:pointer">Continue</button>
 </form>
+${SOURCE_FOOTER_HTML_INLINE}
 </body></html>`,
   );
 });

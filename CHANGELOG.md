@@ -65,10 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Every page offers its own source.** A footer carrying the running version,
   the license, and a link to the source now renders in the shared layout and on
-  the standalone sign-in, sign-up, and OAuth-consent documents — an offer only a
-  signed-in user could see is not the one AGPL §13 asks of an operator running a
-  modified instance. Self-hosters running modifications repoint
-  `STRATUM_SOURCE_URL` in `src/version.ts`; there is nothing else to configure.
+  every standalone document — sign-in, sign-up, OAuth consent, the magic-link
+  verify page, and the webhook-created page — because an offer only a signed-in
+  user could see is not the one AGPL §13 asks of an operator running a modified
+  instance. Self-hosters running modifications repoint `STRATUM_SOURCE_URL` in
+  `src/version.ts`; there is nothing else to configure.
 - **Stratum can deploy a merged change.** A new `deploys:` block in
   `.stratum/policy.yaml` names one or more deploys, each with a `target`
   (`cloudflare-pages`, `cloudflare-workers`, or `vercel`), an optional `dir` to
