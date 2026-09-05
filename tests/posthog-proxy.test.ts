@@ -1,6 +1,7 @@
+import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import app from "../src/index";
-import { isPostHogProxyPath } from "../src/routes/posthog-proxy";
+import { isPostHogProxyPath, posthogProxyRouter } from "../src/routes/posthog-proxy";
 import type { Env } from "../src/types";
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
@@ -12,6 +13,7 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
     } as unknown as KVNamespace,
     DB: {} as D1Database,
     POSTHOG_HOST: "https://app.posthog.com",
+    POSTHOG_PUBLIC_KEY: "phc_test123",
     ...overrides,
   } as unknown as Env;
 }
@@ -217,6 +219,58 @@ describe("ingestion forwarding", () => {
       makeEnv(),
     );
     expect(res.status).toBe(204);
+  });
+});
+
+describe("gates", () => {
+  it("relays nothing on an instance that never serves the SDK", async () => {
+    // The default for every self-hoster. Without this the path allowlist made
+    // it "not an open relay" while the feature switch did not — any instance
+    // running this code relayed beacons on its own origin and subrequest budget.
+    const calls = stubUpstream(() => new Response("ok"));
+    for (const env of [
+      makeEnv({ POSTHOG_PUBLIC_KEY: undefined }),
+      makeEnv({ POSTHOG_PUBLIC_KEY: "phx_personal" }),
+      makeEnv({ STRATUM_TELEMETRY_DISABLED: "true" }),
+    ]) {
+      const res = await app.fetch(
+        new Request("http://localhost/_ph/e", { method: "POST", body: "{}" }),
+        env,
+      );
+      expect(res.status).toBe(204);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses a beacon from a user who has opted out", async () => {
+    // Suppressing the script only stops NEW page loads. A tab opened before the
+    // user opted out keeps posting, and this is the last point that can refuse
+    // it — so this is where the opt-out actually becomes enforcement rather
+    // than a request not to be sent one.
+    const probe = new Hono<{ Bindings: Env }>();
+    probe.use("*", (c, next) => {
+      c.set("telemetryOptOut", true);
+      return next();
+    });
+    probe.route("/_ph", posthogProxyRouter);
+
+    const calls = stubUpstream(() => new Response("ok"));
+    const res = await probe.fetch(
+      new Request("http://localhost/_ph/e", { method: "POST", body: "{}" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(204);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not serve the SDK bundle when the feature is off", async () => {
+    const calls = stubUpstream(() => new Response("/* sdk */"));
+    const res = await app.fetch(
+      new Request("http://localhost/_ph/static/1.427.2/array.js"),
+      makeEnv({ POSTHOG_PUBLIC_KEY: undefined }),
+    );
+    expect(res.status).toBe(404);
+    expect(calls).toHaveLength(0);
   });
 });
 

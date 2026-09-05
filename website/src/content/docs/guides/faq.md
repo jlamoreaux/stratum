@@ -331,8 +331,12 @@ page titles are made of the things the promise forbids.
   content blockers do not silently bias your numbers toward users who do not
   run one. That last reason is a deliberate choice and is stated here rather
   than left for you to discover in `src/routes/posthog-proxy.ts`. The proxy
-  forwards only PostHog's ingestion paths, strips your session cookie before
-  forwarding, and refuses anything else.
+  forwards only PostHog's ingestion paths, strips your session cookie and
+  `Referer` before forwarding, and refuses anything else. It is inert unless
+  `POSTHOG_PUBLIC_KEY` is set, so an instance that never turned browser
+  analytics on is not running a relay, and it refuses a beacon from an account
+  that has opted out — which is what stops a browser tab opened *before* you
+  opted out from continuing to report.
 
 ### The details worth knowing
 

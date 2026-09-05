@@ -148,6 +148,24 @@ export function isSelfReferential(target: string, requestOrigin: string): boolea
   }
 }
 
+/**
+ * Does this instance do browser analytics at all?
+ *
+ * The instance half of `webAnalyticsConfig`, split out because the proxy needs
+ * it without having an actor. An instance that never serves the SDK has no
+ * reason to relay a beacon, and relaying anyway would leave every self-hoster
+ * who left browser analytics off running a PostHog relay on their own origin
+ * and their own subrequest budget.
+ */
+export function browserAnalyticsEnabled(env: {
+  POSTHOG_PUBLIC_KEY?: string;
+  STRATUM_TELEMETRY_DISABLED?: string;
+}): boolean {
+  if (env.STRATUM_TELEMETRY_DISABLED === "true") return false;
+  const token = env.POSTHOG_PUBLIC_KEY?.trim();
+  return token !== undefined && token !== "" && PROJECT_TOKEN_PATTERN.test(token);
+}
+
 /** Everything the browser bootstrap needs. Serialized into the page as JSON. */
 export interface WebAnalyticsConfig {
   /** The PostHog project token. Public by design; validated as `phc_…` before it gets here. */

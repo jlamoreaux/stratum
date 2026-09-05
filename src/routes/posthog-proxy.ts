@@ -31,7 +31,12 @@
  * origin and billed to whoever deployed it.
  */
 import { Hono } from "hono";
-import { PROXY_PREFIX, isSelfReferential, resolvePostHogRegion } from "../analytics/web";
+import {
+  PROXY_PREFIX,
+  browserAnalyticsEnabled,
+  isSelfReferential,
+  resolvePostHogRegion,
+} from "../analytics/web";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 
@@ -147,6 +152,9 @@ export const posthogProxyRouter = new Hono<{ Bindings: Env }>();
  * bundle through a deploy, instead of a 404 that silently ends analytics.
  */
 posthogProxyRouter.get("/static/:version/array.js", async (c) => {
+  // Nothing to serve on an instance that never injects the SDK.
+  if (!browserAnalyticsEnabled(c.env)) return c.notFound();
+
   const version = c.req.param("version");
   // Anything that is not a plain semver would be attacker-controlled path
   // material in a CDN URL.
@@ -190,6 +198,22 @@ posthogProxyRouter.get("/static/:version/array.js", async (c) => {
 /** Event capture and the per-pageview config call. */
 posthogProxyRouter.all("/*", async (c) => {
   const request = c.req.raw;
+
+  // Two gates the first version of this file was missing, both found by
+  // exercising a preview deployment that has no key configured.
+  //
+  // Without the first, every instance that left browser analytics off — the
+  // default for every self-hoster — still relayed arbitrary beacons to PostHog
+  // from its own origin and subrequest budget. "Not an open relay" was true of
+  // the path allowlist and false of the feature switch.
+  //
+  // The second is where the per-user opt-out has to be enforced to mean
+  // anything. Suppressing the script only stops NEW page loads; a tab opened
+  // before the user opted out keeps posting, and this is the point that can
+  // still refuse it.
+  if (!browserAnalyticsEnabled(c.env)) return noContent();
+  if (c.get("telemetryOptOut") === true) return noContent();
+
   if (!ALLOWED_METHODS.has(request.method)) {
     logger.warn("Refused a non-beacon method", { method: request.method });
     return noContent();
