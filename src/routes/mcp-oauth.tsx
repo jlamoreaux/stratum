@@ -43,6 +43,7 @@ import {
 } from "../storage/oauth";
 import { getUser } from "../storage/users";
 import type { Env } from "../types";
+import { SourceFooter } from "../ui/components/source-footer";
 import type { createLogger } from "../utils/logger";
 import { mcpResourceIdentifier } from "../utils/oauth-challenge";
 import { rememberPostLoginRedirect } from "../utils/post-login-redirect";
@@ -409,6 +410,7 @@ async function renderAuthorizeError(
             </p>
           </div>
         </div>
+        <SourceFooter />
       </body>
     </html>,
     400,
@@ -601,6 +603,7 @@ app.get("/oauth/authorize", async (c) => {
             </details>
           </div>
         </div>
+        <SourceFooter />
       </body>
     </html>,
   );

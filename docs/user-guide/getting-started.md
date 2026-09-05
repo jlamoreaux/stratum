@@ -36,13 +36,19 @@ exists. A separate display name, shown in the header, can be changed any time.
 
 ### Self-hosting
 
-Stratum is MIT-licensed and self-hostable on your own Cloudflare account. You
+Stratum is AGPL-3.0-or-later and self-hostable on your own Cloudflare account. You
 need Node.js 22.13+ and a Cloudflare account with Workers, **Artifacts (beta)**,
 D1, KV, Queues, Durable Objects, and R2; the Workers AI binding is optional and
 only needed for the LLM evaluator,
 and Sandboxes only for the sandbox evaluator. Follow the
 [Quick Start in the README](../../README.md#quick-start) — everywhere this guide
 says `app.usestratum.dev`, substitute your own instance's origin.
+
+Self-hosting an unmodified Stratum obliges you to nothing. If you modify it and
+other people use your instance over a network, AGPL §13 asks you to offer them
+that version's source — one constant, `STRATUM_SOURCE_URL` in `src/version.ts`,
+points both the page footer and the `X-Source-Code` response header at your
+repository. The code you *host in* Stratum is untouched by this.
 
 ## 2. Create or import a project
 

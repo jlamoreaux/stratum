@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- **Stratum is no longer MIT-licensed.** The server, the web UI, `docs/`, and the
+  `website/` sources are now **AGPL-3.0-or-later**; the `@stratum/cli` and `@stratum/agent` packages are
+  **Apache-2.0**, chosen over MIT for its express patent grant. Everything
+  released through v0.2.0 stays MIT and always will — anyone holding that code
+  keeps their MIT rights in it, forks included. The new terms apply from this
+  commit forward. [`LICENSING.md`](LICENSING.md) is the authoritative account.
+
+  The split follows the line that matters to a user: what you run *as a service*
+  is copyleft, what you run *inside your own pipeline* is not. A CLI invoked from
+  your CI, or the reference agent forked into your automation, should never raise
+  a question about the license of the code it operates on.
+
+  **What this changes for you if you self-host:** running an unmodified Stratum,
+  nothing at all. If you modify it and other people reach your instance over a
+  network, AGPL §13 asks you to offer them that version's source — point the new
+  `STRATUM_SOURCE_URL` constant in `src/version.ts` at the repository holding
+  your changes and the page footer carries the offer. Nothing in the license
+  reaches the repositories Stratum hosts, the changes it evaluates, your policy
+  file, or anything that speaks to the REST API, the CLI, or `/mcp`. Commercial
+  use, including running Stratum as a paid service, remains permitted.
+
+  One carve-out: the agent skill files published under
+  `website/public/.well-known/agent-skills/` stay **MIT**. They exist to be
+  fetched and pasted into other people's agents, they contain no
+  implementation, and copyleft on a discovery artifact would discourage exactly
+  the copying they are published for.
+
+  Contributions now carry a [CLA](CLA.md), confirmed by a checkbox in the pull
+  request template. Contributors keep their copyright; the agreement adds the
+  right to license contributions under other terms, without which no commercial
+  license for Stratum could exist. Contributions merged before this change were
+  made under MIT and stay that way.
+
 ### Security
 - **GitHub sign-in no longer trusts an unverified email.** The callback picked
   the primary address, verified or not, and fell back to *any* address on the
@@ -29,6 +63,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than folded into this change.
 
 ### Added
+- **Every response offers its own source.** A footer carrying the running
+  version, the license, and a link to the source now renders in the shared
+  layout and on every standalone document — sign-in, sign-up, OAuth consent, the
+  magic-link verify page, and the webhook-created page — because an offer only a
+  signed-in user could see is not the one AGPL §13 asks of an operator running a
+  modified instance. For callers who never receive HTML at all, every response
+  also carries `Link: …; rel="license"` and `X-Source-Code` headers, so an agent
+  driving Stratum over `/mcp` or the REST API is offered the source too — set
+  both before and after the handler runs, because a handler returning a raw
+  `Response` (as `/mcp` does on its main paths) replaces the context response
+  and does not inherit buffered headers. Git smart-HTTP responses are left
+  untouched. Self-hosters running modifications
+  repoint `STRATUM_SOURCE_URL` in `src/version.ts`; there is nothing else to
+  configure.
 - **Stratum can deploy a merged change.** A new `deploys:` block in
   `.stratum/policy.yaml` names one or more deploys, each with a `target`
   (`cloudflare-pages`, `cloudflare-workers`, or `vercel`), an optional `dir` to

@@ -1,4 +1,5 @@
 import type { FC } from "hono/jsx";
+import { SourceFooter } from "./components/source-footer";
 
 /**
  * A closed union rather than a free string: the header renders exactly these
@@ -89,6 +90,7 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, c
           </div>
         </nav>
         <main class="main">{children}</main>
+        <SourceFooter />
       </body>
     </html>
   );
