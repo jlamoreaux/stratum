@@ -98,6 +98,47 @@ function sdkUpstream(version: string): string {
  */
 const STRIPPED_REQUEST_HEADERS = ["cookie", "authorization", "x-stratum-token", "referer"];
 
+/**
+ * Read a request body, refusing anything over the cap without buffering it.
+ *
+ * `arrayBuffer()` materialises the whole body first, so checking the length
+ * afterwards bounds what is forwarded upstream but not what this Worker holds.
+ * `Content-Length` closes that for a declared body; a chunked request declares
+ * nothing, which is exactly the shape an abusive caller would send. Reading
+ * through the stream and cancelling as soon as the running total passes the cap
+ * bounds both cases.
+ *
+ * Returns `null` when the body is too large.
+ */
+async function readBoundedBody(request: Request): Promise<ArrayBuffer | null> {
+  const declared = Number(request.headers.get("content-length") ?? Number.NaN);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  if (!request.body) return new ArrayBuffer(0);
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged.buffer;
+}
+
 /** A telemetry beacon must never fail a page, so failures answer 204. */
 function noContent(): Response {
   return new Response(null, { status: 204 });
@@ -259,20 +300,12 @@ posthogProxyRouter.all("/*", async (c) => {
 
   let body: ArrayBuffer | undefined;
   if (request.method === "POST") {
-    // Refuse before allocating. `arrayBuffer()` buffers the whole body, so a
-    // check afterwards bounds only what is forwarded upstream, not what this
-    // Worker holds in memory.
-    const declared = Number(request.headers.get("content-length") ?? Number.NaN);
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-      logger.warn("Refused an oversized beacon", { bytes: declared });
+    const bounded = await readBoundedBody(request);
+    if (bounded === null) {
+      logger.warn("Refused an oversized beacon");
       return noContent();
     }
-    // Still checked after reading, for a chunked body that declared no length.
-    body = await request.arrayBuffer();
-    if (body.byteLength > MAX_BODY_BYTES) {
-      logger.warn("Refused an oversized beacon", { bytes: body.byteLength });
-      return noContent();
-    }
+    body = bounded;
   }
 
   const target = `${region.ingest}${suffix}${url.search}`;

@@ -87,6 +87,45 @@ const PROXY_PREFIX = "/_ph";
 const SDK_VERSION = "1.427.2";
 
 /**
+ * Read a request body, refusing anything over the cap without buffering it.
+ *
+ * Mirrors readBoundedBody in src/routes/posthog-proxy.ts. Content-Length alone
+ * is not enough: a chunked request declares no length, which is the shape an
+ * abusive caller would send, so the running total is checked as the stream is
+ * consumed and the reader cancelled the moment it is exceeded.
+ *
+ * Returns null when the body is too large.
+ */
+async function readBoundedBody(request) {
+  const declared = Number(request.headers.get("content-length") ?? Number.NaN);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  if (!request.body) return new ArrayBuffer(0);
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged.buffer;
+}
+
+/**
  * Same-origin reverse proxy for analytics, mirroring `src/routes/posthog-proxy.ts`.
  *
  * Must run before the Markdown branch below, which would otherwise rewrite
@@ -145,12 +184,8 @@ async function handleAnalyticsProxy(request, url) {
 
   let body;
   if (request.method === "POST") {
-    // Refuse before allocating; `arrayBuffer()` buffers the whole body, so a
-    // check afterwards bounds only what is forwarded, not what is held here.
-    const declared = Number(request.headers.get("content-length") ?? Number.NaN);
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return noContent();
-    body = await request.arrayBuffer();
-    if (body.byteLength > MAX_BODY_BYTES) return noContent();
+    body = await readBoundedBody(request);
+    if (body === null) return noContent();
   }
 
   const upstream = await fetch(`https://us.i.posthog.com${suffix}${url.search}`, {

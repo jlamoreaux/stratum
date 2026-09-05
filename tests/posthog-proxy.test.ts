@@ -172,6 +172,61 @@ describe("ingestion forwarding", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("refuses an oversized chunked body without buffering it whole", async () => {
+    // A chunked request declares no Content-Length, so the early header check
+    // cannot see it — the running total during the stream read is what bounds
+    // this case, and it is the shape an abusive caller would actually send.
+    const calls = stubUpstream(() => new Response("ok"));
+    const chunk = new Uint8Array(256 * 1024);
+    const TOTAL_CHUNKS = 40; // 10 MB if fully drained
+    let emitted = 0;
+    let cancelled = false;
+    const stream = new ReadableStream({
+      pull(controller) {
+        if (emitted >= TOTAL_CHUNKS) {
+          controller.close();
+          return;
+        }
+        emitted += 1;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const res = await app.fetch(
+      // @ts-expect-error duplex is required for a streaming body and is not in the DOM types
+      new Request("http://localhost/_ph/e", { method: "POST", body: stream, duplex: "half" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(204);
+    expect(calls).toHaveLength(0);
+
+    // The assertions that distinguish this from the previous implementation.
+    // Buffering the body first and checking afterwards would drain all 40
+    // chunks and never cancel, so a 204 alone proves nothing: both versions
+    // refuse the request, only one refuses it without holding 10 MB.
+    expect(cancelled).toBe(true);
+    expect(emitted).toBeLessThan(TOTAL_CHUNKS);
+  });
+
+  it("forwards a normal-sized chunked body", async () => {
+    const calls = stubUpstream(() => new Response("ok"));
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"event":"$pageview"}'));
+        controller.close();
+      },
+    });
+    const res = await app.fetch(
+      // @ts-expect-error duplex is required for a streaming body and is not in the DOM types
+      new Request("http://localhost/_ph/e", { method: "POST", body: stream, duplex: "half" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
   it("never forwards the Referer, which carries the full page URL", async () => {
     // Referrer-Policy: strict-origin-when-cross-origin sends the FULL url on a
     // same-origin subresource request, and this proxy is same-origin — so
