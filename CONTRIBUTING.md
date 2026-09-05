@@ -111,9 +111,10 @@ public issue** — follow [`SECURITY.md`](SECURITY.md).
 
 ## License and the CLA
 
-Stratum is split across two licenses — [AGPL-3.0-or-later](LICENSE) for the server and
-everything not listed otherwise, [Apache-2.0](cli/LICENSE) for `cli/` and `agent/`.
-[`LICENSING.md`](LICENSING.md) explains which is which and why.
+Stratum is licensed by directory — [AGPL-3.0-or-later](LICENSE) for the server and
+everything not listed otherwise, [Apache-2.0](cli/LICENSE) for `cli/` and `agent/`, and MIT
+for the published agent skills under `website/public/.well-known/agent-skills/`.
+[`LICENSING.md`](LICENSING.md) is authoritative and explains why each is where it is.
 
 Your contribution goes out under the license of the directory it lands in. Beyond that,
 opening a pull request means agreeing to the [Contributor License Agreement](CLA.md), which

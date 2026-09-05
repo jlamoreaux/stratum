@@ -54,12 +54,22 @@ Stratum makes that one edit, not a project:
 export const STRATUM_SOURCE_URL = "https://github.com/stratum-eng/stratum";
 ```
 
-Point it at the repository holding your changes and redeploy. Every page footer
-then offers your source, which is the whole of the obligation. Publishing your
-fork on any host your users can reach satisfies it; there is no requirement to
-contribute anything upstream, and no requirement that your *users'* code, the
-repositories Stratum stores, or anything you build with it be licensed at all.
-The AGPL covers Stratum, and nothing that passes through it.
+Point it at the repository holding your changes and redeploy. Stratum then
+carries the offer on every surface it serves: the footer of every page, and, for
+callers who never receive HTML at all — the REST API, `/mcp`, anything answering
+in JSON — a `Link: …; rel="license"` and an `X-Source-Code` header on every
+response. §13 reaches everyone interacting with the program over the network,
+not only the people looking at markup, so an agent driving Stratum entirely over
+`/mcp` is offered the source too.
+
+That is the source-offer mechanism, and it is the part Stratum can do for you.
+It is not a substitute for the rest of the license: if you modify Stratum you
+still carry §5's obligations to mark your changes and keep the legal notices
+intact. Publishing your fork on any host your users can reach is what discharges
+the offer itself; there is no requirement to contribute anything upstream, and
+no requirement that your *users'* code, the repositories Stratum stores, or
+anything you build with it be licensed at all. The AGPL covers Stratum, and
+nothing that passes through it.
 
 ## What this does not restrict
 

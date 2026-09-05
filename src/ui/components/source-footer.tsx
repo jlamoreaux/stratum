@@ -1,6 +1,8 @@
 import type { FC } from "hono/jsx";
 import { STRATUM_SOURCE_URL, STRATUM_VERSION } from "../../version";
 
+export { STRATUM_SOURCE_URL };
+
 /**
  * The AGPL-3.0 §13 source offer, rendered in the chrome of every page Stratum
  * serves.
@@ -21,8 +23,15 @@ import { STRATUM_SOURCE_URL, STRATUM_VERSION } from "../../version";
  * grows a `</body>` without an offer, which is how the two template-string
  * pages were found in the first place.
  */
-const LICENSE_NAME = "AGPL-3.0";
-const LICENSE_URL = "https://www.gnu.org/licenses/agpl-3.0.html";
+/**
+ * The full SPDX identifier, not the bare "AGPL-3.0". The repository is
+ * AGPL-3.0-**or-later**, and a notice naming only version 3 understates the
+ * grant a reader is being given. `tests/source-offer.test.tsx` pins this to
+ * package.json's `license` field so the visible notice and the manifest cannot
+ * disagree.
+ */
+export const LICENSE_NAME = "AGPL-3.0-or-later";
+export const LICENSE_URL = "https://www.gnu.org/licenses/agpl-3.0.html";
 
 export const SourceFooter: FC = () => (
   <footer class="site-footer">

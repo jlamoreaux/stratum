@@ -190,16 +190,22 @@ Artifacts namespaces.
 
 ## What license is Stratum under, and what does self-hosting oblige me to?
 
-The server and web UI are **AGPL-3.0-or-later**; the `@stratum/cli` and
-`@stratum/agent` packages are **Apache-2.0**. Releases through v0.2.0 were MIT
-and stay MIT. [`LICENSING.md`](https://github.com/stratum-eng/stratum/blob/main/LICENSING.md) is the full account.
+Licensing is by directory: the server, web UI, `docs/`, and `website/` sources
+are **AGPL-3.0-or-later**; the `@stratum/cli` and `@stratum/agent` packages are
+**Apache-2.0**; the published agent skills under
+`website/public/.well-known/agent-skills/` stay **MIT**, because they exist to be
+pasted into third-party agents. Releases through v0.2.0 were MIT and stay MIT.
+[`LICENSING.md`](https://github.com/stratum-eng/stratum/blob/main/LICENSING.md) is authoritative and explains each choice.
 
 Running an **unmodified** Stratum obliges you to nothing at all — no notice, no
 publication. If you **modify** Stratum and other people reach your instance over
 a network (your own developers count), AGPL §13 asks you to offer those users
 the source of the version you are running. Point `STRATUM_SOURCE_URL` in
 `src/version.ts` at the repository holding your changes and redeploy; the page
-footer then carries the offer, and that is the whole of the obligation.
+footer and the `X-Source-Code` header on every API and `/mcp` response then
+carry the offer. That is the source-offer mechanism — the part Stratum handles
+for you — rather than the whole of the license: modifying Stratum also carries
+§5's obligations to mark your changes and preserve the legal notices.
 
 Nothing in the license reaches your own work. The repositories Stratum hosts,
 the changes it evaluates, your `.stratum/policy.yaml`, your custom evaluators

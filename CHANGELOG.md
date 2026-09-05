@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking
-- **Stratum is no longer MIT-licensed.** The server, the web UI, and the docs are
-  now **AGPL-3.0-or-later**; the `@stratum/cli` and `@stratum/agent` packages are
+- **Stratum is no longer MIT-licensed.** The server, the web UI, `docs/`, and the
+  `website/` sources are now **AGPL-3.0-or-later**; the `@stratum/cli` and `@stratum/agent` packages are
   **Apache-2.0**, chosen over MIT for its express patent grant. Everything
   released through v0.2.0 stays MIT and always will — anyone holding that code
   keeps their MIT rights in it, forks included. The new terms apply from this
@@ -63,13 +63,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than folded into this change.
 
 ### Added
-- **Every page offers its own source.** A footer carrying the running version,
-  the license, and a link to the source now renders in the shared layout and on
-  every standalone document — sign-in, sign-up, OAuth consent, the magic-link
-  verify page, and the webhook-created page — because an offer only a signed-in
-  user could see is not the one AGPL §13 asks of an operator running a modified
-  instance. Self-hosters running modifications repoint `STRATUM_SOURCE_URL` in
-  `src/version.ts`; there is nothing else to configure.
+- **Every response offers its own source.** A footer carrying the running
+  version, the license, and a link to the source now renders in the shared
+  layout and on every standalone document — sign-in, sign-up, OAuth consent, the
+  magic-link verify page, and the webhook-created page — because an offer only a
+  signed-in user could see is not the one AGPL §13 asks of an operator running a
+  modified instance. For callers who never receive HTML at all, every response
+  also carries `Link: …; rel="license"` and `X-Source-Code` headers, so an agent
+  driving Stratum over `/mcp` or the REST API is offered the source too; git
+  smart-HTTP responses are left untouched. Self-hosters running modifications
+  repoint `STRATUM_SOURCE_URL` in `src/version.ts`; there is nothing else to
+  configure.
 - **Stratum can deploy a merged change.** A new `deploys:` block in
   `.stratum/policy.yaml` names one or more deploys, each with a `target`
   (`cloudflare-pages`, `cloudflare-workers`, or `vercel`), an optional `dir` to

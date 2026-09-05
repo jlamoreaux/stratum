@@ -1,7 +1,11 @@
 /// <reference types="vite/client" />
+import { Hono } from "hono";
 import { renderToString } from "hono/jsx/dom/server";
 import { describe, expect, it } from "vitest";
+import { sourceOfferMiddleware } from "../src/middleware/source-offer";
+import type { Env } from "../src/types";
 import {
+  LICENSE_NAME,
   SOURCE_FOOTER_HTML,
   SOURCE_FOOTER_HTML_INLINE,
   SourceFooter,
@@ -17,6 +21,14 @@ import { STRATUM_SOURCE_URL, STRATUM_VERSION } from "../src/version";
  * component away from being deleted by a layout refactor and nobody noticing
  * until it matters. This suite is the thing that notices.
  */
+const PACKAGE_JSON = (
+  import.meta.glob("../package.json", {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  }) as Record<string, string>
+)["../package.json"] as string;
+
 const render = (): string =>
   renderToString(
     <Layout title="Test" user={{ id: "u1", email: "a@b.test", username: "someone" }}>
@@ -126,6 +138,50 @@ describe("AGPL §13 source offer", () => {
       expect(html).toContain("https://www.gnu.org/licenses/agpl-3.0.html");
       expect(html).toContain(STRATUM_SOURCE_URL);
     }
+  });
+
+  /**
+   * The version beside the license is a claim about which release is running,
+   * and the licensing docs say releases through v0.2.0 are MIT. Those two can
+   * only stay coherent if the footer's version tracks the manifest and the
+   * footer's license name *is* the manifest's license. `src/version.ts` claimed
+   * a test enforced the first half; none did until this one.
+   */
+  it("keeps the footer's version and license pinned to package.json", () => {
+    const manifest = JSON.parse(PACKAGE_JSON) as { version: string; license: string };
+    expect(STRATUM_VERSION).toBe(manifest.version);
+    expect(LICENSE_NAME).toBe(manifest.license);
+    // Belt and braces: the rendered notice, not just the constant.
+    expect(renderToString(<SourceFooter />)).toContain(manifest.license);
+  });
+
+  /**
+   * §13 reaches everyone interacting with the program over a network, not only
+   * the people receiving markup. An agent driving Stratum entirely over `/mcp`
+   * never sees the footer, so the offer also rides on response headers.
+   */
+  it("offers the source to callers who never receive HTML", async () => {
+    const json = new Hono<{ Bindings: Env }>();
+    json.use("*", sourceOfferMiddleware);
+    json.get("/api/anything", (c) => c.json({ ok: true }));
+    json.get("/mcp", (c) => c.json({ jsonrpc: "2.0" }));
+
+    for (const path of ["/api/anything", "/mcp"]) {
+      const res = await json.request(path);
+      expect(res.headers.get("X-Source-Code"), path).toBe(STRATUM_SOURCE_URL);
+      expect(res.headers.get("Link"), path).toContain('rel="license"');
+    }
+  });
+
+  it("leaves git smart-HTTP responses alone", async () => {
+    // git clients and proxies get exactly the bytes they expect, and a clone is
+    // already receiving the source.
+    const git = new Hono<{ Bindings: Env }>();
+    git.use("*", sourceOfferMiddleware);
+    git.get("/@me/repo/info/refs", (c) => c.text("001e# service=git-upload-pack"));
+
+    const res = await git.request("/@me/repo/info/refs");
+    expect(res.headers.get("X-Source-Code")).toBeNull();
   });
 
   it("keeps the raw-HTML rendering identical to the JSX one", () => {

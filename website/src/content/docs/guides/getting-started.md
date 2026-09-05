@@ -51,8 +51,8 @@ says `app.usestratum.dev`, substitute your own instance's origin.
 Self-hosting an unmodified Stratum obliges you to nothing. If you modify it and
 other people use your instance over a network, AGPL §13 asks you to offer them
 that version's source — one constant, `STRATUM_SOURCE_URL` in `src/version.ts`,
-points the page footer at your repository. The code you *host in* Stratum is
-untouched by this.
+points both the page footer and the `X-Source-Code` response header at your
+repository. The code you *host in* Stratum is untouched by this.
 
 ## 2. Create or import a project
 

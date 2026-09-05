@@ -471,14 +471,15 @@ instead — see [SECURITY.md](SECURITY.md) for what to include and expected resp
 
 ## License
 
-Two licenses, split along the line that matters to you: what you run as a
-service is copyleft, what you run inside your own pipeline is not.
+Split along the line that matters to you: what you run as a service is
+copyleft, what you run inside your own pipeline is not.
 
 | Path | License |
 |---|---|
 | [`cli/`](cli) — `@stratum/cli` | [Apache-2.0](cli/LICENSE) |
 | [`agent/`](agent) — `@stratum/agent` | [Apache-2.0](agent/LICENSE) |
-| everything else — the server, the web UI, the docs | [AGPL-3.0-or-later](LICENSE) |
+| `website/public/.well-known/agent-skills/` — the published agent skills | MIT |
+| everything else — the server, the web UI, `docs/`, `website/` | [AGPL-3.0-or-later](LICENSE) |
 
 Copyright © 2026 Jordan Lamoreaux.
 

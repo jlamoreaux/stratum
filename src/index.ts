@@ -10,6 +10,7 @@ import { configGuardMiddleware } from "./middleware/config-guard";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
+import { sourceOfferMiddleware } from "./middleware/source-offer";
 import { handleDeployQueue } from "./queue/deploy-queue";
 import { handleEventQueue } from "./queue/event-consumer";
 import type { EventQueueMessage } from "./queue/events";
@@ -75,6 +76,7 @@ function errorRoute(c: Context<{ Bindings: Env }>): string {
 }
 
 app.use("*", securityHeadersMiddleware);
+app.use("*", sourceOfferMiddleware);
 app.use("*", configGuardMiddleware);
 app.use("*", analyticsMiddleware);
 app.use("*", authMiddleware);
