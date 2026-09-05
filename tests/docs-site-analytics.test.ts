@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import appWeb from "../src/analytics/web.ts?raw";
 // @ts-expect-error plain ESM helper shared by the docs build and its Worker
-import { isPostHogProjectKey } from "../website/analytics-key.mjs";
+import { readPostHogProjectKey } from "../website/analytics-key.mjs";
 import analyticsKey from "../website/analytics-key.mjs?raw";
 // Raw imports rather than node:fs, matching tests/wrangler-telemetry-config.test.ts.
 // The docs site has no test runner of its own, so its two analytics-bearing
@@ -16,8 +16,8 @@ describe("docs site analytics gating", () => {
     // They diverged once: `startsWith("phc_")` in the build against a full
     // pattern in the Worker, so `phc_bad-key` produced a site that loaded the
     // SDK and then had every request refused by its own proxy.
-    expect(astroConfig).toContain("isPostHogProjectKey");
-    expect(docsWorker).toContain("isPostHogProjectKey");
+    expect(astroConfig).toContain("readPostHogProjectKey");
+    expect(docsWorker).toContain("readPostHogProjectKey");
     expect(astroConfig).not.toContain('startsWith("phc_")');
     expect(analyticsKey).toContain("/^phc_[A-Za-z0-9]+$/");
   });
@@ -25,18 +25,32 @@ describe("docs site analytics gating", () => {
   it("ships nothing unless a PostHog project key is supplied at build time", () => {
     // A fork, a PR preview, or anyone running `npm run build` must produce a
     // site that sends nothing. The build must never depend on the variable.
-    expect(astroConfig).toContain("process.env.POSTHOG_PUBLIC_KEY");
-    expect(astroConfig).toContain("isPostHogProjectKey(POSTHOG_KEY)");
+    expect(astroConfig).toContain("readPostHogProjectKey(process.env.POSTHOG_PUBLIC_KEY)");
+    // The value embedded in the HTML must be the one the reader returned, not
+    // the raw variable: a reader that normalises and a caller that embeds the
+    // original is how `" phc_abc "` shipped padded and was rejected upstream.
+    expect(astroConfig).toContain("JSON.stringify(POSTHOG_KEY)");
   });
 
   it("refuses a personal API key, which would be a credential in public HTML", () => {
     // PostHog's two key types differ by one letter and the value is embedded in
     // every page, so this check is the only thing standing between a paste
     // error and a disclosure.
-    expect(isPostHogProjectKey("phc_abc123")).toBe(true);
+    expect(readPostHogProjectKey("phc_abc123")).toBe("phc_abc123");
     for (const bad of ["phx_secret", "sk_live", "phc_", "PHC_abc", "phc_bad-key", "", undefined]) {
-      expect(isPostHogProjectKey(bad), String(bad)).toBe(false);
+      expect(readPostHogProjectKey(bad), String(bad)).toBe("");
     }
+  });
+
+  it("normalises the key it validates, so the build cannot embed a padded one", () => {
+    // A secret pasted into a CI variable arrives with a trailing newline more
+    // often than not. Trimming inside the check and returning a boolean let
+    // `" phc_abc123 "` pass while the caller embedded the padded string, which
+    // PostHog refuses — a site that looks instrumented and sends nothing.
+    expect(readPostHogProjectKey(" phc_abc123 ")).toBe("phc_abc123");
+    expect(readPostHogProjectKey("phc_abc123\n")).toBe("phc_abc123");
+    expect(readPostHogProjectKey("\tphc_abc123")).toBe("phc_abc123");
+    expect(readPostHogProjectKey(" phc_bad-key ")).toBe("");
   });
 
   it("pins the SDK version rather than tracking a floating bundle", () => {
@@ -96,7 +110,7 @@ describe("docs site proxy", () => {
     // must not run a PostHog relay — the FAQ promises exactly that, so without
     // this the docs half made the documentation false.
     expect(docsWorker).toContain("env.POSTHOG_PUBLIC_KEY");
-    expect(docsWorker).toContain("isPostHogProjectKey(env.POSTHOG_PUBLIC_KEY)");
+    expect(docsWorker).toContain("readPostHogProjectKey(env.POSTHOG_PUBLIC_KEY)");
   });
 
   it("forwards only PostHog ingestion paths", () => {

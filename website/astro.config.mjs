@@ -3,7 +3,7 @@ import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
 import starlight from "@astrojs/starlight";
 import starlightLlmsTxt from "starlight-llms-txt";
-import { isPostHogProjectKey } from "./analytics-key.mjs";
+import { readPostHogProjectKey } from "./analytics-key.mjs";
 
 const SITE = "https://docs.usestratum.dev";
 
@@ -27,10 +27,10 @@ const SITE = "https://docs.usestratum.dev";
 // differ only by word order would be a trap. Read at build time via
 // `process.env` and inlined below, so Astro's `PUBLIC_` prefix convention —
 // which exists to expose a variable through `import.meta.env` — does not apply.
-const POSTHOG_KEY = process.env.POSTHOG_PUBLIC_KEY ?? "";
+const POSTHOG_KEY = readPostHogProjectKey(process.env.POSTHOG_PUBLIC_KEY);
 const SDK_VERSION = "1.427.2";
 /** @type {import("astro").AstroUserConfig["integrations"] extends any ? Array<{tag: "script", attrs?: Record<string, string | boolean | undefined>, content?: string}> : never} */
-const analyticsHead = isPostHogProjectKey(POSTHOG_KEY)
+const analyticsHead = POSTHOG_KEY
   ? [
       {
         tag: /** @type {const} */ ("script"),

@@ -1,4 +1,4 @@
-import { isPostHogProjectKey } from "../analytics-key.mjs";
+import { readPostHogProjectKey } from "../analytics-key.mjs";
 
 /**
  * Docs site Worker.
@@ -142,7 +142,7 @@ async function handleAnalyticsProxy(request, url, env) {
   // promise the FAQ makes and burns Worker time on traffic nobody asked for.
   // The build bakes the key into the HTML; this var is what tells the Worker
   // the same deployment has analytics on, and it is set by the deploy workflow.
-  if (!isPostHogProjectKey(env.POSTHOG_PUBLIC_KEY)) return new Response(null, { status: 204 });
+  if (!readPostHogProjectKey(env.POSTHOG_PUBLIC_KEY)) return new Response(null, { status: 204 });
 
   const suffix = url.pathname.slice(PROXY_PREFIX.length) || "/";
   const noContent = () => new Response(null, { status: 204 });
