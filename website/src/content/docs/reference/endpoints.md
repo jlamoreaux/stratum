@@ -1,7 +1,7 @@
 ---
 title: "API Endpoints"
 description: "The Stratum REST API surface — projects, branches, workspaces, changes, reviews, issues, deployments, agents, users, and organizations."
-editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/api/endpoints"
+editUrl: "https://github.com/stratum-eng/stratum/edit/main/docs/api/endpoints/README.md"
 ---
 
 - [Projects](#projects-api) — projects, branches, browsing, import, sync
@@ -31,6 +31,10 @@ is the [OpenAPI specification](/reference/openapi/).
 
 ### Import from GitHub
 `POST /api/projects/{namespace}/{slug}/import`
+
+See the [Importing from GitHub guide](/guides/importing/) for the
+available options, how to track an import's progress, and keeping the project
+in sync with its source.
 
 ### Delete Project
 `DELETE /api/projects/{namespace}/{slug}`
@@ -145,7 +149,8 @@ Users only. Merged changes cannot be rejected.
 ### Merge
 `POST /api/changes/{id}/merge`
 
-Runs the full merge gate. Common refusals:
+Runs the full merge gate. Common refusals (see [Error codes](/reference/errors/) for
+the full list and the response shapes):
 
 | Code | Meaning |
 |---|---|
@@ -296,7 +301,10 @@ Ordered newest-first by issue number.
 ### Update an Issue
 `PATCH /api/projects/{namespace}/{slug}/issues/{number}`
 
-Requires **write** access. Only the fields present are written.
+Requires **write** access **and a user identity** — an agent token is refused
+with `401`. This is the editing and labelling path, so an agent can open an
+issue and comment on it but cannot retitle, reassign, relabel, or close one.
+Only the fields present in the body are written.
 
 ```json
 { "title": "…", "body": "…", "status": "closed",
@@ -329,10 +337,10 @@ Paginated with `limit` (default 100, max 500) and `offset`.
 
 ## Deployments and Deploy Secrets API
 
-Post-merge deployments and the per-project secret store that feeds them. See
-the [Deployments user guide](/guides/deployments/) for the concepts
-— the `deploys:` policy block, the three targets, limits, and what each status
-means — and the [OpenAPI specification](/reference/openapi/) for exact schemas.
+Post-merge deployments and the encrypted per-project secret store that feeds
+them. See the [Deployments user guide](/guides/deployments/) for the
+concepts — the `deploys:` policy block, the three targets, limits, and what each
+status means — and the [OpenAPI specification](/reference/openapi/) for exact schemas.
 
 Two authorization rules here are stricter than the usual project read/write
 split:
@@ -495,14 +503,39 @@ from a project webhook.
 
 ## Agents API
 
+An agent is a non-human contributor registered by a user. It authenticates with
+an agent token and inherits its owner's project access. See
+[Authentication](/reference/authentication/) for how agent tokens differ from a user's
+scoped API tokens.
+
 ### List Agents
 `GET /api/agents`
 
 ### Create Agent
 `POST /api/agents`
 
+Returns the new agent alongside its token as `token` — the **only** time the
+plaintext is ever returned. Neither `GET /api/agents` nor `GET /api/agents/{id}`
+includes it, and there is no way to re-read it; a lost token means deleting the
+agent and registering a new one.
+
+Agent tokens **do not expire** and are not scoped. The only way to revoke one is
+to delete the agent.
+
 ### Get Agent
 `GET /api/agents/{id}`
+
+### Delete Agent
+`DELETE /api/agents/{id}`
+
+Deletes the agent row, which is what revokes its token — **the only revocation
+path for a credential that never expires.** Requires the owning user's identity:
+`401` without a user identity (an agent token sets `agentId` and never `userId`,
+so an agent cannot delete itself or any sibling), `403` for a user who is not
+the owner, `404` for an unknown id. Audited as `agent.revoked`.
+
+Deleting the owning user's account revokes their agents too, as part of the
+account cascade ([Delete Account](#delete-account)).
 
 ## Users API
 
@@ -589,3 +622,10 @@ mismatched `confirm` returns `400`.
 
 ### Create Organization
 `POST /api/orgs`
+
+### Members and teams
+
+Members and teams are managed under `/api/orgs/{slug}/members` and
+`/api/orgs/{slug}/teams` — add and remove a member, create, list and delete a
+team, and add and remove a team's members. See the
+[OpenAPI specification](/reference/openapi/) for the exact routes and schemas.

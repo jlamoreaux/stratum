@@ -11,7 +11,6 @@
 //   node scripts/mirror-docs.mjs --check   # exit 1 if any mirror is stale
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 
 const REPO = "https://github.com/stratum-eng/stratum";
 const DOCS = "../docs";
@@ -194,9 +193,14 @@ async function renderEndpointsPage() {
 
   // Sibling links resolve to this same page, so point them at the section
   // rather than at the page they are already on.
+  //
+  // A link that already carries a fragment (`changes.md#list-changes`) keeps
+  // the fragment *instead of* the section anchor: the heading it names is now
+  // on this same page, and concatenating the two would emit `#a#b`, a single
+  // fragment with two hashes that matches no heading at all.
   const linkToAnchor = (text) =>
     text.replace(/\]\(\.?\/?([a-z0-9-]+)\.md(#[^)]*)?\)/g, (whole, slug, hash) =>
-      anchors.has(slug) ? `](${anchors.get(slug)}${hash ?? ""})` : whole,
+      anchors.has(slug) ? `](${hash ?? anchors.get(slug)})` : whole,
     );
 
   const composed = [
@@ -210,7 +214,11 @@ async function renderEndpointsPage() {
   );
   body = body.replace(/\n{3,}/g, "\n\n").trimEnd();
 
-  const editUrl = `${REPO}/edit/main/docs/api/endpoints`;
+  // A file, not the directory: GitHub's /edit/ route only resolves file paths,
+  // so a directory here renders an "Edit this page" link that 404s. The README
+  // is the composed page's own introduction, which makes it the right landing
+  // spot for someone who clicked edit from the top of the page.
+  const editUrl = `${REPO}/edit/main/docs/api/endpoints/README.md`;
   return (
     `---\ntitle: ${yamlString(title)}\ndescription: ${yamlString(ENDPOINTS_DESCRIPTION)}\n` +
     `editUrl: ${yamlString(editUrl)}\n---\n\n${body}\n`
@@ -221,7 +229,7 @@ async function renderEndpointsPage() {
  * Every `.md` under `docs/api/endpoints` must be registered in
  * `ENDPOINT_ORDER`, and every registered slug must exist.
  */
-export async function endpointsAudit() {
+async function endpointsAudit() {
   const dir = join(DOCS, "api", "endpoints");
   const present = (await readdir(dir))
     .filter((f) => f.endsWith(".md") && f !== "README.md")
@@ -264,7 +272,7 @@ async function publishedPages(dir = OUT, prefix = "") {
  * how a hand-authored `reference/endpoints.md` shadowed `docs/api/endpoints/`
  * unnoticed.
  */
-export async function inventoryAudit(generated) {
+async function inventoryAudit(generated) {
   const owned = new Set([...generated, ...SITE_OWNED.keys()]);
   const problems = [];
   for (const page of await publishedPages()) {
