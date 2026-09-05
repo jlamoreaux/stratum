@@ -116,4 +116,16 @@ Mirror lint → typecheck → test locally before pushing.
   `docs/runbooks/ai-review.md`). Its findings are advisory, never a merge gate; collaborators
   can run `/review`, `/improve`, or `/ask <question>` in PR comments.
 
+## Licensing
+
+- Two licenses, split by directory: `cli/` and `agent/` are **Apache-2.0**, everything else is
+  **AGPL-3.0-or-later**, and the published agent skills under
+  `website/public/.well-known/agent-skills/` are deliberately **MIT**. `LICENSING.md` is
+  authoritative; don't restate the terms elsewhere.
+- The `license: "MIT"` strings in `src/templates/index.ts` are scaffolding for projects *users*
+  create through Stratum. They are not Stratum's license — leave them alone.
+- `STRATUM_SOURCE_URL` in `src/version.ts` is what the page footer offers under AGPL §13. It
+  is a per-deployment constant, not a config knob; changing its meaning is a licensing change.
+- A human contributor's PR needs the CLA checkbox (`CLA.md`) confirmed before it merges.
+
 See `CONTRIBUTING.md` for the human-facing version of all of this.

@@ -19,8 +19,8 @@
  *    proxy is not required for the POSTs themselves.)
  *
  * Reason 1 deserves stating plainly rather than being left implicit in a
- * neutral-looking path: this is an MIT project, anyone can read this file, and
- * a reader who discovers the intent for themselves is entitled to conclude it
+ * neutral-looking path: the source is public, anyone can read this file, and a
+ * reader who discovers the intent for themselves is entitled to conclude it
  * was hidden. `docs/user-guide/faq.md` names it, and `respect_dnt` is on.
  *
  * ## What this is not

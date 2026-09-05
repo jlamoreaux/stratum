@@ -22,8 +22,8 @@
  * self-hoster: "export server-side route patterns." Reusing it here would
  * silently redefine it to also mean "load third-party JavaScript in your
  * users' browsers and send their IP addresses to PostHog" — for operators who
- * set it months ago and took no action since. This project is MIT and
- * self-hostable; that is not a change we get to make on their behalf.
+ * set it months ago and took no action since. This project is self-hostable;
+ * that is not a change we get to make on their behalf.
  *
  * `POSTHOG_PUBLIC_KEY` is therefore a separate, deliberate opt-in, and a
  * `[vars]` entry rather than a secret because a value embedded in every page

@@ -53,6 +53,11 @@ export async function buildIndex(dir = SKILLS_DIR, site = SITE) {
     description:
       "Skills for driving Stratum — the governance layer that decides what agent output is allowed to merge.",
     homepage: `${site}/`,
+    // Deliberately MIT, not the repository's AGPL: these skills exist to be
+    // fetched and embedded in third-party agents, which is the one thing
+    // copyleft on a discovery artifact would discourage. They carry no
+    // implementation. See LICENSING.md — this is an explicit carve-out, not a
+    // line that was missed when the project relicensed.
     license: "MIT",
     skills,
   };

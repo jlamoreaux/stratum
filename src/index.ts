@@ -10,6 +10,7 @@ import { configGuardMiddleware } from "./middleware/config-guard";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
+import { sourceOfferMiddleware } from "./middleware/source-offer";
 import { webAnalyticsMiddleware } from "./middleware/web-analytics";
 import { handleDeployQueue } from "./queue/deploy-queue";
 import { handleEventQueue } from "./queue/event-consumer";
@@ -82,8 +83,11 @@ function errorRoute(c: Context<{ Bindings: Env }>): string {
 app.use("*", securityHeadersMiddleware);
 // Registered early so its post-`next()` work sees the final response, after
 // every other middleware has had its say. It reads `userId`/`telemetryOptOut`,
-// which `authMiddleware` below publishes before this runs.
+// which `authMiddleware` below publishes before this runs. Outermost of the two
+// response rewriters, so it builds its replacement `Response` from headers
+// `sourceOfferMiddleware` has already set rather than racing it.
 app.use("*", webAnalyticsMiddleware);
+app.use("*", sourceOfferMiddleware);
 app.use("*", configGuardMiddleware);
 app.use("*", analyticsMiddleware);
 app.use("*", authMiddleware);

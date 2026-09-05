@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import app from "../src/index";
 import { NO_ANALYTICS_HEADER, webAnalyticsMiddleware } from "../src/middleware/web-analytics";
 import type { Env } from "../src/types";
+import { STRATUM_SOURCE_URL } from "../src/version";
 
 const KEY = "phc_test123";
 
@@ -217,5 +218,17 @@ describe("web analytics injection", () => {
     const env = makeEnv({ STRATUM_TELEMETRY_DISABLED: "true" });
     const html = await (await fetchSignup(env)).text();
     expect(html).not.toContain(KEY);
+  });
+
+  it("leaves the AGPL source offer intact on the page it rewrites", async () => {
+    // Two features now write to the same document: `Layout` renders the §13
+    // offer just inside `</body>`, and this middleware splices scripts in at
+    // that same marker. Injecting is a rewrite of an already-rendered page, so
+    // the offer must survive it — a legal notice dropped by an analytics
+    // rewrite would be a licence violation caused by telemetry.
+    const html = await (await fetchSignup(makeEnv())).text();
+    expect(html).toContain("posthog.init");
+    expect(html).toContain(STRATUM_SOURCE_URL);
+    expect(html).toContain("AGPL-3.0");
   });
 });
