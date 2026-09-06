@@ -487,9 +487,10 @@ export function cutRelease(text: string, options: CutOptions): Result<string> {
 
 /**
  * Structural problems that would break the release automation later: a missing
- * `Unreleased` heading, an undated or non-semver release, a version with no
- * link definition (the dead-link failure mode this file exists to prevent), or
- * releases listed out of order. Returns an empty array when the file is sound.
+ * `Unreleased` heading, an `Unreleased` entry sitting outside a `### Group`,
+ * an undated or non-semver release, a version with no link definition (the
+ * dead-link failure mode this file exists to prevent), or releases listed out
+ * of order. Returns an empty array when the file is sound.
  */
 export function validateChangelog(text: string): string[] {
   const problems: string[] = [];
@@ -507,6 +508,14 @@ export function validateChangelog(text: string): string[] {
 
     if (section.version === UNRELEASED) {
       if (section.date) problems.push("`Unreleased` must not carry a date");
+      // An entry above the first `### Group` heading is silently dropped when
+      // fragments are folded in (mergeChangelogBodies keys everything by
+      // group), so reject it here rather than lose it at release time.
+      if (splitGroups(section.body).preamble !== "") {
+        problems.push(
+          "`Unreleased` has content before its first `### Group` heading — put every entry under a group",
+        );
+      }
       continue;
     }
 

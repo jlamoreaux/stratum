@@ -389,6 +389,24 @@ describe("validateChangelog", () => {
     expect(validateChangelog(text).join("\n")).toContain("Unreleased");
   });
 
+  it("flags an Unreleased entry sitting above the first group heading", () => {
+    // Such an entry is legal Markdown and reads fine, but mergeChangelogBodies
+    // keys everything by group, so `prepare` would drop it from the cut
+    // release without a word. Fail here instead.
+    const text = FIXTURE.replace(
+      "## [Unreleased]\n",
+      "## [Unreleased]\n\n- Fix startup failure when the config file is absent\n",
+    );
+    expect(validateChangelog(text)).toContain(
+      "`Unreleased` has content before its first `### Group` heading — put every entry under a group",
+    );
+  });
+
+  it("does not flag an empty Unreleased section", () => {
+    const text = FIXTURE.replace("### Added\n- A new thing.\n\n### Fixed\n- An old thing.\n\n", "");
+    expect(validateChangelog(text)).toEqual([]);
+  });
+
   it("flags a release with no link definition — the dead-link failure mode", () => {
     const text = FIXTURE.replace(`[0.1.0]: ${REPO}/releases/tag/v0.1.0\n`, "");
     expect(validateChangelog(text)).toContain("No link definition for `0.1.0`");
