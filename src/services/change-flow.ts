@@ -20,7 +20,7 @@ import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync"
 import { type EventActor, emitEvent } from "../queue/events";
 import { getAgent } from "../storage/agents";
 import { createChange, updateChangeStatus } from "../storage/changes";
-import { type CostSample, recordCosts } from "../storage/costs";
+import { type CostSample, recordCosts, resolveBillingSubject } from "../storage/costs";
 import { recordEvalRuns } from "../storage/eval-runs";
 import {
   artifactsRepoNameFromRemote,
@@ -36,6 +36,7 @@ import {
   type ProjectEntry,
   getArtifactsRepoName,
   projectDefaultBranch,
+  projectDisplayName,
 } from "../types";
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -158,12 +159,9 @@ export function buildEvaluators(
   logger: Logger,
   workspaceRepo?: SandboxRepoAccess,
 ): Array<{ type: string; evaluator: Evaluator }> {
-  // Guarded because a legacy entry can carry no namespace, as this file already
-  // assumes at `resolveProjectHead` and `ensureWorkspaceRepo`. Interpolating
-  // unguarded would log "undefined/old-project" for exactly the projects whose
-  // identity is already hardest to trace.
-  const projectName =
-    project.namespace && project.slug ? `${project.namespace}/${project.slug}` : project.name;
+  // Guarded, because a legacy entry can carry no namespace — see
+  // `projectDisplayName`, and this file's own `resolveProjectHead`.
+  const projectName = projectDisplayName(project);
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
   ];
@@ -475,10 +473,20 @@ export async function createChangeWithEvaluation(
     { kind: "git_ops", quantity: 2 },
     ...evalRuns.flatMap(({ result }) => result.costs ?? []),
   ];
+  // Resolved rather than reused from `billingContextFor` above: that one yields
+  // nothing for an agent-owned project, while the ledger can still name the
+  // agent's owning user as the payer.
+  const createSubject = await resolveBillingSubject(env.DB, logger, project);
   await recordCosts(
     env.DB,
     logger,
-    { project: projectName, projectId: project.id, changeId: change.id, workspace: workspaceName },
+    {
+      project: projectName,
+      projectId: project.id,
+      changeId: change.id,
+      workspace: workspaceName,
+      ...(createSubject ?? {}),
+    },
     createCostSamples,
   );
 

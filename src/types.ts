@@ -329,6 +329,25 @@ export function projectDefaultBranch(project: {
   return project.sourceDefaultBranch || project.githubDefaultBranch || "main";
 }
 
+/**
+ * A project's `@namespace/slug` label, falling back to its bare name.
+ *
+ * The fallback is the point. A legacy entry can carry no namespace — KV records
+ * are cast without shape validation, and this file's own `projectDefaultBranch`
+ * exists for the same class of drift — so interpolating the pair unguarded
+ * yields the string `"undefined/my-repo"`. That is merely ugly in a log line
+ * and actively wrong in `cost_records.project`, where it becomes a persisted
+ * identifier that matches no project during the deletion cascade's name-form
+ * lookup.
+ */
+export function projectDisplayName(project: {
+  namespace?: string;
+  slug?: string;
+  name: string;
+}): string {
+  return project.namespace && project.slug ? `${project.namespace}/${project.slug}` : project.name;
+}
+
 export interface WorkspaceEntry {
   name: string;
   remote: string;

@@ -114,7 +114,14 @@ vi.mock("../src/storage/users", () => ({
 
 vi.mock("../src/storage/agents", () => ({
   getAgentByToken: vi.fn(async () => ({ success: false, error: { code: "NOT_FOUND" } })),
-  getAgent: vi.fn(),
+  // Cost attribution walks this for an agent-owned project (`resolveBillingSubject`).
+  // These tests assert on the evaluation context, not the ledger, so the walk
+  // resolving to nothing is the right default here — it costs the attribution
+  // and never the change.
+  getAgent: vi.fn(async () => ({
+    success: false,
+    error: { code: "NOT_FOUND", message: "Agent not found" },
+  })),
 }));
 
 import { DiffEvaluator } from "../src/evaluation/diff-evaluator";

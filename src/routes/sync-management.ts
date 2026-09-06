@@ -6,6 +6,7 @@ import { authMiddleware } from "../middleware/auth";
 import { billingContextFor, buildEvaluators, runEvaluation } from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
 import { getChange } from "../storage/changes";
+import { recordCosts, resolveBillingSubject } from "../storage/costs";
 import {
   MAX_FILE_BYTES,
   buildManualResolutionDiff,
@@ -22,7 +23,7 @@ import {
   updateProjectAfterSync,
 } from "../storage/sync";
 import type { Env } from "../types";
-import { projectDefaultBranch } from "../types";
+import { projectDefaultBranch, projectDisplayName } from "../types";
 import { canWriteProject } from "../utils/authz";
 import { createLogger } from "../utils/logger";
 import { readJsonWithLimit } from "../utils/request-body";
@@ -665,12 +666,32 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     // `buildManualResolutionDiff` resolved this base from the clone it built the
     // diff on, so it names the tree the resolution actually applies to (#274).
     // This path runs the LLM evaluator too, so it needs a payer as much as
-    // change creation does — it is the one metered path that records nothing
-    // today.
+    // change creation does.
     const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
       baseSha,
       billing: billingContextFor(project),
     });
+
+    // Recorded here, BEFORE the verdict is acted on, because the spend is
+    // already incurred: a resolution the suite rejects burned exactly the same
+    // model tokens as one it accepts, and the early return below would drop
+    // them. Mirrors the recording POST /changes/:id/evaluate does, minus the
+    // git_ops pair — `buildManualResolutionDiff` cloned once, above.
+    const resolveSubject = await resolveBillingSubject(c.env.DB, logger, project);
+    await recordCosts(
+      c.env.DB,
+      logger,
+      {
+        project: projectDisplayName(project),
+        projectId: project.id,
+        // The Change whose merge attempt produced this conflict, when the
+        // conflict context named one — a resolution is part of landing it.
+        ...(conflictCtx.changeId ? { changeId: conflictCtx.changeId } : {}),
+        workspace: conflictCtx.workspaceName,
+        ...(resolveSubject ?? {}),
+      },
+      [{ kind: "git_ops", quantity: 1 }, ...evalRuns.flatMap(({ result }) => result.costs ?? [])],
+    );
 
     if (!evalResult.passed) {
       logger.warn("Manual conflict resolution blocked by evaluator suite", {

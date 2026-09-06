@@ -25,7 +25,12 @@ import {
   mergeTransitionOpts,
   updateChangeStatus,
 } from "../storage/changes";
-import { type CostSample, getChangeCostSummary, recordCosts } from "../storage/costs";
+import {
+  type CostSample,
+  getChangeCostSummary,
+  recordCosts,
+  resolveBillingSubject,
+} from "../storage/costs";
 import { isTargetDeleting } from "../storage/deletion";
 import { listEvalRuns, recordEvalRuns } from "../storage/eval-runs";
 import {
@@ -801,6 +806,7 @@ app.post("/changes/:id/merge", async (c) => {
     });
   }
 
+  const mergeSubject = await resolveBillingSubject(c.env.DB, logger, project);
   await recordCosts(
     c.env.DB,
     logger,
@@ -810,6 +816,9 @@ app.post("/changes/:id/merge", async (c) => {
       projectId: change.projectId ?? project.id,
       changeId: id,
       workspace: change.workspace,
+      // The project's owner now, not the author of the change: this is the
+      // account the clone and push were spent against.
+      ...(mergeSubject ?? {}),
     },
     [{ kind: "git_ops", quantity: 2 }],
   );
@@ -1421,6 +1430,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     { kind: "git_ops", quantity: 2 },
     ...evalRuns.flatMap(({ result }) => result.costs ?? []),
   ];
+  const evaluateSubject = await resolveBillingSubject(c.env.DB, logger, project);
   await recordCosts(
     c.env.DB,
     logger,
@@ -1429,6 +1439,7 @@ app.post("/changes/:id/evaluate", async (c) => {
       projectId: change.projectId ?? project.id,
       changeId: id,
       workspace: change.workspace,
+      ...(evaluateSubject ?? {}),
     },
     evaluateCostSamples,
   );

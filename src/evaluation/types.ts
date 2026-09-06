@@ -7,8 +7,22 @@ export interface EvalResult {
   passed: boolean;
   reason: string;
   issues?: string[];
-  /** Resource usage the evaluator incurred, recorded for cost tracking. */
-  costs?: Array<{ kind: "llm_tokens" | "sandbox_ms"; quantity: number; estimated?: boolean }>;
+  /**
+   * Resource usage the evaluator incurred, recorded for cost tracking.
+   *
+   * Structurally a subset of `CostSample` (src/storage/costs.ts) rather than an
+   * import of it, so the evaluation layer does not depend on storage. `source`
+   * is what lets an evaluator running on the project's own provider credential
+   * say so: both recording sites flatten this array straight into `recordCosts`,
+   * so a field missing here is a distinction that cannot be made at all.
+   * Omitted means `"platform"` — the operator paid.
+   */
+  costs?: Array<{
+    kind: "llm_tokens" | "sandbox_ms";
+    quantity: number;
+    estimated?: boolean;
+    source?: "platform" | "byok";
+  }>;
 }
 
 /**

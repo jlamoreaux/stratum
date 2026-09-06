@@ -33,7 +33,7 @@ import { parsePolicyContent } from "../evaluation/policy-loader";
 import type { DeployConfig, DeployRejection } from "../evaluation/types";
 import { type StratumEvent, emitEvent } from "../queue/events";
 import { getChange } from "../storage/changes";
-import { recordCosts } from "../storage/costs";
+import { recordCosts, resolveBillingSubject } from "../storage/costs";
 import { isTargetDeleting } from "../storage/deletion";
 import {
   type Deployment,
@@ -854,6 +854,7 @@ async function readTree(
 
   // Recorded whether or not the read succeeded: a clone that failed still cost
   // the round trip.
+  const subject = await resolveBillingSubject(env.DB, logger, project);
   await recordCosts(
     env.DB,
     logger,
@@ -861,6 +862,7 @@ async function readTree(
       project: project.name,
       projectId: project.id,
       ...(changeId !== undefined ? { changeId } : {}),
+      ...(subject ?? {}),
     },
     [{ kind: "git_ops", quantity: 1 }],
   );
