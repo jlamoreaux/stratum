@@ -476,17 +476,23 @@ app.post("/send", async (c) => {
   try {
     // Check if user exists to determine intent
     const existingUser = await getUserByEmail(c.env.DB, email, logger);
+    // This endpoint takes no invite code, so under the closed beta the only
+    // link it could mint for a new address is one that dies at verify: an email
+    // sent, a link clicked, and an "invalid invite code" at the end of it. Skip
+    // that send — but answer exactly as a sent link does. Saying "you need an
+    // invite" here while a registered address said "check your email" would
+    // turn this endpoint into a membership oracle for the beta population, one
+    // request per address and no code needed to run it, which is the very thing
+    // the send-only-for-real-accounts branch above is shaped to avoid. Someone
+    // who holds a code signs up at /auth/signup, which asks for one.
+    if (!existingUser.success && betaGateEnabled(c.env)) {
+      logger.info("Legacy signup link not minted — closed beta", { emailHash });
+      return emailAuthRedirect(c, "success", "email_sent");
+    }
+
     const intent = existingUser.success ? "login" : "signup";
     let username: string | undefined;
     if (!existingUser.success) {
-      // This endpoint carries no invite code, so under the closed beta it can
-      // only ever mint a signup link that dies at verify. Say so here instead:
-      // the gate belongs on every path that *starts* a signup, not on the one
-      // check at the end of one of them.
-      if (betaGateEnabled(c.env)) {
-        logger.warn("Blocked legacy signup link — closed beta", { emailHash });
-        return emailAuthRedirect(c, "error", "invite_required", "/auth/signup");
-      }
       // Generate and validate username from email
       const candidate = (email.split("@")[0] ?? "")
         .toLowerCase()

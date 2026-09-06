@@ -1560,10 +1560,9 @@ describe("Auth Signup/Login Integration Tests", () => {
       expect(tokenData.intent).toBe("login");
     });
 
-    it("refuses to start a signup while the closed-beta gate is on", async () => {
+    it("mints no signup link while the closed-beta gate is on", async () => {
       // The endpoint takes no invite code, so under the gate the only link it
-      // could mint is one that dies at verify. It must refuse up front instead,
-      // and send the caller to the form that can collect a code.
+      // could mint is one that dies at verify. Nothing is sent.
       const gated = makeEnv({
         BETA_GATE: "1",
         REFERRAL_SERVICE_URL: "https://referral.example.com",
@@ -1578,7 +1577,6 @@ describe("Auth Signup/Login Integration Tests", () => {
       );
 
       expect(res.status).toBe(302);
-      expect(res.headers.get("location")).toBe("/auth/signup?error=invite_required");
       expect(await extractMagicLinkToken(gated)).toBeNull();
       expect(gated.EMAIL?.send).not.toHaveBeenCalled();
     });
@@ -1605,6 +1603,41 @@ describe("Auth Signup/Login Integration Tests", () => {
       expect((await getMagicLinkData(gated, token)) as { intent: string }).toMatchObject({
         intent: "login",
       });
+    });
+
+    it("answers a registered and an unknown address identically under the gate", async () => {
+      // Refusing an ungated signup here with a visible "you need an invite",
+      // while a registered address got "check your email", would make this
+      // endpoint a one-request-per-address membership oracle for the beta
+      // population — free to run, no invite code needed. The two responses must
+      // stay indistinguishable.
+      const { createUser } = await import("../src/storage/users");
+      await createUser(env.DB, "known@example.com", {} as unknown as Logger, "known");
+      const gate = { BETA_GATE: "1", REFERRAL_SERVICE_URL: "https://referral.example.com" };
+
+      const knownEnv = makeEnv(gate);
+      const known = await app.fetch(
+        request("/auth/email/send", {
+          method: "POST",
+          body: createFormData({ email: "known@example.com" }),
+        }),
+        knownEnv,
+      );
+
+      const unknownEnv = makeEnv(gate);
+      const unknown = await app.fetch(
+        request("/auth/email/send", {
+          method: "POST",
+          body: createFormData({ email: "stranger@example.com" }),
+        }),
+        unknownEnv,
+      );
+
+      expect(unknown.status).toBe(known.status);
+      expect(unknown.headers.get("location")).toBe(known.headers.get("location"));
+      // Same answer, but only the registered address is actually mailed.
+      expect(knownEnv.EMAIL?.send).toHaveBeenCalledOnce();
+      expect(unknownEnv.EMAIL?.send).not.toHaveBeenCalled();
     });
 
     it("enforces rate limiting on legacy endpoint", async () => {
