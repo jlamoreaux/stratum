@@ -26,21 +26,55 @@ export function repoDoConfigError(
   return null;
 }
 
-// Log the config problem at most once per isolate rather than on every request.
+/**
+ * Returns a human-readable error when entitlement enforcement is switched on
+ * without the service it enforces against, else null.
+ *
+ * Structurally the same footgun as `REPO_DO_ENABLED` above, one step quieter:
+ * `ENTITLEMENTS_ENFORCE=1` with no `BILLING_SERVICE_URL` throws nothing and
+ * breaks nothing — every owner resolves to `UnlimitedEntitlements` and every
+ * decision admits. That is enforcement that looks on in the dashboard and does
+ * nothing in production, which is worse than being off, because nobody goes
+ * looking for a limit they believe is already applied.
+ *
+ * `BILLING_SERVICE_SECRET` is not checked here: it is a Wrangler secret rather
+ * than a var, so a deploy that has the URL and not the secret is an operational
+ * state to fix, not a config file to reread — and `entitlementsEnabled` already
+ * treats it as off.
+ */
+export function entitlementsConfigError(
+  env: Pick<Env, "ENTITLEMENTS_ENFORCE" | "BILLING_SERVICE_URL">,
+): string | null {
+  if (env.ENTITLEMENTS_ENFORCE === "1" && !env.BILLING_SERVICE_URL) {
+    return (
+      "ENTITLEMENTS_ENFORCE is '1' but BILLING_SERVICE_URL is not set — no plan " +
+      "limits can be fetched, so every owner resolves to unlimited and every " +
+      "enforcement point admits. Set BILLING_SERVICE_URL (and the " +
+      "BILLING_SERVICE_SECRET secret) for the [env.<env>] block, or unset " +
+      "ENTITLEMENTS_ENFORCE."
+    );
+  }
+  return null;
+}
+
+// Log the config problems at most once per isolate rather than on every request.
 let hasLoggedConfigError = false;
 
 /**
- * Surfaces an incoherent RepoDO/R2 configuration loudly in Workers Logs on the
- * first request after a bad deploy, instead of only when a later merge throws.
- * Non-fatal: reads and the UI still work without the bucket, so we log rather
- * than reject the request.
+ * Surfaces an incoherent RepoDO/R2 or entitlements configuration loudly in
+ * Workers Logs on the first request after a bad deploy, instead of only when a
+ * later merge throws — or, for entitlements, never. Non-fatal: reads and the UI
+ * still work in both cases, so we log rather than reject the request.
  */
 export const configGuardMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   if (!hasLoggedConfigError) {
-    const problem = repoDoConfigError(c.env);
-    if (problem) {
+    const problems = [repoDoConfigError(c.env), entitlementsConfigError(c.env)].filter(
+      (problem): problem is string => problem !== null,
+    );
+    if (problems.length > 0) {
       hasLoggedConfigError = true;
-      createLogger({ component: "config-guard" }).error(problem);
+      const logger = createLogger({ component: "config-guard" });
+      for (const problem of problems) logger.error(problem);
     }
   }
   await next();

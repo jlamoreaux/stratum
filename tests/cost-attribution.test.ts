@@ -262,6 +262,27 @@ describe("recordCosts attribution columns", () => {
     expect(llm?.total).toBe(750);
   });
 
+  it("drops one unusable sample instead of losing the whole batch to it", async () => {
+    // db.batch is a transaction and quantity is NOT NULL, while SQLite stores
+    // NaN as NULL — so an unfiltered NaN would not cost itself, it would abort
+    // the write and take every other sample in the same evaluation with it.
+    const { db, raw } = makeSqliteD1();
+    const result = await recordCosts(
+      db,
+      logger,
+      { project: "p", changeId: "chg_1", ownerId: "user_alice", ownerType: "user" },
+      [
+        { kind: "llm_tokens", quantity: Number.NaN, estimated: true },
+        { kind: "git_ops", quantity: 2 },
+      ],
+    );
+
+    expect(result.success).toBe(true);
+    const kept = rows(raw);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.kind).toBe("git_ops");
+  });
+
   it("serves an owner-scoped, newest-first history from the new index", async () => {
     // What idx_costs_owner exists for. `created_at` is written only by
     // recordCosts as an ISO 8601 string, so ordering it in SQL is safe here —

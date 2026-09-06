@@ -391,6 +391,27 @@ describe("POST /api/changes/:id/merge records attributed costs", () => {
     });
   });
 
+  it("still records for ?strategy=squash, which never takes the queue branch", async () => {
+    // The queue branch is gated on `strategy === "merge"`, so squash reaches the
+    // cold path even with the binding present. Written because the note above
+    // claims this coverage.
+    const queueEnv = makeEnv({
+      MERGE_QUEUE: {
+        idFromName: (name: string) => name,
+        get: () => ({
+          merge: async () => {
+            throw new Error("squash must not reach the merge queue");
+          },
+        }),
+      } as unknown as Env["MERGE_QUEUE"],
+    });
+
+    const res = await makeApp(changesRouter).fetch(mergeRequest("?strategy=squash"), queueEnv);
+
+    expect(res.status).toBe(200);
+    expect(costRows()[0]).toMatchObject({ kind: "git_ops", owner_id: "user_alice" });
+  });
+
   it("records NOTHING when the merge queue is bound, which is every deployed config", async () => {
     // Asserting the gap rather than the fix, deliberately. Closing it means
     // recording inside the queue branch, which is its own change; until then a

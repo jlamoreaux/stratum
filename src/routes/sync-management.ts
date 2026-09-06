@@ -783,17 +783,23 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     logger,
   );
 
-  // `resolveConflict` clones the project AND the workspace fork and pushes, for
-  // EVERY strategy — so this is recorded here rather than in the `manual` branch
-  // above, which only ever sees the evaluator suite's spend. Without it,
-  // accept-project and accept-workspace resolutions record nothing at all, and
-  // manual under-records by the clone+push it just paid for. Two git_ops, the
-  // same shape the single-merge route bills for the same clone+push.
+  // `resolveConflict` runs for EVERY strategy, so this is recorded here rather
+  // than in the `manual` branch above, which only ever sees the evaluator
+  // suite's spend. Without it, accept-project and accept-workspace resolutions
+  // record nothing at all, and manual under-records the git work it paid for.
   //
-  // Before the failure branch below, for the same reason the manual branch
-  // records before its 422: the clones are already paid for when the push
-  // fails, and a failure that costs the operator the same as a success must not
-  // be the cheap way to use the platform.
+  // Recorded before the failure branch below, for the same reason the manual
+  // branch records before its 422: a resolution that clones and then fails to
+  // push cost the operator what a successful one did, and a failure must not be
+  // the cheap way to use the platform.
+  //
+  // The count is what the strategy WOULD do, not a measurement — `resolveConflict`
+  // reports only a commit sha, so there is nothing to measure. It therefore
+  // over-bills a resolution that dies before its first clone (a rejected token)
+  // and is exact otherwise. Tolerable while `git_ops` maps to no meter
+  // (`meterForCostKind`); if it ever gains one, `resolveConflict` has to report
+  // the operations it actually completed rather than being guessed at here.
+  const resolveGitOps = strategy === "accept-workspace" ? 3 : 2;
   const resolveGitSubject = await resolveBillingSubject(c.env.DB, logger, project);
   await recordCosts(
     c.env.DB,
@@ -805,7 +811,7 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
       workspace: conflictCtx.workspaceName,
       ...(resolveGitSubject ?? {}),
     },
-    [{ kind: "git_ops", quantity: 2 }],
+    [{ kind: "git_ops", quantity: resolveGitOps }],
   );
 
   if (!resolveResult.success) {

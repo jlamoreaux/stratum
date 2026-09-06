@@ -1,13 +1,13 @@
 import { AppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
-import type { BillingSubject, CostKind } from "./costs";
+import type { BillingSubject, CostKind, CostSource } from "./costs";
 
 /**
  * A metered quantity an allowance can be set against, over a calendar month.
  *
  * The `_month` suffix is redundant with the row's `period` column and is kept
- * anyway: these are the exact strings entitlements keys its limits on, so a
+ * anyway: these are the strings an entitlement's limits are keyed on, so a
  * limit lookup is `limits[row.meter]` rather than a second mapping table that
  * could disagree with this one.
  *
@@ -19,10 +19,18 @@ export type MeterKey = "llm_tokens_month" | "sandbox_ms_month" | "deploys_month"
 export interface UsageDelta {
   meter: MeterKey;
   quantity: number;
+  /**
+   * Whose provider account paid. Omitted means `"platform"` — the operator's,
+   * and so the only kind an allowance limits. Kept as a separate total rather
+   * than summed in, because a limit applies to one of the two and not the
+   * other; see migration 049.
+   */
+  source?: CostSource;
 }
 
 export interface UsageSummaryEntry {
   meter: MeterKey;
+  source: CostSource;
   quantity: number;
   /** ISO 8601, app-written. When this owner last consumed this meter. */
   updatedAt: string;
@@ -30,6 +38,7 @@ export interface UsageSummaryEntry {
 
 interface UsageRow {
   meter: string;
+  source: string;
   quantity: number;
   updated_at: string;
 }
@@ -94,7 +103,8 @@ export function usagePeriod(at: Date = new Date()): string {
  *
  * Deliberately not `db.batch`: the meters are independent, so cross-meter
  * atomicity buys nothing, and one statement per meter keeps the atomicity claim
- * at the statement where it is actually true. Callers send at most two.
+ * at the statement where it is actually true. However many deltas arrive, only
+ * as many statements run as there are distinct (meter, source) pairs.
  *
  * Best-effort by contract, like `recordCosts` which drives it: this returns a
  * Result and logs, and never throws into change creation, merge or deploy.
@@ -111,34 +121,48 @@ export async function upsertUsage(
   period: string,
   deltas: readonly UsageDelta[],
 ): Promise<Result<void, AppError>> {
-  const merged = new Map<MeterKey, number>();
+  // Keyed on both dimensions the row is keyed on, so platform and BYOK spend
+  // for one meter accumulate as two totals rather than one.
+  const merged = new Map<string, { meter: MeterKey; source: CostSource; quantity: number }>();
   for (const delta of deltas) {
     // A NaN or Infinity would poison the running total permanently: SQLite has
     // no way back from it and every later comparison against a limit would be
-    // false. Drop the sample and keep the meter usable.
-    if (!Number.isFinite(delta.quantity)) {
-      logger.warn("Usage delta skipped: quantity is not finite", {
+    // false. A NEGATIVE would do something worse than poison it — it would
+    // refund the month, through the single statement that exists to stop the
+    // month being refundable. Wall-clock arithmetic makes that reachable
+    // without malice (`Date.now() - startedAt` under a backwards clock step).
+    // Drop either and keep the meter usable; migration 049's CHECK is the
+    // backstop if one ever gets past here.
+    if (!Number.isFinite(delta.quantity) || delta.quantity < 0) {
+      logger.warn("Usage delta skipped: quantity is not a usable increment", {
         ownerId: subject.ownerId,
         meter: delta.meter,
         quantity: delta.quantity,
       });
       continue;
     }
-    merged.set(delta.meter, (merged.get(delta.meter) ?? 0) + delta.quantity);
+    const source: CostSource = delta.source ?? "platform";
+    const key = `${delta.meter}\u0000${source}`;
+    const existing = merged.get(key);
+    merged.set(key, {
+      meter: delta.meter,
+      source,
+      quantity: (existing?.quantity ?? 0) + delta.quantity,
+    });
   }
   if (merged.size === 0) return ok(undefined);
 
   const updatedAt = new Date().toISOString();
   try {
-    for (const [meter, quantity] of merged) {
+    for (const { meter, source, quantity } of merged.values()) {
       await db
         .prepare(
-          "INSERT INTO usage_periods (owner_id, owner_type, period, meter, quantity, updated_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?) " +
-            "ON CONFLICT(owner_id, period, meter) DO UPDATE SET " +
+          "INSERT INTO usage_periods (owner_id, owner_type, period, meter, source, quantity, updated_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+            "ON CONFLICT(owner_id, period, meter, source) DO UPDATE SET " +
             "quantity = quantity + excluded.quantity, updated_at = excluded.updated_at",
         )
-        .bind(subject.ownerId, subject.ownerType, period, meter, quantity, updatedAt)
+        .bind(subject.ownerId, subject.ownerType, period, meter, source, quantity, updatedAt)
         .run();
     }
     logger.debug("Usage aggregate updated", {
@@ -185,7 +209,7 @@ export async function getOwnerUsageSummary(
   try {
     const result = await db
       .prepare(
-        "SELECT meter, quantity, updated_at FROM usage_periods WHERE owner_id = ? AND period = ? ORDER BY meter",
+        "SELECT meter, source, quantity, updated_at FROM usage_periods WHERE owner_id = ? AND period = ? ORDER BY meter, source",
       )
       .bind(ownerId, period)
       .all<UsageRow>();
@@ -195,6 +219,7 @@ export async function getOwnerUsageSummary(
         // migration 049), so a row written by a future meter this build does
         // not know about reads through rather than failing the whole summary.
         meter: row.meter as MeterKey,
+        source: row.source as CostSource,
         quantity: row.quantity,
         updatedAt: row.updated_at,
       })),

@@ -154,6 +154,17 @@ export interface Env {
   BETA_GATE?: string;
   REFERRAL_SERVICE_URL?: string;
   REFERRAL_SERVICE_SECRET?: string;
+  /** Plan/entitlements service (Stratum Cloud only; OSS self-hosters leave these
+   * unset -> every owner resolves to `UnlimitedEntitlements` and nothing is
+   * fetched). BOTH are required for the hook to be live — see
+   * `entitlementsEnabled` in src/billing/entitlements.ts. */
+  BILLING_SERVICE_URL?: string;
+  BILLING_SERVICE_SECRET?: string;
+  /** "1" makes entitlement decisions REFUSE rather than only record. Off by
+   * default: the limits are measured for a period before they gate anything.
+   * Setting it without BILLING_SERVICE_URL is enforcement that looks on and does
+   * nothing — `entitlementsConfigError` flags exactly that. */
+  ENTITLEMENTS_ENFORCE?: string;
   ANALYTICS?: AnalyticsEngineDataset;
   SANDBOX?: SandboxBinding;
   AI?: AiBinding;

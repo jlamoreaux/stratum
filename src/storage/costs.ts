@@ -106,7 +106,7 @@ export async function resolveBillingSubject(
 /**
  * Accumulate the metered half of a batch into `usage_periods`.
  *
- * Split out of `recordCosts` so all six recording sites get it without any of
+ * Split out of `recordCosts` so every recording site gets it without any of
  * them knowing it exists — the aggregate must never be something a call site
  * can forget, because a site that forgets is an owner whose spend does not
  * count against their allowance.
@@ -132,13 +132,21 @@ async function accumulateUsage(
   for (const sample of samples) {
     // `git_ops` maps to no meter; see `meterForCostKind`.
     const meter = meterForCostKind(sample.kind);
-    if (meter) deltas.push({ meter, quantity: sample.quantity });
+    if (meter) {
+      deltas.push({ meter, quantity: sample.quantity, source: sample.source ?? "platform" });
+    }
   }
   if (deltas.length === 0) return;
   // The Result is deliberately not folded into `recordCosts`'s own: the ledger
   // rows above ARE written, and reporting an error would tell the caller the
-  // spend went unrecorded when it did not. `upsertUsage` logs its own failure,
-  // and the aggregate is reconcilable from the ledger it derives from.
+  // spend went unrecorded when it did not. `upsertUsage` logs its own failure.
+  //
+  // Be clear about what that costs, because it is not free and there is no job
+  // that repairs it: this aggregate cannot be rebuilt from `cost_records` (the
+  // project cascade deletes those rows and leaves these standing — see
+  // migration 049), so a failed upsert is a permanent under-count of that
+  // owner's month. Accepted because the alternative is failing a merge over an
+  // accounting write, which is the worse trade in both directions.
   await upsertUsage(
     db,
     logger,
@@ -170,6 +178,22 @@ export async function recordCosts(
   samples: CostSample[],
 ): Promise<Result<void, AppError>> {
   if (samples.length === 0) return ok(undefined);
+
+  // Dropped BEFORE the batch, not inside the aggregate that also guards them.
+  // `db.batch` is one transaction and `cost_records.quantity` is NOT NULL,
+  // while SQLite stores NaN as NULL — so a single unusable sample does not cost
+  // itself, it aborts the write and loses every other sample in the same
+  // evaluation. Filtering here keeps one bad number from taking the ledger with
+  // it, and is why `upsertUsage`'s own guard is a backstop rather than the
+  // first line of defence.
+  const usable = samples.filter((sample) => Number.isFinite(sample.quantity));
+  if (usable.length !== samples.length) {
+    logger.warn("Cost samples dropped: quantity is not finite", {
+      project: opts.project,
+      dropped: samples.length - usable.length,
+    });
+  }
+  if (usable.length === 0) return ok(undefined);
   const createdAt = new Date().toISOString();
 
   try {
@@ -177,7 +201,7 @@ export async function recordCosts(
       "INSERT INTO cost_records (id, project, project_id, change_id, workspace, kind, quantity, estimated, created_at, owner_id, owner_type, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     await db.batch(
-      samples.map((sample) =>
+      usable.map((sample) =>
         stmt.bind(
           newId("cost"),
           opts.project,
@@ -203,7 +227,7 @@ export async function recordCosts(
     });
     // Only after the ledger write succeeded: the aggregate derives from those
     // rows, so it must never count spend the ledger does not record.
-    await accumulateUsage(db, logger, opts, samples, createdAt);
+    await accumulateUsage(db, logger, opts, usable, createdAt);
     return ok(undefined);
   } catch (error) {
     const appError =

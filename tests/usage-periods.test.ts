@@ -11,7 +11,7 @@
  * the owner_type CHECK and the UPSERT's conflict target are the shipped ones
  * rather than a stub's idea of them.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { recordCosts } from "../src/storage/costs";
 import {
   captureDeletionTarget,
@@ -39,6 +39,10 @@ const logger: Logger = {
   child: vi.fn(() => logger),
 };
 
+// The mock is module-level, so without this a `toHaveBeenCalledWith` assertion
+// can be satisfied by an earlier test's call and the suite passes on run order.
+beforeEach(() => vi.clearAllMocks());
+
 const ALICE = { ownerId: "user_alice", ownerType: "user" } as const;
 const PERIOD = "2026-09";
 
@@ -47,6 +51,7 @@ interface UsageRow {
   owner_type: string;
   period: string;
   meter: string;
+  source: string;
   quantity: number;
   updated_at: string;
 }
@@ -55,7 +60,7 @@ type Raw = ReturnType<typeof makeSqliteD1>["raw"];
 
 function usageRows(raw: Raw): UsageRow[] {
   return raw
-    .prepare("SELECT * FROM usage_periods ORDER BY owner_id, period, meter")
+    .prepare("SELECT * FROM usage_periods ORDER BY owner_id, period, meter, source")
     .all() as unknown as UsageRow[];
 }
 
@@ -118,8 +123,18 @@ describe("deleting a project does not refund the allowance", () => {
     const period = usagePeriod();
     const before = await getOwnerUsageSummary(db, logger, "user_alice", period);
     expect(before.success && before.data).toEqual([
-      { meter: "llm_tokens_month", quantity: 12_000, updatedAt: expect.any(String) },
-      { meter: "sandbox_ms_month", quantity: 4_500, updatedAt: expect.any(String) },
+      {
+        meter: "llm_tokens_month",
+        source: "platform",
+        quantity: 12_000,
+        updatedAt: expect.any(String),
+      },
+      {
+        meter: "sandbox_ms_month",
+        source: "platform",
+        quantity: 4_500,
+        updatedAt: expect.any(String),
+      },
     ]);
     expect(countCostRows(raw)).toBe(3);
 
@@ -240,7 +255,7 @@ describe("upsertUsage", () => {
     expect(result.success).toBe(true);
     expect(usageRows(raw).map((r) => [r.meter, r.quantity])).toEqual([["llm_tokens_month", 100]]);
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("not finite"),
+      expect.stringContaining("not a usable increment"),
       expect.objectContaining({ meter: "llm_tokens_month" }),
     );
   });
@@ -321,12 +336,22 @@ describe("getOwnerUsageSummary", () => {
 });
 
 describe("usagePeriod", () => {
-  it("classifies a moment by its UTC month, not the local one", () => {
-    // A local-time month would put a spend just after midnight UTC into the
-    // previous period for half the world, and two counters keyed on different
-    // months are two allowances.
+  it("puts either side of a UTC month boundary in a different period", () => {
+    // Honest about its own limits: on a UTC runner — which is what CI is —
+    // these assertions do NOT discriminate against a local-time implementation,
+    // because local and UTC agree. Forcing `process.env.TZ` here would make them
+    // discriminate, and was tried; it is process-global while vitest runs
+    // several files per worker, so it perturbs every other suite sharing the
+    // process. A flaky suite costs more than this test can buy.
+    //
+    // The guarantee therefore rests on `usagePeriod` deriving from
+    // `toISOString()`, which is UTC by construction. What these pin is the
+    // property that matters either way: one millisecond either side of a
+    // boundary must not land in the same period, or two counters would share an
+    // allowance across the rollover.
     expect(usagePeriod(new Date("2026-09-30T23:59:59.999Z"))).toBe("2026-09");
     expect(usagePeriod(new Date("2026-10-01T00:00:00.000Z"))).toBe("2026-10");
+    expect(usagePeriod(new Date("2025-12-31T23:59:59.999Z"))).toBe("2025-12");
     expect(usagePeriod(new Date("2026-01-01T00:00:00.000Z"))).toBe("2026-01");
   });
 });
@@ -409,6 +434,52 @@ describe("recordCosts accumulates usage alongside the ledger", () => {
     await recordCosts(db, logger, { project: "@acme/api", ownerId: "org_acme", ownerType: "org" }, [
       { kind: "llm_tokens", quantity: 800, source: "byok" },
     ]);
-    expect(usageRows(raw)[0]).toMatchObject({ owner_id: "org_acme", quantity: 800 });
+    expect(usageRows(raw)[0]).toMatchObject({
+      owner_id: "org_acme",
+      quantity: 800,
+      source: "byok",
+    });
+  });
+
+  it("refuses a negative delta rather than refunding the month", async () => {
+    // The refund vector the CHECK and the guard both exist for. sandbox_ms is
+    // wall-clock arithmetic, so a backwards clock step produces one without
+    // anybody trying — and it would subtract through the single statement this
+    // table exists to make non-refundable.
+    const { db, raw } = makeSqliteD1();
+    await upsertUsage(db, logger, ALICE, "2026-09", [
+      { meter: "sandbox_ms_month", quantity: 5_000 },
+    ]);
+    const result = await upsertUsage(db, logger, ALICE, "2026-09", [
+      { meter: "sandbox_ms_month", quantity: -4_000 },
+    ]);
+
+    expect(result.success).toBe(true);
+    expect(usageRows(raw).map((r) => r.quantity)).toEqual([5_000]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("not a usable increment"),
+      expect.objectContaining({ quantity: -4_000 }),
+    );
+  });
+
+  it("keeps BYOK and platform spend as separate totals for the same meter", async () => {
+    // The reason `source` is in the PRIMARY KEY. An allowance limits what the
+    // OPERATOR spends, so enforcement reads the platform row alone — a project
+    // paying its own provider costs the operator nothing. Summed together these
+    // could never be separated again: this table is not rebuildable from
+    // cost_records, so the dimension has to be captured as it is written.
+    const { db, raw } = makeSqliteD1();
+    await recordCosts(db, logger, { project: "@alice/my-repo", ...ALICE }, [
+      { kind: "llm_tokens", quantity: 1000 },
+      { kind: "llm_tokens", quantity: 250, source: "byok" },
+    ]);
+    await recordCosts(db, logger, { project: "@alice/my-repo", ...ALICE }, [
+      { kind: "llm_tokens", quantity: 500, source: "byok" },
+    ]);
+
+    const rows = usageRows(raw).filter((r) => r.meter === "llm_tokens_month");
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.source === "platform")?.quantity).toBe(1000);
+    expect(rows.find((r) => r.source === "byok")?.quantity).toBe(750);
   });
 });
