@@ -9,6 +9,7 @@ import { enqueueMergeDeploy } from "../queue/deploy-queue";
 import { emitEvent } from "../queue/events";
 import type { MergeOutcome } from "../queue/merge-queue";
 import {
+  billingContextFor,
   buildEvaluators,
   createChangeWithEvaluation,
   resolveProjectHead,
@@ -1397,7 +1398,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     baseOid,
   } = diffResult.data;
 
-  const evaluators = buildEvaluators(c.env, policy, change.project, logger, {
+  const evaluators = buildEvaluators(c.env, policy, project, logger, {
     remote: workspace.remote,
     token: workspaceReadToken.data,
     ref: evaluatedSha,
@@ -1407,6 +1408,7 @@ app.post("/changes/:id/evaluate", async (c) => {
   // stale by the time a change is re-evaluated (#274).
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
     baseSha: baseOid,
+    billing: billingContextFor(project),
   });
 
   const recordResult = await recordEvalRuns(c.env.DB, logger, id, evalRuns);

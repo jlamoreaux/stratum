@@ -9,7 +9,13 @@ import {
   loadPolicy,
 } from "../evaluation";
 import type { SandboxRepoAccess } from "../evaluation/sandbox-evaluator";
-import type { EvalPolicy, EvalResult, EvaluationContext, Evaluator } from "../evaluation/types";
+import type {
+  BillingContext,
+  EvalPolicy,
+  EvalResult,
+  EvaluationContext,
+  Evaluator,
+} from "../evaluation/types";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
 import { type EventActor, emitEvent } from "../queue/events";
 import { getAgent } from "../storage/agents";
@@ -97,9 +103,32 @@ export class UnavailableEvaluator implements Evaluator {
 }
 
 /**
+ * The billing subject an evaluation of `project` should be charged to, or
+ * `undefined` when the project has none that can be named yet.
+ *
+ * `ProjectEntry.ownerType` admits `"agent"`, which `BillingContext` does not:
+ * an agent is not a payer, it belongs to one. Walking `agents.owner_id` to that
+ * user is `resolveBillingSubject`'s job in the attribution work that follows —
+ * so an agent-owned project yields no context here rather than a guessed one.
+ * Attributing spend to an agent id would be worse than attributing none.
+ */
+export function billingContextFor(project: ProjectEntry): BillingContext | undefined {
+  if (project.ownerType === "agent") return undefined;
+  return {
+    ownerId: project.ownerId,
+    ownerType: project.ownerType,
+    projectId: project.id,
+  };
+}
+
+/**
  * Build the evaluator set for a policy: the always-on blocking secret scan plus
  * whatever the policy configures. Evaluators whose binding is missing become
  * UnavailableEvaluator (score 0, fail) rather than silently vanishing.
+ *
+ * Takes the whole `ProjectEntry` rather than a display name so an evaluator can
+ * be told who owns the project it is judging; the display name every call site
+ * used to pass is derived here so no caller has to build it twice.
  *
  * `workspaceRepo` is read access to the workspace being evaluated (remote +
  * read token + the pinned evaluated commit); the sandbox evaluator needs it to
@@ -111,10 +140,14 @@ export class UnavailableEvaluator implements Evaluator {
 export function buildEvaluators(
   env: Env,
   policy: EvalPolicy,
-  projectName: string,
+  project: ProjectEntry,
   logger: Logger,
   workspaceRepo?: SandboxRepoAccess,
 ): Array<{ type: string; evaluator: Evaluator }> {
+  // The whole entry, not a name: an evaluator that spends money has to be able
+  // to name the payer, and a "@ns/slug" string identifies no owner and no
+  // project id. Only the log line below needs the human-readable form.
+  const projectName = `${project.namespace}/${project.slug}`;
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
   ];
@@ -393,7 +426,7 @@ export async function createChangeWithEvaluation(
     baseOid,
   } = diffResult.data;
 
-  const evaluators = buildEvaluators(env, policy, projectName, logger, {
+  const evaluators = buildEvaluators(env, policy, project, logger, {
     remote: workspaceRemote,
     token: workspaceReadToken.data,
     ref: evaluatedSha,
@@ -403,6 +436,7 @@ export async function createChangeWithEvaluation(
   // base must be the one the diff was actually built against (#274).
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
     baseSha: baseOid,
+    billing: billingContextFor(project),
   });
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";

@@ -3,7 +3,7 @@ import { loadPolicy } from "../evaluation/policy-loader";
 import { scanContentForSecrets } from "../evaluation/secret-scanner";
 import { checkResolutionMergeProtection } from "../merge/protection";
 import { authMiddleware } from "../middleware/auth";
-import { buildEvaluators, runEvaluation } from "../services/change-flow";
+import { billingContextFor, buildEvaluators, runEvaluation } from "../services/change-flow";
 import { recordAudit } from "../storage/audit";
 import { getChange } from "../storage/changes";
 import {
@@ -656,17 +656,20 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     const { diff, baseSha } = diffResult.data;
 
     const policy = await loadPolicy(project.remote, projectToken.data, logger, branch);
-    const projectName = `${conflictCtx.namespace}/${conflictCtx.slug}`;
     // No workspace repo access is passed for the sandbox evaluator: the content
     // being judged here has no commit of its own yet — that's the point, it must
     // pass BEFORE resolveConflict creates one — so there is no ref a sandbox
     // could check out. A policy naming `sandbox` fails closed via
     // UnavailableEvaluator, same as any other missing prerequisite.
-    const evaluators = buildEvaluators(c.env, policy, projectName, logger);
+    const evaluators = buildEvaluators(c.env, policy, project, logger);
     // `buildManualResolutionDiff` resolved this base from the clone it built the
     // diff on, so it names the tree the resolution actually applies to (#274).
+    // This path runs the LLM evaluator too, so it needs a payer as much as
+    // change creation does — it is the one metered path that records nothing
+    // today.
     const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
       baseSha,
+      billing: billingContextFor(project),
     });
 
     if (!evalResult.passed) {
