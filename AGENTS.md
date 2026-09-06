@@ -11,6 +11,23 @@ serverless Git. The web UI is **server-rendered JSX**: every page must work with
 disabled. A few inline scripts exist purely as progressive enhancement — never add a
 client-side framework or a build step.
 
+**The one exception is product analytics**, which loads PostHog's SDK in the browser. It has
+**two** bootstraps, and an audit that reads only the first has read half of it:
+`src/analytics/web-snippet.ts` for the app, which redacts every URL, title and element it
+sends, and an inline one in `website/astro.config.mjs` for the docs site, which does not — docs
+URLs are public content, and which page someone read is the whole question there. It is bound by the rule it is an exception to: no framework, no
+build step, no application content or behaviour rendered or gated by it, and every page still
+works with it blocked or absent. (The script itself is of course rendered, and gated on
+`POSTHOG_PUBLIC_KEY` — that is the exception. What must never depend on it is anything a user
+came here to do.) Two things earned the exception and are the terms of keeping it. The bundle is
+**version-pinned and served from our own origin**, so third-party code cannot change size or
+behaviour in a release nobody here chose — an unpinned CDN script on pages that render private
+repositories under an authenticated session is the risk this rule exists to prevent, and
+"it's only analytics" is not an answer to it. And it is **off unless `POSTHOG_PUBLIC_KEY` is
+set**, separately from server-side telemetry, so a self-hoster never gets browser JavaScript
+they did not ask for. Do not widen this into a precedent for shipping client-side JS
+generally: the next thing that wants to be an exception needs its own argument, not this one.
+
 ## Repository layout
 
 | Path | What it is |
@@ -64,7 +81,9 @@ Mirror lint → typecheck → test locally before pushing.
   silently swallow an error — log it (see `src/utils/logger.ts`).
 - **Comments explain *why*, not *what*.** Add one only for a non-obvious constraint, invariant, or
   workaround. JSDoc on public APIs is welcome.
-- **Server-rendered only.** Do not introduce client-side JS into the UI.
+- **Server-rendered only.** Do not introduce client-side JS into the UI. The single
+  exception, its terms, and why it is not a precedent are described under "What this project
+  is" above.
 - **Every user-visible change gets a changelog entry**, in the same PR: add one new file under
   `changelog.d/` (see `changelog.d/README.md`) rather than editing `CHANGELOG.md`'s `Unreleased`
   section directly — two PRs editing `Unreleased` at once is the single most common source of PR
@@ -101,5 +120,17 @@ Mirror lint → typecheck → test locally before pushing.
 - Every PR receives an automated AI review (PR-Agent via Cloudflare AI Gateway — see
   `docs/runbooks/ai-review.md`). Its findings are advisory, never a merge gate; collaborators
   can run `/review`, `/improve`, or `/ask <question>` in PR comments.
+
+## Licensing
+
+- Two licenses, split by directory: `cli/` and `agent/` are **Apache-2.0**, everything else is
+  **AGPL-3.0-or-later**, and the published agent skills under
+  `website/public/.well-known/agent-skills/` are deliberately **MIT**. `LICENSING.md` is
+  authoritative; don't restate the terms elsewhere.
+- The `license: "MIT"` strings in `src/templates/index.ts` are scaffolding for projects *users*
+  create through Stratum. They are not Stratum's license — leave them alone.
+- `STRATUM_SOURCE_URL` in `src/version.ts` is what the page footer offers under AGPL §13. It
+  is a per-deployment constant, not a config knob; changing its meaning is a licensing change.
+- A human contributor's PR needs the CLA checkbox (`CLA.md`) confirmed before it merges.
 
 See `CONTRIBUTING.md` for the human-facing version of all of this.

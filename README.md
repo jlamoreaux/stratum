@@ -1,7 +1,7 @@
 # Stratum
 
 [![CI Status](https://github.com/stratum-eng/stratum/actions/workflows/ci.yml/badge.svg)](https://github.com/stratum-eng/stratum/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Docs](https://img.shields.io/badge/docs-usestratum.dev-blue.svg)](https://docs.usestratum.dev)
 
 **The governance layer for AI-written code** — the control plane that decides what agent
@@ -74,11 +74,19 @@ Humans and AI agents are both first-class citizens, with different powers by des
   | R2 | backups; backups no-op when unbound | recommended |
   | Analytics Engine | request analytics | optional |
   | Workers AI | the LLM evaluator | optional |
-  | Sandboxes | sandbox evaluator, post-merge smoke tests | optional |
+  | Sandboxes | sandbox evaluator, post-merge smoke tests | **beta, off by default** |
 
-  Every optional binding degrades rather than crashes — the sandbox evaluator, notably,
-  **fails closed** when its binding is absent, so a policy that requires it will block
-  merges rather than wave them through. `wrangler.toml` declares all of them.
+  `wrangler.toml` declares every binding above **except `[[sandboxes]]`, which is commented
+  out** — Sandboxes is a gated Cloudflare beta, so neither the hosted instance nor a fresh
+  self-host has it. Uncomment it (and add it to each `[env.*]` block you deploy) only once
+  your account has Sandboxes access.
+
+  Missing bindings do not crash the Worker, but the two evaluator bindings **fail closed**
+  rather than degrade: with no `SANDBOX` binding a `sandbox` evaluator is replaced by one
+  that returns score 0 / failed, and the same is true of `llm` with no `AI` binding. Naming
+  either in `merge.requiredEvaluators` while its binding is absent blocks **every** merge in
+  that project. `merge.postMergeCommand` is the exception — with no `SANDBOX` binding it is
+  skipped with a warning.
 
 ### Installation
 
@@ -181,8 +189,11 @@ curl -X POST https://your-instance.workers.dev/api/projects/@you/react/import \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"url": "https://github.com/facebook/react", "branch": "main"}'
 
-# Fork a workspace, commit into it, then open an evaluation-gated change
-curl -X POST .../api/projects/@you/my-project/workspaces -d '{"name": "fix-bug"}'
+# Fork a workspace, commit into it, then open an evaluation-gated change.
+# The repeated "workspaces" segment is correct, not a typo: the router mounts at
+# /api/workspaces and declares /:namespace/:slug/workspaces. Project-scoped
+# though it is, this route does not live under /api/projects.
+curl -X POST .../api/workspaces/@you/my-project/workspaces -d '{"name": "fix-bug"}'
 curl -X POST .../api/workspaces/fix-bug/commit \
   -d '{"files": {"src/index.ts": "export const fixed = true;"}, "message": "Fix the bug", "projectId": "..."}'
 curl -X POST .../api/projects/@you/my-project/changes -d '{"workspace": "fix-bug"}'
@@ -223,7 +234,8 @@ for pkg in cli agent; do
 done
 ```
 
-That gives you `stratum` (CLI, full API parity) and `stratum-agent` (reference agent:
+That gives you `stratum` (CLI: projects, workspaces, commits, changes including review and
+merge, issues, and activity — not the whole REST surface) and `stratum-agent` (reference agent:
 identity → fork → LLM edit plan → commit → change).
 
 ## Configuring the merge gate
@@ -247,11 +259,14 @@ evaluators:
 
   - type: webhook
     url: "https://ci.example.com/evaluate"
-    timeoutMs: 300000
+    timeoutMs: 120000                   # clamped to 120000; larger values are lowered
 
-  - type: sandbox
-    command: "npm test"
-    timeoutMs: 120000
+  # Requires the Sandboxes beta (see Prerequisites). With no SANDBOX binding this
+  # evaluator does NOT skip — it returns score 0 / failed, so uncommenting it on an
+  # instance without Sandboxes makes every change in this project fail evaluation.
+  # - type: sandbox
+  #   command: "npm test"
+  #   timeoutMs: 120000
 
 requireAll: true
 minScore: 0.6
@@ -261,9 +276,18 @@ merge:
   requiredEvaluators: ["secret_scan"]   # latest run of each must have passed
   allowForce: false                     # deny-by-default; ?force=true is rejected unless true
   requireFreshBase: true                # block a change whose base moved (409 STALE_BASE)
-  postMergeCommand: "npm test"          # smoke test the merged HEAD in a sandbox
-  autoRevert: true                      # revert the merge commit if it fails
+  # Also Sandboxes-only. Unlike the evaluator this one degrades quietly: with no
+  # SANDBOX binding the smoke test is skipped with a warning and the merge stands.
+  # postMergeCommand: "npm test"        # smoke test the merged HEAD in a sandbox
+  # autoRevert: true                    # revert the merge commit if it fails (default true)
 ```
+
+> [!WARNING]
+> Never put `"sandbox"` in `merge.requiredEvaluators` unless the `[[sandboxes]]` binding is
+> actually enabled. A required evaluator that fails closed blocks every merge in the
+> project, and short of enabling the binding the only fix is to edit the policy file —
+> which itself needs a human approval and refuses force-merge, because
+> `.stratum/policy.yaml` is a protected config file.
 
 This repository runs under its own policy — [`.stratum/policy.yaml`](.stratum/policy.yaml)
 is the live, dogfooded example.
@@ -278,13 +302,15 @@ drift out of sync with them.
 Git hosting on Cloudflare Artifacts · clone/fetch/push over smart HTTP · workspace forking ·
 changes (PRs) with evaluation gates · hunk-level diffs with a pure-CSS unified/split toggle ·
 squash and true three-way merges · a Durable Object merge queue · batch merging ·
-post-merge smoke tests with auto-revert · repo browser, file viewer, commit log, and tags.
+post-merge smoke tests with auto-revert (Sandboxes beta) · repo browser, file viewer,
+commit log, and tags.
 
 **The evaluation gate**
 Secret scanner (always on and blocking; 25+ credential patterns plus entropy detection) ·
 diff analysis · webhook for external CI · LLM review via the Workers AI binding · sandboxed
-test execution · per-evaluator evidence and estimated resource costs (LLM tokens, sandbox
-time, git ops) · branch protection · provenance recorded per merged commit.
+test execution (Sandboxes beta; see [Prerequisites](#prerequisites)) · per-evaluator
+evidence and estimated resource costs (LLM tokens, sandbox time, git ops) · branch
+protection · provenance recorded per merged commit.
 
 **Post-merge deployments**
 A `deploys:` block in `.stratum/policy.yaml` publishes the merged tree to Cloudflare
@@ -318,13 +344,17 @@ queue consumer and a stale-event sweep · workspace TTL sweep.
 **Interfaces**
 Server-rendered web UI · REST API (93 paths) · remote MCP server at `/mcp` with an
 OAuth 2.1 authorization server (dynamic client registration, PKCE, rotating refresh
-tokens) · `@stratum/cli` at full API parity · `@stratum/agent` reference agent.
+tokens) · `@stratum/cli` covering the change flow, issues, and activity ·
+`@stratum/agent` reference agent.
 
 ## Known limitations
 
-- **Merge conflicts** — a three-way merge that conflicts falls back to a squash merge;
-  there's no interactive conflict resolution for changes (GitHub *sync* conflicts do have a
-  resolution UI).
+- **Merge conflicts** — a three-way merge that conflicts does **not** fall back to a squash
+  merge: the merge is refused with `409 MERGE_CONFLICT`, carrying the conflicting paths and
+  a conflict id you resolve out-of-band via
+  `POST /api/projects/conflicts/{id}/resolve` — `accept-project`, `accept-workspace`, or
+  `manual` with whole-file contents, not a hunk editor. There's no in-UI conflict resolution
+  for changes; GitHub *sync* conflicts do have a resolution UI.
 - **Diff depth** — diffs are hunk-level with unified and split views, but there's no
   per-line intra-hunk highlighting, binary files aren't diffed, and very large files are
   rendered whole.
@@ -425,8 +455,12 @@ Published at [docs.usestratum.dev](https://docs.usestratum.dev), built from
 
 ### GitHub Actions
 
-- **`pr-checks.yml`** — tests, lint, typecheck, and the CLI/agent package builds on
-  every pull request, plus a staging preview deploy.
+- **`pr-checks.yml`** — tests, lint, typecheck, security scan, and the CLI/agent package
+  builds on every pull request. It deliberately deploys nothing: a PR deploying over the
+  shared staging Worker desynchronised its Durable Object migration tag and red-lined
+  `main`.
+- **`pr-preview.yml`** — the per-PR preview instead: an isolated `stratum-pr-<N>` Worker
+  with its own D1 and KV, torn down when the PR closes. Fork PRs get none.
 - **`ci.yml`** — the same gates on every push to `main`, then deploys to staging and to
   production. Both deploys are gated by GitHub deployment environments, so production waits
   for whatever approvals that environment requires.
@@ -471,7 +505,28 @@ instead — see [SECURITY.md](SECURITY.md) for what to include and expected resp
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Split along the line that matters to you: what you run as a service is
+copyleft, what you run inside your own pipeline is not.
+
+| Path | License |
+|---|---|
+| [`cli/`](cli) — `@stratum/cli` | [Apache-2.0](cli/LICENSE) |
+| [`agent/`](agent) — `@stratum/agent` | [Apache-2.0](agent/LICENSE) |
+| `website/public/.well-known/agent-skills/` — the published agent skills | MIT |
+| everything else — the server, the web UI, `docs/`, `website/` | [AGPL-3.0-or-later](LICENSE) |
+
+Copyright © 2026 Jordan Lamoreaux.
+
+Self-hosting an unmodified Stratum obliges you to nothing. If you **modify** it
+and other people reach your instance over a network, AGPL §13 asks you to offer
+them that version's source: point `STRATUM_SOURCE_URL` in
+[`src/version.ts`](src/version.ts) at your repository and the page footer does
+it. Nothing in the AGPL reaches the repositories Stratum hosts, the changes it
+evaluates, or anything you build with it.
+
+Releases through **v0.2.0 are MIT and stay MIT**. See
+[LICENSING.md](LICENSING.md) for the full account, including commercial
+licensing, and [CLA.md](CLA.md) for what contributors agree to.
 
 ## Acknowledgments
 

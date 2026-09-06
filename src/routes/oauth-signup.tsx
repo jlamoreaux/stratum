@@ -18,12 +18,15 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { captureAuthCompleted } from "../analytics/auth";
+import type { AuthKind } from "../analytics/events";
 import { admitAndDeliverCodes, betaGateEnabled, validateInviteCode } from "../beta/gate";
 import { enforceSameOrigin } from "../middleware/csrf";
 import { recordAudit } from "../storage/audit";
 import { createSession, getSession } from "../storage/sessions";
 import { createUser, getUserByEmail, getUserByUsername, linkGitHub } from "../storage/users";
 import type { Env } from "../types";
+import { SourceFooter } from "../ui/components/source-footer";
 import { getWaitUntil } from "../utils/execution-ctx";
 import { type Logger, createLogger } from "../utils/logger";
 import { consumePostLoginRedirect } from "../utils/post-login-redirect";
@@ -170,6 +173,11 @@ async function issueSessionAndRedirect(
   record: PendingSignup,
   rememberMe: boolean,
   logger: Logger,
+  // Both callers land here, but they mean different things to the funnel: one
+  // arrives with an account that already existed, the other just created one.
+  // Inferring it from the record is not possible — by this point they look
+  // identical — so the caller states it.
+  kind: AuthKind,
 ): Promise<Response> {
   const sessionLogger = logger.child({ userId });
   const sessionResult = await createSession(c.env.DB, userId, sessionLogger, rememberMe);
@@ -183,6 +191,7 @@ async function issueSessionAndRedirect(
     actorId: userId,
     detail: { method: `${record.provider}-oauth` },
   });
+  await captureAuthCompleted(c, sessionLogger, { kind, provider: record.provider, userId });
   setCookie(c, "stratum_session", sessionResult.data.id, {
     httpOnly: true,
     secure: true,
@@ -319,6 +328,7 @@ app.get("/", async (c) => {
           </div>
         </main>
 
+        <SourceFooter />
         <script
           nonce={c.get("cspNonce") ?? ""}
           dangerouslySetInnerHTML={{ __html: COMPLETE_SIGNUP_SCRIPT }}
@@ -378,7 +388,7 @@ app.post("/", async (c) => {
       if (!linked.success) logger.error("Failed to link GitHub account", linked.error);
     }
     await clearPendingSignup(c, token);
-    return issueSessionAndRedirect(c, existing.data.id, record, rememberMe, logger);
+    return issueSessionAndRedirect(c, existing.data.id, record, rememberMe, logger, "signin");
   }
 
   // Closed beta: the gate is enforced here rather than in the callback, which is
@@ -437,7 +447,7 @@ app.post("/", async (c) => {
   }
 
   await clearPendingSignup(c, token);
-  return issueSessionAndRedirect(c, userId, record, rememberMe, logger);
+  return issueSessionAndRedirect(c, userId, record, rememberMe, logger, "signup");
 });
 
 /**

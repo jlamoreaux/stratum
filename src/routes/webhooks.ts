@@ -12,6 +12,7 @@ import {
   webhookBelongsToProject,
 } from "../storage/webhooks";
 import type { Env, ProjectEntry } from "../types";
+import { SOURCE_FOOTER_HTML } from "../ui/components/source-footer";
 import { canWriteProject } from "../utils/authz";
 import { escapeHtml } from "../utils/html";
 import { createLogger } from "../utils/logger";
@@ -226,7 +227,7 @@ app.post("/:namespace/:slug/webhooks", async (c) => {
 })();`;
     return noStore(
       c.html(
-        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Webhook created — Stratum</title><link rel="stylesheet" href="/ui.css"></head><body><main class="main" style="max-width:640px"><div class="card settings-token-reveal"><h3 style="margin-top:0">Webhook created</h3><p class="settings-help"><strong>Copy the signing secret now — it will not be shown again.</strong></p><p class="settings-help">Payload URL: <code>${escapeHtml(wh.url)}</code></p><div class="token-reveal-row"><code class="settings-token" id="webhook-secret">${escapeHtml(wh.secret)}</code><button type="button" class="btn btn-small" id="copy-secret">Copy</button></div><p class="settings-help" style="margin-top:0.75rem">Verify each delivery's <code>X-Stratum-Signature</code> (HMAC-SHA256) with this secret.</p><p style="margin-top:1rem"><a href="${escapeHtml(backUrl)}">&larr; Back to webhooks</a></p></div></main><script nonce="${escapeHtml(nonce)}">${copyScript}</script></body></html>`,
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Webhook created — Stratum</title><link rel="stylesheet" href="/ui.css"></head><body><main class="main" style="max-width:640px"><div class="card settings-token-reveal"><h3 style="margin-top:0">Webhook created</h3><p class="settings-help"><strong>Copy the signing secret now — it will not be shown again.</strong></p><p class="settings-help">Payload URL: <code>${escapeHtml(wh.url)}</code></p><div class="token-reveal-row"><code class="settings-token" id="webhook-secret">${escapeHtml(wh.secret)}</code><button type="button" class="btn btn-small" id="copy-secret">Copy</button></div><p class="settings-help" style="margin-top:0.75rem">Verify each delivery's <code>X-Stratum-Signature</code> (HMAC-SHA256) with this secret.</p><p style="margin-top:1rem"><a href="${escapeHtml(backUrl)}">&larr; Back to webhooks</a></p></div></main>${SOURCE_FOOTER_HTML}<script nonce="${escapeHtml(nonce)}">${copyScript}</script></body></html>`,
         201,
       ),
     );

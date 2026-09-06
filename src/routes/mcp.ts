@@ -15,9 +15,11 @@
  * be added, and the `GET` handler below is where the spec expects them.
  */
 import { Hono } from "hono";
+import type { AnalyticsTracker } from "../analytics/tracker";
+import { trackerForRequest } from "../analytics/tracker";
 import { StratumClient } from "../mcp/client";
 import { dispatchApiRequest } from "../mcp/dispatch";
-import { describeMcpOutcome } from "../mcp/outcome";
+import { describeMcpAnalytics, describeMcpOutcome } from "../mcp/outcome";
 import {
   JSON_RPC,
   LATEST_PROTOCOL_VERSION,
@@ -32,31 +34,40 @@ import type { Logger } from "../utils/logger";
 import { buildAuthenticateChallenge } from "../utils/oauth-challenge";
 import { readTextWithLimit } from "../utils/request-body";
 import { requestLogger } from "../utils/request-logger";
+import { STRATUM_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
 
-/** One log line per exchange, at the level `describeMcpOutcome` picks. */
-function logOutcome(
+/**
+ * One log line and one analytics event per exchange.
+ *
+ * Both are derived here rather than at the two call sites below (single
+ * message, and each message of a batch) so a batched call is counted exactly
+ * like an unbatched one. `describeMcpAnalytics` returns null for exchanges
+ * that ran nothing, which are logged but not counted.
+ */
+function recordOutcome(
   logger: Logger,
+  tracker: AnalyticsTracker,
+  knownTools: ReadonlySet<string>,
   message: unknown,
   reply: Awaited<ReturnType<typeof handleMessage>>,
 ): void {
   const outcome = describeMcpOutcome(message, reply);
   logger[outcome.level](outcome.message, outcome.meta);
+
+  const analytics = describeMcpAnalytics(message, reply, knownTools);
+  if (analytics !== null) tracker.capture("mcp_request", analytics);
 }
 
 /**
  * Reported in the `initialize` handshake.
  *
- * Duplicated from `package.json` rather than imported: pulling JSON into the
- * Worker bundle would need `resolveJsonModule` and would ship the whole
- * manifest to the edge for one string. `tests/mcp-endpoint.test.ts` asserts the
- * two match, which is how this repo pins its other cross-file constants
- * (`tests/changelog.test.ts`, `tests/wrangler-migration-chain.test.ts`), so a
- * release bump that forgets this line fails CI rather than shipping a stale
- * version to every client's log.
+ * Re-exported from `src/version.ts`, which is also what stamps `$lib_version`
+ * on every analytics event — one constant, so the version a client is told and
+ * the version a metric is attributed to cannot disagree.
  */
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = STRATUM_VERSION;
 
 /**
  * Cap on a single JSON-RPC body.
@@ -179,6 +190,14 @@ app.post("/mcp", async (c) => {
     dispatchApiRequest(request, c.env, getExecutionCtx(c)),
   );
   const ctx = { tools: buildTools(client), serverVersion: SERVER_VERSION };
+  // The tool names this build actually defines, so an unrecognised name in a
+  // client's request is never echoed into the export. Derived from `ctx.tools`
+  // rather than from a second list, which would drift.
+  const knownTools = new Set(ctx.tools.map((t) => t.name));
+  // `api_request` already counts this POST; `mcp_request` is what makes the
+  // traffic legible — one HTTP request can carry a batch, and "which tool, for
+  // which client, with what outcome" is not recoverable from a route pattern.
+  const tracker = trackerForRequest(c);
 
   // A batch is a JSON array. Dropped from the 2025-06-18 revision but still
   // sent by clients on the two older ones we accept, so it is handled rather
@@ -212,7 +231,7 @@ app.post("/mcp", async (c) => {
     const replies = [];
     for (const message of parsed) {
       const reply = await handleMessage(message, ctx);
-      logOutcome(logger, message, reply);
+      recordOutcome(logger, tracker, knownTools, message, reply);
       if (reply !== null) replies.push(reply);
     }
     if (replies.length === 0) return new Response(null, { status: 202 });
@@ -220,7 +239,7 @@ app.post("/mcp", async (c) => {
   }
 
   const reply = await handleMessage(parsed, ctx);
-  logOutcome(logger, parsed, reply);
+  recordOutcome(logger, tracker, knownTools, parsed, reply);
   // A notification gets no body. 202 Accepted is what the spec prescribes, and
   // it is distinguishable from a 200 with an empty body, which some clients
   // treat as a truncated response.

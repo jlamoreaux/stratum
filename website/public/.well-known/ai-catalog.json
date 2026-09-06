@@ -6,7 +6,7 @@
     "displayName": "Stratum",
     "description": "The governance layer for AI-written code — evaluation-gated merges, provenance, and agent identities, built on Cloudflare Workers.",
     "url": "https://docs.usestratum.dev/",
-    "license": "MIT",
+    "license": "AGPL-3.0-or-later",
     "repository": "https://github.com/stratum-eng/stratum"
   },
   "entries": [

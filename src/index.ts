@@ -1,5 +1,8 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { setCookie } from "hono/cookie";
+import { routePath } from "hono/route";
+import { trackerForRequest } from "./analytics/tracker";
 import { githubWebhookRouter } from "./github/webhooks";
 import { analyticsMiddleware } from "./middleware/analytics";
 import { authMiddleware } from "./middleware/auth";
@@ -7,6 +10,8 @@ import { configGuardMiddleware } from "./middleware/config-guard";
 import { csrfMiddleware } from "./middleware/csrf";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { securityHeadersMiddleware, setHtmlSecurityHeaders } from "./middleware/security-headers";
+import { sourceOfferMiddleware } from "./middleware/source-offer";
+import { webAnalyticsMiddleware } from "./middleware/web-analytics";
 import { handleDeployQueue } from "./queue/deploy-queue";
 import { handleEventQueue } from "./queue/event-consumer";
 import type { EventQueueMessage } from "./queue/events";
@@ -31,6 +36,7 @@ import { mcpOAuthRouter } from "./routes/mcp-oauth";
 import { metricsRouter } from "./routes/metrics";
 import { oauthSignupRouter } from "./routes/oauth-signup";
 import { orgsRouter } from "./routes/orgs";
+import { posthogProxyRouter } from "./routes/posthog-proxy";
 import { projectsRouter } from "./routes/projects";
 import { restoreRouter } from "./routes/restore";
 import { reviewsRouter } from "./routes/reviews";
@@ -55,7 +61,33 @@ export { RepoDO } from "./queue/repo-do";
 
 const app = new Hono<{ Bindings: Env }>();
 
+/**
+ * The matched route pattern for an error, or `"*"` when there is none.
+ *
+ * `routePath` reads the matched-route registry, which a failure raised before
+ * routing (a middleware throwing) never populated. Falling back to the literal
+ * `"*"` keeps the concrete path — namespaces, slugs, file paths — out of the
+ * export, which is the same guarantee `analyticsMiddleware` makes.
+ */
+function errorRoute(c: Context<{ Bindings: Env }>): string {
+  try {
+    // Defaults to `c.req.routeIndex` — the responding handler. See the note in
+    // `analyticsMiddleware`: the `-1` form reports the last *registered*
+    // matching route, which the `/:namespace/:slug` catch-all always wins.
+    return routePath(c) || "*";
+  } catch {
+    return "*";
+  }
+}
+
 app.use("*", securityHeadersMiddleware);
+// Registered early so its post-`next()` work sees the final response, after
+// every other middleware has had its say. It reads `userId`/`telemetryOptOut`,
+// which `authMiddleware` below publishes before this runs. Outermost of the two
+// response rewriters, so it builds its replacement `Response` from headers
+// `sourceOfferMiddleware` has already set rather than racing it.
+app.use("*", webAnalyticsMiddleware);
+app.use("*", sourceOfferMiddleware);
 app.use("*", configGuardMiddleware);
 app.use("*", analyticsMiddleware);
 app.use("*", authMiddleware);
@@ -122,6 +154,10 @@ app.get("/dev-login", async (c) => {
     return c.json({ error: "Dev login failed", details: error.message }, 500);
   }
 });
+
+// Mounted before uiRouter, whose `/:namespace/:slug` catch-all is registered
+// last and would otherwise swallow these paths.
+app.route("/_ph", posthogProxyRouter);
 
 app.get("/ui.css", (c) => {
   return c.text(CSS, 200, { "Content-Type": "text/css; charset=UTF-8" });
@@ -220,6 +256,20 @@ app.onError((err, c) => {
   logger.error(`Unhandled error: ${err.message}`, err instanceof Error ? err : undefined, {
     path: c.req.path,
     method: c.req.method,
+  });
+  // An unhandled exception never reaches `analyticsMiddleware`'s post-`next()`
+  // body — the rejection propagates straight past it to here — so a 500 born
+  // this way is invisible in `api_request` entirely. That is the gap this
+  // fills, and why it is a distinct event rather than a status code.
+  //
+  // The message is deliberately absent: exception messages quote their input,
+  // which on this codebase means SQL fragments, tokens, and file paths. The
+  // constructor name is the bounded part, and the message stays in the log
+  // line above where an operator can read it and a third party cannot.
+  trackerForRequest(c).capture("error_occurred", {
+    route: errorRoute(c),
+    method: c.req.method,
+    error_type: err instanceof Error ? err.constructor.name : "unknown",
   });
   // Belt-and-suspenders: the middleware registers headers before next(), but the
   // error boundary builds a fresh response, so re-assert the full set here via the

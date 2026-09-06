@@ -1,4 +1,5 @@
 import type { FC } from "hono/jsx";
+import { SourceFooter } from "./components/source-footer";
 
 /**
  * A closed union rather than a free string: the header renders exactly these
@@ -42,8 +43,15 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, c
         <link rel="stylesheet" href="/ui.css" />
       </head>
       <body>
+        {/*
+          `data-ph` is the click identifier browser analytics reports (see
+          src/analytics/web-snippet.ts). The value must be a literal written
+          here — never interpolated from a project, file or user name — and
+          only `[a-z][a-z0-9-]*` is accepted; anything else is dropped before
+          it leaves the browser rather than trusted.
+        */}
         <nav class="nav">
-          <a class="nav-brand" href="/">
+          <a class="nav-brand" href="/" data-ph="nav-home">
             stratum
           </a>
           {user && (
@@ -69,26 +77,37 @@ export const Layout: FC<LayoutProps> = ({ title, user, refreshSeconds, active, c
                 <span class="nav-user" title={`@${user.username}`}>
                   {user.displayName ?? user.username ?? user.email}
                 </span>
-                <a href="/new" class="nav-auth-link" aria-current={current("new")}>
+                <a
+                  href="/new"
+                  class="nav-auth-link"
+                  data-ph="nav-new-project"
+                  aria-current={current("new")}
+                >
                   new project
                 </a>
-                <a href="/settings" class="nav-auth-link" aria-current={current("settings")}>
+                <a
+                  href="/settings"
+                  class="nav-auth-link"
+                  data-ph="nav-settings"
+                  aria-current={current("settings")}
+                >
                   settings
                 </a>
                 <form method="post" action="/auth/logout" class="nav-logout-form">
-                  <button type="submit" class="nav-auth-link">
+                  <button type="submit" class="nav-auth-link" data-ph="nav-logout">
                     logout
                   </button>
                 </form>
               </>
             ) : (
-              <a href="/auth/login" class="nav-auth-link">
+              <a href="/auth/login" class="nav-auth-link" data-ph="nav-sign-in">
                 sign in
               </a>
             )}
           </div>
         </nav>
         <main class="main">{children}</main>
+        <SourceFooter />
       </body>
     </html>
   );

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { captureAuthCompleted } from "../analytics/auth";
 import { recordAudit } from "../storage/audit";
 import { createSession, deleteSession, getSession } from "../storage/sessions";
 import { getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
@@ -270,6 +271,13 @@ app.get("/github/callback", async (c) => {
       actorId: user.id,
       detail: { method: "github-oauth" },
     });
+    // `signin`, never `signup`: a first-time GitHub identity was diverted to
+    // the username step above and is counted there, once the account exists.
+    await captureAuthCompleted(c, sessionLogger, {
+      kind: "signin",
+      provider: "github",
+      userId: user.id,
+    });
   }
   if (!sessionResult.success) {
     sessionLogger.error("Failed to create session");
@@ -420,6 +428,13 @@ app.get("/google/callback", async (c) => {
     actorType: "user",
     actorId: userId,
     detail: { method: "google-oauth" },
+  });
+  // Reached only for an email that already has an account; a new Google
+  // identity is diverted to the username step and counted there.
+  await captureAuthCompleted(c, sessionLogger, {
+    kind: "signin",
+    provider: "google",
+    userId,
   });
 
   setCookie(c, "stratum_session", sessionResult.data.id, {

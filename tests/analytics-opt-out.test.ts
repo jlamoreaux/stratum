@@ -145,7 +145,11 @@ describe("telemetry opt-out — request path", () => {
     await flushCapture();
 
     expect(captured).toHaveLength(1);
-    expect(captured[0]?.distinct_id).toBe("agt_1");
+    // Attributed to the owner, not the agent: an agent token is a credential
+    // acting under a person's account, and minting a person profile per token
+    // would split that person's history and inflate the person count.
+    expect(captured[0]?.distinct_id).toBe("usr_1");
+    expect(captured[0]?.properties.agent_id).toBe("agt_1");
   });
 
   it("keeps capturing anonymous traffic personless — it carries no preference", async () => {

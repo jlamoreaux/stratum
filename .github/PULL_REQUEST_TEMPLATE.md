@@ -34,3 +34,5 @@
       `cd website && npm run sync:guides` and commit the regenerated mirrors (see AGENTS.md)
 - [ ] No secrets, tokens, or personal data committed
 - [ ] The web UI change (if any) stays server-rendered with no client-side JavaScript
+- [ ] I have read the [CLA](https://github.com/stratum-eng/stratum/blob/main/CLA.md) and agree
+      to it for this contribution
