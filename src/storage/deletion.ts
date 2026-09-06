@@ -673,6 +673,16 @@ const IDENTITY_COLUMNS: readonly [table: string, column: string][] = [
   // agent's id under requested_by_type = 'agent' and is left alone.
   ["deployments", "requested_by_id"],
   ["deployments", "approved_by"],
+  // Cost rows outlive an erasure by two routes: the project is org-owned, or it
+  // is agent-owned and so never cascaded at all (only `ownerType === "user"`
+  // projects are). In the agent case the row was stamped with the *user* id by
+  // `resolveBillingSubject`'s agent walk, and step 3 of the cascade then deletes
+  // the agent — destroying the only link that could re-derive the attribution
+  // and leaving a bare, unresolvable account id behind. `cost_records` has no
+  // foreign key to `users`, so nothing else catches it. Only `owner_id` is
+  // rewritten: `quantity` and `kind` are what the spend was, not who incurred
+  // it, and the row must stay readable as spend that happened.
+  ["cost_records", "owner_id"],
 ];
 
 /**

@@ -790,6 +790,26 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
 
   const { commitSha } = resolveResult.data;
 
+  // `resolveConflict` clones the project AND the workspace fork and pushes, for
+  // EVERY strategy — so this is recorded here rather than in the `manual` branch
+  // above, which only ever sees the evaluator suite's spend. Without it,
+  // accept-project and accept-workspace resolutions record nothing at all, and
+  // manual under-records by the clone+push it just paid for. Two git_ops, the
+  // same shape the single-merge route bills for the same clone+push.
+  const resolveGitSubject = await resolveBillingSubject(c.env.DB, logger, project);
+  await recordCosts(
+    c.env.DB,
+    logger,
+    {
+      project: projectDisplayName(project),
+      projectId: project.id,
+      ...(conflictCtx.changeId ? { changeId: conflictCtx.changeId } : {}),
+      workspace: conflictCtx.workspaceName,
+      ...(resolveGitSubject ?? {}),
+    },
+    [{ kind: "git_ops", quantity: 2 }],
+  );
+
   // Record history (non-throwing); delete conflict key regardless of history outcome
   await recordSyncHistory(
     c.env.DB,

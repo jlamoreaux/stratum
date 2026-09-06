@@ -80,7 +80,7 @@ describe("anonymizeUserContributions", () => {
     expect(result.success).toBe(true);
 
     const updates = executed.filter((s) => s.sql.startsWith("UPDATE"));
-    expect(updates.length).toBe(11);
+    expect(updates.length).toBe(12);
     for (const stmt of updates) {
       expect(stmt.sql).toMatch(/^UPDATE \w+ SET \w+ = \? WHERE \w+ = \?$/);
       expect(stmt.bindings).toEqual([DELETED_USER_SENTINEL, "usr_1"]);
@@ -93,6 +93,10 @@ describe("anonymizeUserContributions", () => {
     expect(cols).toContain("UPDATE webhooks SET created_by = ? WHERE created_by = ?");
     expect(cols).toContain("UPDATE project_secrets SET updated_by = ? WHERE updated_by = ?");
     expect(cols).toContain("UPDATE deployments SET approved_by = ? WHERE approved_by = ?");
+    // A cost row survives an erasure whenever its project is org- or
+    // agent-owned, and the agent it named is deleted outright — so without this
+    // the row keeps a bare account id that nothing can resolve or erase.
+    expect(cols).toContain("UPDATE cost_records SET owner_id = ? WHERE owner_id = ?");
   });
 });
 

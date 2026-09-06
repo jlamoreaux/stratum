@@ -453,6 +453,43 @@ describe("POST /api/projects/conflicts/:id/resolve records attributed costs", ()
     expect(byKind.llm_tokens).toMatchObject({ owner_id: "user_alice", quantity: 1500 });
   });
 
+  it("records the clone and push for a strategy that runs no evaluator", async () => {
+    // accept-project and accept-workspace skip the evaluator suite entirely, but
+    // resolveConflict still clones both repos and pushes for every strategy. The
+    // suite's recording lives in the manual branch, so billing the git work
+    // there would have made these two resolutions free.
+    const request = new Request("http://localhost/api/projects/conflicts/conflict-abc/resolve", {
+      method: "POST",
+      headers: { ...USER_AUTH, "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy: "accept-project" }),
+    });
+
+    const res = await makeApp(syncManagementRouter).fetch(request, envWithConflict());
+
+    expect(res.status).toBe(200);
+    const rows = costRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "git_ops",
+      quantity: 2,
+      owner_id: "user_alice",
+      owner_type: "user",
+      project: "@alice/my-repo",
+    });
+  });
+
+  it("bills the manual path for the resolve clone on top of the suite", async () => {
+    const res = await makeApp(syncManagementRouter).fetch(resolveRequest(), envWithConflict());
+
+    expect(res.status).toBe(200);
+    // One git_op for buildManualResolutionDiff's clone, two for resolveConflict's
+    // clone-both-and-push. Under-counting here was the whole defect.
+    const gitOps = costRows()
+      .filter((r) => r.kind === "git_ops")
+      .reduce((sum, r) => sum + r.quantity, 0);
+    expect(gitOps).toBe(3);
+  });
+
   it("leaves change_id null when the conflict predates that field", async () => {
     const { changeId: _dropped, ...legacy } = CONFLICT_CTX;
     const res = await makeApp(syncManagementRouter).fetch(
