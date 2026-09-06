@@ -19,7 +19,7 @@ vi.mock("../src/storage/users", () => ({
   getUserByGitHubId: vi.fn(),
   getUserByUsername: vi.fn(),
   linkGitHub: vi.fn(),
-  upsertGitHubUser: vi.fn(),
+  signInGitHubUser: vi.fn(),
 }));
 
 vi.mock("../src/storage/sessions", () => ({
@@ -46,7 +46,7 @@ import {
   getUserByGitHubId,
   getUserByUsername,
   linkGitHub,
-  upsertGitHubUser,
+  signInGitHubUser,
 } from "../src/storage/users";
 
 const COMPLETE = "/auth/signup/complete";
@@ -207,6 +207,8 @@ describe("OAuth signup: choosing a username", () => {
     vi.mocked(getUserByGitHubId).mockResolvedValue(notFound);
     vi.mocked(getUserByUsername).mockResolvedValue(notFound);
     vi.mocked(getSession).mockResolvedValue(notFound);
+    // No account behind the identity — the callback's cue to park it.
+    vi.mocked(signInGitHubUser).mockResolvedValue({ success: true, data: null });
     vi.mocked(linkGitHub).mockResolvedValue({ success: true, data: undefined });
     vi.mocked(createSession).mockResolvedValue({
       success: true,
@@ -244,7 +246,6 @@ describe("OAuth signup: choosing a username", () => {
       });
       // Nothing is created and nobody is signed in until the form comes back.
       expect(createUser).not.toHaveBeenCalled();
-      expect(upsertGitHubUser).not.toHaveBeenCalled();
       expect(createSession).not.toHaveBeenCalled();
       expect(cookieValue(res, "stratum_session")).toBeUndefined();
     });
@@ -343,7 +344,7 @@ describe("OAuth signup: choosing a username", () => {
       const res = await callback(app, env, "github");
 
       expect(res.status).toBe(422);
-      expect(getUserByEmail).not.toHaveBeenCalled();
+      expect(signInGitHubUser).not.toHaveBeenCalled();
       expect(createUser).not.toHaveBeenCalled();
     });
 
@@ -358,16 +359,21 @@ describe("OAuth signup: choosing a username", () => {
       const res = await callback(app, env, "github");
 
       expect(res.status).toBe(302);
-      expect(getUserByEmail).toHaveBeenCalledWith(
+      // Only the verified address is ever handed to the lookup, so an
+      // unverified one can neither match nor link an existing account.
+      expect(signInGitHubUser).toHaveBeenCalledWith(
         env.DB,
-        "attacker@example.com",
+        expect.objectContaining({ email: "attacker@example.com" }),
         expect.anything(),
       );
-      expect(getUserByEmail).not.toHaveBeenCalledWith(
+      expect(signInGitHubUser).not.toHaveBeenCalledWith(
         env.DB,
-        "victim@example.com",
+        expect.objectContaining({ email: "victim@example.com" }),
         expect.anything(),
       );
+      expect(pendingRecord(env, cookieValue(res, "stratum_pending_signup") ?? "")).toMatchObject({
+        email: "attacker@example.com",
+      });
     });
 
     it("still signs an existing account straight in", async () => {
@@ -375,7 +381,7 @@ describe("OAuth signup: choosing a username", () => {
       const env = makeEnv();
       mockGitHub([{ email: "octo@example.com", primary: true, verified: true }]);
       vi.mocked(getUserByGitHubId).mockResolvedValue({ success: true, data: user() });
-      vi.mocked(upsertGitHubUser).mockResolvedValue({ success: true, data: user() });
+      vi.mocked(signInGitHubUser).mockResolvedValue({ success: true, data: user() });
 
       const res = await callback(app, env, "github");
 
@@ -391,12 +397,12 @@ describe("OAuth signup: choosing a username", () => {
       const env = makeEnv();
       mockGitHub([{ email: "octo@example.com", primary: true, verified: true }]);
       vi.mocked(getUserByEmail).mockResolvedValue({ success: true, data: user() });
-      vi.mocked(upsertGitHubUser).mockResolvedValue({ success: true, data: user() });
+      vi.mocked(signInGitHubUser).mockResolvedValue({ success: true, data: user() });
 
       const res = await callback(app, env, "github");
 
       expect(res.headers.get("Location")).toBe("/");
-      expect(upsertGitHubUser).toHaveBeenCalledWith(
+      expect(signInGitHubUser).toHaveBeenCalledWith(
         env.DB,
         { githubId: "12345", email: "octo@example.com", username: "Octo_Cat" },
         expect.anything(),

@@ -107,7 +107,10 @@ vi.mock("../src/storage/users", () => {
       return { success: false, error: new NotFoundError("User", githubId) };
     }),
 
-    upsertGitHubUser: vi.fn(async (_db, opts, _logger) => {
+    // Mirrors production: matches, links — and creates nothing. A GitHub
+    // identity with no account comes back as null so the callback parks it for
+    // the (invite-gated) username form.
+    signInGitHubUser: vi.fn(async (_db, opts, _logger) => {
       const users = getMockUsers();
       // Check if user exists by GitHub ID first
       for (const user of users.values()) {
@@ -125,23 +128,7 @@ vi.mock("../src/storage/users", () => {
         return { success: true, data: existingByEmail };
       }
 
-      // Create new user
-      const counter = incrementMockUserIdCounter();
-      const user: User = {
-        id: `usr_${counter.toString(36)}`,
-        email: opts.email,
-        username: opts.username.toLowerCase().replace(/[^a-z0-9]/g, ""),
-        githubId: opts.githubId,
-        githubUsername: opts.username,
-        tokenHash: `hash_${counter}`,
-        createdAt: new Date().toISOString(),
-      };
-
-      users.set(`email:${user.email}`, user);
-      users.set(`username:${user.username}`, user);
-      users.set(`id:${user.id}`, user);
-
-      return { success: true, data: user };
+      return { success: true, data: null };
     }),
     getUserByToken: vi.fn(),
     getUser: vi.fn(),

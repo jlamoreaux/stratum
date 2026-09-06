@@ -78,7 +78,7 @@ function randomToken(): string {
 
 /**
  * A username to prefill from a provider handle or an email's local part. The
- * same coercion `upsertGitHubUser` applied when it still invented names; here
+ * same coercion the GitHub callback applied when it still invented names; here
  * it is only a suggestion, so an unusable result is simply no suggestion.
  */
 export function suggestUsername(candidate: string): string | null {
@@ -421,7 +421,7 @@ app.post("/", async (c) => {
 
   if (record.github) {
     // The account exists now, so a link failure is logged rather than fatal:
-    // `upsertGitHubUser` will link by verified email on the next sign-in.
+    // `signInGitHubUser` will link by verified email on the next sign-in.
     const linked = await linkGitHub(
       c.env.DB,
       userId,
