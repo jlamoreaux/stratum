@@ -36,6 +36,15 @@ new_sqlite_classes = ["RepoDO"]
 tag = "v3"
 new_sqlite_classes = ["MagicLinkRateLimiter"]
 
+# UsageMeter: serialized usage counters, one instance per ENFORCEMENT subject
+# (PRD §4a — the acting user, or an org positively known to be paid). SQLite-backed
+# like the two above. APPEND ONLY: tags are recorded on the deployed script, so
+# editing or reordering one makes wrangler replay the chain and every deploy of
+# that environment fails with error 10074 — see tests/wrangler-migration-chain.test.ts.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["UsageMeter"]
+
 # Observability - Workers Logs and Traces
 [observability]
 enabled = true
@@ -88,6 +97,11 @@ script_name = "stratum"
 [[durable_objects.bindings]]
 name = "MAGIC_LINK_LIMITER"
 class_name = "MagicLinkRateLimiter"
+script_name = "stratum"
+
+[[durable_objects.bindings]]
+name = "USAGE_METER"
+class_name = "UsageMeter"
 script_name = "stratum"
 
 [[queues.producers]]
@@ -196,6 +210,37 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # BETA_GATE = "1"
 # REFERRAL_SERVICE_URL = "https://your-referral-service.example.com"
 
+# --- Usage metering, entitlements, and evaluator BYOK -------------------------
+# Every var in this group must be declared PER ENVIRONMENT: named envs do NOT
+# inherit top-level [vars] (the same footgun as the telemetry kill switch just
+# below), so setting one here only affects a bare `wrangler deploy`.
+#
+# Plan/entitlements service (hosted-only). The hook is live only when BOTH
+# BILLING_SERVICE_URL and the BILLING_SERVICE_SECRET secret are set — see
+# `entitlementsEnabled` in src/billing/entitlements.ts, which treats a URL
+# without a credential as OFF rather than half-on. Unset, the default for every
+# self-hoster: nothing is fetched, every owner resolves to unlimited, and the
+# usage counters record without limiting anything.
+# BILLING_SERVICE_URL = "https://your-billing-service.example.com"
+#
+# "1" makes entitlement decisions REFUSE rather than only record. Declared "0"
+# explicitly rather than left unset so the enforcement switch is visible in each
+# environment's config instead of inferred from an absence — the same reason
+# DEV_LOGIN_ENABLED is spelled out per env. Setting it WITHOUT
+# BILLING_SERVICE_URL is enforcement that looks on and does nothing;
+# `entitlementsConfigError` (src/middleware/config-guard.ts) logs exactly that.
+ENTITLEMENTS_ENFORCE = "0"
+#
+# The evaluator's provider allowlist, and the ONLY place a provider endpoint may
+# be named: a project's .stratum/policy.yaml may SELECT one of these by name and
+# can never supply a `baseUrl`, so a project owner cannot aim the operator's
+# Worker at a host of their choosing. An unrecognized name fails the policy
+# closed — a merge gate that cannot run must not pass. Unset (the default) means
+# Workers AI (`env.AI`) only, which is today's behavior. Credentials are NOT
+# here: they live per project in `project_secrets`. Shape illustrated, parsed by
+# the provider seam:
+# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]'
+
 # Instance-wide telemetry kill switch. Not a secret — a plain var, listed here
 # next to POSTHOG_API_KEY because they are read together. Named envs do NOT
 # inherit top-level vars, so uncommenting this alone only affects a bare
@@ -211,6 +256,7 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # GOOGLE_CLIENT_SECRET =
 # EMAIL_FROM_ADDRESS = "noreply@yourdomain.com"  # for magic link emails
 # REFERRAL_SERVICE_SECRET =  # closed-beta gate shared secret (must match the referral service)
+# BILLING_SERVICE_SECRET =  # entitlements service shared secret; without it BILLING_SERVICE_URL is inert
 # DEPLOY_SECRET_KEY =  # master key for per-project deploy secrets; rotating it makes every stored secret undecryptable
 
 # =============================================================================
@@ -277,6 +323,11 @@ script_name = "stratum"
 [[env.production.durable_objects.bindings]]
 name = "MAGIC_LINK_LIMITER"
 class_name = "MagicLinkRateLimiter"
+script_name = "stratum"
+
+[[env.production.durable_objects.bindings]]
+name = "USAGE_METER"
+class_name = "UsageMeter"
 script_name = "stratum"
 
 [[env.production.queues.producers]]
@@ -362,6 +413,17 @@ GOOGLE_REDIRECT_URI = "https://app.usestratum.dev/auth/google/callback"
 # the gate ON so the invite path stays exercised end-to-end.
 BETA_GATE = "0"
 REFERRAL_SERVICE_URL = "https://referral.usestratum.dev"
+# Usage metering / entitlements / BYOK. Declared here as well as at top level
+# because named envs inherit no vars; see the top-level [vars] block for what
+# each one does. BILLING_SERVICE_SECRET is a secret and is set out-of-band with
+# `wrangler secret put BILLING_SERVICE_SECRET --env production` — secrets are
+# per-environment too, so a top-level one never reaches this deploy.
+# BILLING_SERVICE_URL = "https://<the cloud billing service host>"
+# Observe-only: the limits are measured for a period before they gate anything
+# (PRD Goal 3 — metering is always on, enforcement is a separate switch).
+ENTITLEMENTS_ENFORCE = "0"
+# Operator-configured LLM providers; unset = Workers AI only.
+# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]'
 
 # =============================================================================
 # [env.staging]
@@ -424,6 +486,11 @@ script_name = "stratum-staging"
 [[env.staging.durable_objects.bindings]]
 name = "MAGIC_LINK_LIMITER"
 class_name = "MagicLinkRateLimiter"
+script_name = "stratum-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "USAGE_METER"
+class_name = "UsageMeter"
 script_name = "stratum-staging"
 
 [[env.staging.r2_buckets]]
@@ -506,3 +573,12 @@ EMAIL_FROM_ADDRESS = "noreply@staging.app.usestratum.dev"
 # live stratum-landing Worker (see [env.production.vars] cutover note).
 BETA_GATE = "1"
 REFERRAL_SERVICE_URL = "https://referral.usestratum.dev"
+# Usage metering / entitlements / BYOK; declared per env (see [env.production.vars]
+# and the top-level [vars] block). BILLING_SERVICE_SECRET is set with
+# `wrangler secret put BILLING_SERVICE_SECRET --env staging`.
+# BILLING_SERVICE_URL = "https://<the cloud billing service host>"
+# Staging is where enforcement gets validated first, as with every other flag
+# here — but only once the billing service is live and a period of observation
+# has produced real numbers. Off until then.
+ENTITLEMENTS_ENFORCE = "0"
+# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]'

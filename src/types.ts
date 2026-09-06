@@ -2,6 +2,7 @@
 // runner's message union cannot create a runtime import cycle.
 import type { DeployQueueMessage } from "./deploy/runner";
 import type { MagicLinkRateLimiter } from "./queue/magic-link-limiter";
+import type { UsageMeter } from "./queue/usage-meter";
 import type { LoggerContext } from "./utils/logger";
 export type { LoggerContext };
 
@@ -179,6 +180,19 @@ export interface Env {
    * is type-only, so the cycle with magic-link-limiter.ts (which imports `Env`
    * from here) is erased. */
   MAGIC_LINK_LIMITER?: DurableObjectNamespace<MagicLinkRateLimiter>;
+  /** Serialized usage counters, one instance per ENFORCEMENT subject (PRD §4a:
+   * the acting user, or an org positively known to be paid — NOT the recorded
+   * billing subject, which is resettable by creating an org). Optional only so
+   * tests and minimal deployments can omit it; every deploy from this repo's
+   * wrangler.toml binds it, and nothing here enforces anything until the
+   * enforcement call sites exist.
+   *
+   * Parameterised by the class for the same reason as the limiter above: the
+   * `.get()` stub is typed, so a change to `reserve`/`settle`/`setFloor` is a
+   * compile error at the call site rather than something a cast absorbs. The
+   * import is type-only, so the cycle with usage-meter.ts (which imports `Env`
+   * from here) is erased. */
+  USAGE_METER?: DurableObjectNamespace<UsageMeter>;
   /** Content-addressed git object plane (ADR 004 Phase 2). */
   REPO_OBJECTS?: R2Bucket;
   /** Durable backup store (D1 dumps, KV identity, repo packs). Optional: when

@@ -1,3 +1,4 @@
+import { usageMeterName } from "../queue/usage-meter";
 import type { Env, ProjectEntry, WorkspaceEntry } from "../types";
 import { type AppError, toAppError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -382,9 +383,17 @@ async function deleteArtifactsRepo(env: Env, name: string, logger: Logger): Prom
   return false;
 }
 
-/** Purge a Durable Object's storage via its `purge()` RPC; false on failure. */
-async function purgeDurableObject(
-  namespace: DurableObjectNamespace | undefined,
+/**
+ * Purge a Durable Object's storage via its `purge()` RPC; false on failure.
+ *
+ * Generic over the namespace's class because the bindings differ: MERGE_QUEUE
+ * and REPO_DO are untyped namespaces while USAGE_METER is parameterised by its
+ * class (`src/types.ts`), and the two are not assignable to one another. The
+ * `purge()` call is asserted below either way, since a typed stub is not enough
+ * to prove the method exists on an untyped one.
+ */
+async function purgeDurableObject<T extends Rpc.DurableObjectBranded | undefined>(
+  namespace: DurableObjectNamespace<T> | undefined,
   key: string,
   label: string,
   logger: Logger,
@@ -497,6 +506,13 @@ export async function deleteProjectCascade(
         residuals.push(`do:MergeQueue:${key}`);
       }
     }
+    // USAGE_METER is deliberately absent from this cascade, and its absence is
+    // the point of the aggregate it counts against: the meter is keyed on an
+    // ENFORCEMENT subject (a user, or a paid org) and never on a project, so a
+    // project deletion must not touch it. Purging it here would refund the
+    // month by deleting a project — exactly what keeping `usage_periods` out of
+    // PROJECT_SCOPED_TABLES prevents (migration 049). The ACCOUNT cascade
+    // erases it, and nothing else does.
 
     // 5) KV last, project entry very last: as long as the entry exists, the
     // project is still resolvable and a re-drive can recapture everything.
@@ -797,6 +813,16 @@ async function resolveOrgOwnership(
   // a successor was promoted above, the org survives and so must its
   // consumption — a change of owner is not a fresh monthly allowance.
   await db.prepare("DELETE FROM usage_periods WHERE owner_id = ?").bind(org.id).run();
+  // ...and so does the org's enforcement counter, on this branch alone. The DO
+  // is named `org:<id>`, never a bare id, so deleting one org can only reach
+  // that org's own counter: a person who spent inside it was charged against
+  // `user:<id>` (PRD §4a — the enforcement subject is the actor unless the org
+  // is positively known to be paid), which is a different object this cannot
+  // name. Purging a shared counter here would erase a stranger's allowance.
+  const meterName = usageMeterName("org", org.id);
+  if (!(await purgeDurableObject(env.USAGE_METER, meterName, "UsageMeter", logger))) {
+    residuals.push(`do:UsageMeter:${meterName}`);
+  }
   await db.prepare("DELETE FROM orgs WHERE id = ?").bind(org.id).run();
 }
 
@@ -877,6 +903,17 @@ export async function deleteAccountCascade(
     // the project that burned it is not an allowance. Here the subject itself is
     // going, so there is nothing left to bill and nothing left to enforce.
     await db.prepare("DELETE FROM usage_periods WHERE owner_id = ?").bind(userId).run();
+    // The same subject's live counters. The DO is keyed on the ENFORCEMENT
+    // subject (PRD §4a), which for a person is the person: everything this user
+    // ran — including inside orgs they are merely a member of — was checked
+    // against `user:<id>`, so erasing the account erases all of it while those
+    // orgs keep their own rows and their own counters. A failure becomes a
+    // residual, which retains the users row for a re-drive rather than
+    // stranding a counter under a deleted account.
+    const userMeterName = usageMeterName("user", userId);
+    if (!(await purgeDurableObject(env.USAGE_METER, userMeterName, "UsageMeter", logger))) {
+      residuals.push(`do:UsageMeter:${userMeterName}`);
+    }
     // Same reasoning, same trap: `oauth_tokens.user_id` and
     // `oauth_auth_codes.user_id` both REFERENCE users(id) (#349). An OAuth
     // grant is a live credential handed to an editor, so an erasure that left
