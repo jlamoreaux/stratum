@@ -3,7 +3,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { captureAuthCompleted } from "../analytics/auth";
 import { recordAudit } from "../storage/audit";
 import { createSession, deleteSession, getSession } from "../storage/sessions";
-import { getUserByEmail, getUserByGitHubId, upsertGitHubUser } from "../storage/users";
+import { getUserByEmail, signInGitHubUser } from "../storage/users";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 import { consumePostLoginRedirect, isSafeRedirectTarget } from "../utils/post-login-redirect";
@@ -229,37 +229,36 @@ app.get("/github/callback", async (c) => {
   const nextPath = consumed.next ?? safeNextPath(next, c.req.url);
 
   const githubId = String(githubUser.id);
-  const byGithub = await getUserByGitHubId(c.env.DB, githubId, logger);
-  if (!byGithub.success) {
-    const byEmail = await getUserByEmail(c.env.DB, verifiedEmail, logger);
-    if (!byEmail.success) {
-      // First time we have seen this person: nothing is created until they have
-      // chosen a username (and, under the closed beta, presented an invite code).
-      logger.info("New GitHub identity; asking for a username", { githubId });
-      return beginPendingSignup(c, {
-        provider: "github",
-        email: verifiedEmail,
-        suggestedUsername: suggestUsername(githubUser.login),
-        github: { id: githubId, login: githubUser.login },
-        ...(nextPath !== undefined ? { next: nextPath } : {}),
-      });
-    }
-  }
-
-  logger.info("Signing in GitHub user", { githubId });
-  // Finds by GitHub id or links by verified email; the create branch inside is
-  // unreachable from here, because a brand-new identity was diverted above.
-  const userResult = await upsertGitHubUser(
+  // Finds by GitHub id or links by verified email, and creates nothing: an
+  // identity with no account comes back as `null`. That decision is made once,
+  // inside `signInGitHubUser`, rather than duplicated here — a second copy of
+  // the lookup is how a signup slips past the closed-beta gate the moment the
+  // two disagree.
+  const userResult = await signInGitHubUser(
     c.env.DB,
     { githubId, email: verifiedEmail, username: githubUser.login },
     logger,
   );
 
   if (!userResult.success) {
-    logger.error("Failed to upsert GitHub user", userResult.error, { githubId });
+    logger.error("Failed to resolve GitHub user", userResult.error, { githubId });
     return c.json({ error: "Failed to sign in" }, 500);
   }
 
+  if (userResult.data === null) {
+    // First time we have seen this person: nothing is created until they have
+    // chosen a username (and, under the closed beta, presented an invite code).
+    logger.info("New GitHub identity; asking for a username", { githubId });
+    return beginPendingSignup(c, {
+      provider: "github",
+      email: verifiedEmail,
+      suggestedUsername: suggestUsername(githubUser.login),
+      github: { id: githubId, login: githubUser.login },
+      ...(nextPath !== undefined ? { next: nextPath } : {}),
+    });
+  }
+
+  logger.info("Signing in GitHub user", { githubId });
   const user = userResult.data;
   const sessionLogger = logger.child({ userId: user.id });
 

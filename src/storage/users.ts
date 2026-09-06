@@ -4,7 +4,7 @@ import { AppError, NotFoundError } from "../utils/errors";
 import { newId } from "../utils/ids";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
-import { sanitizeUsername, validateUsername } from "../utils/username-validation";
+import { validateUsername } from "../utils/username-validation";
 
 export interface CreateUserResult {
   user: User;
@@ -434,12 +434,26 @@ export async function linkGitHub(
   }
 }
 
-export async function upsertGitHubUser(
+/**
+ * The account behind a verified GitHub identity — `ok(null)` when there is none.
+ *
+ * Matches by GitHub id first, then by the *verified* email, linking the identity
+ * to that account on first use so the next sign-in matches by id.
+ *
+ * It deliberately does NOT create an account. Account creation is the one thing
+ * the closed-beta gate exists to hold, and it lives on a single path for every
+ * signup method: the `/auth/signup/complete` form, which collects the username
+ * and (while the gate is on) the invite code. A create branch here would be an
+ * SSO-shaped way around that gate, guarded only by the caller remembering to
+ * check first — so instead a first-time identity comes back as `null` and the
+ * callback parks it for that form.
+ */
+export async function signInGitHubUser(
   db: D1Database,
   opts: { githubId: string; email: string; username: string },
   logger: Logger,
-): Promise<Result<User, AppError>> {
-  logger.debug("Upserting GitHub user", {
+): Promise<Result<User | null, AppError>> {
+  logger.debug("Resolving GitHub identity", {
     githubId: opts.githubId,
     emailHash: hashEmail(opts.email),
   });
@@ -468,33 +482,11 @@ export async function upsertGitHubUser(
     return ok(updated.data);
   }
 
-  logger.debug("Creating new user for GitHub account", {
+  logger.debug("No account for this GitHub identity", {
+    githubId: opts.githubId,
     emailHash: hashEmail(opts.email),
-    username: opts.username,
   });
-  // Sanitize the GitHub handle before using it as a preferred username.
-  // GitHub allows handles that start with digits or match stratum reserved names,
-  // so we sanitize and validate — falling back to email-derived if it still fails.
-  const sanitized = sanitizeUsername(opts.username).replace(/^[0-9]+/, "");
-  const preferredUsername = validateUsername(sanitized, logger).success ? sanitized : undefined;
-  const createResult = await createUser(db, opts.email, logger, preferredUsername);
-  if (!createResult.success) {
-    return err(createResult.error);
-  }
-  const { user } = createResult.data;
-  const linkResult = await linkGitHub(db, user.id, opts.githubId, opts.username, logger);
-  if (!linkResult.success) {
-    return err(linkResult.error);
-  }
-  const linked = await getUser(db, user.id, logger);
-  if (!linked.success) {
-    return err(
-      new AppError(`User ${user.id} not found after createUser`, "NOT_FOUND", 404, {
-        userId: user.id,
-      }),
-    );
-  }
-  return ok(linked.data);
+  return ok(null);
 }
 
 /**
