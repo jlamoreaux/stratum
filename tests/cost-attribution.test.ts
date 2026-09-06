@@ -7,7 +7,7 @@
  * that backfills `source`, and the owner index — rather than against a stub's
  * idea of it.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type CostSample,
   getChangeCostSummary,
@@ -27,6 +27,10 @@ const logger: Logger = {
   fatal: vi.fn(),
   child: vi.fn(() => logger),
 };
+
+// The mock is module-level, so without this a `toHaveBeenCalledWith` assertion
+// can be satisfied by an earlier test's call and the suite passes on run order.
+beforeEach(() => vi.clearAllMocks());
 
 interface CostRow {
   project: string;
@@ -238,32 +242,56 @@ describe("recordCosts attribution columns", () => {
     const legacy = rows(raw)[0];
     expect(legacy?.source).toBe("platform");
     expect(legacy?.owner_id).toBeNull();
-    // And the historical row still aggregates alongside attributed ones.
+
+    // And it still aggregates alongside an attributed row. The legacy INSERT
+    // above carries no change_id, so it must be given one to be summarized at
+    // all — asserting only that the summary succeeds would pass against an
+    // empty result, and therefore against any schema.
+    raw.prepare("UPDATE cost_records SET change_id = ? WHERE id = ?").run("chg_1", "cost_legacy");
+    await recordCosts(
+      db,
+      logger,
+      { project: "p", changeId: "chg_1", ownerId: "user_alice", ownerType: "user" },
+      [{ kind: "llm_tokens", quantity: 250 }],
+    );
+
     const summary = await getChangeCostSummary(db, logger, "chg_1");
     expect(summary.success).toBe(true);
+    if (!summary.success) return;
+    const llm = summary.data.find((entry) => entry.kind === "llm_tokens");
+    expect(llm?.total).toBe(750);
   });
 
   it("serves an owner-scoped, newest-first history from the new index", async () => {
     // What idx_costs_owner exists for. `created_at` is written only by
     // recordCosts as an ISO 8601 string, so ordering it in SQL is safe here —
     // the mixed-format hazard 042/044/047 warn about needs two writers.
-    const { db, raw } = makeSqliteD1();
-    await recordCosts(db, logger, { project: "p", ownerId: "user_alice", ownerType: "user" }, [
-      { kind: "git_ops", quantity: 1 },
-    ]);
-    await recordCosts(db, logger, { project: "p", ownerId: "org_acme", ownerType: "org" }, [
-      { kind: "git_ops", quantity: 5 },
-    ]);
+    const { raw } = makeSqliteD1();
+    // Written directly rather than through recordCosts: that function stamps
+    // `new Date().toISOString()`, and successive calls land inside the same
+    // millisecond, so an ordering assertion over them would hold whatever the
+    // ORDER BY said. Distinct timestamps are the whole point of the test.
+    const insert = raw.prepare(
+      "INSERT INTO cost_records (id, project, kind, quantity, estimated, created_at, owner_id, owner_type, source) VALUES (?, ?, ?, ?, 0, ?, ?, ?, 'platform')",
+    );
+    insert.run("c_old", "p", "git_ops", 1, "2026-01-01T00:00:00.000Z", "user_alice", "user");
+    insert.run("c_new", "p", "git_ops", 2, "2026-03-01T00:00:00.000Z", "user_alice", "user");
+    insert.run("c_other", "p", "git_ops", 5, "2026-02-01T00:00:00.000Z", "org_acme", "org");
 
     const mine = raw
       .prepare("SELECT quantity FROM cost_records WHERE owner_id = ? ORDER BY created_at DESC")
       .all("user_alice") as unknown as Array<{ quantity: number }>;
-    expect(mine.map((r) => r.quantity)).toEqual([1]);
+    // Newest first, and another subject's row is not in it.
+    expect(mine.map((r) => r.quantity)).toEqual([2, 1]);
 
-    const indexes = raw
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'cost_records'")
-      .all() as unknown as Array<{ name: string }>;
-    expect(indexes.map((i) => i.name)).toContain("idx_costs_owner");
+    // The planner must actually reach for the index, not merely have it: an
+    // index nothing uses is a write cost with no read benefit.
+    const plan = raw
+      .prepare(
+        "EXPLAIN QUERY PLAN SELECT * FROM cost_records WHERE owner_id = ? ORDER BY created_at DESC",
+      )
+      .all("user_alice") as unknown as Array<{ detail: string }>;
+    expect(plan.map((step) => step.detail).join(" ")).toContain("idx_costs_owner");
   });
 
   it("reports, and does not throw, when the owner_type CHECK rejects a row", async () => {

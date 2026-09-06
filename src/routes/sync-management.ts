@@ -783,19 +783,17 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     logger,
   );
 
-  if (!resolveResult.success) {
-    const status = resolveResult.error.statusCode === 401 ? 401 : 422;
-    return c.json({ error: resolveResult.error.message, code: resolveResult.error.code }, status);
-  }
-
-  const { commitSha } = resolveResult.data;
-
   // `resolveConflict` clones the project AND the workspace fork and pushes, for
   // EVERY strategy — so this is recorded here rather than in the `manual` branch
   // above, which only ever sees the evaluator suite's spend. Without it,
   // accept-project and accept-workspace resolutions record nothing at all, and
   // manual under-records by the clone+push it just paid for. Two git_ops, the
   // same shape the single-merge route bills for the same clone+push.
+  //
+  // Before the failure branch below, for the same reason the manual branch
+  // records before its 422: the clones are already paid for when the push
+  // fails, and a failure that costs the operator the same as a success must not
+  // be the cheap way to use the platform.
   const resolveGitSubject = await resolveBillingSubject(c.env.DB, logger, project);
   await recordCosts(
     c.env.DB,
@@ -809,6 +807,13 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     },
     [{ kind: "git_ops", quantity: 2 }],
   );
+
+  if (!resolveResult.success) {
+    const status = resolveResult.error.statusCode === 401 ? 401 : 422;
+    return c.json({ error: resolveResult.error.message, code: resolveResult.error.code }, status);
+  }
+
+  const { commitSha } = resolveResult.data;
 
   // Record history (non-throwing); delete conflict key regardless of history outcome
   await recordSyncHistory(

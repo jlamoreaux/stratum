@@ -3,6 +3,7 @@ import { newId } from "../utils/ids";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
 import { getAgent } from "./agents";
+import { type UsageDelta, meterForCostKind, upsertUsage, usagePeriod } from "./usage";
 
 export type CostKind = "llm_tokens" | "sandbox_ms" | "git_ops";
 
@@ -103,6 +104,51 @@ export async function resolveBillingSubject(
 }
 
 /**
+ * Accumulate the metered half of a batch into `usage_periods`.
+ *
+ * Split out of `recordCosts` so all six recording sites get it without any of
+ * them knowing it exists — the aggregate must never be something a call site
+ * can forget, because a site that forgets is an owner whose spend does not
+ * count against their allowance.
+ *
+ * Samples with no billing subject are skipped. `cost_records` keeps them with a
+ * NULL owner because the spend still happened, but a quantity nobody can be
+ * billed for cannot be enforced against anyone, so there is no row here to
+ * write it into — `usage_periods.owner_id` is NOT NULL for exactly that reason.
+ *
+ * The period comes from the same `createdAt` the ledger rows carry, so a cost
+ * row and the month it counts toward cannot land on opposite sides of a
+ * boundary.
+ */
+async function accumulateUsage(
+  db: D1Database,
+  logger: Logger,
+  opts: { ownerId?: string; ownerType?: BillingSubject["ownerType"] },
+  samples: CostSample[],
+  createdAt: string,
+): Promise<void> {
+  if (!opts.ownerId || !opts.ownerType) return;
+  const deltas: UsageDelta[] = [];
+  for (const sample of samples) {
+    // `git_ops` maps to no meter; see `meterForCostKind`.
+    const meter = meterForCostKind(sample.kind);
+    if (meter) deltas.push({ meter, quantity: sample.quantity });
+  }
+  if (deltas.length === 0) return;
+  // The Result is deliberately not folded into `recordCosts`'s own: the ledger
+  // rows above ARE written, and reporting an error would tell the caller the
+  // spend went unrecorded when it did not. `upsertUsage` logs its own failure,
+  // and the aggregate is reconcilable from the ledger it derives from.
+  await upsertUsage(
+    db,
+    logger,
+    { ownerId: opts.ownerId, ownerType: opts.ownerType },
+    usagePeriod(new Date(createdAt)),
+    deltas,
+  );
+}
+
+/**
  * Record cost samples for a change. Best-effort: failures are logged and
  * reported, but callers treat cost recording as non-blocking.
  *
@@ -155,6 +201,9 @@ export async function recordCosts(
       changeId: opts.changeId,
       count: samples.length,
     });
+    // Only after the ledger write succeeded: the aggregate derives from those
+    // rows, so it must never count spend the ledger does not record.
+    await accumulateUsage(db, logger, opts, samples, createdAt);
     return ok(undefined);
   } catch (error) {
     const appError =
@@ -201,40 +250,6 @@ export async function getChangeCostSummary(
             { operation: "getChangeCostSummary", changeId },
           );
     logger.error("Failed to get change cost summary", appError, { changeId });
-    return err(appError);
-  }
-}
-
-export async function getProjectCostSummary(
-  db: D1Database,
-  logger: Logger,
-  project: string,
-): Promise<Result<CostSummaryEntry[], AppError>> {
-  try {
-    const result = await db
-      .prepare(
-        "SELECT kind, SUM(quantity) AS total, MAX(estimated) AS any_estimated FROM cost_records WHERE project = ? GROUP BY kind",
-      )
-      .bind(project)
-      .all<SummaryRow>();
-    return ok(
-      result.results.map((row) => ({
-        kind: row.kind as CostKind,
-        total: row.total,
-        estimated: row.any_estimated === 1,
-      })),
-    );
-  } catch (error) {
-    const appError =
-      error instanceof AppError
-        ? error
-        : new AppError(
-            error instanceof Error ? error.message : "Failed to summarize costs",
-            "DATABASE_ERROR",
-            500,
-            { operation: "getProjectCostSummary", project },
-          );
-    logger.error("Failed to get project cost summary", appError, { project });
     return err(appError);
   }
 }

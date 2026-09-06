@@ -683,6 +683,14 @@ const IDENTITY_COLUMNS: readonly [table: string, column: string][] = [
   // rewritten: `quantity` and `kind` are what the spend was, not who incurred
   // it, and the row must stay readable as spend that happened.
   ["cost_records", "owner_id"],
+  // `usage_periods.owner_id` is deliberately NOT here, and its absence is a
+  // decision rather than an oversight. Rewriting it to the shared sentinel
+  // would collide two erased users' rows on PRIMARY KEY (owner_id, period,
+  // meter) and throw mid-erasure; and there is nothing worth preserving. A cost
+  // row is evidence that spend happened and reads perfectly well with the payer
+  // anonymized, whereas an aggregate exists only to be compared against a limit
+  // for a subject that no longer exists. `deleteAccountCascade` below deletes
+  // those rows outright instead.
 ];
 
 /**
@@ -785,6 +793,10 @@ async function resolveOrgOwnership(
     .bind(org.id)
     .run();
   await db.prepare("DELETE FROM teams WHERE org_id = ?").bind(org.id).run();
+  // The org's usage aggregate goes with the org, and ONLY on this branch: where
+  // a successor was promoted above, the org survives and so must its
+  // consumption — a change of owner is not a fresh monthly allowance.
+  await db.prepare("DELETE FROM usage_periods WHERE owner_id = ?").bind(org.id).run();
   await db.prepare("DELETE FROM orgs WHERE id = ?").bind(org.id).run();
 }
 
@@ -859,6 +871,12 @@ export async function deleteAccountCascade(
     // erasure request is itself a retention bug.
     await db.prepare("DELETE FROM agents WHERE owner_id = ?").bind(userId).run();
     await db.prepare("DELETE FROM api_tokens WHERE user_id = ?").bind(userId).run();
+    // The owner-scoped usage aggregate (migration 049). Erasing the account is
+    // the ONLY event that may clear it: `usage_periods` is deliberately outside
+    // `PROJECT_SCOPED_TABLES` because an allowance a user can reset by deleting
+    // the project that burned it is not an allowance. Here the subject itself is
+    // going, so there is nothing left to bill and nothing left to enforce.
+    await db.prepare("DELETE FROM usage_periods WHERE owner_id = ?").bind(userId).run();
     // Same reasoning, same trap: `oauth_tokens.user_id` and
     // `oauth_auth_codes.user_id` both REFERENCE users(id) (#349). An OAuth
     // grant is a live credential handed to an editor, so an erasure that left

@@ -361,14 +361,24 @@ describe("POST /api/changes/:id/evaluate records attributed costs", () => {
 });
 
 describe("POST /api/changes/:id/merge records attributed costs", () => {
-  it("attributes the merge's git operations to the project's owner", async () => {
-    const res = await makeApp(changesRouter).fetch(
-      new Request("http://localhost/api/changes/chg_abc123/merge", {
-        method: "POST",
-        headers: USER_AUTH,
-      }),
-      makeEnv(),
-    );
+  function mergeRequest(query = ""): Request {
+    return new Request(`http://localhost/api/changes/chg_abc123/merge${query}`, {
+      method: "POST",
+      headers: USER_AUTH,
+    });
+  }
+
+  // NOTE ON WHAT THIS COVERS. `makeEnv()` binds no MERGE_QUEUE, which is the
+  // ONLY reason control reaches the recordCosts this asserts on. With the
+  // binding present — as it is in the top-level, production and staging configs
+  // — a `strategy=merge` request takes the MergeQueue branch at
+  // `changes.ts:589`, which returns before that recording. So this covers the
+  // cold path a self-hoster without the binding gets, and `?strategy=squash`.
+  // It does NOT cover a default merge on the hosted instance, which records
+  // nothing at all; the sibling test below pins that gap so it cannot be
+  // mistaken for coverage.
+  it("attributes the cold path's git operations to the project's owner", async () => {
+    const res = await makeApp(changesRouter).fetch(mergeRequest(), makeEnv());
 
     expect(res.status).toBe(200);
     expect(costRows()).toHaveLength(1);
@@ -379,6 +389,30 @@ describe("POST /api/changes/:id/merge records attributed costs", () => {
       source: "platform",
       change_id: "chg_abc123",
     });
+  });
+
+  it("records NOTHING when the merge queue is bound, which is every deployed config", async () => {
+    // Asserting the gap rather than the fix, deliberately. Closing it means
+    // recording inside the queue branch, which is its own change; until then a
+    // green suite must not imply merges are metered in production. Flip this to
+    // expect a row when that lands.
+    // `transitioned: false` is the queue branch's earliest clean exit — it
+    // returns 200 right after logging, skipping the event emit and post-merge
+    // work this test has no business exercising. Any successful outcome reaches
+    // the same conclusion: no recordCosts on the way out.
+    const queueEnv = makeEnv({
+      MERGE_QUEUE: {
+        idFromName: (name: string) => name,
+        get: () => ({
+          merge: async () => ({ success: true, transitioned: false, commit: "merged_sha" }),
+        }),
+      } as unknown as Env["MERGE_QUEUE"],
+    });
+
+    const res = await makeApp(changesRouter).fetch(mergeRequest(), queueEnv);
+
+    expect(res.status).toBe(200);
+    expect(costRows()).toHaveLength(0);
   });
 });
 
