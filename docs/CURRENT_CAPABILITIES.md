@@ -18,9 +18,14 @@ limitation recorded below.
 
 ## Evaluation & merge pipeline
 
-- Evaluators: secret scan (always on, blocking), diff, webhook, LLM (AI binding),
-  sandbox (Sandboxes binding; fails closed when absent). Per-change evaluator
-  evidence and estimated resource costs (LLM tokens, sandbox time, git ops).
+- Evaluators: secret scan (always on, blocking), diff, webhook, LLM, sandbox
+  (Sandboxes binding; fails closed when absent). The LLM evaluator runs on the
+  Workers AI binding by default, or on the project's own credential against an
+  operator-configured provider (`anthropic` or an OpenAI-compatible endpoint) —
+  see BYOK below. Per-change evaluator evidence and resource costs (LLM tokens,
+  sandbox time, git ops); token counts are the ones the provider reported, and
+  fall back to a `~4 chars/token` estimate — marked `estimated` on the cost
+  record — only for a response that omits them.
 - Branch protection in `.stratum/policy.yaml` (`merge:`): required evaluators
   (latest run per type), required human approvals, force-merge control
   (**deny-by-default** — force is only allowed when the policy sets
@@ -44,6 +49,35 @@ limitation recorded below.
   messages sit there for manual inspection.
 - Human reviews (approve / request changes) move the change state machine and are
   human-only; agents cannot approve work.
+
+## Usage metering, entitlements, and BYOK
+
+- Every cost record names who pays for it (`owner_id`, `owner_type`) and whether
+  it was `platform` or `byok` spend, and rolls up into `usage_periods`, an
+  owner-scoped monthly aggregate keyed `(owner_id, period, meter, source)`.
+  Metering is **always on**, including self-hosted: it is a ledger, not a
+  paywall.
+- BYOK for the `llm` evaluator: an operator allowlist (`LLM_PROVIDERS`) of named
+  providers (`anthropic`, `openai-compatible`), selected by name from
+  `.stratum/policy.yaml`, with the project's own credential read from
+  `project_secrets`. A policy can never supply a `baseUrl`. Every failure path
+  fails the gate closed and none falls back to the operator's `AI` binding.
+  See `adr/008-llm-provider-byok-threat-model.md`.
+- A `UsageMeter` Durable Object holds the monthly reserve/settle counters and a
+  bucketed sliding `evaluations_per_hour` window (a rate ceiling BYOK does not
+  lift).
+- An entitlements seam (`BILLING_SERVICE_URL` + `BILLING_SERVICE_SECRET`) that
+  is **inert when unset** — every allowance reads as unlimited, no meter binding
+  is touched, and nothing can be refused. Plan definitions and payment live
+  outside this repository. Enforcement is additionally observe-only unless
+  `ENTITLEMENTS_ENFORCE=1`: a decision is evaluated and recorded, and admits.
+- Limits are checked against the **acting user** (an agent resolves to its
+  owner), not the project's owner, so an allowance follows the person; recording
+  still names the true owner, so the ledger is unaffected.
+- Visibility: `/settings/usage`, an 80%-of-a-meter banner and one email per
+  crossing, `stratum_get_usage` over MCP, and `GET /api/users/me/usage`. The
+  billing surface is read-only everywhere — no tool or endpoint can raise a
+  limit, buy capacity, or set a provider key.
 
 ## Events & integrations
 
@@ -73,8 +107,9 @@ limitation recorded below.
   syntax-highlighted file viewer (dependency-free lexer), commit log, changes with
   diff viewer + evaluator evidence + costs + reviews + comments, issues, activity,
   webhooks management, deployments (history, log tail for writers, Approve and
-  Retry buttons), deploy-secret management in project settings, settings. Open
-  changes poll via meta refresh.
+  Retry buttons), deploy-secret management in project settings, settings, and a
+  per-account usage page (`/settings/usage`). Open changes poll via meta
+  refresh.
 
 ## Tooling
 
@@ -92,7 +127,11 @@ limitation recorded below.
   but evaluation itself has no queue worker yet.
 - Team permissions are org-wide; per-project team grants are not implemented.
 - Phase 4 operational items remain: load testing at 1000+ concurrent workspaces,
-  D1 hot/cold rotation, SSO/SAML, multi-tenancy/billing for Stratum Cloud.
+  D1 hot/cold rotation, SSO/SAML, and the rest of multi-tenancy/billing for
+  Stratum Cloud — the metering, entitlement and enforcement machinery above is
+  in the tree, but plan definitions, checkout and subscription state are not,
+  and there is no org billing UI, no seat model, and no retention or storage
+  limit.
 - Durability is covered: D1 and KV identity back up to R2 daily and on demand,
   along with the reachable history of a rotating slice of repos (coverage rotates
   across runs under a per-run cap), with a tested restore path

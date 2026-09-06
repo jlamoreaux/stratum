@@ -1,7 +1,14 @@
 # Monetization and BYOK
 
-**Status:** research / proposal. Nothing here is implemented, and nothing here
-changes what a self-hoster gets today.
+**Status:** research / proposal, now **partly superseded by what shipped**. The
+metering, entitlement, enforcement and BYOK machinery described below is in the
+tree — see `docs/CURRENT_CAPABILITIES.md` for what exists,
+`docs/adr/008-llm-provider-byok-threat-model.md` for the threat model as
+implemented, and `docs/REMAINING_WORK.md` for what is still open. Where this
+document and those disagree, they are right and this is the earlier thinking.
+Pricing, plan definitions and payment remain unimplemented, and a self-hoster's
+behavior is still unchanged: every allowance is unlimited unless a billing
+service is configured.
 
 This document scopes how Stratum charges for hosted usage without withholding
 code from the open-source repository, what the free tier costs the operator, and

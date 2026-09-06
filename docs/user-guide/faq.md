@@ -112,12 +112,20 @@ agent, not laundered through a human account.
 The software is free software (see the licensing question below) and costs
 nothing; self-hosted, you pay only for the Cloudflare resources you use
 (Workers, Artifacts, D1, KV, Queues, plus AI
-Gateway and Sandboxes if you enable those evaluators). Stratum meters estimated
-resource usage per change — LLM tokens, sandbox execution milliseconds, and git
+Gateway and Sandboxes if you enable those evaluators). Stratum meters resource
+usage per change — LLM tokens, sandbox execution milliseconds, and git
 operations — and shows it alongside the evaluation evidence, so you can see what
-each (agent) change cost you. The hosted instance has open signup and is free
-while billing and multi-tenancy for a managed offering ("Stratum Cloud") are
-planned but not built.
+each (agent) change cost you. LLM tokens are the counts the provider reported,
+falling back to a `~4 chars/token` estimate (marked as one) only when a response
+omits them. Those per-change records roll up into a monthly per-account total
+you can read at `/settings/usage`.
+
+Nothing in a self-hosted instance ever refuses you on the strength of those
+numbers. Allowances, and the enforcement that consults them, are switched on by
+pointing the instance at a billing service; unconfigured — the default — every
+allowance reads as unlimited. The hosted instance has open signup and is free:
+plan definitions, checkout and subscription state for a managed offering
+("Stratum Cloud") are still not built.
 
 ## What are the current limitations?
 
@@ -177,9 +185,10 @@ SSH transport is not supported (Workers have no raw TCP listener).
 
 Node.js 22.13+ and your own Cloudflare account with Workers, **Artifacts (which
 is in beta — you need access to it)**, D1, KV, Queues, and Durable Objects.
-Optional: the Workers AI binding for the LLM evaluator, Sandboxes for the
-sandbox evaluator (without the binding that evaluator fails closed), R2 for
-backups, and Cloudflare Email for magic links.
+Optional: the Workers AI binding for the LLM evaluator (or, instead, an
+`LLM_PROVIDERS` allowlist so projects can bring their own model key), Sandboxes
+for the sandbox evaluator (without the binding that evaluator fails closed), R2
+for backups, and Cloudflare Email for magic links.
 The [README Quick Start](../../README.md#quick-start) covers secrets,
 migrations, and deployment; keep production and staging in separate
 Artifacts namespaces.
