@@ -12,6 +12,7 @@ import {
   MAX_DIFF_CHARS_FLOOR,
   MAX_POLICY_CONTEXT_CHARS,
 } from "./defaults";
+import type { LLMBudget } from "./llm-budget";
 import { sanitizePolicy } from "./sanitize-policy";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
@@ -25,7 +26,16 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 export class LLMEvaluator implements Evaluator {
-  constructor(private ai: AiBinding) {}
+  /**
+   * `budget` carries the deployment's limits, not the policy's. On a hosted
+   * instance the inference is billed to the operator's Cloudflare account while
+   * the policy asking for it belongs to the project, so the ceiling has to come
+   * from the side paying. Omitted (self-host default) means unrestricted.
+   */
+  constructor(
+    private ai: AiBinding,
+    private budget: LLMBudget = { allowedModels: [] },
+  ) {}
 
   async evaluate(
     diff: string,
@@ -56,6 +66,32 @@ export class LLMEvaluator implements Evaluator {
           : DEFAULT_MAX_DIFF_CHARS;
 
       logger.debug("LLM config", { model, threshold, maxDiffChars });
+
+      // Refused before the allowance is touched: a policy naming a model this
+      // deployment does not offer has not spent anything, and charging it a
+      // unit of quota would let a typo burn the project's day.
+      const { allowedModels } = this.budget;
+      if (allowedModels.length > 0 && !allowedModels.includes(model)) {
+        logger.warn("Policy names a model this deployment does not allow", { model });
+        return ok({
+          score: 0,
+          passed: false,
+          reason: `LLM evaluator failed closed: this deployment does not allow the model "${model}". Allowed: ${allowedModels.join(", ")}.`,
+        });
+      }
+
+      if (this.budget.reserve) {
+        const reservation = await this.budget.reserve();
+        if (!reservation.allowed) {
+          // Fails closed rather than skipping, so exhausting the allowance
+          // cannot be a way to switch this gate off and merge unreviewed.
+          return ok({
+            score: 0,
+            passed: false,
+            reason: `LLM evaluator failed closed: this project has used its ${reservation.limit} LLM evaluations for today. The allowance resets at 00:00 UTC.`,
+          });
+        }
+      }
 
       const truncated = diff.length > maxDiffChars;
       const truncationNote = truncated

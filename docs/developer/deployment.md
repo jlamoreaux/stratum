@@ -205,6 +205,43 @@ jobs:
 - [ ] Secrets configured (`wrangler secret put`)
 - [ ] Bindings configured in wrangler.toml
 - [ ] Domain/routing configured
+- [ ] `llm` evaluator limits set if this deployment serves users other than you
+  (see below)
+
+#### Who pays for the `llm` evaluator
+
+The `llm` evaluator calls the **Workers AI binding of the account this Worker is
+deployed to**. There is no per-project credential and no AI Gateway in the path:
+`env.AI` is a plain `[ai]` binding, so every run bills the operator.
+
+That is fine when you self-host — the account being billed is the account
+running the projects. It is an open tab on a multi-tenant deployment, because
+the spend is requested by someone else's `.stratum/policy.yaml`: that file
+chooses the model, and a change can be re-evaluated through
+`POST /changes/:id/evaluate` as often as the request rate limiter allows (1000
+requests per minute for an authenticated user), each run sending up to 100,000
+characters of diff.
+
+Two environment variables bound it. Both are unset by default, which is the
+self-host behaviour:
+
+| Variable | Effect |
+|----------|--------|
+| `LLM_MODEL_ALLOWLIST` | Comma-separated Workers AI model ids the evaluator may call. Unset allows any model the binding serves — including expensive ones a policy names |
+| `LLM_EVALS_PER_PROJECT_PER_DAY` | Calls one project may make per UTC day. Unset, `0`, or unparseable means no cap |
+
+Both refusals **fail closed**, with a reason naming the limit. They are
+deliberately not skips: a skipped evaluator would make exhausting the allowance
+a way to switch off your own LLM review and merge unreviewed, turning a cost
+control into a bypass.
+
+The counter is a per-day KV key (`llmquota:<project>:<day>`), read-increment-
+written like the request rate limiter. KV is not atomic, so concurrent
+evaluations of one project can overshoot by roughly the number in flight — this
+bounds a runaway rather than metering to the call. A counter that cannot be read
+refuses the call rather than allowing an unmetered one.
+
+Neither limit is a substitute for a billing alert on the Cloudflare account.
 
 ### Testing
 

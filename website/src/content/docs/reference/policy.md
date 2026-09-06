@@ -213,6 +213,17 @@ Three behaviours are worth knowing before you rely on it:
 Token usage is estimated (Workers AI does not report it) and recorded as a cost
 on the change.
 
+**A deployment may restrict this evaluator.** It is the one evaluator whose cost
+lands on the account the Stratum instance runs on rather than on the project
+that configured it, so a hosted instance can set an allowlist of permitted
+models and a per-project daily cap. Both refusals fail closed with a reason
+naming the limit: a model outside the allowlist, or a project that has spent its
+allowance for the UTC day. Neither is *skipped* — exhausting an allowance must
+not become a way to switch this gate off and merge unreviewed. Self-hosted
+instances set no limits by default, since the account being billed is the
+account running the projects. On `app.usestratum.dev` the allowlist is the
+default model and the cap is 200 evaluations per project per day.
+
 ### `sandbox`
 
 Clones the workspace into a Cloudflare Sandbox, installs dependencies, and runs

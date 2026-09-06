@@ -144,6 +144,21 @@ export interface Env {
   ANALYTICS?: AnalyticsEngineDataset;
   SANDBOX?: SandboxBinding;
   AI?: AiBinding;
+  /**
+   * Comma-separated Workers AI model ids the `llm` evaluator may call. Unset
+   * (the self-host default) allows any model the binding serves.
+   *
+   * A hosted deployment sets it because `model` in `.stratum/policy.yaml` is
+   * chosen by the project owner and paid for by whoever owns the account this
+   * Worker is deployed to.
+   */
+  LLM_MODEL_ALLOWLIST?: string;
+  /**
+   * Maximum `llm` evaluations one project may run per UTC day. Unset, zero, or
+   * unparseable means no cap — the self-host default, where the account being
+   * billed is the same account running the projects.
+   */
+  LLM_EVALS_PER_PROJECT_PER_DAY?: string;
   MERGE_QUEUE?: DurableObjectNamespace;
   REPO_DO?: DurableObjectNamespace;
   /** Serialized magic-link send counters (issue #283). Optional only so tests

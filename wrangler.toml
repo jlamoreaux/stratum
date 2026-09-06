@@ -348,6 +348,15 @@ GOOGLE_REDIRECT_URI = "https://app.usestratum.dev/auth/google/callback"
 # the gate ON so the invite path stays exercised end-to-end.
 BETA_GATE = "0"
 REFERRAL_SERVICE_URL = "https://referral.usestratum.dev"
+# `llm` evaluator limits. This is the ONE evaluator whose cost lands on the
+# account this Worker is deployed to rather than on the project that asked for
+# it: `.stratum/policy.yaml` picks the model, and a change can be re-evaluated
+# as often as the request limiter allows. Signup is open, so both are set here.
+# A self-hoster leaves them unset (their account is their own) and nothing
+# changes. Over-limit runs fail closed, naming the limit — never skipped, or
+# exhausting the allowance would be a way to switch the gate off and merge.
+LLM_MODEL_ALLOWLIST = "@cf/meta/llama-3.1-8b-instruct"
+LLM_EVALS_PER_PROJECT_PER_DAY = "200"
 
 # =============================================================================
 # [env.staging]
@@ -485,3 +494,7 @@ EMAIL_FROM_ADDRESS = "noreply@staging.app.usestratum.dev"
 # live stratum-landing Worker (see [env.production.vars] cutover note).
 BETA_GATE = "1"
 REFERRAL_SERVICE_URL = "https://referral.usestratum.dev"
+# Same limits as production, so the refusal paths are exercised before they
+# reach a real bill. The cap is lower because staging has fewer projects.
+LLM_MODEL_ALLOWLIST = "@cf/meta/llama-3.1-8b-instruct"
+LLM_EVALS_PER_PROJECT_PER_DAY = "50"

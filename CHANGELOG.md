@@ -90,6 +90,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than folded into this change.
 
 ### Added
+- **The `llm` evaluator can be bounded by the deployment that pays for it.** It
+  calls the Workers AI binding of the account Stratum is deployed to, so on a
+  multi-tenant instance every run is inference the operator pays for, requested
+  by a policy file someone else wrote — which picks the model, and can be
+  re-run through `POST /changes/:id/evaluate` as often as the request limiter
+  allows. Two environment variables now bound it: `LLM_MODEL_ALLOWLIST`
+  (permitted Workers AI model ids) and `LLM_EVALS_PER_PROJECT_PER_DAY` (calls
+  per project per UTC day, counted in KV). Both are unset by default, so a
+  self-hoster — whose account is their own — sees no change.
+
+  Both refusals **fail closed** with a reason naming the limit, and neither is a
+  skip: skipping would make exhausting the allowance a way to switch off your
+  own LLM review and merge unreviewed, turning a cost control into a bypass. A
+  model outside the allowlist is refused before any allowance is spent, so a
+  typo cannot burn a project's day. `app.usestratum.dev` now runs with the
+  default model allowlisted and 200 evaluations per project per day.
+
 - **A complete policy reference, and a test that keeps it honest.**
   [`docs/api/policy.md`](docs/api/policy.md) documents every
   `.stratum/policy.yaml` field, its type, its default, the bounds it is clamped

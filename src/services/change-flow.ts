@@ -8,6 +8,7 @@ import {
   diffTouchesProtectedConfig,
   loadPolicy,
 } from "../evaluation";
+import { llmBudgetForProject } from "../evaluation/llm-budget";
 import type { SandboxRepoAccess } from "../evaluation/sandbox-evaluator";
 import type { EvalPolicy, EvalResult, EvaluationContext, Evaluator } from "../evaluation/types";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
@@ -127,7 +128,13 @@ export function buildEvaluators(
         case "webhook":
           return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
         case "llm":
-          if (env.AI) return [{ type: "llm", evaluator: new LLMEvaluator(env.AI) }];
+          if (env.AI)
+            return [
+              {
+                type: "llm",
+                evaluator: new LLMEvaluator(env.AI, llmBudgetForProject(env, projectName, logger)),
+              },
+            ];
           return [
             {
               type: "llm",

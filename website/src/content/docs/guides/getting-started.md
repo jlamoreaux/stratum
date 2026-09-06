@@ -202,7 +202,10 @@ every default, every bound, and what each one does when it is wrong.
   minimum passing score (0.0–1.0); `maxDiffChars` bounds how much diff is
   sent (default 24,000, max 100,000). An unavailable model or unparseable
   verdict fails closed. Token usage is recorded on the change as a cost
-  record.
+  record. A hosted instance may restrict which models this evaluator may call
+  and how many times a project may call it per day, since the inference is
+  billed to the instance rather than to your project — see the
+  [policy reference](/reference/policy/#llm).
 
 Two top-level knobs sit alongside `evaluators`: `requireAll` (default `true`)
 makes the aggregate verdict demand every evaluator pass — set it to `false` to
