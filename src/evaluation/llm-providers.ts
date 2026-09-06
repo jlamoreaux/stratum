@@ -14,6 +14,7 @@
  */
 import type { Env } from "../types";
 import type { Logger } from "../utils/logger";
+import { privateHostReason } from "../utils/validation";
 
 /**
  * Wire protocols the evaluator can speak, one per HTTP implementation in
@@ -73,79 +74,69 @@ export function providerSecretName(providerName: string): string {
 /**
  * Why this host must not be fetched, or null when it is fine.
  *
- * Loopback, link-local and RFC1918 addresses are the ones that turn an outbound
- * fetch into a read of something only the Worker's own network can see. The
- * WHATWG URL parser normalizes IPv4 for special schemes, so the obfuscated
- * spellings (`0x7f.0.0.1`, `2130706433`) arrive here already in dotted-quad
- * form and are caught by the same rules.
+ * A thin alias for `privateHostReason` (`utils/validation.ts`), which is the
+ * one host filter in the codebase and is also what `validateWebhookUrl` uses.
+ * This used to be a second implementation, and the two drifted exactly as a
+ * duplicated security filter always does: this copy missed CGNAT, the
+ * `.internal` suffix (GCP's metadata endpoint is `metadata.google.internal`),
+ * everything in `fe80::/10` not literally spelled `fe80`, and the
+ * IPv4-compatible IPv6 form `[::127.0.0.1]`, which the URL parser hands on as
+ * `[::7f00:1]`.
  *
- * **Known limit:** this is an address check, not a resolution check. A public
- * DNS name that resolves to 127.0.0.1 defeats it, and nothing at parse time can
- * see that. It is defence in depth — the actual control is that only the
- * operator writes this variable, and that a policy file can never add to it.
+ * Kept as a named export because the reason is interpolated into the operator's
+ * config error, and because the allowlist is where this rule is *enforced*:
+ * every URL rule is checked once, at parse time, not per request.
  */
 export function blockedHostReason(hostname: string): string | null {
-  // A trailing dot is the same name to a resolver; lowercase for the literals.
-  const host = hostname.toLowerCase().replace(/\.$/, "");
-
-  if (host === "localhost" || host.endsWith(".localhost")) {
-    return "'localhost' names the loopback interface";
-  }
-
-  if (host.startsWith("[") && host.endsWith("]")) {
-    const inner = host.slice(1, -1);
-    if (inner === "::1") return "[::1] is the IPv6 loopback address";
-    if (inner === "::" || inner === "::0") return "[::] is the IPv6 unspecified address";
-    if (inner.startsWith("fe80")) return `${host} is an IPv6 link-local address`;
-    // fc00::/7 — unique local, the IPv6 equivalent of RFC1918.
-    if (/^f[cd]/.test(inner)) return `${host} is an IPv6 unique-local address`;
-    // An IPv4-mapped address exists only to reach an IPv4 host through an IPv6
-    // socket; an operator has no reason to write one, and each spelling
-    // (dotted-quad tail, hex tail) would need its own check to be safe.
-    if (inner.includes("::ffff:")) return `${host} is an IPv4-mapped IPv6 address`;
-    return null;
-  }
-
-  const quad = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (!quad) return null;
-  const [a, b] = [Number(quad[1]), Number(quad[2])];
-
-  if (a === 127) return `${host} is in the loopback range 127.0.0.0/8`;
-  if (a === 0) return `${host} is in the unspecified range 0.0.0.0/8`;
-  if (a === 169 && b === 254) return `${host} is in the link-local range 169.254.0.0/16`;
-  if (a === 10) return `${host} is in the private range 10.0.0.0/8`;
-  if (a === 172 && b >= 16 && b <= 31) return `${host} is in the private range 172.16.0.0/12`;
-  if (a === 192 && b === 168) return `${host} is in the private range 192.168.0.0/16`;
-  return null;
+  return privateHostReason(hostname);
 }
 
-function baseUrlError(name: string, raw: unknown): string | null {
+/** A validated `baseUrl`, normalized, or why the entry cannot be used. */
+type BaseUrlCheck = { ok: true; baseUrl: string } | { ok: false; reason: string };
+
+function checkBaseUrl(name: string, raw: unknown): BaseUrlCheck {
   if (typeof raw !== "string" || raw.length === 0) {
-    return `provider "${name}": "baseUrl" is required and must be a string`;
+    return { ok: false, reason: `provider "${name}": "baseUrl" is required and must be a string` };
   }
 
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    return `provider "${name}": "baseUrl" is not a valid absolute URL`;
+    return { ok: false, reason: `provider "${name}": "baseUrl" is not a valid absolute URL` };
   }
 
   if (url.protocol !== "https:") {
     // Not tidiness: the request carries the project's API key and the diff.
-    return `provider "${name}": "baseUrl" must use https, not ${url.protocol.replace(":", "")}`;
+    return {
+      ok: false,
+      reason: `provider "${name}": "baseUrl" must use https, not ${url.protocol.replace(":", "")}`,
+    };
   }
   if (url.username !== "" || url.password !== "") {
-    return `provider "${name}": "baseUrl" must not embed credentials`;
+    return { ok: false, reason: `provider "${name}": "baseUrl" must not embed credentials` };
   }
   if (url.search !== "" || url.hash !== "") {
-    return `provider "${name}": "baseUrl" must not carry a query string or fragment`;
+    return {
+      ok: false,
+      reason: `provider "${name}": "baseUrl" must not carry a query string or fragment`,
+    };
   }
   const blocked = blockedHostReason(url.hostname);
   if (blocked) {
-    return `provider "${name}": "baseUrl" host is not reachable from an allowlist — ${blocked}`;
+    return {
+      ok: false,
+      reason: `provider "${name}": "baseUrl" host is not reachable from an allowlist — ${blocked}`,
+    };
   }
-  return null;
+
+  // Normalized, never the raw string. `https://host#` and `https://host?` both
+  // pass the two emptiness checks above — the parser reports an empty hash and
+  // an empty search for them — while the bytes the operator wrote would put the
+  // provider's `/messages` path inside a fragment or a query. Origin plus path
+  // is what `href` would give minus exactly those two, and the trailing slash
+  // goes because the provider classes append an absolute path.
+  return { ok: true, baseUrl: `${url.origin}${url.pathname}`.replace(/\/+$/, "") };
 }
 
 /**
@@ -222,15 +213,13 @@ export function parseLlmProviders(raw: string | undefined): LlmProvidersParse {
       };
     }
 
-    const urlProblem = baseUrlError(name, source.baseUrl);
-    if (urlProblem) return { status: "invalid", reason: urlProblem };
+    const url = checkBaseUrl(name, source.baseUrl);
+    if (!url.ok) return { status: "invalid", reason: url.reason };
 
     providers.set(name, {
       name,
       kind: source.kind as LlmProviderKind,
-      // Trailing slashes are stripped by the provider classes when they build a
-      // path; store what the operator wrote.
-      baseUrl: source.baseUrl as string,
+      baseUrl: url.baseUrl,
     });
   }
 
@@ -258,10 +247,13 @@ function parseCached(raw: string | undefined): LlmProvidersParse {
  *
  * Empty-on-invalid is the fail-closed direction, not a silent disable: an empty
  * catalog means every policy naming a provider is rejected by
- * `sanitizeLlmConfig` and blocks merges with a reason naming the provider, while
- * projects on Workers AI — which is every project that never opted into BYOK —
- * are untouched by an operator's typo. The typo itself is reported by
- * `llmProvidersConfigError` and logged here on the isolate's first parse.
+ * `sanitizeLlmConfig`, which fails the policy file closed and blocks merges with
+ * a reason that NAMES the unconfigured provider — the rejection it records is
+ * carried into `parsePolicyContent`'s malformed reason, so the person fixing the
+ * file is not left with a bare count of unusable entries. Projects on Workers AI
+ * — which is every project that never opted into BYOK — are untouched by an
+ * operator's typo. The typo itself is reported by `llmProvidersConfigError` and
+ * logged here on the isolate's first parse.
  */
 export function llmProviderCatalog(
   env: Pick<Env, "LLM_PROVIDERS">,

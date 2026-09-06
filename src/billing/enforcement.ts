@@ -1,0 +1,481 @@
+/**
+ * Consulting entitlements: the one place a limit turns into a decision.
+ *
+ * `entitlements.ts` defines and fetches allowances and enforces nothing. This
+ * module is the other half — it evaluates a decision, records it, and hands the
+ * call site an answer. Every metered call site goes through {@link checkMeter}
+ * or {@link checkGauge} rather than reading a limit itself, so "what does the
+ * plan allow", "what has been used", "who is this checked against" and "does
+ * the answer bind" are decided once instead of five times.
+ *
+ * ## Everything here ships observe-only
+ *
+ * A decision is always *evaluated* and *recorded*; it is *binding* only when
+ * `ENTITLEMENTS_ENFORCE=1`. Under observe-only a refusal still reserves, still
+ * logs, and still admits — that is the month of measurement PRD §8 asks for
+ * before anything blocks. `admitted` is what a caller acts on; `refused` is what
+ * the decision was, and the two differ exactly when enforcement is off.
+ *
+ * ## Inert with `BILLING_SERVICE_URL` unset
+ *
+ * The first line of every entry point is `entitlementsEnabled`. With the billing
+ * vars unset — every self-hoster — nothing here reads entitlements, nothing
+ * touches the `USAGE_METER` binding, and no refusal can be produced.
+ * `tests/enforcement.test.ts` asserts the binding is never touched in that
+ * configuration, because "inert by default" is a claim that decays silently.
+ *
+ * ## The subject (PRD §4a)
+ *
+ * The subject a limit is CHECKED against is the acting user, not the subject the
+ * spend is RECORDED against. See {@link resolveEnforcementSubject}.
+ */
+import {
+  type RateMeterKey,
+  type UsageMeterKey,
+  rateWindowSeconds,
+  usageMeterName,
+} from "../queue/usage-meter";
+import { resolveBillingSubject } from "../storage/costs";
+import { type MeterKey, getOwnerMeterTotals, usagePeriod } from "../storage/usage";
+import type { Env } from "../types";
+import type { Logger } from "../utils/logger";
+import {
+  type CountKey,
+  type Entitlements,
+  RemoteEntitlements,
+  UNLIMITED,
+  UnlimitedEntitlements,
+  entitlementsEnabled,
+  warmEntitlements,
+} from "./entitlements";
+
+/** Who a limit is checked against. Not necessarily who the spend is billed to. */
+export interface EnforcementSubject {
+  ownerId: string;
+  ownerType: "user" | "org";
+  /**
+   * True only when this subject is an org that is *positively known* to pool
+   * its members' usage on a paid plan. Never inferred; see
+   * {@link resolveEnforcementSubject}.
+   */
+  pooled: boolean;
+}
+
+/** What one check decided, and whether that decision binds. */
+export interface EnforcementDecision {
+  /**
+   * Whether the caller may proceed. Under observe-only this is `true` even for
+   * a refusal — gate on this, and report {@link EnforcementDecision.refused}.
+   */
+  admitted: boolean;
+  /** What the limit says, regardless of whether it binds. */
+  refused: boolean;
+  /** Whether `ENTITLEMENTS_ENFORCE=1` made this decision binding. */
+  enforcing: boolean;
+  /** Whether a limit was consulted at all (false when the seam is inert). */
+  checked: boolean;
+  /** Whether a reservation was taken and therefore needs settling. */
+  reserved: boolean;
+  /** The limit consulted: `-1` unlimited, `0` a hard block, else a ceiling. */
+  limit: number;
+  /** The subject's counter after this check, as the meter reported it. */
+  count: number;
+  /**
+   * Present when refused: the user- and agent-facing copy naming what is
+   * exhausted, when it resets and both remedies (PRD §4c). Never a bare error
+   * string — this is the highest-intent moment in the funnel.
+   */
+  reason?: string;
+}
+
+/** Every entry point short-circuits to this when the seam is off. */
+function inert(): EnforcementDecision {
+  return {
+    admitted: true,
+    refused: false,
+    enforcing: false,
+    checked: false,
+    reserved: false,
+    limit: UNLIMITED,
+    count: 0,
+  };
+}
+
+/**
+ * Whether a decision, once evaluated, is allowed to refuse anything.
+ *
+ * Two switches, not one (PRD Goal 3): metering is always on, enforcement is
+ * opt-in on top of a configured billing service. `ENTITLEMENTS_ENFORCE=1` with
+ * no service is a misconfiguration `entitlementsConfigError` reports; here it
+ * simply cannot bind, because there is no limit to bind to.
+ */
+export function enforcementBinding(env: Env): boolean {
+  return entitlementsEnabled(env) && env.ENTITLEMENTS_ENFORCE === "1";
+}
+
+/**
+ * The subject a limit is checked against (PRD §4a).
+ *
+ * **The acting user, not the project's owner.** A project in an org namespace is
+ * recorded against the org, and an org costs nothing to create and needs only
+ * *write* access to put a project in — so an allowance keyed on the recorded
+ * owner is one an exhausted user resets by making an org, or by being added to
+ * someone else's. Keying the check on the person who ran the evaluation makes
+ * the allowance follow the person: ten orgs do not help, and nobody can drain an
+ * allowance that is not theirs.
+ *
+ * **An org pools only when positively known to be paid**, which is the one place
+ * this PRD does not fail open, and the direction matters. `forOwner` is a cached
+ * read that never fetches and nothing warms an org's entitlements before the
+ * first project of that org is evaluated, so an org's plan is ALWAYS a miss on
+ * first contact. Reading "unknown" as "own subject" would therefore make every
+ * org its own permanently-unlimited allowance — the hole, reopened by the
+ * safety mechanism. Unknown or uncached means free, and the actor is charged.
+ * The cost of that direction is that during a billing outage a paying org's
+ * members fall back to their personal limits: a degradation, and recoverable,
+ * where the alternative is permanent.
+ *
+ * The org's entitlements are warmed here via `waitUntil` — the auth middleware
+ * knows the caller but not the project, so it cannot do it — which is why the
+ * first check for a given org resolves to the actor and a later one can pool.
+ *
+ * @param opts.actorUserId - The user who ran the operation, when the site knows one
+ * @param opts.owner - The project's recorded owner (`agent` walks to its user)
+ * @param opts.waitUntil - Used to warm an org's plan off the response path
+ * @returns The subject, or `null` when nobody can be named
+ */
+export async function resolveEnforcementSubject(
+  env: Env,
+  logger: Logger,
+  opts: {
+    actorUserId?: string;
+    owner?: { ownerId?: string; ownerType?: "user" | "org" | "agent" };
+    waitUntil?: (promise: Promise<unknown>) => void;
+  },
+): Promise<EnforcementSubject | null> {
+  const { actorUserId, owner, waitUntil } = opts;
+
+  if (owner?.ownerType === "org" && owner.ownerId) {
+    const orgId = owner.ownerId;
+    if (entitlementsEnabled(env)) {
+      const resolved = await new RemoteEntitlements(env, logger).forOwner(orgId, "org");
+      // `source: "default"` is "we have never heard about this org", not "this
+      // org is on the default plan" — pooling on it would pool on ignorance.
+      const pooled =
+        resolved.success && resolved.data.source !== "default" && resolved.data.entitlements.pooled;
+      if (pooled) {
+        return { ownerId: orgId, ownerType: "org", pooled: true };
+      }
+      // Warmed for NEXT time, never awaited: a paid org pools from its second
+      // evaluation onward, and the first one is charged to the actor.
+      warmEntitlements(env, waitUntil, { ownerId: orgId, ownerType: "org" }, logger);
+    }
+  }
+
+  if (actorUserId) return { ownerId: actorUserId, ownerType: "user", pooled: false };
+
+  // No actor: a queue consumer, or a path that does not carry one. The recorded
+  // subject is then the only nameable one — weaker than §4a wants for an
+  // org-owned project, and still strictly better than no check at all, which is
+  // the only other option here. `resolveBillingSubject` also performs the
+  // agent -> owner walk, so an agent-owned project resolves to a person.
+  if (!owner?.ownerId) return null;
+  const recorded = await resolveBillingSubject(env.DB, logger, owner);
+  if (!recorded) return null;
+  return { ...recorded, pooled: recorded.ownerType === "org" };
+}
+
+/**
+ * The subject's allowances, from the cached read only.
+ *
+ * Never fetches: this runs on the request path, where a cold billing service
+ * would put a five-second dependency in front of a merge. A miss resolves to
+ * `UnlimitedEntitlements`, which admits — the fail-open rule of the module it
+ * reads from.
+ */
+async function entitlementsFor(
+  env: Env,
+  logger: Logger,
+  subject: EnforcementSubject,
+): Promise<Entitlements> {
+  const resolved = await new RemoteEntitlements(env, logger).forOwner(
+    subject.ownerId,
+    subject.ownerType,
+  );
+  return resolved.success ? resolved.data.entitlements : UnlimitedEntitlements;
+}
+
+/**
+ * Subjects whose D1 aggregate has already been reconciled into their counter in
+ * THIS isolate, keyed `subjectType:subjectId:period`.
+ *
+ * The counter is authoritative for enforcement but it is not the ledger: a
+ * subject that spent before the meter existed, or whose object was purged, or
+ * whose spend was recorded by a path that never reserved, has a `usage_periods`
+ * total the object has never seen. `setFloor` raises the counter to it (never
+ * lowers — see the object's doc comment), and doing that once per isolate keeps
+ * the D1 read off every single evaluation.
+ */
+const reconciled = new Set<string>();
+
+/**
+ * Raise the subject's counters to the D1 aggregate, at most once per isolate.
+ *
+ * `source = "platform"` is not optional here and not a detail: migration 049
+ * keys usage on `(owner_id, period, meter, source)` exactly so a project paying
+ * its own provider bill is not charged against the hosted allowance, and a sum
+ * that omitted the filter would hand that distinction straight back (Goal 5).
+ */
+async function reconcileFloor(
+  env: Env,
+  logger: Logger,
+  meterNamespace: NonNullable<Env["USAGE_METER"]>,
+  subject: EnforcementSubject,
+  period: string,
+): Promise<void> {
+  const key = `${subject.ownerType}:${subject.ownerId}:${period}`;
+  if (reconciled.has(key)) return;
+  reconciled.add(key);
+  if (!env.DB) return;
+  const totals = await getOwnerMeterTotals(env.DB, logger, subject.ownerId, period, "platform");
+  if (!totals.success) return;
+  const stub = meterNamespace.get(
+    meterNamespace.idFromName(usageMeterName(subject.ownerType, subject.ownerId)),
+  );
+  for (const [meter, quantity] of Object.entries(totals.data)) {
+    if (typeof quantity === "number") await stub.setFloor(meter as MeterKey, quantity, period);
+  }
+}
+
+export interface MeterCheckOptions {
+  subject: EnforcementSubject;
+  meter: UsageMeterKey;
+  /** Upper bound on what this operation will consume. Settled afterwards. */
+  estimate: number;
+  /** Caller's clock, so one operation's counters cannot straddle a boundary. */
+  nowMs?: number;
+  /** 'YYYY-MM' UTC; defaults to the month `nowMs` falls in. */
+  period?: string;
+  /** What is being gated, for the refusal copy (e.g. "AI review"). */
+  what: string;
+}
+
+/**
+ * Evaluate one metered limit for one subject: reserve an upper bound, record the
+ * decision, and admit unless enforcement is on and the bound does not fit.
+ *
+ * The reservation is the point. An LLM call's true cost is known only from its
+ * response, so checking a counter and then spending would be check-then-act
+ * against a shared total; `reserve` admits or refuses the whole bound
+ * atomically, and {@link settleMeter} hands back the difference.
+ *
+ * A refusal takes no reservation (the meter does not count what it refuses), so
+ * only an admitted decision reports `reserved`.
+ */
+export async function checkMeter(
+  env: Env,
+  logger: Logger,
+  opts: MeterCheckOptions,
+): Promise<EnforcementDecision> {
+  if (!entitlementsEnabled(env)) return inert();
+  const meterNamespace = env.USAGE_METER;
+  if (!meterNamespace) {
+    // Configured to enforce with nothing to count against. Logged rather than
+    // refusing: `entitlementsConfigError` is where this gets fixed, and a
+    // missing binding must not become a merge outage.
+    logger.warn("Entitlement check skipped: USAGE_METER binding is not configured", {
+      meter: opts.meter,
+    });
+    return inert();
+  }
+
+  const nowMs = opts.nowMs ?? Date.now();
+  const period = opts.period ?? usagePeriod(new Date(nowMs));
+  const entitlements = await entitlementsFor(env, logger, opts.subject);
+  const limit = limitFor(entitlements, opts.meter);
+
+  if (isMonthlyMeter(opts.meter)) {
+    await reconcileFloor(env, logger, meterNamespace, opts.subject, period);
+  }
+
+  const stub = meterNamespace.get(
+    meterNamespace.idFromName(usageMeterName(opts.subject.ownerType, opts.subject.ownerId)),
+  );
+  const outcome = await stub.reserve(opts.meter, opts.estimate, limit, period, nowMs);
+  const enforcing = enforcementBinding(env);
+  const refused = !outcome.admitted;
+
+  const decision: EnforcementDecision = {
+    admitted: outcome.admitted || !enforcing,
+    refused,
+    enforcing,
+    checked: true,
+    reserved: outcome.admitted,
+    limit,
+    count: outcome.count,
+  };
+  if (refused) {
+    decision.reason = meterRefusalReason(opts.what, opts.meter, limit, period, nowMs);
+  }
+  record(logger, opts.subject, opts.meter, decision, entitlements.plan);
+  return decision;
+}
+
+/**
+ * Apply the true cost of a spend a {@link checkMeter} reservation covered.
+ *
+ * Call it in a `finally`. A provider call that throws has still consumed the
+ * reservation, and leaving it standing would charge the subject the upper bound
+ * for a call that never produced a token — a few of those and the allowance is
+ * gone with nothing to show for it.
+ */
+export async function settleMeter(
+  env: Env,
+  // Kept for signature symmetry with `checkMeter`, which every call site pairs
+  // it with; settling reports nothing of its own.
+  _logger: Logger,
+  opts: {
+    subject: EnforcementSubject;
+    meter: UsageMeterKey;
+    /** Signed difference between the true cost and the reserved bound. */
+    delta: number;
+    nowMs?: number;
+    period?: string;
+  },
+): Promise<void> {
+  if (!entitlementsEnabled(env)) return;
+  const meterNamespace = env.USAGE_METER;
+  if (!meterNamespace) return;
+  if (!Number.isFinite(opts.delta) || opts.delta === 0) return;
+  const nowMs = opts.nowMs ?? Date.now();
+  const period = opts.period ?? usagePeriod(new Date(nowMs));
+  const stub = meterNamespace.get(
+    meterNamespace.idFromName(usageMeterName(opts.subject.ownerType, opts.subject.ownerId)),
+  );
+  await stub.settle(opts.meter, opts.delta, period, nowMs);
+}
+
+/**
+ * Evaluate a counted gauge — a thing that exists rather than a thing that is
+ * spent, so there is nothing to reserve and nothing to settle.
+ *
+ * @param opts.current - How many the subject already has, counted by the caller
+ */
+export async function checkGauge(
+  env: Env,
+  logger: Logger,
+  opts: { subject: EnforcementSubject; count: CountKey; current: number; what: string },
+): Promise<EnforcementDecision> {
+  if (!entitlementsEnabled(env)) return inert();
+  const entitlements = await entitlementsFor(env, logger, opts.subject);
+  const limit = entitlements.counts[opts.count];
+  const enforcing = enforcementBinding(env);
+  // Same reading of a limit as the meter: `-1` unlimited, `0` a hard block,
+  // anything not a usable limit admits rather than blocking on a bad payload.
+  const usable = Number.isInteger(limit) && limit >= 0;
+  const refused = usable && opts.current + 1 > limit;
+
+  const decision: EnforcementDecision = {
+    admitted: !refused || !enforcing,
+    refused,
+    enforcing,
+    checked: true,
+    reserved: false,
+    limit,
+    count: opts.current,
+  };
+  if (refused) decision.reason = gaugeRefusalReason(opts.what, limit);
+  record(logger, opts.subject, opts.count, decision, entitlements.plan);
+  return decision;
+}
+
+/**
+ * Every decision is recorded, admitted or not.
+ *
+ * This is what makes observe-only worth a month: a log line per decision, with
+ * the plan and whether the decision bound, is the difference between measuring
+ * limits and guessing at them.
+ */
+function record(
+  logger: Logger,
+  subject: EnforcementSubject,
+  meter: string,
+  decision: EnforcementDecision,
+  plan: string,
+): void {
+  logger.info("Entitlement decision", {
+    subjectId: subject.ownerId,
+    subjectType: subject.ownerType,
+    pooled: subject.pooled,
+    plan,
+    meter,
+    limit: decision.limit,
+    count: decision.count,
+    refused: decision.refused,
+    enforcing: decision.enforcing,
+    admitted: decision.admitted,
+  });
+}
+
+function isMonthlyMeter(meter: UsageMeterKey): meter is MeterKey {
+  return meter.endsWith("_month");
+}
+
+function limitFor(entitlements: Entitlements, meter: UsageMeterKey): number {
+  return isMonthlyMeter(meter)
+    ? entitlements.meters[meter]
+    : entitlements.rates[meter as RateMeterKey];
+}
+
+/** First instant of the month after `period`, ISO 8601 — when a monthly meter frees up. */
+export function periodResetsAt(period: string): string {
+  const match = /^(\d{4})-(\d{2})$/.exec(period);
+  if (!match) return "the start of next month";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  return new Date(Date.UTC(year, month, 1)).toISOString();
+}
+
+/**
+ * The copy a blocked caller reads (PRD §4c, §8).
+ *
+ * It is product copy, not an error message: this is the moment somebody learns
+ * a limit exists, and an agent over `/mcp` gets only this string. So it names
+ * what is exhausted, when it resets, and BOTH ways out — and for the rate meter
+ * it says plainly that a project's own key is not one of them, because that is
+ * the remedy an agent would otherwise reach for first.
+ */
+function meterRefusalReason(
+  what: string,
+  meter: UsageMeterKey,
+  limit: number,
+  period: string,
+  nowMs: number,
+): string {
+  if (meter === "evaluations_per_hour") {
+    const resetsAt = new Date(nowMs + rateWindowSeconds(meter) * 1000).toISOString();
+    return `${what} could not run: this account has used its hourly evaluation allowance (${limit} per hour). Capacity frees up as the window rolls, and in full by ${resetsAt}. Two ways forward: wait for the window, or raise this account's plan limits. Bringing your own provider key does NOT lift this one — it bounds how often an evaluation runs, not whose tokens it spends.`;
+  }
+  const remedy =
+    meter === "llm_tokens_month"
+      ? "set `provider:` on the llm evaluator in .stratum/policy.yaml to run reviews on this project's own API key"
+      : "reduce this month's usage";
+  return `${what} could not run: this account's ${meterLabel(meter)} for ${period} is used up (limit ${limit}). It resets at ${periodResetsAt(period)}. Two ways forward: ${remedy}, or raise this account's plan limits.`;
+}
+
+function gaugeRefusalReason(what: string, limit: number): string {
+  return `${what} is not allowed: this account's plan allows ${limit} of them. Two ways forward: remove or make public one you already have, or raise this account's plan limits.`;
+}
+
+function meterLabel(meter: UsageMeterKey): string {
+  switch (meter) {
+    case "llm_tokens_month":
+      return "monthly LLM token allowance";
+    case "sandbox_ms_month":
+      return "monthly sandbox time allowance";
+    case "deploys_month":
+      return "monthly deploy allowance";
+    default:
+      return meter;
+  }
+}

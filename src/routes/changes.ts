@@ -1415,17 +1415,26 @@ app.post("/changes/:id/evaluate", async (c) => {
     baseOid,
   } = diffResult.data;
 
-  const evaluators = await buildEvaluators(c.env, policy, project, logger, {
-    remote: workspace.remote,
-    token: workspaceReadToken.data,
-    ref: evaluatedSha,
-  });
+  const evaluators = await buildEvaluators(
+    c.env,
+    policy,
+    project,
+    logger,
+    {
+      remote: workspace.remote,
+      token: workspaceReadToken.data,
+      ref: evaluatedSha,
+    },
+    getWaitUntil(c),
+  );
   // The base this re-evaluation's diff was built against — not `change.baseSha`,
   // which records the base at creation and is exactly the value that has gone
   // stale by the time a change is re-evaluated (#274).
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
     baseSha: baseOid,
-    billing: billingContextFor(project),
+    // This route is user-credentialed (agent tokens are rejected above), so the
+    // acting user is the caller — the subject PRD §4a checks a limit against.
+    billing: billingContextFor(project, userId),
   });
 
   const recordResult = await recordEvalRuns(c.env.DB, logger, id, evalRuns);
@@ -1448,6 +1457,7 @@ app.post("/changes/:id/evaluate", async (c) => {
       changeId: id,
       workspace: change.workspace,
       ...(evaluateSubject ?? {}),
+      notify: { env: c.env, actorUserId: userId, waitUntil: getWaitUntil(c) },
     },
     evaluateCostSamples,
   );

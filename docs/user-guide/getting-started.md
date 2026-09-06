@@ -194,7 +194,14 @@ downgrade your governance.
   minimum passing score (0.0–1.0); `maxDiffChars` bounds how much diff is
   sent (default 24,000, max 100,000). An unavailable model or unparseable
   verdict fails closed. Token usage is recorded on the change as a cost
-  record.
+  record. **A policy may declare at most one `llm` entry** — a second one is a
+  merge-blocking policy error, because the two entries cannot both be the
+  configuration in force.
+
+A policy may declare **at most 16 `evaluators:` entries**; more than that is a
+policy error and blocks merges, the same as any other unusable entry. (The
+`deploys:` list has the same cap, for the same reason: one merge must not turn
+into an unbounded number of external calls.)
 
 Two top-level knobs sit alongside `evaluators`: `requireAll` (default `true`)
 makes the aggregate verdict demand every evaluator pass — set it to `false` to

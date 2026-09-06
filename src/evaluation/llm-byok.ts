@@ -35,26 +35,40 @@ export type LlmProviderSelection =
   | { status: "unavailable"; reason: string };
 
 /**
- * The `llm` entry the evaluator will actually read.
+ * Every `llm` entry in the policy.
  *
- * `find`, not `filter`: `LLMEvaluator` itself takes the first `llm` entry and
- * ignores any others, so resolving from a later one would run the credential of
- * a provider whose model and threshold are not the ones in force.
+ * `filter`, not `find`, and the difference is a fail-open. `LLMEvaluator` reads
+ * the FIRST `llm` entry, while `buildEvaluators` constructs an evaluator for
+ * EVERY one — so resolving a provider from the first entry alone meant
+ * `[{llm}, {llm, provider: anthropic}]` produced two evaluators on `env.AI`,
+ * with no error and no log: a policy that asked to run on its own key silently
+ * running on the operator's. `sanitizeLlmConfig` now rejects a second entry at
+ * parse time, and {@link resolveLlmProvider} refuses to choose between them for
+ * any policy that reaches it another way (a KV-cached one, say).
  */
-export function llmConfigOf(policy: EvalPolicy): LlmEvaluatorConfig | undefined {
-  return policy.evaluators.find((entry): entry is LlmEvaluatorConfig => entry.type === "llm");
+export function llmConfigsOf(policy: EvalPolicy): LlmEvaluatorConfig[] {
+  return policy.evaluators.filter((entry): entry is LlmEvaluatorConfig => entry.type === "llm");
 }
 
 /**
  * Resolve the provider for this policy, loading the project's credential only
  * when the policy names one.
  *
- * The plaintext credential reaches exactly one place: an `Authorization` (or
+ * The plaintext credential is used in exactly one place: an `Authorization` (or
  * `x-api-key`) header on the provider request. `loadSecretValues` is the only
  * read path for a secret value in the codebase and is held to the same rule as
  * the deploy runner — no route returns it, renders it, or logs it. That an
  * HTTP request *triggers* this resolution is not the same thing as the value
  * being route-reachable.
+ *
+ * "Used in one place" is not the same as "reaches one place", and the
+ * difference was a live leak: `new Headers()` throws a `TypeError` that quotes
+ * the offending value, so a stored credential containing CR, LF or NUL became
+ * an error message, then an `EvalResult.reason`, then a rendered line on a
+ * world-readable change page. Both ends are now closed — the store rejects
+ * control characters (`storage/project-secrets.ts`) and the provider builds its
+ * headers outside the try, mapping a failure to a constant that interpolates
+ * nothing (`llm-provider.ts`).
  *
  * **There is deliberately no MCP surface for writing the credential this
  * reads** (PRD §4c). `stratum_set_provider_key` looks like an obvious gap and
@@ -69,7 +83,17 @@ export async function resolveLlmProvider(
   policy: EvalPolicy,
   logger: Logger,
 ): Promise<LlmProviderSelection> {
-  const providerName = llmConfigOf(policy)?.provider;
+  const configs = llmConfigsOf(policy);
+  if (configs.length > 1) {
+    // Never "pick the first one". Which entry wins decides whose bill the run
+    // lands on, and a policy that cannot say is a policy this must refuse.
+    return {
+      status: "unavailable",
+      reason: `policy declares ${configs.length} "llm" evaluator entries; at most one is allowed, so no provider could be resolved`,
+    };
+  }
+
+  const providerName = configs[0]?.provider;
   // The skip. Nothing below this line runs for a project that never opted in.
   if (providerName === undefined) return { status: "platform" };
 

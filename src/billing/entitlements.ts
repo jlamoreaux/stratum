@@ -10,7 +10,8 @@
  * Three key sets, deliberately not one union, because they are not one kind of
  * thing and do not live in one place: a `MeterKey` is a monthly *flow* accumulated
  * in `usage_periods`, a `CountKey` is a *gauge* counted on demand, and a `RateKey`
- * is a per-minute *rate* enforced out of KV. Collapsing them invites a limit to be
+ * is a *rate* over a short window, enforced out of KV or off the usage meter but
+ * never out of the monthly aggregate. Collapsing them invites a limit to be
  * looked up from the wrong store.
  *
  * ## Fail OPEN — deliberately the opposite of the beta gate
@@ -48,8 +49,16 @@ import { type Result, err, ok } from "../utils/result";
 /** A gauge counted on demand, not a monthly flow — there is no `private_projects` meter. */
 export type CountKey = "private_projects";
 
-/** A rate, enforced from KV by the request limiter rather than from a spend counter. */
-export type RateKey = "requests_per_minute";
+/**
+ * A bound on how often something may happen, rather than on how much it spends.
+ *
+ * The two members are enforced in different places on purpose, and the split is
+ * the one PRD §4b argues: `requests_per_minute` stays on the KV request limiter,
+ * where the bucket rolls as fast as KV goes stale, and `evaluations_per_hour`
+ * lives on the `UsageMeter` Durable Object, because an hour-long window read
+ * through a per-colo cache that is a minute stale is not a limit at all.
+ */
+export type RateKey = "requests_per_minute" | "evaluations_per_hour";
 
 /** Every meter a limit may be set on. Mirrors `MeterKey`; see `parseEntitlements`. */
 export const METER_KEYS: readonly MeterKey[] = [
@@ -60,7 +69,7 @@ export const METER_KEYS: readonly MeterKey[] = [
 
 export const COUNT_KEYS: readonly CountKey[] = ["private_projects"];
 
-export const RATE_KEYS: readonly RateKey[] = ["requests_per_minute"];
+export const RATE_KEYS: readonly RateKey[] = ["requests_per_minute", "evaluations_per_hour"];
 
 /**
  * One billing subject's allowances.
@@ -72,6 +81,24 @@ export const RATE_KEYS: readonly RateKey[] = ["requests_per_minute"];
 export interface Entitlements {
   /** Opaque plan identifier as the billing service names it; for display and logs. */
   plan: string;
+  /**
+   * Whether an ORG on this plan pools its members' usage onto the org itself
+   * (PRD §4a).
+   *
+   * Explicit rather than derived from {@link Entitlements.plan}, which is an
+   * opaque display string: pooling decides WHOSE allowance a spend is checked
+   * against, and inferring that from a name the billing service is free to
+   * change is how a rename becomes a free-usage hole.
+   *
+   * It defaults to `false`, and that default is load bearing — it is the one
+   * place this file does not fail open. `forOwner` never fetches and org
+   * entitlements are never warmed by the auth path, so an org's plan is always
+   * a cache miss on FIRST contact; reading an unknown plan as "pooled" would
+   * make every org its own unlimited subject permanently, which is exactly the
+   * hole the enforcement subject exists to close. Unknown therefore means free,
+   * and the acting user is charged instead.
+   */
+  pooled: boolean;
   meters: Record<MeterKey, number>;
   counts: Record<CountKey, number>;
   rates: Record<RateKey, number>;
@@ -125,7 +152,11 @@ export const UnlimitedEntitlements: Entitlements = Object.freeze({
     deploys_month: UNLIMITED,
   }),
   counts: Object.freeze({ private_projects: UNLIMITED }),
-  rates: Object.freeze({ requests_per_minute: UNLIMITED }),
+  rates: Object.freeze({ requests_per_minute: UNLIMITED, evaluations_per_hour: UNLIMITED }),
+  // Never pooled by default: "we do not know this org's plan" must not read as
+  // "this org pools", or an unknown org becomes a fresh allowance. See the
+  // field's own doc comment.
+  pooled: false,
 });
 
 /**
@@ -156,8 +187,17 @@ const CACHE_TTL_SECONDS = 300;
  */
 const FAILURE_TTL_SECONDS = 60;
 
-/** Versioned so a shape change cannot be read back as the old shape. */
-const KEY_PREFIX = "entitlements:v1:";
+/**
+ * Versioned so a shape change cannot be read back as the old shape.
+ *
+ * Bumped to v2 by the enforcement work: `pooled` and `evaluations_per_hour`
+ * joined the payload, and a v1 entry read back through the new parser would
+ * silently take the defaults for both — which for `pooled` is the safe answer
+ * and for `evaluations_per_hour` is "unlimited". Neither is a value anybody
+ * chose, so the old entries are abandoned rather than reinterpreted. The
+ * billing service's response contract changes with it (private cloud layer).
+ */
+const KEY_PREFIX = "entitlements:v2:";
 
 function cacheKey(ownerType: string, ownerId: string): string {
   return `${KEY_PREFIX}${ownerType}:${ownerId}`;
@@ -221,6 +261,9 @@ function parseEntitlements(payload: unknown, fallback: Entitlements): Entitlemen
   const plan = typeof record.plan === "string" && record.plan.trim() ? record.plan.trim() : null;
   return {
     plan: plan ?? fallback.plan,
+    // Only a real boolean pools. A truthy string or a 1 is a payload we do not
+    // understand, and the safe reading of that is "not positively known".
+    pooled: typeof record.pooled === "boolean" ? record.pooled : fallback.pooled,
     meters: readGroup(record.meters, METER_KEYS, fallback.meters),
     counts: readGroup(record.counts, COUNT_KEYS, fallback.counts),
     rates: readGroup(record.rates, RATE_KEYS, fallback.rates),

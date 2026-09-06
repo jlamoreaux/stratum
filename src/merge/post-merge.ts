@@ -94,6 +94,11 @@ export async function runPostMergeCheck(
           projectId: project.id,
           changeId: opts.changeId,
           ...(subject ?? {}),
+          // No `waitUntil`: this runs in the merge queue consumer, with no
+          // request to hang background work off, so delivery is best-effort
+          // inline (PRD §8). No actor either — a queue message names no user,
+          // so the check falls back to the recorded subject.
+          notify: { env },
         },
         [
           { kind: "sandbox_ms", quantity: Date.now() - runStartedAt },

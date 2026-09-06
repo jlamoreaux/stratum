@@ -61,14 +61,27 @@ export interface LlmProvider {
  * shape problem, or a constant this file chose, and nothing else.
  */
 export class LlmProviderResponseError extends AppError {
-  constructor(message: string, cause?: unknown) {
+  /**
+   * Token counts the provider reported for a response that cannot be used.
+   *
+   * Present only where the provider *billed* the call anyway — a verdict
+   * truncated at the token cap is a completed, charged generation. The
+   * evaluator records it as a cost sample, so a run the provider charged for is
+   * not recorded as zero. Absent for every failure that produced no tokens (a
+   * non-2xx status, an unreadable body), which must not be billed.
+   */
+  readonly usage?: LlmUsage;
+
+  constructor(message: string, cause?: unknown, usage?: LlmUsage) {
     super(message, "LLM_PROVIDER_RESPONSE", 502);
     this.name = "LlmProviderResponseError";
     // Attached rather than described: a `SyntaxError` from `JSON.parse` quotes
     // the bytes that failed, which are the provider's body — exactly what the
     // message must not carry. Dropping it entirely would swallow the only
-    // record of what went wrong.
+    // record of what went wrong, and `LLMEvaluator` logs it (operator-visible)
+    // without ever putting it in the user-visible reason.
     if (cause !== undefined) this.cause = cause;
+    if (usage !== undefined) this.usage = usage;
   }
 }
 
@@ -83,6 +96,15 @@ function transportError(error: unknown): AppError {
 
 /** How long any provider gets before the gate gives up on it. */
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * The two constant messages the request path can fail with. Constants rather
+ * than interpolations because both are reached with attacker-influenced values
+ * in hand — a redirect `Location`, or a header value that could not be built —
+ * and every message from this file becomes a user-visible evaluation reason.
+ */
+const REDIRECT_REFUSED = "provider redirected the request, which is not followed";
+const HEADER_CONSTRUCTION_FAILED = "provider request headers could not be constructed";
 
 export interface ProviderOptions {
   /** Give up on the request after this many milliseconds. */
@@ -184,6 +206,22 @@ abstract class HttpLlmProvider implements LlmProvider {
    * its own shape, because a body that parsed is not a body that can be read.
    */
   protected async post(path: string, headers: Record<string, string>, body: unknown) {
+    // Built HERE, outside the try, and never from inside it. `new Headers` throws
+    // a `TypeError` whose message QUOTES the offending value, and the value here
+    // is the project's API key: inside the try that message would become a
+    // transport error, then an `ExternalServiceError`, then `EvalResult.reason`,
+    // which is persisted on the change and rendered on a page that is
+    // world-readable for a public project. The store rejects control characters
+    // in a secret value (`storage/project-secrets.ts`) so this should be
+    // unreachable; it is the second of the two ends, and it maps to a constant
+    // that interpolates nothing.
+    let requestHeaders: Headers;
+    try {
+      requestHeaders = new Headers({ "content-type": "application/json", ...headers });
+    } catch {
+      return err(new LlmProviderResponseError(HEADER_CONSTRUCTION_FAILED) as AppError);
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
@@ -193,10 +231,20 @@ abstract class HttpLlmProvider implements LlmProvider {
     try {
       const response = await fetch(`${this.baseUrl.replace(/\/+$/, "")}${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...headers },
+        headers: requestHeaders,
         body: JSON.stringify(body),
         signal: controller.signal,
+        // Never follow a redirect: the allowlist binds the host this request was
+        // *sent* to, and a followed 3xx would re-send the prompt (the diff and
+        // the policy) to a host nobody validated — with `x-api-key` still
+        // attached, since the Fetch spec strips only `Authorization`
+        // cross-origin. The sibling `webhook-evaluator.ts` does the same.
+        redirect: "manual",
       });
+
+      if (response.status >= 300 && response.status < 400) {
+        return err(new LlmProviderResponseError(REDIRECT_REFUSED) as AppError);
+      }
 
       if (!response.ok) {
         // The status, never the body: an error body can echo the API key that
@@ -291,9 +339,13 @@ export class AnthropicProvider extends HttpLlmProvider {
     // model's formatting for a limit this file chose. Anthropic says so
     // explicitly: `stop_reason` is `"max_tokens"` in exactly that case.
     if (body.stop_reason === "max_tokens") {
+      // With the counts: the generation ran to the cap and the provider billed
+      // it, so an unusable verdict here still costs real tokens.
       return err(
         new LlmProviderResponseError(
           `provider response was truncated at the ${AnthropicProvider.MAX_TOKENS}-token limit`,
+          undefined,
+          usageOrNothing(body.usage?.input_tokens, body.usage?.output_tokens).usage,
         ) as AppError,
       );
     }
@@ -366,9 +418,12 @@ export class OpenAiCompatibleProvider extends HttpLlmProvider {
     // not the model, and the half-object left behind must not be reported as
     // the model's own formatting failure.
     if (choice?.finish_reason === "length") {
+      // Billed, like the Anthropic sibling — see the note there.
       return err(
         new LlmProviderResponseError(
           `provider response was truncated at the ${OpenAiCompatibleProvider.MAX_COMPLETION_TOKENS}-token limit`,
+          undefined,
+          usageOrNothing(body.usage?.prompt_tokens, body.usage?.completion_tokens).usage,
         ) as AppError,
       );
     }

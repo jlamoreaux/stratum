@@ -242,7 +242,10 @@ ENTITLEMENTS_ENFORCE = "0"
 # Parsed once per isolate by `parseLlmProviders` (src/evaluation/llm-providers.ts)
 # and validated there, not per request: `kind` must be "anthropic" or
 # "openai-compatible", `baseUrl` must be https with no embedded credentials, and
-# a loopback, link-local or RFC1918 host is rejected. One bad entry rejects the
+# a loopback, link-local, CGNAT, .internal/.local or RFC1918 host is rejected.
+# `baseUrl` must include the API version path — the provider appends "/messages"
+# (anthropic) or "/chat/completions" (openai-compatible) to it, so
+# "https://api.anthropic.com" without the "/v1" 404s on every call. One bad entry rejects the
 # whole value — every project selecting a provider then blocks, projects on
 # Workers AI are unaffected, and `llmProvidersConfigError` logs the reason on the
 # first request after the deploy.
@@ -255,7 +258,7 @@ ENTITLEMENTS_ENFORCE = "0"
 # every deploy secret undecryptable, and now blocks the merge gate on every BYOK
 # project until each re-enters its provider key. See the rotation warning in
 # docs/user-guide/deployments.md.
-# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]'
+# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com/v1"}]'
 
 # Instance-wide telemetry kill switch. Not a secret — a plain var, listed here
 # next to POSTHOG_API_KEY because they are read together. Named envs do NOT
@@ -419,6 +422,12 @@ GIT_PUSH_GATED_ENABLED = "false"
 # in the GitHub and Google OAuth app settings.
 OAUTH_REDIRECT_URI = "https://app.usestratum.dev/auth/github/callback"
 GOOGLE_REDIRECT_URI = "https://app.usestratum.dev/auth/google/callback"
+# The From address every outbound email needs. Declared here and not only at top
+# level for the usual reason (named envs inherit no vars) — and it is REQUIRED,
+# not optional: every send path returns early without it, so production would
+# otherwise ship the usage-threshold notice and the magic-link mail as features
+# that silently never send, in the one environment that has limits at all.
+EMAIL_FROM_ADDRESS = "noreply@app.usestratum.dev"
 # Open signup — the closed-beta invite gate is OFF in production ("available
 # today" is the positioning; Origin launched to every paid Cursor plan).
 # To re-enable the invite wall set BETA_GATE = "1"; the gate fails closed and
@@ -442,7 +451,7 @@ ENTITLEMENTS_ENFORCE = "0"
 # what production runs on today. A project opts in by naming one of these in its
 # policy and storing its own key in that project's secrets. See the top-level
 # [vars] block for the validation rules and the DEPLOY_SECRET_KEY coupling.
-# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]'
+# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com/v1"}]'
 
 # =============================================================================
 # [env.staging]
@@ -603,4 +612,4 @@ ENTITLEMENTS_ENFORCE = "0"
 # Operator-configured LLM provider allowlist; unset = Workers AI only. Staging is
 # where a new provider entry gets exercised end-to-end before production, since a
 # bad one is only visible as blocked merges on the projects selecting it.
-# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]'
+# LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com/v1"}]'

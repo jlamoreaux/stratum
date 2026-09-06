@@ -42,7 +42,9 @@ const logger: Logger = {
 const ANTHROPIC_ENTRY = {
   name: "anthropic",
   kind: "anthropic",
-  baseUrl: "https://api.anthropic.com",
+  // With the "/v1": the provider POSTs `${baseUrl}/messages`, so the version-less
+  // host every example used to show 404s on every BYOK call.
+  baseUrl: "https://api.anthropic.com/v1",
 };
 
 const PROVIDERS_JSON = JSON.stringify([ANTHROPIC_ENTRY]);
@@ -93,7 +95,7 @@ describe("parseLlmProviders — the allowlist is the only place an endpoint is n
     expect(parse.providers.get("anthropic")).toEqual({
       name: "anthropic",
       kind: "anthropic",
-      baseUrl: "https://api.anthropic.com",
+      baseUrl: "https://api.anthropic.com/v1",
     });
   });
 
@@ -125,8 +127,18 @@ describe("parseLlmProviders — the allowlist is the only place an endpoint is n
     ["https://172.31.255.254/v1", "172.16.0.0/12"],
     ["https://192.168.1.1/v1", "192.168.0.0/16"],
     ["https://[fe80::1]/v1", "link-local"],
+    // The rest of fe80::/10, which a literal "fe80" prefix test let straight through.
+    ["https://[feb0::1]/v1", "link-local"],
     ["https://[fd00::1]/v1", "unique-local"],
     ["https://[::ffff:127.0.0.1]/v1", "IPv4-mapped"],
+    // IPv4-compatible IPv6: the URL parser rewrites this to [::7f00:1], which is
+    // neither "::1" nor "::ffff:" and was accepted.
+    ["https://[::127.0.0.1]/v1", "reserved ::/64"],
+    // CGNAT — carrier space, and reachable from plenty of private networks.
+    ["https://100.64.0.1/v1", "100.64.0.0/10"],
+    // The GCP metadata endpoint is a NAME, not an address: no IP check sees it.
+    ["https://metadata.google.internal/computeMetadata/v1", ".internal"],
+    ["https://printer.local/v1", ".local"],
   ])("rejects %s at parse time", (baseUrl, expected) => {
     const parse = parseLlmProviders(JSON.stringify([{ ...ANTHROPIC_ENTRY, baseUrl }]));
     expect(parse.status, `${baseUrl} was accepted`).toBe("invalid");
@@ -139,6 +151,23 @@ describe("parseLlmProviders — the allowlist is the only place an endpoint is n
     // octet — a check written as a string prefix would fail both of these.
     for (const baseUrl of ["https://172.32.0.1/v1", "https://110.0.0.1/v1"]) {
       expect(blockedHostReason(new URL(baseUrl).hostname)).toBeNull();
+    }
+  });
+
+  it("stores the baseUrl normalized, so a bare '#' or '?' cannot swallow the path", () => {
+    // Both pass the empty-search and empty-hash checks — the parser reports both
+    // as "" — while the raw bytes would put `/messages` inside a fragment or a
+    // query, sending the prompt to the wrong path with the credential attached.
+    for (const [written, stored] of [
+      ["https://api.anthropic.com/v1#", "https://api.anthropic.com/v1"],
+      ["https://api.anthropic.com/v1?", "https://api.anthropic.com/v1"],
+      ["https://api.anthropic.com/v1/", "https://api.anthropic.com/v1"],
+      ["https://api.anthropic.com", "https://api.anthropic.com"],
+    ]) {
+      const parse = parseLlmProviders(JSON.stringify([{ ...ANTHROPIC_ENTRY, baseUrl: written }]));
+      expect(parse.status, `${written} was rejected`).toBe("ok");
+      if (parse.status !== "ok") return;
+      expect(parse.providers.get("anthropic")?.baseUrl).toBe(stored);
     }
   });
 
@@ -227,11 +256,72 @@ describe("sanitizeLlmConfig — the policy may select a provider, never describe
   }
 
   it("keeps a provider the operator configured", () => {
-    const parsed = parsePolicy({ evaluators: [{ type: "llm", provider: "anthropic" }] });
+    const parsed = parsePolicy({
+      evaluators: [{ type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" }],
+    });
     expect(parsed.status).toBe("ok");
     if (parsed.status !== "ok") return;
-    expect(parsed.policy.evaluators[0]).toEqual({ type: "llm", provider: "anthropic" });
+    expect(parsed.policy.evaluators[0]).toEqual({
+      type: "llm",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+    });
     expect(parsed.policy.configError).toBeUndefined();
+  });
+
+  it("fails closed on a provider entry that names no model", () => {
+    // The default model id is a Workers AI one (`@cf/meta/llama-3.1-8b-instruct`).
+    // Posted to Anthropic it fails every call — a gate that never runs, found one
+    // merge at a time — so the entry is refused where it is written instead.
+    const parsed = parsePolicy({ evaluators: [{ type: "llm", provider: "anthropic" }] });
+    expect(parsed.status).toBe("malformed");
+    if (parsed.status !== "malformed") return;
+    expect(parsed.reason).toContain('no "model"');
+    // A policy with no provider keeps the Workers AI default, where the id is right.
+    expect(parsePolicy({ evaluators: [{ type: "llm" }] }).status).toBe("ok");
+  });
+
+  it("names the provider in the reason that blocks the merge", () => {
+    // A bare count ("1 unusable entry in 'evaluators'") is what the person
+    // fixing the file sees; it has to say which entry and why.
+    const parsed = parsePolicy({
+      evaluators: [{ type: "llm", provider: "evil-corp", model: "m" }],
+    });
+    expect(parsed.status).toBe("malformed");
+    if (parsed.status !== "malformed") return;
+    expect(parsed.reason).toContain("evil-corp");
+    expect(parsed.reason).toContain("LLM_PROVIDERS");
+  });
+
+  it("rejects a policy declaring more than one llm entry", () => {
+    // The fail-open this closes: `LLMEvaluator` reads the FIRST entry while
+    // `buildEvaluators` builds one per entry, so this pair used to yield two
+    // evaluators on the operator's Workers AI bill from a policy that asked to
+    // run on the project's own key — no error, no log.
+    const parsed = parsePolicy({
+      evaluators: [
+        { type: "llm" },
+        { type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" },
+      ],
+    });
+    expect(parsed.status).toBe("malformed");
+    if (parsed.status !== "malformed") return;
+    expect(parsed.reason).toContain("'llm' entries");
+  });
+
+  it("caps how many evaluator entries one policy file may declare", () => {
+    // The `deploys:` sibling has had this cap from the start, and an evaluator
+    // entry is an outbound call: without it one merge amplifies into unbounded
+    // provider requests.
+    const parsed = parsePolicy({
+      evaluators: Array.from({ length: 17 }, () => ({ type: "diff" })),
+    });
+    expect(parsed.status).toBe("malformed");
+    if (parsed.status !== "malformed") return;
+    expect(parsed.reason).toContain("at most 16");
+    expect(
+      parsePolicy({ evaluators: Array.from({ length: 16 }, () => ({ type: "diff" })) }).status,
+    ).toBe("ok");
   });
 
   it("fails the whole policy CLOSED on a provider name the operator has not configured", () => {
@@ -239,7 +329,9 @@ describe("sanitizeLlmConfig — the policy may select a provider, never describe
     // deliberately opposite to a rejected `deploys:` entry: an unresolvable
     // provider means the gate cannot run, and a gate that cannot run must not
     // pass.
-    const parsed = parsePolicy({ evaluators: [{ type: "llm", provider: "evil-corp" }] });
+    const parsed = parsePolicy({
+      evaluators: [{ type: "llm", provider: "evil-corp", model: "m" }],
+    });
     expect(parsed.status).toBe("malformed");
     if (parsed.status !== "malformed") return;
     expect(parsed.reason).toContain("unusable entr");
@@ -251,7 +343,7 @@ describe("sanitizeLlmConfig — the policy may select a provider, never describe
     // silently dropped the entry would let the change through on its remaining
     // evaluators.
     const parsed = parsePolicy({
-      evaluators: [{ type: "llm", provider: "evil-corp" }, { type: "diff" }],
+      evaluators: [{ type: "llm", provider: "evil-corp", model: "m" }, { type: "diff" }],
     });
     expect(parsed.status).toBe("malformed");
   });
@@ -260,7 +352,9 @@ describe("sanitizeLlmConfig — the policy may select a provider, never describe
     // Not a special case, and it must not be: an operator who never set
     // LLM_PROVIDERS has an empty catalog, which resolves no name.
     const parsed = parsePolicyContent(
-      JSON.stringify({ evaluators: [{ type: "llm", provider: "anthropic" }] }),
+      JSON.stringify({
+        evaluators: [{ type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" }],
+      }),
       "json",
       logger,
       catalogFrom(undefined),
@@ -275,6 +369,7 @@ describe("sanitizeLlmConfig — the policy may select a provider, never describe
       {
         type: "llm",
         provider: "anthropic",
+        model: "claude-sonnet-4-5",
         baseUrl: "https://evil.example.com",
         base_url: "https://evil.example.com",
         endpoint: "https://evil.example.com",
@@ -282,16 +377,23 @@ describe("sanitizeLlmConfig — the policy may select a provider, never describe
       logger,
       providers(),
     );
-    expect(config).toEqual({ type: "llm", provider: "anthropic" });
+    expect(config).toEqual({ type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" });
     expect(JSON.stringify(config)).not.toContain("evil.example.com");
   });
 
   it("drops an inline credential a policy tried to smuggle in", () => {
     const config = sanitizeLlmConfig(
-      { type: "llm", provider: "anthropic", apiKey: "sk-ant-inline", secret: "s" },
+      {
+        type: "llm",
+        provider: "anthropic",
+        model: "claude-sonnet-4-5",
+        apiKey: "sk-ant-inline",
+        secret: "s",
+      },
       logger,
       providers(),
     );
+    expect(config).not.toBeNull();
     expect(JSON.stringify(config)).not.toContain("sk-ant-inline");
   });
 
@@ -368,7 +470,9 @@ describe("resolveLlmProvider — the credential path", () => {
     return db;
   }
 
-  const byokPolicy: EvalPolicy = { evaluators: [{ type: "llm", provider: "anthropic" }] };
+  const byokPolicy: EvalPolicy = {
+    evaluators: [{ type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" }],
+  };
 
   it("skips the secret load entirely when the policy names no provider", async () => {
     // The skip is the performance requirement, so it is asserted the only way
@@ -496,7 +600,9 @@ describe("resolveLlmProvider — the credential path", () => {
 
 describe("buildEvaluators — BYOK never falls back to the operator's Workers AI", () => {
   const KEY = "test-deploy-secret-key-0123456789";
-  const byokPolicy: EvalPolicy = { evaluators: [{ type: "llm", provider: "anthropic" }] };
+  const byokPolicy: EvalPolicy = {
+    evaluators: [{ type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" }],
+  };
 
   function envWith(db: D1Database, ai: AiBinding, overrides: Partial<Env> = {}): Env {
     return {
@@ -595,6 +701,76 @@ describe("buildEvaluators — BYOK never falls back to the operator's Workers AI
     expect(costs?.[0]).toMatchObject({ kind: "llm_tokens", estimated: true });
   });
 
+  it("posts to the URL the operator configured, path included", async () => {
+    // The existing BYOK fetch stubs ignore their arguments, which is how a
+    // version-less example `baseUrl` survived in wrangler.toml and in the Env
+    // docstring: `${baseUrl}/messages` against "https://api.anthropic.com" is a
+    // 404 on every call, and no test looked at the URL.
+    const { db } = makeSqliteD1();
+    await putSecret(
+      db,
+      logger,
+      { DEPLOY_SECRET_KEY: KEY },
+      {
+        projectId: project().id,
+        name: "ANTHROPIC_API_KEY",
+        value: "sk-ant-real",
+        actorId: "user_alice",
+      },
+    );
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          content: [{ type: "text", text: '{"score":1,"passed":true,"reason":"ok"}' }],
+          usage: { input_tokens: 9, output_tokens: 1 },
+        }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const ai: AiBinding = { run: vi.fn() } as unknown as AiBinding;
+    await evaluateWith(envWith(db, ai));
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      { headers: Headers; redirect?: string },
+    ];
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    expect(init.headers.get("x-api-key")).toBe("sk-ant-real");
+    // The allowlist binds the host this was SENT to; a followed redirect would
+    // move it, with the body and that header attached.
+    expect(init.redirect).toBe("manual");
+  });
+
+  it("fails the gate closed when the policy declares two llm entries", async () => {
+    // Reachable with a policy that never went through the parser — a KV-cached
+    // one written before the rule existed. Neither entry may quietly win.
+    const { db } = makeSqliteD1();
+    const ai: AiBinding = {
+      run: vi.fn(async () => ({ response: '{"score":1,"passed":true,"reason":"ok"}' })),
+    } as unknown as AiBinding;
+    const twoEntries: EvalPolicy = {
+      evaluators: [
+        { type: "llm" },
+        { type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" },
+      ],
+    };
+
+    const built = await buildEvaluators(envWith(db, ai), twoEntries, project(), logger);
+    const { evalResult } = await runEvaluation(
+      built.filter((entry) => entry.type === "llm"),
+      "diff --git a/x b/x",
+      twoEntries,
+      logger,
+    );
+
+    expect(evalResult.passed).toBe(false);
+    expect(evalResult.reason).toContain("llm unavailable");
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
   it("keeps a provider error body — including an echoed API key — out of the result and the logs", async () => {
     // Some providers echo the credential that failed. `llm-provider.ts` returns
     // the status and never the body, and this is the assertion that keeps it
@@ -685,7 +861,77 @@ describe("sanitizePolicy — the strip list, and MAX_POLICY_CONTEXT_CHARS", () =
     const policy = {
       evaluators: [{ type: "diff", monkeys: 3, keystone: "kept" }],
     } as unknown as EvalPolicy;
-    expect(JSON.stringify(sanitizePolicy(policy))).toContain("keystone");
+    const serialized = JSON.stringify(sanitizePolicy(policy));
+    expect(serialized).toContain("keystone");
+    expect(serialized).toContain("monkeys");
+  });
+
+  it("strips a credential written at the TOP level of the policy file", () => {
+    // `parsePolicyContent` spreads unknown root keys onto the policy, so this
+    // reached the model prompt AND the body POSTed to a policy-supplied webhook
+    // URL — a host the repository's own file chose.
+    const policy = {
+      evaluators: [{ type: "diff" }],
+      apiKey: "sk-root-leak",
+      registry: { url: "https://kept.example" },
+    } as unknown as EvalPolicy;
+
+    const serialized = JSON.stringify(sanitizePolicy(policy));
+    expect(serialized).not.toContain("sk-root-leak");
+    expect(serialized).not.toContain("apiKey");
+    expect(serialized).toContain("https://kept.example");
+  });
+
+  it("strips a credential NESTED inside an entry, not just a top-level one", () => {
+    // The copy-through case the strip list exists for: an unmodelled `type` is
+    // passed to the model whole, and one level of key filtering left everything
+    // inside an object or an array untouched.
+    const policy = {
+      evaluators: [
+        {
+          type: "future_evaluator",
+          headers: { Authorization: "Bearer sk-nested-1", accept: "application/json" },
+          targets: [{ name: "ci", token: "sk-nested-2" }],
+          deep: { a: { b: { apiKey: "sk-nested-3" } } },
+        },
+      ],
+    } as unknown as EvalPolicy;
+
+    const serialized = JSON.stringify(sanitizePolicy(policy));
+    for (let i = 1; i <= 3; i++) expect(serialized).not.toContain(`sk-nested-${i}`);
+    expect(serialized).toContain("application/json");
+    expect(serialized).toContain('"name":"ci"');
+  });
+
+  it.each([
+    "auth",
+    "AUTH",
+    "tokens",
+    "apiKeys",
+    "access_tokens",
+    "passwords",
+    "pwd",
+    "pat",
+    "githubPat",
+    "hmac",
+    "sig",
+  ])("strips the credential-shaped key %s", (key) => {
+    const policy = {
+      evaluators: [{ type: "future_evaluator", [key]: "sk-word-leak", keystone: "kept" }],
+    } as unknown as EvalPolicy;
+    const serialized = JSON.stringify(sanitizePolicy(policy));
+    expect(serialized).not.toContain("sk-word-leak");
+    // The property the stem test exists to keep: innocuous words survive.
+    expect(serialized).toContain("keystone");
+  });
+
+  it("terminates on a cyclic policy rather than recursing forever", () => {
+    // A YAML alias cycle (`a: &x {b: *x}`) is a well-formed file and an infinite
+    // structure. The depth bound is the cycle guard.
+    const entry: Record<string, unknown> = { type: "future_evaluator" };
+    entry.self = entry;
+    const policy = { evaluators: [entry] } as unknown as EvalPolicy;
+    expect(() => JSON.stringify(sanitizePolicy(policy))).not.toThrow();
   });
 
   it("makes opting into BYOK free against the 8000-char policy context", () => {
@@ -694,12 +940,15 @@ describe("sanitizePolicy — the strip list, and MAX_POLICY_CONTEXT_CHARS", () =
     // oversize one fails the gate CLOSED before any model call. Because
     // `provider` is stripped, adding it costs zero characters.
     const large: EvalPolicy = {
-      evaluators: [{ type: "diff", forbiddenPatterns: [`${"x".repeat(7_500)}`] }, { type: "llm" }],
+      evaluators: [
+        { type: "diff", forbiddenPatterns: [`${"x".repeat(7_500)}`] },
+        { type: "llm", model: "claude-sonnet-4-5" },
+      ],
     };
     const withProvider: EvalPolicy = {
       evaluators: [
         { type: "diff", forbiddenPatterns: [`${"x".repeat(7_500)}`] },
-        { type: "llm", provider: "anthropic" },
+        { type: "llm", provider: "anthropic", model: "claude-sonnet-4-5" },
       ],
     };
 

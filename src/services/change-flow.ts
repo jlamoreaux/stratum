@@ -127,13 +127,25 @@ export class UnavailableEvaluator implements Evaluator {
  * aggregates under an empty key that no account will ever reconcile, where an
  * absent subject is at least visibly absent.
  */
-export function billingContextFor(project: ProjectEntry): BillingContext | undefined {
+export function billingContextFor(
+  project: ProjectEntry,
+  /**
+   * The user who ran the evaluation, when the caller knows one. Carried
+   * alongside the payer rather than instead of it: PRD §4a checks a limit
+   * against the actor while the ledger keeps recording the owner, so a spend on
+   * an org-owned project can be billed to the org and counted against the
+   * person who caused it. For an agent-authored change this is the agent's
+   * OWNER — an agent is not a subject any more than it is a payer.
+   */
+  actorUserId?: string,
+): BillingContext | undefined {
   if (project.ownerType !== "user" && project.ownerType !== "org") return undefined;
   if (!project.ownerId || !project.id) return undefined;
   return {
     ownerId: project.ownerId,
     ownerType: project.ownerType,
     projectId: project.id,
+    ...(actorUserId ? { actorUserId } : {}),
   };
 }
 
@@ -161,6 +173,17 @@ export async function buildEvaluators(
   project: ProjectEntry,
   logger: Logger,
   workspaceRepo?: SandboxRepoAccess,
+  /**
+   * Cloudflare Workers `ExecutionContext.waitUntil`, when the caller has one.
+   *
+   * Used by the metered evaluator for one thing: warming an ORG's entitlements
+   * off the response path (PRD §4a). Auth middleware warms the caller, but it
+   * knows the caller and not the project, so nothing before this point can warm
+   * the org a project belongs to. Absent means no warm — the check then resolves
+   * to the actor, which is the safe direction and the documented first-contact
+   * behaviour, never a blocking fetch on the merge path.
+   */
+  waitUntil?: (promise: Promise<unknown>) => void,
 ): Promise<Array<{ type: string; evaluator: Evaluator }>> {
   // Async only because of this: a policy that selects a BYOK provider needs the
   // project's credential resolved before the evaluator exists. It is a no-op —
@@ -193,16 +216,22 @@ export async function buildEvaluators(
               { type: "llm", evaluator: new UnavailableEvaluator("llm", llmProvider.reason) },
             ];
           }
+          const enforcement = { env, ...(waitUntil !== undefined ? { waitUntil } : {}) };
           if (llmProvider.status === "byok") {
             return [
               {
                 type: "llm",
-                evaluator: new LLMEvaluator(llmProvider.provider, "byok"),
+                evaluator: new LLMEvaluator(llmProvider.provider, "byok", enforcement),
               },
             ];
           }
           if (env.AI)
-            return [{ type: "llm", evaluator: new LLMEvaluator(new WorkersAiProvider(env.AI)) }];
+            return [
+              {
+                type: "llm",
+                evaluator: new LLMEvaluator(new WorkersAiProvider(env.AI), "platform", enforcement),
+              },
+            ];
           return [
             {
               type: "llm",
@@ -480,17 +509,26 @@ export async function createChangeWithEvaluation(
     baseOid,
   } = diffResult.data;
 
-  const evaluators = await buildEvaluators(env, policy, project, logger, {
-    remote: workspaceRemote,
-    token: workspaceReadToken.data,
-    ref: evaluatedSha,
-  });
+  const evaluators = await buildEvaluators(
+    env,
+    policy,
+    project,
+    logger,
+    {
+      remote: workspaceRemote,
+      token: workspaceReadToken.data,
+      ref: evaluatedSha,
+    },
+    waitUntil,
+  );
   // `baseOid`, not the `baseSha` resolved further up: that one is read before
   // the diff clone, so the default branch can advance in between. The evaluated
   // base must be the one the diff was actually built against (#274).
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
     baseSha: baseOid,
-    billing: billingContextFor(project),
+    // The actor is the human behind the change — the agent's owner for an
+    // agent-authored one — which is who an allowance follows under PRD §4a.
+    billing: billingContextFor(project, createdByUserId),
   });
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
@@ -521,6 +559,11 @@ export async function createChangeWithEvaluation(
       changeId: change.id,
       workspace: workspaceName,
       ...(createSubject ?? {}),
+      notify: {
+        env,
+        ...(createdByUserId !== undefined ? { actorUserId: createdByUserId } : {}),
+        ...(waitUntil !== undefined ? { waitUntil } : {}),
+      },
     },
     createCostSamples,
   );

@@ -183,13 +183,15 @@ export interface Env {
    * nothing — `entitlementsConfigError` flags exactly that. */
   ENTITLEMENTS_ENFORCE?: string;
   /** JSON array of the operator's LLM providers, e.g.
-   * `[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]`.
+   * `[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com/v1"}]`.
    * The ONLY place a provider endpoint may be named: a project's policy file
    * selects one of these by name and can never supply a `baseUrl`. Unset (the
    * default) means Workers AI only. Credentials are NOT here — they live per
    * project in `project_secrets`. Parsed by `parseLlmProviders`, which rejects
    * a non-https, credential-bearing, loopback, link-local or private-range
-   * `baseUrl` at parse time. */
+   * `baseUrl` at parse time and stores it normalized. Include the API version
+   * path: the provider appends `/messages` or `/chat/completions` to whatever
+   * this names, so a `baseUrl` missing the `/v1` 404s on every call. */
   LLM_PROVIDERS?: string;
   ANALYTICS?: AnalyticsEngineDataset;
   SANDBOX?: SandboxBinding;

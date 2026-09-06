@@ -58,9 +58,18 @@ function lastFetchCall() {
   const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   const [url, init] = fetchMock.mock.calls[fetchMock.mock.calls.length - 1] as [
     string,
-    { method: string; headers: Record<string, string>; body: string },
+    { method: string; headers: Headers; body: string; redirect?: string },
   ];
-  return { url, init, body: JSON.parse(init.body) as Record<string, unknown> };
+  // The provider builds a `Headers` object rather than a record — it has to, so
+  // that a value no header can carry fails where nothing interpolates it into a
+  // message. Flattened here (iteration lowercases the names) so the assertions
+  // below still read like the request.
+  const headers = Object.fromEntries(init.headers) as Record<string, string>;
+  return {
+    url,
+    init: { ...init, headers },
+    body: JSON.parse(init.body) as Record<string, unknown>,
+  };
 }
 
 beforeEach(() => {
@@ -822,5 +831,131 @@ describe("LLMEvaluator — provider failures fail the gate closed", () => {
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error.message).toContain("isolate exceeded CPU");
+  });
+});
+
+describe("HttpLlmProvider — the request is bound to the host the allowlist checked", () => {
+  it("refuses a redirect instead of following it", async () => {
+    // The allowlist validates the host a request is SENT to. Following a 3xx
+    // would re-send the prompt — the diff and the policy — to a host nobody
+    // validated, and on 307/308 the body goes with it; the Fetch spec strips
+    // `Authorization` cross-origin but not `x-api-key`, so the Anthropic path
+    // would hand the project's credential to whatever the redirect named.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 307,
+      text: async () => "",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new AnthropicProvider("https://api.anthropic.com/v1", "sk-ant-secret").run(
+      "m",
+      [],
+    );
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toBeInstanceOf(LlmProviderResponseError);
+    // Constant: a redirect target is attacker-chosen, so nothing about it is
+    // interpolated into a message that becomes a user-visible reason.
+    expect(result.error.message).toBe("provider redirected the request, which is not followed");
+
+    const [, init] = fetchMock.mock.calls[0] as [string, { redirect?: string }];
+    expect(init.redirect).toBe("manual");
+  });
+
+  it.each([301, 302, 303, 307, 308])("refuses HTTP %i the same way", async (status) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status, text: async () => "" }));
+    const result = await new OpenAiCompatibleProvider("https://api.openai.com/v1", "k").run(
+      "m",
+      [],
+    );
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.message).toBe("provider redirected the request, which is not followed");
+  });
+
+  it("never puts a header value into an error message when the headers cannot be built", async () => {
+    // `new Headers()` throws a TypeError that QUOTES the offending value. The
+    // store rejects control characters so this should be unreachable, but the
+    // message is the one that becomes `EvalResult.reason` — persisted on the
+    // change and rendered on a world-readable page for a public project — so it
+    // is a constant, and the request is never made.
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new AnthropicProvider(
+      "https://api.anthropic.com/v1",
+      "sk-ant-real\r\nX-Injected: 1",
+    ).run("m", []);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toBeInstanceOf(LlmProviderResponseError);
+    expect(result.error.message).toBe("provider request headers could not be constructed");
+    expect(result.error.message).not.toContain("sk-ant-real");
+    expect(JSON.stringify(result.error)).not.toContain("sk-ant-real");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("LLMEvaluator — a truncated verdict was still generated, and billed", () => {
+  it("records the Anthropic-reported counts for a response cut off at the cap", async () => {
+    // `failClosed` records the cost of a response it could not read; this is the
+    // same case one layer up. The provider ran the generation to its cap and
+    // charged for it, so recording zero would under-count a real spend.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          content: [{ type: "text", text: '{"score":1,"passed"' }],
+          stop_reason: "max_tokens",
+          usage: { input_tokens: 900, output_tokens: 1024 },
+        }),
+      ),
+    );
+
+    const result = await new LLMEvaluator(
+      new AnthropicProvider("https://api.anthropic.com/v1", "k"),
+      "byok",
+    ).evaluate("diff content", POLICY, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.passed).toBe(false);
+    expect(result.data.reason).toContain("truncated at the 1024-token limit");
+    expect(result.data.costs).toEqual([{ kind: "llm_tokens", quantity: 1924, source: "byok" }]);
+  });
+
+  it("records the OpenAI-shaped counts too", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [{ message: { content: "{" }, finish_reason: "length" }],
+          usage: { prompt_tokens: 500, completion_tokens: 1024 },
+        }),
+      ),
+    );
+
+    const result = await new LLMEvaluator(
+      new OpenAiCompatibleProvider("https://api.openai.com/v1", "k"),
+    ).evaluate("diff content", POLICY, mockLogger);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.costs).toEqual([{ kind: "llm_tokens", quantity: 1524 }]);
+  });
+
+  it("bills nothing for a failure that generated nothing", async () => {
+    // The distinction the branch turns on: a 401 produced no tokens, so it must
+    // not produce a cost sample either.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(401, { error: "nope" })));
+    const result = await new LLMEvaluator(
+      new AnthropicProvider("https://api.anthropic.com/v1", "k"),
+    ).evaluate("diff content", POLICY, mockLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.costs).toBeUndefined();
   });
 });

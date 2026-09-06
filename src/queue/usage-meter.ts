@@ -80,6 +80,20 @@ const RATE_WINDOWS: Record<RateMeterKey, RateWindow> = {
   evaluations_per_hour: { windowSeconds: 60 * 60, bucketSeconds: 5 * 60 },
 };
 
+/**
+ * How far back a rate meter's window looks, in seconds.
+ *
+ * Exported so the refusal copy can tell a caller when its burst allowance frees
+ * up without restating the window — a message promising a reset the object does
+ * not honour is worse than no message (PRD §4c).
+ *
+ * @param meter - The rate meter to describe
+ * @returns The window length in seconds
+ */
+export function rateWindowSeconds(meter: RateMeterKey): number {
+  return RATE_WINDOWS[meter].windowSeconds;
+}
+
 /** Bucket id (`floor(epochSeconds / bucketSeconds)`) -> quantity in that bucket. */
 type RateBuckets = Record<string, number>;
 

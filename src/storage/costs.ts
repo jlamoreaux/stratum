@@ -1,9 +1,17 @@
+import { noticeUsageThresholds } from "../billing/usage-notifications";
+import type { Env } from "../types";
 import { AppError } from "../utils/errors";
 import { newId } from "../utils/ids";
 import type { Logger } from "../utils/logger";
 import { type Result, err, ok } from "../utils/result";
 import { getAgent } from "./agents";
-import { type UsageDelta, meterForCostKind, upsertUsage, usagePeriod } from "./usage";
+import {
+  type UsageDelta,
+  type UsageWriteTotal,
+  meterForCostKind,
+  upsertUsage,
+  usagePeriod,
+} from "./usage";
 
 export type CostKind = "llm_tokens" | "sandbox_ms" | "git_ops";
 
@@ -126,8 +134,8 @@ async function accumulateUsage(
   opts: { ownerId?: string; ownerType?: BillingSubject["ownerType"] },
   samples: CostSample[],
   createdAt: string,
-): Promise<void> {
-  if (!opts.ownerId || !opts.ownerType) return;
+): Promise<{ subject: BillingSubject; period: string; totals: UsageWriteTotal[] } | null> {
+  if (!opts.ownerId || !opts.ownerType) return null;
   const deltas: UsageDelta[] = [];
   for (const sample of samples) {
     // `git_ops` maps to no meter; see `meterForCostKind`.
@@ -136,7 +144,7 @@ async function accumulateUsage(
       deltas.push({ meter, quantity: sample.quantity, source: sample.source ?? "platform" });
     }
   }
-  if (deltas.length === 0) return;
+  if (deltas.length === 0) return null;
   // The Result is deliberately not folded into `recordCosts`'s own: the ledger
   // rows above ARE written, and reporting an error would tell the caller the
   // spend went unrecorded when it did not. `upsertUsage` logs its own failure.
@@ -147,13 +155,12 @@ async function accumulateUsage(
   // migration 049), so a failed upsert is a permanent under-count of that
   // owner's month. Accepted because the alternative is failing a merge over an
   // accounting write, which is the worse trade in both directions.
-  await upsertUsage(
-    db,
-    logger,
-    { ownerId: opts.ownerId, ownerType: opts.ownerType },
-    usagePeriod(new Date(createdAt)),
-    deltas,
-  );
+  const subject: BillingSubject = { ownerId: opts.ownerId, ownerType: opts.ownerType };
+  const period = usagePeriod(new Date(createdAt));
+  const written = await upsertUsage(db, logger, subject, period, deltas);
+  // The post-write totals travel back up so the caller can notice an 80%
+  // crossing without a second read; a failed write reports nothing to notice.
+  return written.success ? { subject, period, totals: written.data } : null;
 }
 
 /**
@@ -174,6 +181,20 @@ export async function recordCosts(
     workspace?: string;
     ownerId?: string;
     ownerType?: BillingSubject["ownerType"];
+    /**
+     * Everything the threshold notification needs, when the call site can
+     * supply it. Absent means the write is recorded and nobody is told they are
+     * approaching a limit — which is the correct behaviour for a site with no
+     * `Env` in hand, and the reason this is optional rather than a second
+     * required argument. Inert unless the cloud billing service is configured.
+     */
+    notify?: {
+      env: Env;
+      /** The acting user, for the §4a enforcement subject and the addressee. */
+      actorUserId?: string;
+      /** Present on a request path; the queue consumers pass nothing. */
+      waitUntil?: (promise: Promise<unknown>) => void;
+    };
   },
   samples: CostSample[],
 ): Promise<Result<void, AppError>> {
@@ -236,7 +257,16 @@ export async function recordCosts(
     });
     // Only after the ledger write succeeded: the aggregate derives from those
     // rows, so it must never count spend the ledger does not record.
-    await accumulateUsage(db, logger, opts, usable, createdAt);
+    const accumulated = await accumulateUsage(db, logger, opts, usable, createdAt);
+    if (accumulated && opts.notify) {
+      noticeUsageThresholds(opts.notify.env, logger, {
+        recorded: accumulated.subject,
+        ...(opts.notify.actorUserId !== undefined ? { actorUserId: opts.notify.actorUserId } : {}),
+        period: accumulated.period,
+        totals: accumulated.totals,
+        ...(opts.notify.waitUntil !== undefined ? { waitUntil: opts.notify.waitUntil } : {}),
+      });
+    }
     return ok(undefined);
   } catch (error) {
     const appError =

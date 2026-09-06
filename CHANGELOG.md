@@ -67,6 +67,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A policy file is bounded, and an unusable `llm` entry says why.**
+  `evaluators:` now takes at most 16 entries, the cap `deploys:` has always had
+  and for the same reason — one merge must not amplify into an unbounded number
+  of external calls. An entry that names a provider must also name a `model`,
+  since the default is a Workers AI model id that fails every call against any
+  other provider. The merge-blocking reason now names the provider (or the field)
+  that made the entry unusable instead of only counting entries. A verdict
+  truncated at the provider's token cap records the tokens the provider reported
+  for it, rather than recording a charged call as free.
+- **The commented `LLM_PROVIDERS` example carries the API version path.** The
+  provider appends `/messages` (or `/chat/completions`) to `baseUrl`, so the
+  `https://api.anthropic.com` shown in `wrangler.toml` would have 404'd on every
+  call; it is `https://api.anthropic.com/v1` now. A `baseUrl` is also stored
+  normalized, so a trailing `#` or `?` — both of which pass the "no fragment, no
+  query" check — cannot swallow the path the provider appends.
 - **`api_request` reported the wrong route for most pages.** `routePath(c, -1)`
   returns the last *registered* route matching a path, not the one that
   answered it, and `uiRouter`'s `/:namespace/:slug` catch-all is mounted last —
@@ -77,6 +92,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events are not corrected.
 
 ### Security
+- **A project secret can no longer escape through an error message.** A stored
+  value containing CR, LF or NUL made the outbound provider request's header
+  construction throw a `TypeError` that quotes the offending value; that message
+  became an evaluation reason, which is persisted on the change and rendered —
+  world-readably, for a public project. Both ends are closed: the store rejects
+  control characters in a value, and the provider builds its headers where a
+  failure maps to a constant that interpolates nothing.
+- **The LLM provider request no longer follows redirects.** The allowlist
+  validates the host a request is *sent* to; a 3xx from an allowlisted host used
+  to move the prompt (the diff and the policy) to an unvalidated one, re-sending
+  the body on 307/308 with the project's `x-api-key` attached, which the Fetch
+  spec does not strip cross-origin. A redirect is now a failed evaluation.
+- **Credential stripping covers the whole policy, recursively.** Fields whose
+  name says "credential" were removed only from the top level of each evaluator
+  entry, so one written at the top of `.stratum/policy.yaml`, or nested inside an
+  entry of an unmodelled type, reached the review model and the body POSTed to a
+  policy-supplied webhook URL. The word list also missed common names —
+  `auth`, plurals such as `tokens` and `apiKeys`, `pwd`, `pat`, `hmac`, `sig` —
+  while keeping innocuous ones like `keystone`.
+- **One host filter, not two.** The LLM provider allowlist had its own copy of
+  the private-address check, and it had drifted: CGNAT (`100.64/10`), the
+  `.internal`/`.local` suffixes (GCP's metadata endpoint is
+  `metadata.google.internal`), everything in `fe80::/10` not spelled `fe80`, and
+  IPv4-compatible IPv6 (`[::127.0.0.1]`, which the URL parser rewrites to
+  `[::7f00:1]`) all got through. Both callers now share one filter, which
+  expands an IPv6 literal rather than matching its spelling.
+- **A policy declaring two `llm` entries is refused.** The BYOK provider was
+  resolved from the first entry while an evaluator was built for every entry, so
+  `[{llm}, {llm, provider: …}]` silently ran twice on the operator's Workers AI
+  bill — the fail-open this work exists to prevent. Both the parser and the
+  provider resolution now refuse rather than choosing one.
 - **GitHub sign-in no longer trusts an unverified email.** The callback picked
   the primary address, verified or not, and fell back to *any* address on the
   account. That address then matched (and linked to) an existing Stratum

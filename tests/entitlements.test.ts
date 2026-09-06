@@ -40,15 +40,16 @@ function unconfiguredEnv(): Env {
   return env({ BILLING_SERVICE_URL: undefined, BILLING_SERVICE_SECRET: undefined }).env;
 }
 
-const CACHE_KEY = "entitlements:v1:user:usr_1";
-const NEGATIVE_KEY = "entitlements:v1:neg:user:usr_1";
-const LOCK_KEY = "entitlements:v1:lock:user:usr_1";
+const CACHE_KEY = "entitlements:v2:user:usr_1";
+const NEGATIVE_KEY = "entitlements:v2:neg:user:usr_1";
+const LOCK_KEY = "entitlements:v2:lock:user:usr_1";
 
 const paidPlan: Entitlements = {
   plan: "pro",
+  pooled: true,
   meters: { llm_tokens_month: 1_000_000, sandbox_ms_month: 60_000, deploys_month: 100 },
   counts: { private_projects: 25 },
-  rates: { requests_per_minute: 2_000 },
+  rates: { requests_per_minute: 2_000, evaluations_per_hour: 200 },
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -159,10 +160,12 @@ describe("RemoteEntitlements.refresh", () => {
     expect(result.data.source).toBe("remote");
     expect(result.data.entitlements).toEqual({
       plan: "starter",
+      // A payload that says nothing about pooling is not a payload that pools.
+      pooled: false,
       // 0 survives: it is a hard block, not "unset".
       meters: { llm_tokens_month: 0, sandbox_ms_month: -1, deploys_month: -1 },
       counts: { private_projects: -1 },
-      rates: { requests_per_minute: -1 },
+      rates: { requests_per_minute: -1, evaluations_per_hour: -1 },
     });
   });
 

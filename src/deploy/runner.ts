@@ -29,6 +29,7 @@
  * injects its own seams: without them, testing any of the above needs a real git
  * remote, a real clock, and a real provider account.
  */
+import { checkMeter, resolveEnforcementSubject } from "../billing/enforcement";
 import { type LlmProviderCatalog, llmProviderCatalog } from "../evaluation/llm-providers";
 import { parsePolicyContent } from "../evaluation/policy-loader";
 import type { DeployConfig, DeployRejection } from "../evaluation/types";
@@ -573,6 +574,17 @@ async function runOneDeployment(
     });
   }
 
+  // Volume, and only volume (PRD §8). The queue is FIFO with
+  // `max_concurrency = 1` and no priority, so this cannot make anything fairer;
+  // what it bounds is how many deploys a month one subject may run. It goes
+  // BEFORE the claim so a refusal never takes the lease it would then have to
+  // release, and a refusal writes a persisted `failed` row with a named reason
+  // and acks — the message is not left to burn its two retries into the DLQ
+  // over a limit that redelivery cannot change, and it is never silently acked,
+  // because a deploy that did not happen must be visible.
+  const volume = await checkDeployVolume(ctx, deployment);
+  if (volume !== null) return await failWithoutRunning(ctx, deployment, volume);
+
   const claim = await claimDeployment(env.DB, logger, {
     projectId: project.id,
     deploymentId: deployment.id,
@@ -692,6 +704,37 @@ async function runOneDeployment(
   if (writtenReason !== null) record.reason = writtenReason;
   if (terminal.url !== undefined) record.url = terminal.url;
   return record;
+}
+
+/**
+ * The reason this deploy may not run against the subject's allowance, or `null`
+ * when it may.
+ *
+ * The enforcement subject is the deploy's requester when a human asked for it
+ * (an approve or a retry), and otherwise the project's own billing subject: a
+ * merge-triggered deploy names no acting user at all, and a check against the
+ * recorded owner is weaker than PRD §4a wants but strictly better than the only
+ * alternative here, which is no check.
+ *
+ * Inert with the billing service unconfigured — `checkMeter` returns before it
+ * reads anything — so a self-hoster's deploys are untouched.
+ */
+async function checkDeployVolume(ctx: RunContext, deployment: Deployment): Promise<string | null> {
+  const { env, logger, project } = ctx;
+  const actorUserId = deployment.requestedByType === "user" ? deployment.requestedById : undefined;
+  const subject = await resolveEnforcementSubject(env, logger, {
+    ...(actorUserId !== undefined ? { actorUserId } : {}),
+    owner: { ownerId: project.ownerId, ownerType: project.ownerType },
+  });
+  if (!subject) return null;
+  const decision = await checkMeter(env, logger, {
+    subject,
+    meter: "deploys_month",
+    estimate: 1,
+    nowMs: ctx.now(),
+    what: "This deployment",
+  });
+  return decision.admitted ? null : (decision.reason ?? "Deploy allowance exhausted");
 }
 
 /**
@@ -864,6 +907,11 @@ async function readTree(
       projectId: project.id,
       ...(changeId !== undefined ? { changeId } : {}),
       ...(subject ?? {}),
+      // Best-effort inline, with no `waitUntil`: this is a queue consumer and
+      // there is no request to schedule against (PRD §8). `git_ops` maps to no
+      // meter today, so this notices nothing until `deploys_month` gains a D1
+      // writer — wired anyway so that writer does not have to remember.
+      notify: { env },
     },
     [{ kind: "git_ops", quantity: 1 }],
   );

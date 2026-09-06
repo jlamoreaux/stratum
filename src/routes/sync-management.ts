@@ -26,6 +26,7 @@ import {
 import type { Env } from "../types";
 import { projectDefaultBranch, projectDisplayName } from "../types";
 import { canWriteProject } from "../utils/authz";
+import { getWaitUntil } from "../utils/execution-ctx";
 import { createLogger } from "../utils/logger";
 import { readJsonWithLimit } from "../utils/request-body";
 import { notFound, ok } from "../utils/response";
@@ -669,14 +670,23 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     // pass BEFORE resolveConflict creates one — so there is no ref a sandbox
     // could check out. A policy naming `sandbox` fails closed via
     // UnavailableEvaluator, same as any other missing prerequisite.
-    const evaluators = await buildEvaluators(c.env, policy, project, logger);
+    const evaluators = await buildEvaluators(
+      c.env,
+      policy,
+      project,
+      logger,
+      undefined,
+      getWaitUntil(c),
+    );
     // `buildManualResolutionDiff` resolved this base from the clone it built the
     // diff on, so it names the tree the resolution actually applies to (#274).
     // This path runs the LLM evaluator too, so it needs a payer as much as
     // change creation does.
     const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
       baseSha,
-      billing: billingContextFor(project),
+      // The resolver is the actor: this route is user-credentialed, and PRD §4a
+      // checks the allowance against the person who ran the suite.
+      billing: billingContextFor(project, userId),
     });
 
     // Recorded here, BEFORE the verdict is acted on, because the spend is
@@ -696,6 +706,7 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
         ...(conflictCtx.changeId ? { changeId: conflictCtx.changeId } : {}),
         workspace: conflictCtx.workspaceName,
         ...(resolveSubject ?? {}),
+        notify: { env: c.env, actorUserId: userId, waitUntil: getWaitUntil(c) },
       },
       [{ kind: "git_ops", quantity: 1 }, ...evalRuns.flatMap(({ result }) => result.costs ?? [])],
     );

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { checkGauge, resolveEnforcementSubject } from "../billing/enforcement";
 import {
   importRateLimitMiddleware,
   rateLimitMiddleware,
@@ -65,6 +66,7 @@ import {
   filterReadableProjects,
   isDirectOwner,
 } from "../utils/authz";
+import { getWaitUntil } from "../utils/execution-ctx";
 import { createLogger } from "../utils/logger";
 import type { Logger } from "../utils/logger";
 import { readJsonWithLimit } from "../utils/request-body";
@@ -179,6 +181,39 @@ app.post("/", async (c) => {
       return badRequest("visibility must be 'private' or 'public'");
     }
     visibility = body.visibility;
+  }
+
+  // The private-project gauge (PRD §8): a thing that exists rather than a thing
+  // that is spent, so it is counted on demand and there is nothing to reserve.
+  //
+  // Counted over the namespace the project is being created INTO, not over
+  // everything the actor owns. For a personal namespace those are the same set.
+  // For an org namespace it is the org's own private projects checked against
+  // the actor's limit — which is not the §4a subject's own gauge, and is the
+  // reading that bounds BOTH cases: KV has no index by owner, so an actor-wide
+  // count is a full scan of every project on the instance, per creation.
+  if (visibility === "private") {
+    const gaugeSubject = await resolveEnforcementSubject(c.env, logger, {
+      actorUserId: userId,
+      owner: { ownerId: owner.id, ownerType: owner.type },
+      waitUntil: getWaitUntil(c),
+    });
+    if (gaugeSubject) {
+      const existing = await listProjectsByNamespace(c.env.STATE, namespace, logger);
+      // A failed listing does not block a creation: the gauge is a limit, not a
+      // correctness rule, and this layer fails open by design.
+      if (existing.success) {
+        const decision = await checkGauge(c.env, logger, {
+          subject: gaugeSubject,
+          count: "private_projects",
+          current: existing.data.filter((entry) => entry.visibility === "private").length,
+          what: "Creating another private project",
+        });
+        if (!decision.admitted) {
+          return forbidden(decision.reason ?? "Private project limit reached");
+        }
+      }
+    }
   }
 
   const seed = body.seed === "true" || body.seed === true || c.req.query("seed") === "true";

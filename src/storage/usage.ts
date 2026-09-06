@@ -28,6 +28,26 @@ export interface UsageDelta {
   source?: CostSource;
 }
 
+/**
+ * One meter's total after an {@link upsertUsage} write, as the UPSERT itself
+ * reported it.
+ *
+ * Returned rather than re-read because the 80% threshold notification is
+ * edge-triggered (PRD §8): it fires on the CROSSING, which needs the totals
+ * either side of this write. A second `SELECT` per evaluated change would cost
+ * a D1 round trip on the change-creation path and still race a concurrent
+ * recorder — `RETURNING` reports the value the statement that did the adding
+ * actually wrote.
+ */
+export interface UsageWriteTotal {
+  meter: MeterKey;
+  source: CostSource;
+  /** The meter's total for this owner and period AFTER this write. */
+  quantity: number;
+  /** What this write added, so the caller can reconstruct the total before it. */
+  added: number;
+}
+
 export interface UsageSummaryEntry {
   meter: MeterKey;
   source: CostSource;
@@ -112,7 +132,8 @@ export function usagePeriod(at: Date = new Date()): string {
  * @param subject - The account the usage is billed to
  * @param period - 'YYYY-MM' UTC, from `usagePeriod`
  * @param deltas - Increments to apply; same-meter entries are summed first
- * @returns Success, or the database error that stopped the accumulation
+ * @returns The post-write total for each (meter, source) touched, or the
+ *   database error that stopped the accumulation
  */
 export async function upsertUsage(
   db: D1Database,
@@ -120,7 +141,7 @@ export async function upsertUsage(
   subject: BillingSubject,
   period: string,
   deltas: readonly UsageDelta[],
-): Promise<Result<void, AppError>> {
+): Promise<Result<UsageWriteTotal[], AppError>> {
   // Keyed on both dimensions the row is keyed on, so platform and BYOK spend
   // for one meter accumulate as two totals rather than one.
   const merged = new Map<string, { meter: MeterKey; source: CostSource; quantity: number }>();
@@ -150,27 +171,38 @@ export async function upsertUsage(
       quantity: (existing?.quantity ?? 0) + delta.quantity,
     });
   }
-  if (merged.size === 0) return ok(undefined);
+  if (merged.size === 0) return ok([]);
 
   const updatedAt = new Date().toISOString();
   try {
+    const totals: UsageWriteTotal[] = [];
     for (const { meter, source, quantity } of merged.values()) {
-      await db
+      // `RETURNING quantity` on the same statement that does the adding: the
+      // post-write total is what makes the threshold crossing detectable
+      // without a second read, and reading it back separately would race
+      // another recorder and report a total this write did not produce.
+      const row = await db
         .prepare(
           "INSERT INTO usage_periods (owner_id, owner_type, period, meter, source, quantity, updated_at) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?) " +
             "ON CONFLICT(owner_id, period, meter, source) DO UPDATE SET " +
-            "quantity = quantity + excluded.quantity, updated_at = excluded.updated_at",
+            "quantity = quantity + excluded.quantity, updated_at = excluded.updated_at " +
+            "RETURNING quantity",
         )
         .bind(subject.ownerId, subject.ownerType, period, meter, source, quantity, updatedAt)
-        .run();
+        .first<{ quantity: number }>();
+      // A driver that does not hand RETURNING back is not an error: the row is
+      // written either way, and the only thing lost is the notification edge.
+      if (row && Number.isFinite(row.quantity)) {
+        totals.push({ meter, source, quantity: row.quantity, added: quantity });
+      }
     }
     logger.debug("Usage aggregate updated", {
       ownerId: subject.ownerId,
       period,
       meters: merged.size,
     });
-    return ok(undefined);
+    return ok(totals);
   } catch (error) {
     const appError =
       error instanceof AppError
@@ -235,6 +267,61 @@ export async function getOwnerUsageSummary(
             { operation: "getOwnerUsageSummary", ownerId, period },
           );
     logger.error("Failed to get owner usage summary", appError, { ownerId, period });
+    return err(appError);
+  }
+}
+
+/**
+ * One owner's totals for a period, **filtered to one source**, as a lookup by
+ * meter.
+ *
+ * Separate from {@link getOwnerUsageSummary}, which reports every source so a
+ * usage page can show what BYOK covered, because an enforcement read must not.
+ * Migration 049 put `source` in the primary key precisely so hosted and
+ * bring-your-own spend accumulate apart; a limit check that summed both would
+ * charge a project's own provider bill against the operator's allowance and
+ * contradict Goal 5. Callers checking a limit pass `"platform"`, always.
+ *
+ * Meters with no rows are absent rather than zero, as in the summary: "never
+ * used" and "used nothing" are one fact, and the caller knows its meter set.
+ *
+ * @param ownerId - The subject whose rows to sum — the ENFORCEMENT subject for
+ *   a limit check (PRD §4a), which is not always the recorded billing subject
+ * @param period - 'YYYY-MM' UTC, from `usagePeriod`
+ * @param source - Which provider account's spend to count
+ * @returns Totals by meter, or the database error
+ */
+export async function getOwnerMeterTotals(
+  db: D1Database,
+  logger: Logger,
+  ownerId: string,
+  period: string,
+  source: CostSource,
+): Promise<Result<Partial<Record<MeterKey, number>>, AppError>> {
+  try {
+    const result = await db
+      .prepare(
+        "SELECT meter, SUM(quantity) AS quantity FROM usage_periods " +
+          "WHERE owner_id = ? AND period = ? AND source = ? GROUP BY meter",
+      )
+      .bind(ownerId, period, source)
+      .all<{ meter: string; quantity: number }>();
+    const totals: Partial<Record<MeterKey, number>> = {};
+    for (const row of result.results) {
+      if (Number.isFinite(row.quantity)) totals[row.meter as MeterKey] = row.quantity;
+    }
+    return ok(totals);
+  } catch (error) {
+    const appError =
+      error instanceof AppError
+        ? error
+        : new AppError(
+            error instanceof Error ? error.message : "Failed to total usage",
+            "DATABASE_ERROR",
+            500,
+            { operation: "getOwnerMeterTotals", ownerId, period },
+          );
+    logger.error("Failed to total owner usage", appError, { ownerId, period, source });
     return err(appError);
   }
 }

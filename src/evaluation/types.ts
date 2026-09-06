@@ -46,6 +46,21 @@ export interface BillingContext {
   ownerType: "user" | "org";
   /** The project whose policy is being enforced. */
   projectId: string;
+  /**
+   * The user who ran this evaluation, when the call site knows one.
+   *
+   * Not the payer, and deliberately a separate field from `ownerId`: PRD §4a
+   * separates the subject a spend is RECORDED against from the subject a LIMIT
+   * is checked against, because an org-owned project bills the org and an org
+   * costs nothing to create. Recording still names the owner above; enforcement
+   * uses this. Absent where no acting user exists (a queue consumer), which is
+   * not the same as free — it means the check falls back to the recorded
+   * subject.
+   *
+   * Like every other field here, it must never be forwarded off-box: the
+   * webhook evaluator names the fields it sends for exactly this reason.
+   */
+  actorUserId?: string;
 }
 
 /**

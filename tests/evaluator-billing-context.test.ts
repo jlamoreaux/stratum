@@ -450,16 +450,25 @@ describe("createChangeWithEvaluation passes the project through", () => {
     expect(outcome.success).toBe(true);
     expect(secretScanContext()).toEqual({
       baseSha: "base_from_diff_clone",
-      billing: { ownerId: "user_alice", ownerType: "user", projectId: "proj_abc" },
+      billing: {
+        ownerId: "user_alice",
+        ownerType: "user",
+        projectId: "proj_abc",
+        actorUserId: "user_alice",
+      },
     });
   });
 
-  it("bills an org-owned project's org", async () => {
+  it("bills an org-owned project's org, and still names the actor", async () => {
     await create(projectEntry({ ownerId: "org_acme", ownerType: "org" }));
+    // The recorded subject is the org and the ACTOR is carried beside it: PRD
+    // §4a checks the limit against the person, while the ledger keeps naming
+    // the org. Collapsing the two is the hole that separation closes.
     expect(secretScanContext()?.billing).toEqual({
       ownerId: "org_acme",
       ownerType: "org",
       projectId: "proj_abc",
+      actorUserId: "user_alice",
     });
   });
 
@@ -479,6 +488,7 @@ describe("createChangeWithEvaluation passes the project through", () => {
       ownerId: "user_alice",
       ownerType: "user",
       projectId: "proj_abc",
+      actorUserId: "user_alice",
     });
   });
 });
@@ -514,7 +524,12 @@ describe("POST /api/changes/:id/evaluate passes the project through", () => {
     // and no project id. The evaluators now see the loaded entry.
     expect(secretScanContext()).toEqual({
       baseSha: "base_from_diff_clone",
-      billing: { ownerId: "user_alice", ownerType: "user", projectId: "proj_abc" },
+      billing: {
+        ownerId: "user_alice",
+        ownerType: "user",
+        projectId: "proj_abc",
+        actorUserId: "user_alice",
+      },
     });
   });
 });
@@ -569,7 +584,12 @@ describe("POST /api/projects/conflicts/:id/resolve passes the project through", 
     expect(res.status).toBe(200);
     expect(secretScanContext()).toEqual({
       baseSha: "conflict_base_sha",
-      billing: { ownerId: "user_alice", ownerType: "user", projectId: "proj_abc" },
+      billing: {
+        ownerId: "user_alice",
+        ownerType: "user",
+        projectId: "proj_abc",
+        actorUserId: "user_alice",
+      },
     });
   });
 });
