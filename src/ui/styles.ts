@@ -1085,4 +1085,17 @@ input[type="checkbox"] { width: 1.15rem; height: 1.15rem; accent-color: var(--ac
 .commit-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
 .commit-author { width: 160px; font-size: 0.82rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-date { width: 96px; font-size: 0.82rem; color: var(--text-muted); text-align: right; }
+
+/* Site footer — carries the AGPL §13 source offer, so it is a legal notice
+   rather than an ornament: --text-muted (7.3:1), never --text-faint. The
+   separators are the only decorative part. */
+.site-footer {
+  max-width: 1100px; margin: 0 auto; padding: 1.5rem 1.5rem 2.5rem;
+  border-top: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
+  font-size: 0.82rem; color: var(--text-muted);
+}
+.site-footer a { color: var(--text-muted); }
+.site-footer a:hover { color: var(--accent-text); }
+.site-footer-sep { color: var(--text-faint); }
 `;

@@ -286,4 +286,5 @@ Releases are changelog-driven: see [CHANGELOG.md](../CHANGELOG.md) and the
 
 ## License
 
-Documentation is licensed under the same MIT license as the project.
+Documentation is licensed under the same terms as the code it documents —
+[AGPL-3.0-or-later](../LICENSE). See [`LICENSING.md`](../LICENSING.md).

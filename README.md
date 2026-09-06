@@ -1,7 +1,7 @@
 # Stratum
 
 [![CI Status](https://github.com/stratum-eng/stratum/actions/workflows/ci.yml/badge.svg)](https://github.com/stratum-eng/stratum/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Docs](https://img.shields.io/badge/docs-usestratum.dev-blue.svg)](https://docs.usestratum.dev)
 
 **The governance layer for AI-written code** — the control plane that decides what agent
@@ -505,7 +505,28 @@ instead — see [SECURITY.md](SECURITY.md) for what to include and expected resp
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Split along the line that matters to you: what you run as a service is
+copyleft, what you run inside your own pipeline is not.
+
+| Path | License |
+|---|---|
+| [`cli/`](cli) — `@stratum/cli` | [Apache-2.0](cli/LICENSE) |
+| [`agent/`](agent) — `@stratum/agent` | [Apache-2.0](agent/LICENSE) |
+| `website/public/.well-known/agent-skills/` — the published agent skills | MIT |
+| everything else — the server, the web UI, `docs/`, `website/` | [AGPL-3.0-or-later](LICENSE) |
+
+Copyright © 2026 Jordan Lamoreaux.
+
+Self-hosting an unmodified Stratum obliges you to nothing. If you **modify** it
+and other people reach your instance over a network, AGPL §13 asks you to offer
+them that version's source: point `STRATUM_SOURCE_URL` in
+[`src/version.ts`](src/version.ts) at your repository and the page footer does
+it. Nothing in the AGPL reaches the repositories Stratum hosts, the changes it
+evaluates, or anything you build with it.
+
+Releases through **v0.2.0 are MIT and stay MIT**. See
+[LICENSING.md](LICENSING.md) for the full account, including commercial
+licensing, and [CLA.md](CLA.md) for what contributors agree to.
 
 ## Acknowledgments
 
