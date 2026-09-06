@@ -23,9 +23,19 @@ interface FakePostHog {
   identify: (id: string) => void;
   reset: () => void;
   register: (props: Record<string, unknown>) => void;
+  capture: (event: string, props?: Record<string, unknown>) => void;
   identified: string[];
   resets: number;
   registered: Record<string, unknown>[];
+  captured: Array<{ event: string; props?: Record<string, unknown> }>;
+}
+
+/** The smallest thing `closest("[data-ph]")` can be called on. */
+function fakeTarget(dataPh: string | null, matches = true): unknown {
+  const el = {
+    getAttribute: (name: string) => (name === "data-ph" ? dataPh : null),
+  };
+  return { closest: (selector: string) => (matches && selector === "[data-ph]" ? el : null) };
 }
 
 /**
@@ -37,6 +47,8 @@ function runBootstrap(config: WebAnalyticsConfig = CONFIG): {
   options: InitOptions;
   ph: FakePostHog;
   initCalledBeforeDomReady: boolean;
+  /** Fire the delegated listener the bootstrap registered on `document`. */
+  click: (target: unknown) => void;
 } {
   let options: InitOptions | undefined;
   const posthog = {
@@ -52,10 +64,12 @@ function runBootstrap(config: WebAnalyticsConfig = CONFIG): {
   // the listener fires. A bootstrap that calls init immediately would see
   // `posthog === undefined`, return, and send nothing forever.
   const listeners: Array<() => void> = [];
+  const clickHandlers: Array<(event: unknown) => void> = [];
   const doc = {
     readyState: "loading",
-    addEventListener: (event: string, handler: () => void) => {
-      if (event === "DOMContentLoaded") listeners.push(handler);
+    addEventListener: (event: string, handler: (event: unknown) => void) => {
+      if (event === "DOMContentLoaded") listeners.push(handler as () => void);
+      if (event === "click") clickHandlers.push(handler);
     },
   };
 
@@ -85,6 +99,7 @@ function runBootstrap(config: WebAnalyticsConfig = CONFIG): {
     identified: [],
     resets: 0,
     registered: [],
+    captured: [],
     identify(id) {
       this.identified.push(id);
     },
@@ -94,9 +109,22 @@ function runBootstrap(config: WebAnalyticsConfig = CONFIG): {
     register(props) {
       this.registered.push(props);
     },
+    capture(event, props) {
+      this.captured.push({ event, props });
+    },
   };
   options.loaded(ph);
-  return { options, ph, initCalledBeforeDomReady };
+  return {
+    options,
+    ph,
+    initCalledBeforeDomReady,
+    click(target) {
+      // The bootstrap registers on `document`; a page with no listener at all
+      // is the regression this indirection makes visible.
+      if (clickHandlers.length === 0) throw new Error("bootstrap registered no click listener");
+      for (const handler of clickHandlers) handler({ target });
+    },
+  };
 }
 
 /** Every property this app could plausibly leak, plus the safe ones that must survive. */
@@ -211,6 +239,23 @@ describe("bootstrap redaction", () => {
     }
   });
 
+  // The bug that made this whole feature a no-op: the allowlist deleted the
+  // three properties posthog-js re-reads AFTER before_send returns, so the SDK
+  // dropped every event for "had its 'token' property removed in a beforeSend
+  // function" — a console.warn on a surface nobody reads. Named individually
+  // because losing any one of them silently ends browser analytics.
+  it("keeps the properties posthog-js requires for ingestion", () => {
+    const { options } = runBootstrap();
+    const sent = options.before_send({
+      event: "$pageview",
+      properties: { token: "phc_abc123", distinct_id: "user_1", $cookieless_mode: false },
+    }) as Record<string, unknown>;
+    const kept = sent.properties as Record<string, unknown>;
+    expect(kept.token).toBe("phc_abc123");
+    expect(kept.distinct_id).toBe("user_1");
+    expect(kept.$cookieless_mode).toBe(false);
+  });
+
   it("survives a null or property-less event without throwing", () => {
     expect(options.before_send(null)).toBeNull();
     expect(() => options.before_send({ event: "$pageview" })).not.toThrow();
@@ -293,9 +338,70 @@ describe("autocapture element scrubbing", () => {
 
   it("still sends every event the FAQ does document", () => {
     const { options } = runBootstrap();
-    for (const name of ["$pageview", "$pageleave", "$autocapture", "$rageclick", "$identify"]) {
+    for (const name of [
+      "$pageview",
+      "$pageleave",
+      "$autocapture",
+      "$rageclick",
+      "$identify",
+      "ui_click",
+    ]) {
       expect(options.before_send({ event: name, properties: {} }), name).not.toBeNull();
     }
+  });
+});
+
+describe("ui_click", () => {
+  it("reports the data-ph identifier of the clicked control", () => {
+    // What $autocapture cannot answer with the masks on: it reports the tag and
+    // its position, never which control. `element` is the whole point.
+    const { ph, click } = runBootstrap();
+    click(fakeTarget("project-tab-deployments"));
+    expect(ph.captured).toEqual([
+      { event: "ui_click", props: { element: "project-tab-deployments" } },
+    ]);
+  });
+
+  it("walks up to the nearest instrumented ancestor", () => {
+    // Clicks land on the <span> inside a <button>. Without closest(), every
+    // control with a child element would report nothing.
+    const { ph, click } = runBootstrap();
+    click(fakeTarget("nav-logout"));
+    expect(ph.captured[0]?.props).toEqual({ element: "nav-logout" });
+  });
+
+  it("stays silent on a click that is not on an instrumented control", () => {
+    const { ph, click } = runBootstrap();
+    click(fakeTarget(null, false));
+    click({});
+    click(null);
+    expect(ph.captured).toEqual([]);
+  });
+
+  it("refuses a data-ph that is not a source-code literal", () => {
+    // The guarantee is structural, not conventional: a `data-ph` built by
+    // interpolating a repo slug, a filename or an email cannot match the
+    // vocabulary pattern, so it is dropped in the browser instead of becoming
+    // the leak every other rule in this file exists to prevent.
+    const { ph, click } = runBootstrap();
+    for (const value of [
+      "tab-@alice/private-repo",
+      "src/secret.ts",
+      "Create tag",
+      "alice@example.com",
+      "-leading-dash",
+      "a".repeat(41),
+      "",
+    ]) {
+      click(fakeTarget(value));
+    }
+    expect(ph.captured).toEqual([]);
+  });
+
+  it("sends nothing but the identifier", () => {
+    const { ph, click } = runBootstrap();
+    click(fakeTarget("nav-settings"));
+    expect(Object.keys(ph.captured[0]?.props ?? {})).toEqual(["element"]);
   });
 });
 
@@ -347,6 +453,14 @@ describe("SDK options", () => {
     expect(options.mask_all_text).toBe(true);
     expect(options.mask_all_element_attributes).toBe(true);
     expect(options.disable_capture_url_hashes).toBe(true);
+  });
+
+  it("makes no feature-flag request, which before_send cannot redact", () => {
+    // The flags request is not a captured event, so the redaction never sees
+    // it — and posthog-js builds its body from persisted person properties,
+    // which include $initial_current_url and $initial_pathname. It carried the
+    // concrete repo path to PostHog on the first page load of every session.
+    expect(options.advanced_disable_flags).toBe(true);
   });
 
   it("honours Do Not Track, the only opt-out an anonymous visitor has", () => {

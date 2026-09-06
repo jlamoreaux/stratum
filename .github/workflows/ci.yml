@@ -148,8 +148,17 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          POSTHOG_PUBLIC_KEY: ${{ vars.POSTHOG_PUBLIC_KEY }}
         run: |
-          npx wrangler deploy --env=staging
+          # The app's half of browser analytics. `POSTHOG_PUBLIC_KEY` is a
+          # `[vars]` entry that ships commented out, because a self-hoster who
+          # deployed this repo must not inherit our project token — so the
+          # value can only come from here, and until it did, the Worker served
+          # every page without the SDK while the docs site (deploy-docs.yml,
+          # which has passed it since day one) reported browser events. Empty
+          # when the repository variable is unset, which `webAnalyticsConfig`
+          # reads as off.
+          npx wrangler deploy --env=staging --var POSTHOG_PUBLIC_KEY:"$POSTHOG_PUBLIC_KEY"
           SUBDOMAIN=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
             | jq -r '.result.subdomain')
@@ -239,8 +248,17 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          POSTHOG_PUBLIC_KEY: ${{ vars.POSTHOG_PUBLIC_KEY }}
         run: |
-          npx wrangler deploy --env=production
+          # The app's half of browser analytics. `POSTHOG_PUBLIC_KEY` is a
+          # `[vars]` entry that ships commented out, because a self-hoster who
+          # deployed this repo must not inherit our project token — so the
+          # value can only come from here, and until it did, the Worker served
+          # every page without the SDK while the docs site (deploy-docs.yml,
+          # which has passed it since day one) reported browser events. Empty
+          # when the repository variable is unset, which `webAnalyticsConfig`
+          # reads as off.
+          npx wrangler deploy --env=production --var POSTHOG_PUBLIC_KEY:"$POSTHOG_PUBLIC_KEY"
           SUBDOMAIN=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
             | jq -r '.result.subdomain')

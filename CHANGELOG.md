@@ -59,11 +59,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to route patterns, page titles and referrers are dropped, clicked-element
   text and attributes are masked, unrecognised properties are dropped rather
   than forwarded, Do Not Track and Global Privacy Control are respected, and
-  session replay is not shipped. The SDK is version-pinned and served from your
+  session replay is not shipped. No feature-flag request is made either: that
+  call is not a captured event, so the redaction cannot reach it, and PostHog
+  builds its body from stored properties that include the first URL of the
+  session. The SDK is version-pinned and served from your
   own origin through `/_ph/*`, which keeps it under your Content-Security-Policy
   and stops content blockers biasing the numbers. `docs/user-guide/faq.md`
   documents every browser event and every guarantee, and a test fails the build
   if that list and the code disagree.
+
+- **`ui_click` names the control that was clicked.** Masking element text and
+  attributes is what keeps repository and file names out of autocaptured
+  events, and it also leaves `$autocapture` able to say a button was clicked
+  but never which one. Navigation and the main actions now carry a `data-ph`
+  attribute — `nav-settings`, `project-tab-deployments` — whose value is a
+  literal in Stratum's own source; `ui_click` reports that value in `element`
+  and nothing else, and any value that is not a plain `[a-z][a-z0-9-]*` token
+  is dropped in the browser, so a name built from a repository or file name
+  cannot be reported even by mistake. It is the one browser event Stratum sends
+  itself rather than configuring PostHog to send.
 
 ### Fixed
 

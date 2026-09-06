@@ -71,7 +71,12 @@ describe("analytics catalog", () => {
       }),
     )?.[1];
     expect(allowlist, "could not find ALLOWED_EVENTS in the emitted snippet").toBeTruthy();
-    const permitted = [...(allowlist as string).matchAll(/(\$[A-Za-z_]+):\s*1/g)].map((m) => m[1]);
+    // Not `\$`-anchored: `ui_click` is this repo's own browser event, and an
+    // allowlist entry the regex cannot see is an entry this test cannot hold to
+    // the FAQ.
+    const permitted = [...(allowlist as string).matchAll(/([$A-Za-z_][A-Za-z_]*):\s*1/g)].map(
+      (m) => m[1],
+    );
     expect(permitted.length).toBeGreaterThan(0);
     for (const name of permitted) {
       expect(

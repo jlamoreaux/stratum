@@ -16,6 +16,16 @@
  * dropped. A denylist would have been shorter and is what the first draft of
  * this work used, but it silently leaks whatever the next SDK release adds,
  * and it inverts the discipline `src/analytics/events.ts` is built on.
+ *
+ * ## The cost of that rule, and the one event that pays it back
+ *
+ * Masking element text and attributes is what keeps repo and file names out of
+ * autocaptured clicks, and it also leaves `$autocapture` reporting which TAG
+ * was clicked and never which control. So this file captures one event of its
+ * own, `ui_click`, carrying a `data-ph` value written as a literal in the JSX.
+ * It is the only place where the browser reports something this repository
+ * chose rather than something PostHog collected, which is why it is also the
+ * only place a pattern — not a rewrite — is what enforces the promise.
  */
 import type { WebAnalyticsConfig } from "./web";
 
@@ -69,11 +79,20 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
   function init() {
 
   // Mirrors WEB_EVENT_NAMES in ../analytics/events.ts, which is what the FAQ
-  // is tested against.
+  // is tested against. Every name but the last is PostHog's; \`ui_click\` is this
+  // file's own, and is captured at the bottom of \`loaded\`.
   var ALLOWED_EVENTS = {
     $pageview: 1, $pageleave: 1, $autocapture: 1, $rageclick: 1, $identify: 1,
-    $set: 1, $create_alias: 1,
+    $set: 1, $create_alias: 1, ui_click: 1,
   };
+
+  // The vocabulary \`ui_click\` may report: a lowercase kebab-case token, capped.
+  // The values come from \`data-ph\` attributes written as literals in this
+  // repository's JSX, so this pattern is not input validation — it is the
+  // structural version of that guarantee. A \`data-ph\` built by interpolating a
+  // repo slug or a filename cannot match it, so the leak that would otherwise
+  // be one template literal away is refused rather than shipped.
+  var UI_CLICK_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 
   // The only path string this page may report: built from the route PATTERN the
   // server matched, so it contains no namespace, repo slug, change id, file
@@ -84,6 +103,15 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
   // Kept verbatim. Device, browser and session shape: non-identifying, and the
   // reason browser analytics is worth having at all.
   var KEEP = {
+    // Required for ingestion, and the reason this file shipped a bundle that
+    // sent nothing. posthog-js re-reads \`token\`, \`distinct_id\` and
+    // \`$cookieless_mode\` AFTER before_send returns, and drops any event that
+    // no longer carries all three. An allowlist that
+    // had never heard of them therefore rejected 100% of events — silently, at
+    // console.warn, on a surface nobody watches. Any future edit here that
+    // removes one of these turns browser analytics off entirely, which is why
+    // a test asserts them by name.
+    token: 1, distinct_id: 1, $cookieless_mode: 1,
     $browser: 1, $browser_version: 1, $browser_language: 1, $browser_language_prefix: 1,
     $os: 1, $os_version: 1, $device_type: 1, $timezone: 1, $timezone_offset: 1,
     $screen_height: 1, $screen_width: 1, $viewport_height: 1, $viewport_width: 1,
@@ -103,8 +131,9 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
     // The SDK sends the array form here (elementsChainAsString is false), so
     // dropping it costs nothing.
     $elements: 1, $event_type: 1, $ce_version: 1,
-    // Set by this bootstrap.
-    environment: 1,
+    // Set by this bootstrap: \`environment\` on every event, \`element\` on
+    // \`ui_click\` only. Both are source-code literals.
+    environment: 1, element: 1,
   };
 
   // Prefix-matched families whose members are named per-metric and cannot be
@@ -211,6 +240,22 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
     // session, and this ships to every self-hoster's users, not just ours.
     respect_dnt: true,
 
+    // No feature-flag call, and this is a privacy control rather than a
+    // performance one. \`before_send\` governs CAPTURED EVENTS; the flags request
+    // is not one, and posthog-js builds its body from persisted person
+    // properties — which include \`$initial_current_url\`, \`$initial_pathname\`
+    // and \`$initial_host\`. That body carried
+    // \`https://host/@alice/private-repo/tags?ref=main\` to PostHog on the first
+    // page load of every session, past every rewrite above, because the
+    // redaction never sees it. Nothing in this app reads a flag, so the
+    // request buys nothing to weigh against that.
+    //
+    // It also removes the SDK's remote-config fetch, which the proxy answers
+    // 204 (\`/array/<token>/config\` is not on its ingestion allowlist), and with
+    // it the last reason autocapture would have to wait for a network response
+    // before arming its listeners.
+    advanced_disable_flags: true,
+
     capture_pageview: true,
     capture_pageleave: true,
     autocapture: true,
@@ -259,6 +304,35 @@ export function bootstrapScript(config: WebAnalyticsConfig): string {
       // instanceProperties() does. Registered rather than passed per event so
       // autocaptured events carry it too.
       ph.register({ environment: cfg.environment });
+
+      // Which control was used, which $autocapture alone cannot answer here.
+      //
+      // mask_all_text and mask_all_element_attributes stay ON, so an
+      // autocaptured click reports \`button, nth_child: 2\` and nothing else —
+      // true to the promise and useless for "did anyone open Deploys". The
+      // missing half cannot come from relaxing either mask: every attribute
+      // this app renders is a candidate leak (\`href\` alone is
+      // /@alice/private-repo/tags), and posthog-js copies \`attr__href\` onto the
+      // element props whatever the mask says.
+      //
+      // So the identifier is supplied instead of extracted: a \`data-ph\`
+      // attribute whose value is written literally in the JSX. This reads one
+      // attribute, sends one property, and matches it against UI_CLICK_NAME
+      // first — the same discipline as \`enumProp\` in ../analytics/events.ts,
+      // where a field may only ever emit a value this repository contains.
+      //
+      // Capture phase, on document, registered once: a handler that calls
+      // stopPropagation cannot silence it, and delegation means a page can be
+      // instrumented by adding an attribute rather than by remembering to call
+      // anything.
+      document.addEventListener("click", function (event) {
+        var target = event && event.target;
+        var el = target && target.closest ? target.closest("[data-ph]") : null;
+        if (!el) return;
+        var name = el.getAttribute("data-ph");
+        if (typeof name !== "string" || !UI_CLICK_NAME.test(name)) return;
+        ph.capture("ui_click", { element: name });
+      }, true);
     },
   });
   }
