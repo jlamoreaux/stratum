@@ -336,9 +336,13 @@ platform that proxies everything.
 
 ## 6. Abuse
 
-Signup is currently gated by invite codes (`src/beta/gate.ts`), which is doing
-the anti-abuse work today and hides the problem. When that gate lifts, a free
-LLM allowance on an open signup becomes a target.
+*Written while signup was gated by invite codes (`src/beta/gate.ts`), which was
+doing the anti-abuse work and hiding the problem. That gate has since lifted —
+`app.usestratum.dev` has open signup (`docs/user-guide/faq.md`) — so the
+condition this section anticipated is the one in force now, not a future one. The
+gate code remains, inert unless an operator configures it.*
+
+A free LLM allowance on an open signup is a target.
 
 The design has an unusual advantage here: the evaluator is not a chat endpoint.
 `SYSTEM_PROMPT` is fixed in the source, the output is parsed as a strict verdict

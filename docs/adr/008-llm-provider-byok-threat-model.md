@@ -69,7 +69,7 @@ Both are bounded by the same control, but a junior reader who believes the
 threat is "the change being evaluated right now" will build guards in the wrong
 place and leave the real one open.
 
-**The writer-only assumption is load bearing, and it expires.** Everything above
+**The writer-only assumption is load-bearing, and it expires.** Everything above
 rests on `canWriteProject` gating change creation. The day Stratum supports open
 contribution — a fork-and-propose flow from someone with no write access — an
 untrusted party can propose a policy file, and the second control below (a
