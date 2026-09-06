@@ -437,9 +437,9 @@ describe("cost attribution", () => {
   it("still records the read when the tree could not be read", async () => {
     await run(MERGE_MESSAGE, { readFiles: unreadableTree });
 
-    const costs = raw
-      .prepare("SELECT owner_id FROM cost_records")
-      .all() as unknown as Array<{ owner_id: string | null }>;
+    const costs = raw.prepare("SELECT owner_id FROM cost_records").all() as unknown as Array<{
+      owner_id: string | null;
+    }>;
     expect(costs).toHaveLength(1);
     expect(costs[0]?.owner_id).toBe("usr_alice");
   });

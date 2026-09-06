@@ -52,7 +52,7 @@ interface SummaryRow {
  *
  * The single home for the `ownerType -> billing subject` mapping: every
  * recording site resolves through here so the agent walk and the
- * cannot-be-attributed rule exist once rather than five times. Accepts a whole
+ * cannot-be-attributed rule exist once rather than at each of them. Accepts a whole
  * `ProjectEntry` (structurally) or a bare owner pair.
  *
  * An **agent is not a payer** — it belongs to one — so `"agent"` walks

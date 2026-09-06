@@ -675,8 +675,8 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     // Recorded here, BEFORE the verdict is acted on, because the spend is
     // already incurred: a resolution the suite rejects burned exactly the same
     // model tokens as one it accepts, and the early return below would drop
-    // them. Mirrors the recording POST /changes/:id/evaluate does, minus the
-    // git_ops pair — `buildManualResolutionDiff` cloned once, above.
+    // them. Mirrors the recording POST /changes/:id/evaluate does, with one
+    // git_op rather than its pair — `buildManualResolutionDiff` cloned once.
     const resolveSubject = await resolveBillingSubject(c.env.DB, logger, project);
     await recordCosts(
       c.env.DB,

@@ -852,9 +852,9 @@ async function readTree(
     projectDefaultBranch(project),
   );
 
+  const subject = await resolveBillingSubject(env.DB, logger, project);
   // Recorded whether or not the read succeeded: a clone that failed still cost
   // the round trip.
-  const subject = await resolveBillingSubject(env.DB, logger, project);
   await recordCosts(
     env.DB,
     logger,

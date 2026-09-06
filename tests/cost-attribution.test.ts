@@ -209,7 +209,7 @@ describe("recordCosts attribution columns", () => {
 
   it("carries a byok sample through unchanged", async () => {
     // An evaluator running on the project's own credential is the only thing
-    // that can know this; both recording sites just flatten what it reports.
+    // that can know this; every recording site just flattens what it reports.
     const { db, raw } = makeSqliteD1();
     const samples: CostSample[] = [
       { kind: "llm_tokens", quantity: 800, estimated: false, source: "byok" },

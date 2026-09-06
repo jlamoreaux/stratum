@@ -394,9 +394,9 @@ describe("runPostMergeCheck cost attribution", () => {
     );
 
     expect(result.status).toBe("passed");
-    const rows = raw
-      .prepare("SELECT owner_id FROM cost_records")
-      .all() as unknown as Array<{ owner_id: string | null }>;
+    const rows = raw.prepare("SELECT owner_id FROM cost_records").all() as unknown as Array<{
+      owner_id: string | null;
+    }>;
     expect(rows).toHaveLength(2);
     for (const row of rows) expect(row.owner_id).toBeNull();
   });
