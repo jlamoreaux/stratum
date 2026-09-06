@@ -63,6 +63,11 @@ let validCodes = new Set<string>();
 /** Bodies posted to /api/referral/admit, so a redemption can be asserted. */
 let admissions: Record<string, unknown>[] = [];
 
+/**
+ * Only the two routers under test, mounted where production mounts them. The
+ * complete-form path matters: the pending-signup cookie is scoped to `/auth`,
+ * so a form mounted anywhere else would never receive it.
+ */
 function makeApp() {
   const app = new Hono<{ Bindings: Env }>();
   app.route("/auth", authRouter);
@@ -151,6 +156,11 @@ async function park(
   return token;
 }
 
+/**
+ * Submit the username form for a parked identity. The `Origin` header is not
+ * decoration: no session exists yet, so the POST guards itself with an explicit
+ * same-origin check and refuses without it.
+ */
 function complete(
   app: Hono<{ Bindings: Env }>,
   env: Env,
