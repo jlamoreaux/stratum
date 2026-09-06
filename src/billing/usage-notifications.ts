@@ -39,6 +39,7 @@ import type { Env } from "../types";
 import type { Logger } from "../utils/logger";
 import { periodResetsAt, resolveEnforcementSubject } from "./enforcement";
 import { RemoteEntitlements, UnlimitedEntitlements, entitlementsEnabled } from "./entitlements";
+import { recordUsageBanner } from "./usage-banner";
 
 /** Fraction of a limit that earns a warning. One threshold, so one receipt shape. */
 export const USAGE_NOTICE_THRESHOLD = 0.8;
@@ -139,6 +140,20 @@ async function deliver(env: Env, logger: Logger, input: UsageNoticeInput): Promi
       `${RECEIPT_PREFIX}${subject.ownerType}:${subject.ownerId}:${input.period}:` +
       `${total.meter}:${THRESHOLD_PERCENT}:${limit}`;
     if (await alreadySent(env, logger, key)) continue;
+
+    // The in-app banner (Task 9.3) is written from the crossing this loop has
+    // already detected, so a page render costs one KV read and no D1. Users
+    // only: there is no org UI to render it in, so a pooled org's threshold
+    // reaches its actor by email alone (PRD §8).
+    if (subject.ownerType === "user") {
+      await recordUsageBanner(env, logger, subject.ownerId, {
+        meter: total.meter,
+        used: total.quantity,
+        limit,
+        percent: THRESHOLD_PERCENT,
+        period: input.period,
+      });
+    }
 
     await send(env, logger, {
       subject,
