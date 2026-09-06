@@ -159,15 +159,20 @@ export const SURFACE_EVENT_NAMES: readonly SurfaceEventName[] = [
 ];
 
 /**
- * Events produced by PostHog's SDK in the browser, not by this codebase.
+ * Events sent from the browser, not by this codebase's server paths.
  *
  * They are listed here for one reason: `docs/user-guide/faq.md` tells
  * self-hosters the event list is exhaustive, and a test holds that claim to
- * account. Nothing in `src/` emits these — the SDK does, once
+ * account. Nothing in `src/` emits the `$`-prefixed ones — the SDK does, once
  * `POSTHOG_PUBLIC_KEY` is set — so the list has to be maintained by hand
  * against what `src/analytics/web-snippet.ts` enables. Turning on another SDK
  * capture feature means adding its event here, or the FAQ becomes a false
  * statement about what leaves the instance.
+ *
+ * `ui_click` is the exception: the bootstrap captures it itself, because
+ * autocapture with text and attribute masking on reports which TAG was clicked
+ * and never which control. It carries one property, `element`, read from a
+ * `data-ph` attribute written literally in this repo's JSX.
  */
 export const WEB_EVENT_NAMES: readonly string[] = [
   "$pageview",
@@ -180,6 +185,10 @@ export const WEB_EVENT_NAMES: readonly string[] = [
   // would break the anonymous-to-identified stitching identify() exists for.
   "$set",
   "$create_alias",
+  // First-party; see the docblock. Named for the surface rather than the
+  // action, matching `api_request` and `mcp_request`: the action is the
+  // `element` property, so a new instrumented control never needs a new event.
+  "ui_click",
 ];
 
 /** Every event name, for the docs-drift test and for operator reference. */

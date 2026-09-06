@@ -1062,10 +1062,23 @@ async function resolveFetchedTip(
 /**
  * Merges a workspace into its parent project repo.
  *
- * Attempts a true three-way merge via isomorphic-git's multi-remote fetch.
- * Falls back to a squash merge (copy changed files, single commit) if the
- * merge fails — this covers cases where isomorphic-git can't resolve the
- * merge or the remotes have diverged in a way that produces conflicts.
+ * Performs a true three-way merge via isomorphic-git's multi-remote fetch. A
+ * squash merge happens only when the caller asks for one
+ * (`options.strategy === "squash"`).
+ *
+ * It does **not** fall back to a squash on conflict, and has not for some time.
+ * The old fallback swallowed real conflicts: it copied the workspace's files
+ * over the project's, which silently discarded any project commit made after
+ * the workspace forked. A conflict now returns `MergeConflictError`, which the
+ * route turns into `409 MERGE_CONFLICT` carrying a `conflictId` for out-of-band
+ * resolution. It carries the conflicting paths *when they are known*: the
+ * `isGitMergeConflict` branch below reads them from `error.data.filepaths`, but
+ * the `MergeNotSupportedError` branch has no file list and constructs the error
+ * with an empty array. Treat the paths as advisory, not guaranteed.
+ *
+ * This comment is called out because its earlier wording outlived the change
+ * and propagated: the README, the getting-started guide and the roadmap all
+ * described the squash fallback as current behaviour long after it was gone.
  */
 export async function mergeWorkspaceIntoProject(
   projectRemote: string,

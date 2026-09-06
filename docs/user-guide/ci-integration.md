@@ -13,6 +13,46 @@ Stratum causes code to run in exactly four places, all driven by
 `.stratum/policy.yaml`. The first three run inside Stratum's own pipeline; the
 fourth hands your code to a hosting provider that runs it:
 
+> [!IMPORTANT]
+> **Two of these four need the Cloudflare Sandboxes binding, and it is not
+> enabled — on the hosted instance or by default anywhere.** `[[sandboxes]]` is
+> commented out in every environment of the repository's `wrangler.toml`,
+> because Sandboxes is a gated beta.
+>
+> That makes **1. the sandbox evaluator** and **3. `merge.postMergeCommand`**
+> unavailable unless you self-host *and* have Sandboxes access *and* uncomment
+> the binding. The consequence is not cosmetic: a policy naming the `sandbox`
+> evaluator does not skip it, it **fails closed** — score 0, failed. How far
+> that reaches depends on two policy settings:
+>
+> - Under the default `requireAll: true`, the aggregate verdict is
+>   `every(passed)` (`src/evaluation/composite-evaluator.ts:63-65`), so the
+>   failed `sandbox` result sinks it. The change lands in `needs_changes` and
+>   **every merge in that project is blocked** until you remove the evaluator.
+>   The one exception is `merge.allowForce: true`, which is off by default
+>   (force is deny-by-default, `changes.ts:477-480`) and which lets a writer
+>   force *other* changes past the failed evaluator — but **not the policy edit
+>   that removes it**: `.stratum/policy.yaml` is protected config, and force is
+>   refused on a change that touches it (`changes.ts:483-488`). So force is not
+>   a way out of this particular trap.
+> - Under `requireAll: false` the aggregate is `some(passed)`, so another
+>   passing evaluator still carries it — *unless* `sandbox` is named in
+>   `merge.requiredEvaluators`, which is checked per evaluator
+>   (`src/merge/protection.ts:59-65`) and blocks the merge on its own either way.
+>
+> See [the sandbox evaluator](#1-the-sandbox-evaluator) for why it behaves that
+> way.
+>
+> Neither **2. the `webhook` evaluator** nor **4. `deploys:`** needs the
+> Sandbox binding, but they are not equally ready. The webhook evaluator needs
+> only a reachable `https://` endpoint you host and its `url` in the policy.
+> `deploys:` needs deployment setup first: a supported `target`, that
+> provider's credentials in the project secret store, an instance-level
+> `DEPLOY_SECRET_KEY` to decrypt them, and a `DEPLOY_QUEUE` binding — without
+> those a deployment fails or is never enqueued. See
+> [Deployments](deployments.md). If you want tests gating your merges today,
+> the webhook evaluator is the supported route.
+
 ### 1. The sandbox evaluator
 
 The `sandbox` evaluator (`src/evaluation/sandbox-evaluator.ts`) materializes

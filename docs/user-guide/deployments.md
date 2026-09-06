@@ -10,23 +10,6 @@ no preview environment, and no rollback. Read
 [Limitations](#limitations-read-this-before-you-rely-on-it) before you point
 production at it.
 
-## Contents
-
-- [Quickstart](#quickstart)
-- [If your first deploy didn't work](#if-your-first-deploy-didnt-work)
-- [Before you start: your policy still needs `evaluators:`](#before-you-start-your-policy-still-needs-evaluators)
-- [How a deploy is triggered](#how-a-deploy-is-triggered)
-- [The `deploys:` configuration reference](#the-deploys-configuration-reference)
-- [Targets and their secrets](#targets-and-their-secrets)
-- [Storing a secret](#storing-a-secret)
-- [The approval gate](#the-approval-gate)
-- [Retry](#retry)
-- [Deployment statuses](#deployment-statuses)
-- [Limits](#limits)
-- [Operating a Stratum instance with deploys enabled](#operating-a-stratum-instance-with-deploys-enabled)
-- [API](#api)
-- [Limitations](#limitations-read-this-before-you-rely-on-it)
-
 ## Quickstart
 
 Zero to a live deploy. Step 1 is once per instance, steps 2–4 once per project;
@@ -105,8 +88,12 @@ deploys:
   - name: site
     target: cloudflare-pages
     dir: public
-    secrets: [CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_WORKERS_SUBDOMAIN]
+    secrets: [CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID]
 ```
+
+Do **not** add `CLOUDFLARE_WORKERS_SUBDOMAIN` to that `secrets:` list. Naming a
+secret there makes it *required*, which turns the optional "no URL on the row"
+outcome into a failed deploy. The target loads it anyway when it is stored.
 
 ```yaml
 # Worker script: uploads the .js/.mjs files in the tree.
@@ -147,9 +134,11 @@ you actually see.
 
 | What you see | What it means | Fix |
 |---|---|---|
-| **No deployment row at all** | The merge never enqueued: no `deploys:` matched, or the instance has no `DEPLOY_QUEUE` binding | Check the policy is on the **default branch**; then step 1 |
-| Status `skipped` | Deploys are configured for the project but none applied to this merge | Expected, not a failure — `skipped` never means an error |
-| `Missing project secret X — add it in project settings` | The policy names a secret the store doesn't have | Add it (step 3); names are case-sensitive |
+| **No deployment row at all** | The merge never enqueued: the post-merge check reverted or failed the merge, or the instance has no `DEPLOY_QUEUE` binding | Check the post-merge check passed (or is not configured); then step 1 |
+| **No deployment row, but the merge looks fine** | A bound `DEPLOY_QUEUE` can still fail on `send`. The request is then written to the event outbox, which a five-minute cron sweeps and forwards, so the row appears late rather than never | Wait out one sweep. If the outbox write failed too the request is genuinely gone, and the log says so: `Post-merge deploy request could not be made durable and is lost`. There is no row to retry, so merge again or deploy out of band |
+| **No deployment row, and the merge went through `merge-batch`** | Expected. `merge-batch` (`src/routes/changes.ts:898`) never calls `enqueueMergeDeploy` — it runs no post-merge check and enqueues no deploy, by design: the batch path merges many changes in one push | **No post-merge recovery exists.** Approve and Retry both act on an existing row (`notFound("Deployment", id)` otherwise), and the deployments API has no route that creates one. Merge through the single-change path when you want a deploy |
+| Status `skipped` | There was nothing configured to deploy at that commit — no policy file, or a policy with no `deploys:` entries | Check `.stratum/policy.yaml` is committed on the **default branch** and declares `deploys:`. `skipped` never means an error |
+| `Missing project secret: X — add it in project settings` | The policy names a secret the store doesn't have | Add it (step 3); names are case-sensitive |
 | `DEPLOY_SECRET_KEY is not configured on this instance…` | Instance prerequisite missing | Step 1 |
 | `Could not decrypt project secret… may have been rotated` | `DEPLOY_SECRET_KEY` changed after the secret was stored | Re-enter every secret for the project — there is no re-encryption path |
 | `Policy file … is present but invalid` | YAML didn't parse, or `evaluators:` is missing | Fix the file; note this also blocks merges |
@@ -407,8 +396,9 @@ model key ([Getting started](getting-started.md#bringing-your-own-model-key)).
 Rules:
 
 - Names must match `^[A-Z][A-Z0-9_]{0,63}$`.
-- Values are capped at 4096 bytes. There is no minimum — some providers
-  legitimately accept an empty value.
+- Values are capped at 4096 bytes. The storage layer imposes no minimum, but an
+  empty value is not useful: the settings form rejects it outright, and a
+  target reads an empty required secret as missing and fails the deploy.
 - Writing an existing name replaces it.
 - Every write and delete is recorded in the audit trail (`secret.written`,
   `secret.deleted`).
