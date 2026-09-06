@@ -12,6 +12,15 @@
  *   {@link resolveEnforcementSubject}, not the recorded billing subject. A
  *   limit is checked against the acting person, so a page that reported the
  *   recorded owner's totals would show a number no limit is ever compared to.
+ *   That is not the same as reading the actor's `usage_periods` rows, and the
+ *   difference is the reason {@link UsageReport.usedSource} exists: for a
+ *   project in an org namespace the LEDGER records the ORG (deliberately — a
+ *   ledger says what happened) while the CHECK charges the actor's counter. A
+ *   user working only in org namespaces has no rows of their own at all, so a
+ *   page summing D1 alone showed them `0 of 10,000` while the counter refusing
+ *   them was full. So `used` is the counter where there is one, floored by the
+ *   ledger — which is exactly the pair `checkMeter` compares against a limit,
+ *   since `reconcileFloor` raises the counter to the same filtered D1 sum.
  * - **Consumption is `source = 'platform'` only.** Migration 049 keys usage on
  *   `(owner_id, period, meter, source)` precisely so BYOK spend accumulates
  *   apart, and Goal 5 says it is not under the hosted allowance. Summing both
@@ -26,7 +35,8 @@
  *
  * Read-only throughout: nothing here reserves, settles, records or mutates.
  */
-import { type MeterKey, getOwnerMeterTotals, usagePeriod } from "../storage/usage";
+import { usageMeterName } from "../queue/usage-meter";
+import { type MeterKey, getOwnerMeterTotals, isMeterKey, usagePeriod } from "../storage/usage";
 import type { Env } from "../types";
 import { type AppError, ValidationError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -75,6 +85,17 @@ export interface UsageRateReport {
 export interface UsageReport {
   /** Whose allowance this is — the §4a enforcement subject. */
   subject: { ownerId: string; ownerType: "user" | "org" };
+  /**
+   * Where the `used` figures came from, so a surface can say which it is
+   * showing instead of implying a precision it does not have.
+   *
+   * `"meter"` is the live enforcement counter, the number a limit is actually
+   * compared against, floored by the ledger. `"ledger"` is `usage_periods`
+   * alone — every self-hoster, and any instance whose meter binding is missing
+   * or unreadable — which counts spend RECORDED against this subject and so
+   * omits work done in an org namespace, where the org is the recorded owner.
+   */
+  usedSource: "meter" | "ledger";
   /** Opaque plan name from the billing service; `"unlimited"` when there is none. */
   plan: string;
   /**
@@ -116,8 +137,14 @@ function meterEntry(
   limit: number,
   platform: Partial<Record<MeterKey, number>>,
   byok: Partial<Record<MeterKey, number>>,
+  counter: Partial<Record<MeterKey, number>> | null,
 ): UsageMeterReport {
-  const used = platform[meter] ?? 0;
+  // The higher of the two, which is what a limit check sees: the counter leads
+  // the ledger (a reservation is taken before the spend, and it holds the
+  // actor's org-namespace work, which the ledger records against the org),
+  // while `reconcileFloor` raises the counter to the ledger whenever the ledger
+  // is ahead. Neither alone is the number that refuses somebody.
+  const used = Math.max(platform[meter] ?? 0, counter?.[meter] ?? 0);
   // A limit the billing service never sent, or sent as garbage, has already
   // been discarded by `parseEntitlements`; anything still non-integer here is
   // treated as "no usable limit" for the same reason `checkGauge` does — a
@@ -172,14 +199,26 @@ export async function buildUsageReport(
     subject.ownerId,
     subject.ownerType,
   );
-  // Fails open exactly as every other reader does: an unreachable billing
-  // service shows unlimited rather than a page full of errors.
+  if (!resolved.success) {
+    // Fails open exactly as every other reader does: an unreachable billing
+    // service shows unlimited rather than a page full of errors. Logged, not
+    // dropped — a page telling somebody they have no limits because the limits
+    // could not be read must be diagnosable from the log (AGENTS.md).
+    logger.warn("Usage report fell back to unlimited: entitlements unreadable", {
+      subjectId: subject.ownerId,
+      subjectType: subject.ownerType,
+      error: resolved.error.message,
+    });
+  }
   const entitlements = resolved.success ? resolved.data.entitlements : UnlimitedEntitlements;
 
   // The same read `reconcileFloor` performs before a limit check, with the same
-  // `source` filter. Anything else would be a second definition of "used".
+  // `source` filter. Anything else would be a second definition of "used". It
+  // is the FLOOR under the figure reported, not the figure itself — see below.
   const platform = await getOwnerMeterTotals(env.DB, logger, subject.ownerId, period, "platform");
   if (!platform.success) return err(platform.error);
+
+  const counter = await readMeterCounts(env, logger, subject, period);
 
   let byok: Partial<Record<MeterKey, number>> = {};
   if (opts.includeByok) {
@@ -191,16 +230,60 @@ export async function buildUsageReport(
 
   return ok({
     subject: { ownerId: subject.ownerId, ownerType: subject.ownerType },
+    usedSource: counter === null ? "ledger" : "meter",
     plan: entitlements.plan,
     metered: entitlementsEnabled(env),
     period,
     resetsAt: periodResetsAt(period),
     meters: METER_KEYS.map((meter) =>
-      meterEntry(meter, entitlements.meters[meter], platform.data, byok),
+      meterEntry(meter, entitlements.meters[meter], platform.data, byok, counter),
     ),
     rates: RATE_KEYS.map((rate) => {
       const limit = entitlements.rates[rate];
       return { rate, limit, unlimited: !Number.isInteger(limit) || limit === UNLIMITED };
     }),
   });
+}
+
+/**
+ * This subject's live enforcement counters for the period, or `null` when there
+ * are none to read.
+ *
+ * `null` is not a failure to hide: it is every self-hosted instance (no billing
+ * service, so nothing ever reserved), an instance whose `USAGE_METER` binding is
+ * missing, and an object that could not be reached. The caller reports which of
+ * the two numbers it is showing rather than silently presenting one as the
+ * other.
+ *
+ * Read-only: this is `read`, never `reserve`, so looking at the usage page
+ * cannot consume any part of an allowance.
+ */
+async function readMeterCounts(
+  env: Env,
+  logger: Logger,
+  subject: { ownerId: string; ownerType: "user" | "org" },
+  period: string,
+): Promise<Partial<Record<MeterKey, number>> | null> {
+  if (!entitlementsEnabled(env)) return null;
+  const namespace = env.USAGE_METER;
+  if (!namespace) return null;
+  try {
+    const stub = namespace.get(
+      namespace.idFromName(usageMeterName(subject.ownerType, subject.ownerId)),
+    );
+    const snapshot = await stub.read(period);
+    const counts: Partial<Record<MeterKey, number>> = {};
+    for (const [meter, quantity] of Object.entries(snapshot.counts)) {
+      if (isMeterKey(meter) && typeof quantity === "number") counts[meter] = quantity;
+    }
+    return counts;
+  } catch (error) {
+    logger.warn("Usage counters unreadable; reporting the ledger instead", {
+      subjectId: subject.ownerId,
+      subjectType: subject.ownerType,
+      period,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }

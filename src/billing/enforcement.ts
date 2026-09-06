@@ -11,10 +11,14 @@
  * ## Everything here ships observe-only
  *
  * A decision is always *evaluated* and *recorded*; it is *binding* only when
- * `ENTITLEMENTS_ENFORCE=1`. Under observe-only a refusal still reserves, still
- * logs, and still admits — that is the month of measurement PRD §8 asks for
- * before anything blocks. `admitted` is what a caller acts on; `refused` is what
- * the decision was, and the two differ exactly when enforcement is off.
+ * `ENTITLEMENTS_ENFORCE=1`. Under observe-only a refusal still reserves — the
+ * meter is told to count what it refuses ({@link checkMeter}) — still logs, and
+ * still admits. That is the month of measurement PRD §8 asks for before anything
+ * blocks, and the counting half is what makes it worth a month: a counter that
+ * froze at the limit could report THAT people would be blocked and never BY HOW
+ * MUCH, which is the number the whole exercise exists to produce. `admitted` is
+ * what a caller acts on; `refused` is what the decision was, and the two differ
+ * exactly when enforcement is off.
  *
  * ## Inert with `BILLING_SERVICE_URL` unset
  *
@@ -36,7 +40,7 @@ import {
   usageMeterName,
 } from "../queue/usage-meter";
 import { resolveBillingSubject } from "../storage/costs";
-import { type MeterKey, getOwnerMeterTotals, usagePeriod } from "../storage/usage";
+import { type MeterKey, getOwnerMeterTotals, isMeterKey, usagePeriod } from "../storage/usage";
 import type { Env } from "../types";
 import type { Logger } from "../utils/logger";
 import {
@@ -139,6 +143,21 @@ export function enforcementBinding(env: Env): boolean {
  * knows the caller but not the project, so it cannot do it — which is why the
  * first check for a given org resolves to the actor and a later one can pool.
  *
+ * **With no actor at all** — the queue consumers — the recorded subject is the
+ * only nameable one, and it is usable ONLY when it is a person. An org that is
+ * not positively known to be paid must never become its own subject here: it
+ * would get a counter of its own AND, since nothing warms an org's plan on that
+ * path, a permanent cache miss resolving to `UnlimitedEntitlements` — a fresh,
+ * permanently unlimited allowance per org, which is verbatim the hole §4a
+ * exists to close. There is no safe substitute either: charging `orgs.owner_id`
+ * is the aggregation §4a examined and rejected, because it hands an exhausted
+ * member a fresh root and drains one person's allowance for a whole org. So the
+ * check is reported UNAVAILABLE (`null`) and logged, rather than answered
+ * wrongly. The cost is stated rather than hidden: an org-owned operation that
+ * names nobody — today only a merge-triggered deploy — is not volume-checked
+ * until either the org's plan is known to pool or the call site threads an
+ * actor.
+ *
  * @param opts.actorUserId - The user who ran the operation, when the site knows one
  * @param opts.owner - The project's recorded owner (`agent` walks to its user)
  * @param opts.waitUntil - Used to warm an org's plan off the response path
@@ -175,14 +194,26 @@ export async function resolveEnforcementSubject(
   if (actorUserId) return { ownerId: actorUserId, ownerType: "user", pooled: false };
 
   // No actor: a queue consumer, or a path that does not carry one. The recorded
-  // subject is then the only nameable one — weaker than §4a wants for an
-  // org-owned project, and still strictly better than no check at all, which is
-  // the only other option here. `resolveBillingSubject` also performs the
-  // agent -> owner walk, so an agent-owned project resolves to a person.
+  // subject is then the only nameable one, and only when it names a PERSON.
   if (!owner?.ownerId) return null;
+  // Nothing below this line can produce a decision when the seam is off, so the
+  // D1 hop the agent walk costs is not one a self-hoster should pay for.
+  if (!entitlementsEnabled(env)) return null;
+  // `resolveBillingSubject` also performs the agent -> owner walk, so an
+  // agent-owned project resolves to the person who owns the agent.
   const recorded = await resolveBillingSubject(env.DB, logger, owner);
   if (!recorded) return null;
-  return { ...recorded, pooled: recorded.ownerType === "org" };
+  if (recorded.ownerType === "user") return { ...recorded, pooled: false };
+
+  // An org, with nobody to charge and no positive signal that it pools. Never
+  // inferred into a subject of its own (see this function's doc comment): the
+  // check is simply unavailable, and saying so is what keeps it from looking
+  // like an allowance that was checked and passed.
+  logger.warn("Entitlement check unavailable: an org-owned operation named no actor", {
+    ownerId: recorded.ownerId,
+    ownerType: recorded.ownerType,
+  });
+  return null;
 }
 
 /**
@@ -202,12 +233,21 @@ async function entitlementsFor(
     subject.ownerId,
     subject.ownerType,
   );
-  return resolved.success ? resolved.data.entitlements : UnlimitedEntitlements;
+  if (resolved.success) return resolved.data.entitlements;
+  // Fails open, but never silently: admitting because the limits could not be
+  // read is a different fact from admitting because the plan allows it, and a
+  // month of observation that cannot tell them apart measures nothing.
+  logger.warn("Entitlements unreadable; admitting against unlimited defaults", {
+    subjectId: subject.ownerId,
+    subjectType: subject.ownerType,
+    error: resolved.error.message,
+  });
+  return UnlimitedEntitlements;
 }
 
 /**
- * Subjects whose D1 aggregate has already been reconciled into their counter in
- * THIS isolate, keyed `subjectType:subjectId:period`.
+ * Subjects whose D1 aggregate is being, or has been, reconciled into their
+ * counter in THIS isolate, keyed `subjectType:subjectId:period`.
  *
  * The counter is authoritative for enforcement but it is not the ledger: a
  * subject that spent before the meter existed, or whose object was purged, or
@@ -215,11 +255,31 @@ async function entitlementsFor(
  * total the object has never seen. `setFloor` raises the counter to it (never
  * lowers — see the object's doc comment), and doing that once per isolate keeps
  * the D1 read off every single evaluation.
+ *
+ * The value is the in-flight PROMISE, not a bare marker, and that is the whole
+ * correctness of it: a synchronous "remembered" flag lets a second request for
+ * the same subject sail past and reserve against a counter the floor has not
+ * landed in yet. Concurrent callers await the same reconcile instead.
  */
-const reconciled = new Set<string>();
+const reconciled = new Map<string, Promise<boolean>>();
 
 /**
- * Raise the subject's counters to the D1 aggregate, at most once per isolate.
+ * How many subject-periods one isolate remembers having reconciled. Bounded
+ * because an isolate is long-lived and this map is otherwise append-only: a
+ * busy instance would keep an entry per subject for the life of the process.
+ * Oldest out first (a `Map` iterates in insertion order); the only cost of
+ * forgetting one is a repeat of a read that raises nothing.
+ */
+const RECONCILE_MEMO_LIMIT = 1_000;
+
+/**
+ * Raise the subject's counters to the D1 aggregate, at most once per isolate —
+ * and only once it has actually SUCCEEDED.
+ *
+ * A failed reconcile is forgotten rather than remembered: memoizing before the
+ * read returned meant one D1 blip disabled the floor for that subject for the
+ * life of the isolate, so a counter behind the ledger stayed behind it and the
+ * subject spent the difference twice.
  *
  * `source = "platform"` is not optional here and not a detail: migration 049
  * keys usage on `(owner_id, period, meter, source)` exactly so a project paying
@@ -234,16 +294,58 @@ async function reconcileFloor(
   period: string,
 ): Promise<void> {
   const key = `${subject.ownerType}:${subject.ownerId}:${period}`;
-  if (reconciled.has(key)) return;
-  reconciled.add(key);
-  if (!env.DB) return;
-  const totals = await getOwnerMeterTotals(env.DB, logger, subject.ownerId, period, "platform");
-  if (!totals.success) return;
-  const stub = meterNamespace.get(
-    meterNamespace.idFromName(usageMeterName(subject.ownerType, subject.ownerId)),
-  );
-  for (const [meter, quantity] of Object.entries(totals.data)) {
-    if (typeof quantity === "number") await stub.setFloor(meter as MeterKey, quantity, period);
+  const inFlight = reconciled.get(key);
+  if (inFlight) {
+    await inFlight;
+    return;
+  }
+  const run = applyFloor(env, logger, meterNamespace, subject, period);
+  reconciled.set(key, run);
+  if (reconciled.size > RECONCILE_MEMO_LIMIT) {
+    const oldest = reconciled.keys().next();
+    if (!oldest.done) reconciled.delete(oldest.value);
+  }
+  if (!(await run)) reconciled.delete(key);
+}
+
+/**
+ * The reconcile itself. Never rejects: a floor that could not be applied leaves
+ * an allowance read too low, which is a billing problem, where a rejection here
+ * would be a merge that failed because of metering.
+ *
+ * @returns Whether the floor landed, so the caller knows whether to remember it
+ */
+async function applyFloor(
+  env: Env,
+  logger: Logger,
+  meterNamespace: NonNullable<Env["USAGE_METER"]>,
+  subject: EnforcementSubject,
+  period: string,
+): Promise<boolean> {
+  if (!env.DB) return false;
+  try {
+    const totals = await getOwnerMeterTotals(env.DB, logger, subject.ownerId, period, "platform");
+    if (!totals.success) return false;
+    const stub = meterNamespace.get(
+      meterNamespace.idFromName(usageMeterName(subject.ownerType, subject.ownerId)),
+    );
+    for (const [meter, quantity] of Object.entries(totals.data)) {
+      // The key set is validated by the read, so this is a narrowing and not a
+      // trust decision; anything else in the table is not a meter this build
+      // has a limit for, and must not be written into the counter.
+      if (isMeterKey(meter) && typeof quantity === "number") {
+        await stub.setFloor(meter, quantity, period);
+      }
+    }
+    return true;
+  } catch (error) {
+    logger.warn("Usage floor could not be reconciled; the counter may lag the ledger", {
+      subjectId: subject.ownerId,
+      subjectType: subject.ownerType,
+      period,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
   }
 }
 
@@ -269,8 +371,10 @@ export interface MeterCheckOptions {
  * against a shared total; `reserve` admits or refuses the whole bound
  * atomically, and {@link settleMeter} hands back the difference.
  *
- * A refusal takes no reservation (the meter does not count what it refuses), so
- * only an admitted decision reports `reserved`.
+ * A BINDING refusal takes no reservation — the meter does not count what it
+ * actually stops — so `reserved` is what the meter reports it counted, not what
+ * the limit said. Under observe-only a refusal IS counted, because the spend
+ * goes ahead regardless and an uncounted one is a measurement thrown away.
  */
 export async function checkMeter(
   env: Env,
@@ -301,8 +405,14 @@ export async function checkMeter(
   const stub = meterNamespace.get(
     meterNamespace.idFromName(usageMeterName(opts.subject.ownerType, opts.subject.ownerId)),
   );
-  const outcome = await stub.reserve(opts.meter, opts.estimate, limit, period, nowMs);
   const enforcing = enforcementBinding(env);
+  // Observe-only counts what it refuses. The refusal does not bind, so the
+  // spend it did not stop still happens; a counter that froze at the limit
+  // would leave the measurement period unable to answer the one question it
+  // exists for — by how much would this subject have gone over?
+  const outcome = await stub.reserve(opts.meter, opts.estimate, limit, period, nowMs, {
+    countRefused: !enforcing,
+  });
   const refused = !outcome.admitted;
 
   const decision: EnforcementDecision = {
@@ -310,7 +420,7 @@ export async function checkMeter(
     refused,
     enforcing,
     checked: true,
-    reserved: outcome.admitted,
+    reserved: outcome.counted,
     limit,
     count: outcome.count,
   };

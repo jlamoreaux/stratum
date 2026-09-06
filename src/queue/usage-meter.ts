@@ -109,6 +109,17 @@ interface RateRecord {
 
 export interface MeterReserveOutcome {
   admitted: boolean;
+  /**
+   * Whether the estimate was actually added to the counter, and therefore needs
+   * settling.
+   *
+   * Not the same as {@link MeterReserveOutcome.admitted}, and the difference is
+   * the whole point of `countRefused`: under observe-only a refused reservation
+   * is still counted, so the month of measurement can say by HOW MUCH a subject
+   * would have been blocked rather than only that it would have been. Callers
+   * gate on `admitted` and settle on `counted`.
+   */
+  counted: boolean;
   /** The counter after this call. Reported for logging and telemetry; callers gate on `admitted`. */
   count: number;
 }
@@ -217,7 +228,14 @@ export class UsageMeter extends DurableObject<Env> {
    * @param limit - The subject's allowance: `-1` unlimited, `0` a hard block, otherwise a ceiling
    * @param period - 'YYYY-MM' UTC, from `usagePeriod`; ignored by rate meters
    * @param nowMs - Caller's clock, so one request's counters cannot straddle a window boundary
-   * @returns Whether the reservation was admitted, and the counter after this call
+   * @param opts.countRefused - Count the estimate even when the limit refuses it.
+   *   Passed by an observe-only caller, whose refusals do not bind: a counter
+   *   that stopped moving at the limit would freeze exactly when the measurement
+   *   gets interesting, and `tokensReserved` would stay null so the true cost
+   *   was never settled either. It never widens what is ADMITTED — `admitted`
+   *   still reports what the limit says.
+   * @returns Whether the reservation was admitted, whether it was counted, and
+   *   the counter after this call
    */
   async reserve(
     meter: UsageMeterKey,
@@ -225,6 +243,7 @@ export class UsageMeter extends DurableObject<Env> {
     limit: number,
     period: string,
     nowMs: number,
+    opts: { countRefused?: boolean } = {},
   ): Promise<MeterReserveOutcome> {
     const usable = usableQuantity(estimate);
     if (usable === null) {
@@ -238,8 +257,9 @@ export class UsageMeter extends DurableObject<Env> {
       });
     }
     const quantity = usable ?? 0;
-    if (isRateMeter(meter)) return this.reserveRate(meter, quantity, limit, nowMs);
-    return this.reservePeriod(meter, quantity, limit, period);
+    const countRefused = opts.countRefused === true;
+    if (isRateMeter(meter)) return this.reserveRate(meter, quantity, limit, nowMs, countRefused);
+    return this.reservePeriod(meter, quantity, limit, period, countRefused);
   }
 
   /**
@@ -443,11 +463,12 @@ export class UsageMeter extends DurableObject<Env> {
     quantity: number,
     limit: number,
     period: string,
+    countRefused: boolean,
   ): Promise<MeterReserveOutcome> {
     const endsAt = periodEndMs(period);
     if (endsAt === null) {
       warn("Usage meter reserve admitted: unparseable period", { meter, period });
-      return { admitted: true, count: 0 };
+      return { admitted: true, counted: false, count: 0 };
     }
     const record = await this.ctx.storage.get<PeriodRecord>(PERIOD_KEY);
     // A record from an earlier month reads as zero rather than being deleted:
@@ -461,15 +482,17 @@ export class UsageMeter extends DurableObject<Env> {
         limit: String(limit),
       });
     }
-    if (!decision.admitted) return { admitted: false, count: current };
+    if (!decision.admitted && !countRefused) {
+      return { admitted: false, counted: false, count: current };
+    }
     const next = current + quantity;
     await this.ctx.storage.put<PeriodRecord>(PERIOD_KEY, {
       period,
       counts: { ...counts, [meter]: next },
     });
-    // Re-armed on every admission so the erase always trails the live period.
+    // Re-armed on every count so the erase always trails the live period.
     await this.armCleanup(endsAt + CLEANUP_GRACE_MS);
-    return { admitted: true, count: next };
+    return { admitted: decision.admitted, counted: true, count: next };
   }
 
   private async reserveRate(
@@ -477,6 +500,7 @@ export class UsageMeter extends DurableObject<Env> {
     quantity: number,
     limit: number,
     nowMs: number,
+    countRefused: boolean,
   ): Promise<MeterReserveOutcome> {
     if (!isUsableClock(nowMs)) {
       // Admit and count nothing, as with every other malformed input. Counting
@@ -487,7 +511,7 @@ export class UsageMeter extends DurableObject<Env> {
         meter,
         nowMs: String(nowMs),
       });
-      return { admitted: true, count: 0 };
+      return { admitted: true, counted: false, count: 0 };
     }
     const window = RATE_WINDOWS[meter];
     const bucket = bucketId(nowMs, window.bucketSeconds);
@@ -501,14 +525,16 @@ export class UsageMeter extends DurableObject<Env> {
         limit: String(limit),
       });
     }
-    if (!decision.admitted) return { admitted: false, count: total };
+    if (!decision.admitted && !countRefused) {
+      return { admitted: false, counted: false, count: total };
+    }
     const key = String(bucket);
     live[key] = (live[key] ?? 0) + quantity;
     await this.ctx.storage.put<RateRecord>(RATE_KEY, {
       meters: { ...record?.meters, [meter]: live },
     });
     await this.armCleanup(rateExpiresAt(bucket, window));
-    return { admitted: true, count: total + quantity };
+    return { admitted: decision.admitted, counted: true, count: total + quantity };
   }
 
   /**

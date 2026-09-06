@@ -136,8 +136,10 @@ export const UsagePage: FC<UsagePageProps> = ({ user, report, usageNotice }) => 
       </dl>
       <p class="settings-help">
         {report.metered
-          ? "An allowance follows your account, not a project: everything you run, in any namespace, is checked against the figures below."
-          : "This instance is not configured with a billing service, so no allowance is enforced here. Usage is still recorded, and every limit below reads as unlimited."}
+          ? report.usedSource === "meter"
+            ? "An allowance follows your account, not a project: these are the live counters your work is checked against, wherever you run it — your own namespace or an organization's."
+            : "An allowance follows your account, not a project. The counters those checks use could not be read just now, so the figures below are the recorded ledger for your account: work done in an organization's namespace is recorded against the organization and is not included here."
+          : "This instance is not configured with a billing service, so no allowance is enforced here. The figures below are what has been recorded against your account, and every limit reads as unlimited."}
       </p>
     </div>
 

@@ -37,7 +37,7 @@ import type { UsageWriteTotal } from "../storage/usage";
 import { getUser } from "../storage/users";
 import type { Env } from "../types";
 import type { Logger } from "../utils/logger";
-import { periodResetsAt, resolveEnforcementSubject } from "./enforcement";
+import { enforcementBinding, periodResetsAt, resolveEnforcementSubject } from "./enforcement";
 import { RemoteEntitlements, UnlimitedEntitlements, entitlementsEnabled } from "./entitlements";
 import { recordUsageBanner } from "./usage-banner";
 
@@ -125,6 +125,17 @@ async function deliver(env: Env, logger: Logger, input: UsageNoticeInput): Promi
     subject.ownerId,
     subject.ownerType,
   );
+  if (!resolved.success) {
+    // Fails open like every other reader — unlimited has no 80%, so this warns
+    // about nothing — but never silently: a warning nobody got because the
+    // billing service was unreachable is the failure Goal 10 exists to prevent,
+    // and it must be visible in the log rather than inferred from its absence.
+    logger.warn("Usage threshold check fell back to unlimited: entitlements unreadable", {
+      subjectId: subject.ownerId,
+      subjectType: subject.ownerType,
+      error: resolved.error.message,
+    });
+  }
   const entitlements = resolved.success ? resolved.data.entitlements : UnlimitedEntitlements;
 
   for (const total of platform) {
@@ -237,6 +248,10 @@ async function send(
     percent: THRESHOLD_PERCENT,
     period: opts.period,
     resetsAt: periodResetsAt(opts.period),
+    // What happens at 100% is a question about whether limits BIND, not about
+    // whether they exist: during the observe-only month nothing is refused, and
+    // a mail that says otherwise is teaching people to disbelieve it later.
+    enforcing: enforcementBinding(env),
   });
   await env.EMAIL.send({
     to: user.data.email,

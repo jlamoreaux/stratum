@@ -54,7 +54,7 @@ describe("UsageMeter.reserve", () => {
 
     const outcome = await stub.reserve("llm_tokens_month", 5000, 1000, PERIOD, NOW);
 
-    expect(outcome).toEqual({ admitted: false, count: 0 });
+    expect(outcome).toEqual({ admitted: false, counted: false, count: 0 });
     // A refusal writes nothing, so the counter is untouched for the next caller.
     expect((await stub.read(PERIOD)).counts.llm_tokens_month).toBeUndefined();
   });
@@ -65,7 +65,7 @@ describe("UsageMeter.reserve", () => {
     await stub.reserve("llm_tokens_month", 900, 1000, PERIOD, NOW);
     const deploys = await stub.reserve("deploys_month", 1, 5, PERIOD, NOW);
 
-    expect(deploys).toEqual({ admitted: true, count: 1 });
+    expect(deploys).toEqual({ admitted: true, counted: true, count: 1 });
     expect((await stub.read(PERIOD)).counts).toEqual({ llm_tokens_month: 900, deploys_month: 1 });
   });
 
@@ -76,7 +76,38 @@ describe("UsageMeter.reserve", () => {
 
     // Counting under an unlimited plan is the point of the observe-only period:
     // an unmetered "unlimited" would make a month of measurement worthless.
-    expect(outcome).toEqual({ admitted: true, count: 10_000_000 });
+    expect(outcome).toEqual({ admitted: true, counted: true, count: 10_000_000 });
+  });
+
+  it("counts a refusal when the caller says the refusal does not bind", async () => {
+    // Observe-only (`countRefused`). The refusal is still reported — the limit
+    // says what it says — but the quantity is counted, because the spend it did
+    // not stop still happens and an uncounted one is a measurement thrown away.
+    const { stub } = meter();
+
+    const first = await stub.reserve("llm_tokens_month", 900, 1000, PERIOD, NOW, {
+      countRefused: true,
+    });
+    const over = await stub.reserve("llm_tokens_month", 900, 1000, PERIOD, NOW, {
+      countRefused: true,
+    });
+
+    expect(first).toEqual({ admitted: true, counted: true, count: 900 });
+    expect(over).toEqual({ admitted: false, counted: true, count: 1800 });
+    expect((await stub.read(PERIOD)).counts.llm_tokens_month).toBe(1800);
+  });
+
+  it("counts a refused rate reservation too, on the same terms", async () => {
+    const { stub } = meter();
+
+    for (let i = 0; i < 3; i++) {
+      await stub.reserve("evaluations_per_hour", 1, 3, PERIOD, NOW, { countRefused: true });
+    }
+    const over = await stub.reserve("evaluations_per_hour", 1, 3, PERIOD, NOW, {
+      countRefused: true,
+    });
+
+    expect(over).toEqual({ admitted: false, counted: true, count: 4 });
   });
 
   it("treats 0 as a hard block, including for a zero-cost reservation", async () => {
@@ -104,7 +135,7 @@ describe("UsageMeter malformed input", () => {
 
     const outcome = await stub.reserve("llm_tokens_month", 500, limit as number, PERIOD, NOW);
 
-    expect(outcome).toEqual({ admitted: true, count: 500 });
+    expect(outcome).toEqual({ admitted: true, counted: true, count: 500 });
   });
 
   it("keeps admitting under a malformed limit rather than degrading to a block", async () => {
@@ -125,7 +156,7 @@ describe("UsageMeter malformed input", () => {
 
     // A NaN added to the counter would never compare below a limit again — the
     // subject would be blocked for the rest of the month by a bad estimate.
-    expect(bad).toEqual({ admitted: true, count: 100 });
+    expect(bad).toEqual({ admitted: true, counted: true, count: 100 });
     expect((await stub.read(PERIOD)).counts.llm_tokens_month).toBe(100);
     expect((await stub.reserve("llm_tokens_month", 950, 1000, PERIOD, NOW)).admitted).toBe(false);
   });
@@ -234,7 +265,7 @@ describe("UsageMeter period rollover", () => {
       NOW + 31 * 24 * HOUR_MS,
     );
 
-    expect(rolled).toEqual({ admitted: true, count: 100 });
+    expect(rolled).toEqual({ admitted: true, counted: true, count: 100 });
     // One key holds the period, so the rollover overwrote the old counts
     // instead of leaving a record per month for something to sweep.
     expect((await stub.read(PERIOD)).counts).toEqual({});
@@ -363,7 +394,7 @@ describe("UsageMeter evaluations_per_hour", () => {
 
     const later = await stub.reserve("evaluations_per_hour", 1, 12, PERIOD, NOW + HOUR_MS);
 
-    expect(later).toEqual({ admitted: true, count: 1 });
+    expect(later).toEqual({ admitted: true, counted: true, count: 1 });
   });
 
   it("is not reset by the month rolling", async () => {
@@ -448,7 +479,7 @@ describe("UsageMeter evaluations_per_hour", () => {
     const { stub } = meter();
 
     const bad = await stub.reserve("evaluations_per_hour", 1, 1, PERIOD, badClock);
-    expect(bad).toEqual({ admitted: true, count: 0 });
+    expect(bad).toEqual({ admitted: true, counted: false, count: 0 });
 
     // And the good clock that follows is unaffected — the whole allowance is
     // still there, which is what "counts nothing" has to mean.
@@ -461,7 +492,7 @@ describe("UsageMeter evaluations_per_hour", () => {
 
     const outcome = await stub.reserve("evaluations_per_hour", 1, 1, PERIOD, Number.NaN);
 
-    expect(outcome).toEqual({ admitted: true, count: 0 });
+    expect(outcome).toEqual({ admitted: true, counted: false, count: 0 });
   });
 });
 
@@ -560,7 +591,7 @@ describe("usageMeterName", () => {
     await user.reserve("llm_tokens_month", 900, 1000, PERIOD, NOW);
     const orgOutcome = await org.reserve("llm_tokens_month", 900, 1000, PERIOD, NOW);
 
-    expect(orgOutcome).toEqual({ admitted: true, count: 900 });
+    expect(orgOutcome).toEqual({ admitted: true, counted: true, count: 900 });
     expect([...instances.keys()].sort()).toEqual(["org:abc", "user:abc"]);
   });
 });

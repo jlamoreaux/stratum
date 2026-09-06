@@ -309,13 +309,34 @@ export async function runEvaluation(
 ): Promise<{ evalRuns: EvaluationRun[]; evalResult: EvalResult }> {
   const evalRuns = await Promise.all(
     evaluators.map(async ({ type, evaluator }) => {
-      const result = await evaluator.evaluate(diff, policy, logger, context);
-      return {
-        evaluatorType: type,
-        result: result.success
-          ? result.data
-          : { score: 0, passed: false, reason: result.error.message },
-      };
+      // `evaluate` returns a Result by contract, and this catch is what keeps
+      // that contract from being a promise the caller cannot rely on. One
+      // evaluator that REJECTS — a Durable Object RPC that could not be
+      // reached, a runtime fault — would otherwise reject this `Promise.all`
+      // and take change creation down with it, discarding every other
+      // evaluator's verdict on the way. A gate that could not run is a gate
+      // that did not pass; it is reported as a failing verdict, exactly as a
+      // returned error already is, and never as a missing one.
+      try {
+        const result = await evaluator.evaluate(diff, policy, logger, context);
+        return {
+          evaluatorType: type,
+          result: result.success
+            ? result.data
+            : { score: 0, passed: false, reason: result.error.message },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(
+          `Evaluator "${type}" threw instead of returning a result`,
+          error instanceof Error ? error : new Error(message),
+          { evaluatorType: type },
+        );
+        return {
+          evaluatorType: type,
+          result: { score: 0, passed: false, reason: `${type} evaluator failed: ${message}` },
+        };
+      }
     }),
   );
 

@@ -28,6 +28,7 @@ import { LLMEvaluator } from "../src/evaluation/llm-evaluator";
 import type { LlmProvider } from "../src/evaluation/llm-provider";
 import type { EvalPolicy, EvaluationContext } from "../src/evaluation/types";
 import { rateLimitMiddleware } from "../src/middleware/rate-limit";
+import { projectsRouter } from "../src/routes/projects";
 import { recordCosts } from "../src/storage/costs";
 import { insertDeployment } from "../src/storage/deployments";
 import { setProject } from "../src/storage/state";
@@ -171,6 +172,31 @@ describe("inert with BILLING_SERVICE_URL unset (PRD Goal 3)", () => {
     expect(meters.calls).toEqual([]);
   });
 
+  it("issues no request of any kind: the billing service is never called", async () => {
+    // `entitlementsEnabled` is the first line of every entry point, and the
+    // claim it protects is not "no refusal" but "no dependency": a self-hoster's
+    // merge path must not acquire a network call to a service they do not run.
+    const userId = nextUserId();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const provider = llmProvider();
+
+    await new LLMEvaluator(provider, "platform", { env: selfHostedEnv() }).evaluate(
+      "diff",
+      POLICY,
+      logger,
+      billingContext(userId, userId),
+    );
+    await checkGauge(selfHostedEnv(), logger, {
+      subject: { ownerId: userId, ownerType: "user", pooled: false },
+      count: "private_projects",
+      current: 99,
+      what: "Creating another private project",
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
   it("never touches the meter binding from a direct check", async () => {
     const decision = await checkMeter(selfHostedEnv(), logger, {
       subject: { ownerId: nextUserId(), ownerType: "user", pooled: false },
@@ -253,6 +279,42 @@ describe("the enforcement subject (PRD §4a)", () => {
   it("names nobody when there is neither an actor nor a resolvable owner", async () => {
     expect(await resolveEnforcementSubject(makeEnv(), logger, {})).toBeNull();
   });
+
+  it("reports the check unavailable for an org with no actor, not a new subject", async () => {
+    // The §4a hole in its exact shape: no actor (a queue consumer), an
+    // org-owned project, and nothing cached about the org's plan. Reading the
+    // recorded owner as the subject here would give the org a counter of its
+    // own AND a permanent cache miss resolving to unlimited — a fresh,
+    // permanently unlimited allowance for every org anyone cares to create.
+    const subject = await resolveEnforcementSubject(makeEnv(), logger, {
+      owner: { ownerId: "org_no_actor", ownerType: "org" },
+    });
+
+    expect(subject).toBeNull();
+  });
+
+  it("still pools onto a PAID org with no actor, because that signal is positive", async () => {
+    cachePlan("org", "org_paid_queue", plan({ plan: "team", pooled: true }));
+
+    const subject = await resolveEnforcementSubject(makeEnv(), logger, {
+      owner: { ownerId: "org_paid_queue", ownerType: "org" },
+    });
+
+    expect(subject).toEqual({ ownerId: "org_paid_queue", ownerType: "org", pooled: true });
+  });
+
+  it("costs no D1 walk at all when the billing service is unconfigured", async () => {
+    // The agent walk is a D1 read on the deploy path, and with the seam off it
+    // feeds a check that cannot refuse anything. A self-hoster does not pay it.
+    const prepare = vi.spyOn(db, "prepare");
+    const subject = await resolveEnforcementSubject(selfHostedEnv(), logger, {
+      owner: { ownerId: "agt_1", ownerType: "agent" },
+    });
+
+    expect(subject).toBeNull();
+    expect(prepare).not.toHaveBeenCalled();
+    prepare.mockRestore();
+  });
 });
 
 describe("reserve and settle", () => {
@@ -303,6 +365,120 @@ describe("reserve and settle", () => {
     const stub = meters.namespace.get(meters.namespace.idFromName(`user:${userId}`));
     // The whole reservation came back: nothing was spent, so nothing is charged.
     expect((await stub.read(PERIOD)).counts.llm_tokens_month).toBe(0);
+  });
+});
+
+describe("observe-only keeps measuring past the limit", () => {
+  it("counts a refused reservation, so the overage is measurable", async () => {
+    const userId = nextUserId();
+    const subject = { ownerId: userId, ownerType: "user" as const, pooled: false };
+    cachePlan("user", userId, tokenPlan(1_000));
+    const env = makeEnv();
+    const spend = async (estimate: number) =>
+      await checkMeter(env, logger, {
+        subject,
+        meter: "llm_tokens_month",
+        estimate,
+        nowMs: NOW,
+        period: PERIOD,
+        what: "AI review",
+      });
+
+    const under = await spend(900);
+    const over = await spend(900);
+    const further = await spend(900);
+
+    // Every one of them ran: nothing binds. What must not happen is the counter
+    // stopping at the limit — the month of measurement exists to answer "by how
+    // much would this account have been blocked", and a frozen counter cannot.
+    expect([under.admitted, over.admitted, further.admitted]).toEqual([true, true, true]);
+    expect([under.refused, over.refused, further.refused]).toEqual([false, true, true]);
+    expect(further.count).toBe(2_700);
+    const stub = meters.namespace.get(meters.namespace.idFromName(`user:${userId}`));
+    expect((await stub.read(PERIOD)).counts.llm_tokens_month).toBe(2_700);
+  });
+
+  it("reports a refusal it counted as reserved, so the true cost is still settled", async () => {
+    const userId = nextUserId();
+    const subject = { ownerId: userId, ownerType: "user" as const, pooled: false };
+    cachePlan("user", userId, tokenPlan(0));
+
+    const decision = await checkMeter(makeEnv(), logger, {
+      subject,
+      meter: "llm_tokens_month",
+      estimate: 4_000,
+      nowMs: NOW,
+      period: PERIOD,
+      what: "AI review",
+    });
+    // Refused, admitted, and RESERVED: without the last one `tokensReserved`
+    // stays null and the 3,100 unused tokens of that estimate are never handed
+    // back, so the counter drifts to the reservation instead of the spend.
+    expect(decision).toMatchObject({ admitted: true, refused: true, reserved: true });
+
+    await settleMeter(makeEnv(), logger, {
+      subject,
+      meter: "llm_tokens_month",
+      delta: 900 - 4_000,
+      nowMs: NOW,
+      period: PERIOD,
+    });
+    const stub = meters.namespace.get(meters.namespace.idFromName(`user:${userId}`));
+    expect((await stub.read(PERIOD)).counts.llm_tokens_month).toBe(900);
+  });
+
+  it("counts nothing it refuses once enforcement binds", async () => {
+    const userId = nextUserId();
+    const subject = { ownerId: userId, ownerType: "user" as const, pooled: false };
+    cachePlan("user", userId, tokenPlan(1_000));
+
+    const env = makeEnv({ ENTITLEMENTS_ENFORCE: "1" } as Partial<Env>);
+    const decision = await checkMeter(env, logger, {
+      subject,
+      meter: "llm_tokens_month",
+      estimate: 4_000,
+      nowMs: NOW,
+      period: PERIOD,
+      what: "AI review",
+    });
+
+    expect(decision).toMatchObject({ admitted: false, refused: true, reserved: false });
+    const stub = meters.namespace.get(meters.namespace.idFromName(`user:${userId}`));
+    expect((await stub.read(PERIOD)).counts.llm_tokens_month).toBeUndefined();
+  });
+});
+
+describe("a settle that fails is not a merge outage", () => {
+  it("still returns the evaluator's verdict when the meter RPC throws", async () => {
+    const userId = nextUserId();
+    cachePlan("user", userId, tokenPlan(100_000));
+    const provider = llmProvider();
+    // The failure the meter's malformed-input deviation exists to prevent,
+    // arriving through the settle instead: an unreachable Durable Object in a
+    // `finally` would replace the Result with a rejection, reject the
+    // `Promise.all` in `runEvaluation`, and fail change creation outright.
+    const exploding = {
+      idFromName: meters.namespace.idFromName.bind(meters.namespace),
+      get: (id: unknown) => {
+        const stub = meters.namespace.get(id as never);
+        return {
+          ...stub,
+          reserve: stub.reserve.bind(stub),
+          read: stub.read.bind(stub),
+          setFloor: stub.setFloor.bind(stub),
+          settle: async () => {
+            throw new Error("durable object unreachable");
+          },
+        };
+      },
+    } as unknown as Env["USAGE_METER"];
+
+    const result = await new LLMEvaluator(provider, "platform", {
+      env: makeEnv({ USAGE_METER: exploding } as Partial<Env>),
+    }).evaluate("diff", POLICY, logger, billingContext(userId, userId));
+
+    expect(result.success && result.data.passed).toBe(true);
+    expect(provider.run).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -412,6 +588,183 @@ describe("usage reads for a limit check (PRD §4a, Goal 5)", () => {
       what: "AI review",
     });
     expect(decision.count).toBe(700);
+  });
+});
+
+describe("reconciling the counter against the ledger", () => {
+  it("retries after a failed read instead of disabling the floor for the isolate", async () => {
+    // The memo used to be written BEFORE the read returned, so one D1 blip left
+    // that subject's counter unreconciled for the life of the isolate — and the
+    // ledger's spend was then free to be spent a second time.
+    const userId = nextUserId();
+    const subject = { ownerId: userId, ownerType: "user" as const, pooled: false };
+    cachePlan("user", userId, tokenPlan(10_000));
+    await upsertUsage(db, logger, subject, PERIOD, [
+      { meter: "llm_tokens_month", quantity: 600, source: "platform" },
+    ]);
+    const check = async () =>
+      await checkMeter(makeEnv(), logger, {
+        subject,
+        meter: "llm_tokens_month",
+        estimate: 100,
+        nowMs: NOW,
+        period: PERIOD,
+        what: "AI review",
+      });
+
+    const prepare = vi.spyOn(db, "prepare").mockImplementationOnce(() => {
+      throw new Error("D1 unavailable");
+    });
+    const blind = await check();
+    prepare.mockRestore();
+    const reconciled = await check();
+
+    // The first check could not see the ledger; the second one must.
+    expect(blind.count).toBe(100);
+    expect(reconciled.count).toBe(700);
+  });
+});
+
+describe("the private project gauge through POST /projects (PRD §4a)", () => {
+  const ORG_ID = "org_acme";
+
+  function projectApp(userId: string, username: string) {
+    const application = new Hono<{ Bindings: Env }>();
+    application.use("*", async (c, next) => {
+      c.set("userId", userId);
+      c.set("username", username);
+      await next();
+    });
+    application.route("/projects", projectsRouter);
+    return (body: Record<string, unknown>) =>
+      application.fetch(
+        new Request("https://t.test/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        makeEnv({
+          ENTITLEMENTS_ENFORCE: "1",
+          // Never reached by a refusal; a creation that gets past the gauge
+          // fails here instead, which is how "not refused" is asserted.
+          ARTIFACTS: {
+            create: async () => {
+              throw new Error("artifacts unavailable in this test");
+            },
+          },
+        } as unknown as Partial<Env>),
+      );
+  }
+
+  async function seedProject(
+    namespace: string,
+    slug: string,
+    owner: { ownerId: string; ownerType: "user" | "org" },
+  ): Promise<void> {
+    const stored = await setProject(
+      kv,
+      {
+        id: `prj_${namespace}_${slug}`,
+        name: slug,
+        slug,
+        namespace,
+        ownerId: owner.ownerId,
+        ownerType: owner.ownerType,
+        remote: "https://acct.artifacts.cloudflare.net/git/acct/x.git",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        visibility: "private",
+      },
+      logger,
+    );
+    if (!stored.success) throw stored.error;
+  }
+
+  function seedOrg(memberId: string): void {
+    raw
+      .prepare("INSERT INTO orgs (id, name, slug, owner_id) VALUES (?, ?, ?, ?)")
+      .run(ORG_ID, "Acme", "acme", memberId);
+    raw
+      .prepare("INSERT INTO org_members (org_id, user_id, role) VALUES (?, ?, 'admin')")
+      .run(ORG_ID, memberId);
+  }
+
+  it("is not reset by creating the project in an org namespace", async () => {
+    // The vector §4a closes, in the surface that still had it: an actor at
+    // their limit made a free org and got a count of zero, because the count
+    // was taken over the TARGET namespace and the limit over the ACTOR.
+    const userId = createUser(nextUserId());
+    seedOrg(userId);
+    cachePlan("user", userId, plan({ counts: { private_projects: 2 } }));
+    await seedProject("@alice", "one", { ownerId: userId, ownerType: "user" });
+    await seedProject("@alice", "two", { ownerId: userId, ownerType: "user" });
+
+    const response = await projectApp(
+      userId,
+      "alice",
+    )({
+      name: "three",
+      visibility: "private",
+      org: "acme",
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("plan allows 2");
+  });
+
+  it("does not spend your gauge on projects you do not own", async () => {
+    // The inverse, which bit just as hard: being added to a busy org exhausted
+    // your personal allowance against an org's private projects.
+    const userId = createUser(nextUserId());
+    seedOrg(userId);
+    cachePlan("user", userId, plan({ counts: { private_projects: 2 } }));
+    for (const slug of ["a", "b", "c", "d", "e"]) {
+      await seedProject("@acme", slug, { ownerId: ORG_ID, ownerType: "org" });
+    }
+
+    const response = await projectApp(
+      userId,
+      "bob",
+    )({
+      name: "mine",
+      visibility: "private",
+      org: "acme",
+    });
+
+    // Not refused: this actor owns none of those five. The creation fails
+    // further on, at the repository, which is proof it got past the gauge.
+    expect(response.status).not.toBe(403);
+  });
+
+  it("costs a self-hoster no namespace listing at all", async () => {
+    // The listing is a KV list of a whole namespace, on every private project
+    // creation, feeding a check that is inert with no billing service.
+    const userId = createUser(nextUserId());
+    const list = vi.spyOn(kv, "list");
+    const application = new Hono<{ Bindings: Env }>();
+    application.use("*", async (c, next) => {
+      c.set("userId", userId);
+      c.set("username", "carol");
+      await next();
+    });
+    application.route("/projects", projectsRouter);
+
+    await application.fetch(
+      new Request("https://t.test/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "solo", visibility: "private" }),
+      }),
+      selfHostedEnv({
+        ARTIFACTS: {
+          create: async () => {
+            throw new Error("artifacts unavailable in this test");
+          },
+        },
+      } as unknown as Partial<Env>),
+    );
+
+    expect(list).not.toHaveBeenCalled();
+    list.mockRestore();
   });
 });
 
@@ -577,6 +930,65 @@ describe("the deploy volume check", () => {
       .get(inserted.data.deployment.id) as { status: string; reason: string };
     expect(row.status).toBe("failed");
     expect(row.reason).toContain("monthly deploy allowance");
+  });
+
+  it("gives the reserved unit back when this attempt does not run the deploy", async () => {
+    // A deploy meter has no natural settle, so a reservation taken by an
+    // attempt that stops before the claim is a unit charged to nobody's deploy.
+    // Two or three of those per deploy is an allowance that empties itself.
+    const userId = createUser(nextUserId());
+    await deployProject(userId);
+    cachePlan(
+      "user",
+      userId,
+      plan({ meters: { ...UnlimitedEntitlements.meters, deploys_month: 5 } }),
+    );
+
+    const inserted = await insertDeployment(db, logger, {
+      projectId: PROJECT_ID,
+      project: "api",
+      commitSha: SHA,
+      name: "production",
+      target: "vercel",
+      requestedByType: "user",
+      requestedById: userId,
+      now: "2026-09-15T00:00:00.000Z",
+    });
+    if (!inserted.success || !inserted.data.inserted) throw new Error("fixture insert failed");
+    // Someone else holds the lease: this attempt reserves, cannot claim, and
+    // returns the row to its owner.
+    raw
+      .prepare("UPDATE deployments SET status = 'running', lease_expires_at = ? WHERE id = ?")
+      .run("2099-01-01T00:00:00.000Z", inserted.data.deployment.id);
+
+    await runDeployMessage(
+      makeEnv({
+        ENTITLEMENTS_ENFORCE: "1",
+        ARTIFACTS: {
+          get: async () => ({ createToken: async () => ({ plaintext: "repo-token" }) }),
+        },
+      } as unknown as Partial<Env>),
+      { kind: "deployment", projectId: PROJECT_ID, deploymentId: inserted.data.deployment.id },
+      logger,
+      {
+        now: () => NOW,
+        readFiles: async () =>
+          ok(
+            new Map([
+              [
+                ".stratum/policy.yaml",
+                new TextEncoder().encode(
+                  "evaluators: []\ndeploys:\n  - name: production\n    target: vercel\n",
+                ),
+              ],
+            ]),
+          ),
+        fetch: vi.fn(async () => new Response("{}", { status: 200 })),
+      },
+    );
+
+    const stub = meters.namespace.get(meters.namespace.idFromName(`user:${userId}`));
+    expect((await stub.read(PERIOD)).counts.deploys_month).toBe(0);
   });
 });
 

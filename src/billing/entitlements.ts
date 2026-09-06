@@ -40,7 +40,7 @@
  * from consulting them (PRD §8) precisely so the fetch can be observed for a month
  * before it decides anything.
  */
-import type { MeterKey } from "../storage/usage";
+import { METER_KEYS, type MeterKey } from "../storage/usage";
 import type { Env } from "../types";
 import { type AppError, ValidationError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
@@ -60,12 +60,12 @@ export type CountKey = "private_projects";
  */
 export type RateKey = "requests_per_minute" | "evaluations_per_hour";
 
-/** Every meter a limit may be set on. Mirrors `MeterKey`; see `parseEntitlements`. */
-export const METER_KEYS: readonly MeterKey[] = [
-  "llm_tokens_month",
-  "sandbox_ms_month",
-  "deploys_month",
-];
+/**
+ * Every meter a limit may be set on. Re-exported from the storage layer that
+ * defines `MeterKey` rather than restated here: two lists that could drift are
+ * two answers to "which meters exist", and `parseEntitlements` reads this one.
+ */
+export { METER_KEYS };
 
 export const COUNT_KEYS: readonly CountKey[] = ["private_projects"];
 

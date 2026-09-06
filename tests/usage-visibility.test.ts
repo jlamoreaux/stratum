@@ -23,6 +23,7 @@ import { hashToken } from "../src/utils/crypto";
 import type { Logger } from "../src/utils/logger";
 import { makeFakeKV } from "./helpers/fake-kv";
 import { makeSqliteD1 } from "./helpers/sqlite-d1";
+import { makeUsageMeters } from "./helpers/usage-meter";
 
 const logger: Logger = {
   trace: vi.fn(),
@@ -47,7 +48,7 @@ function selfHosted(): Env {
   return { DB: db, STATE: kv } as unknown as Env;
 }
 
-/** A cloud instance with the billing seam configured. */
+/** A cloud instance with the billing seam configured, and no usage meter bound. */
 function cloud(): Env {
   return {
     DB: db,
@@ -55,6 +56,12 @@ function cloud(): Env {
     BILLING_SERVICE_URL: "https://billing.test",
     BILLING_SERVICE_SECRET: "s3cret",
   } as unknown as Env;
+}
+
+/** A cloud instance with the enforcement counters the checks actually read. */
+function metered(): { env: Env; meters: ReturnType<typeof makeUsageMeters> } {
+  const meters = makeUsageMeters();
+  return { env: { ...cloud(), USAGE_METER: meters.namespace } as unknown as Env, meters };
 }
 
 /**
@@ -96,6 +103,13 @@ beforeEach(async () => {
     .bind("usr_1", "alice@test", "alice", await hashToken(USER_TOKEN))
     .run();
 });
+
+/** How many `usage_periods` totals reads a spied `prepare` saw. */
+function totalsReads(prepare: { mock: { calls: unknown[][] } }): number {
+  return prepare.mock.calls.filter(
+    (call) => typeof call[0] === "string" && call[0].includes("FROM usage_periods"),
+  ).length;
+}
 
 describe("buildUsageReport", () => {
   it("states an unlimited limit as unlimited rather than as an empty bar", async () => {
@@ -182,6 +196,10 @@ describe("buildUsageReport", () => {
 
   it("omits the BYOK read entirely when the caller did not ask for it", async () => {
     await record("usr_1", "llm_tokens_month", 7, "byok");
+    // `byok: 0` alone would pass just as well if the read were issued and its
+    // result discarded, which is the opposite of what the flag is for. So the
+    // assertion is on the STATEMENT: one totals read, not two.
+    const prepare = vi.spyOn(db, "prepare");
 
     const report = await buildUsageReport(cloud(), logger, { actorUserId: "usr_1", at: AT });
     if (!report.success) throw report.error;
@@ -189,6 +207,23 @@ describe("buildUsageReport", () => {
       used: 0,
       byok: 0,
     });
+    expect(totalsReads(prepare)).toBe(1);
+    prepare.mockRestore();
+  });
+
+  it("issues exactly one more read when the caller does ask for BYOK", async () => {
+    await record("usr_1", "llm_tokens_month", 7, "byok");
+    const prepare = vi.spyOn(db, "prepare");
+
+    const report = await buildUsageReport(cloud(), logger, {
+      actorUserId: "usr_1",
+      at: AT,
+      includeByok: true,
+    });
+    if (!report.success) throw report.error;
+    expect(report.data.meters.find((m) => m.meter === "llm_tokens_month")?.byok).toBe(7);
+    expect(totalsReads(prepare)).toBe(2);
+    prepare.mockRestore();
   });
 
   it("reads the actor's own rows and nobody else's", async () => {
@@ -204,6 +239,56 @@ describe("buildUsageReport", () => {
   it("refuses to report usage for nobody", async () => {
     const report = await buildUsageReport(cloud(), logger, { actorUserId: "", at: AT });
     expect(report.success).toBe(false);
+  });
+});
+
+describe("what `used` is, when the ledger and the counter disagree", () => {
+  // The bug this closes: for a project in an org namespace the LEDGER records
+  // the org while the CHECK charges the actor's counter, so a user working only
+  // in org namespaces was shown "0 of 10,000" by a page summing D1 alone —
+  // while the counter refusing them was full.
+  it("reports the live counter, which is the number a limit is compared against", async () => {
+    await cacheLimits("usr_1", { llm_tokens_month: 10_000 });
+    const { env, meters } = metered();
+    const stub = meters.namespace.get(meters.namespace.idFromName("user:usr_1"));
+    await stub.reserve("llm_tokens_month", 8_000, 10_000, PERIOD, AT.getTime());
+    // Not one usage_periods row for this user: the spend was recorded against
+    // the org that owns the project.
+    await record("org_acme", "llm_tokens_month", 8_000, "platform");
+
+    const report = await buildUsageReport(env, logger, { actorUserId: "usr_1", at: AT });
+    if (!report.success) throw report.error;
+
+    expect(report.data.usedSource).toBe("meter");
+    expect(report.data.meters.find((m) => m.meter === "llm_tokens_month")).toMatchObject({
+      used: 8_000,
+      remaining: 2_000,
+      percentUsed: 80,
+    });
+  });
+
+  it("floors the counter with the ledger, exactly as a check does", async () => {
+    // `reconcileFloor` raises the counter to the D1 sum before a limit check, so
+    // a ledger ahead of a cold counter is what the next check will see.
+    await cacheLimits("usr_1", { llm_tokens_month: 10_000 });
+    await record("usr_1", "llm_tokens_month", 4_200, "platform");
+    const { env } = metered();
+
+    const report = await buildUsageReport(env, logger, { actorUserId: "usr_1", at: AT });
+    if (!report.success) throw report.error;
+    expect(report.data.meters.find((m) => m.meter === "llm_tokens_month")?.used).toBe(4_200);
+  });
+
+  it("says it is reporting the ledger when there are no counters to read", async () => {
+    // Every self-hoster, and any instance whose meter binding is missing: the
+    // figure is still real, it just means something narrower, and the page and
+    // the tool say which they are showing rather than implying the other.
+    await record("usr_1", "llm_tokens_month", 4_200, "platform");
+
+    const report = await buildUsageReport(selfHosted(), logger, { actorUserId: "usr_1", at: AT });
+    if (!report.success) throw report.error;
+    expect(report.data.usedSource).toBe("ledger");
+    expect(report.data.meters.find((m) => m.meter === "llm_tokens_month")?.used).toBe(4_200);
   });
 });
 
@@ -248,6 +333,51 @@ describe("the 80% banner", () => {
     // nothing sweeping the old one.
     await notice(900, 900);
     expect(await loadUsageBanner(cloud(), logger, "usr_1", "2026-10")).toBeNull();
+  });
+
+  it("keeps a second meter's crossing instead of overwriting the first", async () => {
+    // One slot per (user, period) meant the deploy warning silently replaced
+    // the token warning, and the reader was told about one of the two.
+    await cacheLimits("usr_1", { llm_tokens_month: 1000, deploys_month: 10 });
+    const pending: Array<Promise<unknown>> = [];
+    noticeUsageThresholds(cloud(), logger, {
+      recorded: { ownerId: "usr_1", ownerType: "user" },
+      actorUserId: "usr_1",
+      period: PERIOD,
+      totals: [
+        { meter: "llm_tokens_month", source: "platform", quantity: 800, added: 800 },
+        { meter: "deploys_month", source: "platform", quantity: 9, added: 9 },
+      ],
+      waitUntil: (promise) => pending.push(promise),
+    });
+    await Promise.all(pending);
+
+    // Both are stored; the one nearest its limit is the one worth the banner.
+    const stored = JSON.parse(kv.store.get(`usage-banner:v2:usr_1:${PERIOD}`) ?? "{}") as {
+      notices: Array<{ meter: string }>;
+    };
+    expect(stored.notices.map((n) => n.meter).sort()).toEqual([
+      "deploys_month",
+      "llm_tokens_month",
+    ]);
+    expect((await loadUsageBanner(cloud(), logger, "usr_1", PERIOD))?.meter).toBe("deploys_month");
+  });
+
+  it("does not promise a refusal while the account is only being measured", async () => {
+    await notice(800, 800);
+
+    const observing = await loadUsageBanner(cloud(), logger, "usr_1", PERIOD);
+    const binding = await loadUsageBanner(
+      { ...cloud(), ENTITLEMENTS_ENFORCE: "1" } as Env,
+      logger,
+      "usr_1",
+      PERIOD,
+    );
+
+    // The banner's last sentence turns on this, and the copy it was written for
+    // is the mode where nothing is refused at all.
+    expect(observing?.enforcing).toBe(false);
+    expect(binding?.enforcing).toBe(true);
   });
 
   it("is never shown on a self-hosted instance, and costs no read there", async () => {

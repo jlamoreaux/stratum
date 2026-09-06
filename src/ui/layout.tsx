@@ -42,6 +42,12 @@ interface LayoutProps {
  * chrome and not on `/settings/usage` alone. It has no dismiss control on
  * purpose: dismissal is state, state without script means a cookie or a POST,
  * and the notice is true until the period rolls over anyway.
+ *
+ * The last sentence turns on whether limits actually BIND
+ * (`enforcementBinding`), not on whether billing is configured. Through the
+ * observe-only month the instance has allowances and refuses nothing, and a
+ * banner promising a refusal that cannot happen teaches people to disbelieve
+ * the one that eventually does.
  */
 const UsageBanner: FC<{ notice: UsageBannerNotice }> = ({ notice }) => (
   // `<output>` rather than a div with role="status": it is the semantic element
@@ -51,8 +57,10 @@ const UsageBanner: FC<{ notice: UsageBannerNotice }> = ({ notice }) => (
     <span>
       You have used {notice.percent}% of this account's monthly{" "}
       {meterTitle(notice.meter).toLowerCase()} allowance for {notice.period} (
-      {notice.used.toLocaleString("en-US")} of {notice.limit.toLocaleString("en-US")}). Work that
-      needs it is refused once it runs out.
+      {notice.used.toLocaleString("en-US")} of {notice.limit.toLocaleString("en-US")}).{" "}
+      {notice.enforcing
+        ? "Work that needs it is refused once it runs out."
+        : "Nothing is refused yet — this instance is measuring usage, not enforcing it."}
     </span>
     <a href="/settings/usage">View usage</a>
   </output>

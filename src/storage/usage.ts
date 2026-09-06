@@ -15,6 +15,31 @@ import type { BillingSubject, CostKind, CostSource } from "./costs";
  */
 export type MeterKey = "llm_tokens_month" | "sandbox_ms_month" | "deploys_month";
 
+/**
+ * Every {@link MeterKey}, as values. The single list: `entitlements.ts`
+ * re-exports it so a limit lookup and a meter total cannot disagree about which
+ * meters exist.
+ */
+export const METER_KEYS: readonly MeterKey[] = [
+  "llm_tokens_month",
+  "sandbox_ms_month",
+  "deploys_month",
+];
+
+/**
+ * Whether a string read out of D1 (or out of KV, or off the wire) is a meter
+ * this build knows.
+ *
+ * The `meter` column carries no CHECK on purpose (migration 049), so the type
+ * is a claim about what we write, never a guarantee about what we read. A cast
+ * where that matters is how a row written by a future meter — or by a rollback
+ * to an older build — reaches `setFloor` and gets written into a counter under
+ * a key nothing can ever read back.
+ */
+export function isMeterKey(value: unknown): value is MeterKey {
+  return typeof value === "string" && (METER_KEYS as readonly string[]).includes(value);
+}
+
 /** One meter's increment. Quantities are added, never replaced. */
 export interface UsageDelta {
   meter: MeterKey;
@@ -308,7 +333,18 @@ export async function getOwnerMeterTotals(
       .all<{ meter: string; quantity: number }>();
     const totals: Partial<Record<MeterKey, number>> = {};
     for (const row of result.results) {
-      if (Number.isFinite(row.quantity)) totals[row.meter as MeterKey] = row.quantity;
+      // Validated, not cast: this total is what `reconcileFloor` writes into the
+      // usage meter, and an unrecognised meter string would be stored under a
+      // key no limit lookup can reach — counted forever, checked never.
+      if (!isMeterKey(row.meter)) {
+        logger.warn("Usage total skipped: unknown meter in usage_periods", {
+          ownerId,
+          period,
+          meter: String(row.meter),
+        });
+        continue;
+      }
+      if (Number.isFinite(row.quantity)) totals[row.meter] = row.quantity;
     }
     return ok(totals);
   } catch (error) {

@@ -189,7 +189,14 @@ export class LLMEvaluator implements Evaluator {
           // paying its own provider bill is not spending the hosted allowance,
           // so charging it against one would be charging twice.
           if (this.costSource === "platform") {
-            const estimate = Math.ceil(maxDiffChars / 4) + MAX_OUTPUT_TOKENS;
+            // The PROMPT that is about to be sent, not the window it is allowed
+            // to fill. Reserving `maxDiffChars` charged a three-line diff ~6,000
+            // tokens up front, so someone with 5,000 left was refused for a call
+            // that would have cost 300 — a refusal produced by the estimate
+            // rather than by the spend. It is still an upper bound: ~4 chars per
+            // token is the conservative direction for English and code, and the
+            // response is covered by MAX_OUTPUT_TOKENS on top.
+            const estimate = Math.ceil(promptChars / 4) + MAX_OUTPUT_TOKENS;
             const tokens = await checkMeter(env, logger, {
               subject,
               meter: "llm_tokens_month",
@@ -362,29 +369,40 @@ export class LLMEvaluator implements Evaluator {
       // the reservation. Leaving it standing would charge the subject the whole
       // upper bound for a run that produced nothing, and a handful of those
       // walls somebody off at a fraction of an allowance they never spent.
-      if (subject && this.enforcement) {
+      const settleSubject = subject;
+      if (settleSubject && this.enforcement) {
         const { env } = this.enforcement;
+        // Contained deliberately, exactly as `SandboxEvaluator` contains its
+        // teardown: an `await` that rejects inside `finally` REPLACES the
+        // returned Result with a rejection, which rejects the `Promise.all` in
+        // `runEvaluation` and fails change creation outright. A Durable Object
+        // RPC that cannot be reached is an operational problem to log — a
+        // correction to a counter, not a merge outage. It is the same failure
+        // the meter's malformed-input deviation exists to prevent, and it must
+        // not be reintroduced by the settle path.
+        const settle = async (
+          meter: "llm_tokens_month" | "evaluations_per_hour",
+          delta: number,
+        ) => {
+          try {
+            await settleMeter(env, logger, { subject: settleSubject, meter, delta, nowMs, period });
+          } catch (error) {
+            logger.error(
+              "Usage meter settle failed; the reservation stands until the period rolls",
+              error instanceof Error ? error : new Error(String(error)),
+              { meter, delta },
+            );
+          }
+        };
         if (tokensReserved !== null) {
-          await settleMeter(env, logger, {
-            subject,
-            meter: "llm_tokens_month",
-            delta: tokensSpent - tokensReserved,
-            nowMs,
-            period,
-          });
+          await settle("llm_tokens_month", tokensSpent - tokensReserved);
         }
         // A rate slot is given back only when the evaluation never reached the
         // provider — a token refusal after the rate check admitted. Once the
         // request is out the door the operator has paid for the subrequest and
         // the wall time it bounds, so a failed run still costs its slot.
         if (rateReserved && !reachedProvider) {
-          await settleMeter(env, logger, {
-            subject,
-            meter: "evaluations_per_hour",
-            delta: -1,
-            nowMs,
-            period,
-          });
+          await settle("evaluations_per_hour", -1);
         }
       }
     }

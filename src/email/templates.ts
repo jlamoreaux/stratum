@@ -305,6 +305,13 @@ export interface UsageThresholdEmailData {
   period: string;
   /** ISO 8601 instant the period rolls over and the allowance refills. */
   resetsAt: string;
+  /**
+   * Whether limits BIND on this instance (`enforcementBinding`), as opposed to
+   * merely existing. Through the observe-only month nothing is refused, and a
+   * mail saying evaluations "stop passing" would be describing a wall that is
+   * not there — so the consequence sentence is chosen from this, never assumed.
+   */
+  enforcing: boolean;
 }
 
 /** Human wording for a meter key. Falls back to the key so a new meter still sends. */
@@ -328,26 +335,31 @@ function meterTitle(meter: string): string {
  * Written as a heads-up rather than a warning, because it arrives while nothing
  * is blocked yet: it names what is running out, when it refills, and the two
  * ways to avoid meeting the wall. Sent only when the cloud entitlements service
- * is configured — a self-hoster has no limits to be warned about.
+ * is configured — a self-hoster has no limits to be warned about — and what it
+ * promises will happen at 100% depends on {@link UsageThresholdEmailData.enforcing},
+ * because through the observe-only month the answer is "nothing".
  */
 export function getUsageThresholdEmail(data: UsageThresholdEmailData): {
   subject: string;
   text: string;
   html: string;
 } {
-  const { used, limit, percent, period, resetsAt } = data;
+  const { used, limit, percent, period, resetsAt, enforcing } = data;
   const title = meterTitle(data.meter);
   const subject = `You've used ${percent}% of your Stratum ${title}`;
+  // Two true sentences rather than one convenient one; see `enforcing`.
+  const consequence = enforcing
+    ? "Nothing is blocked yet. When the allowance runs out, evaluations that need it stop\npassing until it refills."
+    : "Nothing is refused: this account's allowances are being measured, not enforced,\nand you will be told before that changes.";
 
   const text = `Heads up — this month's ${title} on your Stratum account is ${percent}% used.
 
 Used: ${used.toLocaleString("en-US")} of ${limit.toLocaleString("en-US")} (${period})
 Refills: ${resetsAt}
 
-Nothing is blocked yet. When the allowance runs out, evaluations that need it
-stop passing until it refills, so if you expect to need more this month you can
-either raise your plan limits or point the llm evaluator at your own provider
-key with \`provider:\` in .stratum/policy.yaml.
+${consequence} If you expect to need more this month you can either
+raise your plan limits or point the llm evaluator at your own provider key with
+\`provider:\` in .stratum/policy.yaml.
 
 --
 Stratum
@@ -363,7 +375,12 @@ Your code management platform`;
       for ${escapeHtml(period)}. The allowance refills at ${escapeHtml(resetsAt)}.
     </div>
     <div class="text-secondary" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 16px; line-height: 1.6; color: #a0a0a0;">
-      Nothing is blocked yet. If you expect to need more this month, raise your plan
+      ${
+        enforcing
+          ? "Nothing is blocked yet. When the allowance runs out, evaluations that need it stop passing until it refills."
+          : "Nothing is refused: this account's allowances are being measured, not enforced, and you will be told before that changes."
+      }
+      If you expect to need more this month, raise your plan
       limits, or point the <code style="color:#e5e5e5;">llm</code> evaluator at your own
       provider key with <code style="color:#e5e5e5;">provider:</code> in
       <code style="color:#e5e5e5;">.stratum/policy.yaml</code>.

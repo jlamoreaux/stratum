@@ -29,7 +29,7 @@
  * injects its own seams: without them, testing any of the above needs a real git
  * remote, a real clock, and a real provider account.
  */
-import { checkMeter, resolveEnforcementSubject } from "../billing/enforcement";
+import { checkMeter, resolveEnforcementSubject, settleMeter } from "../billing/enforcement";
 import { type LlmProviderCatalog, llmProviderCatalog } from "../evaluation/llm-providers";
 import { parsePolicyContent } from "../evaluation/policy-loader";
 import type { DeployConfig, DeployRejection } from "../evaluation/types";
@@ -583,7 +583,7 @@ async function runOneDeployment(
   // over a limit that redelivery cannot change, and it is never silently acked,
   // because a deploy that did not happen must be visible.
   const volume = await checkDeployVolume(ctx, deployment);
-  if (volume !== null) return await failWithoutRunning(ctx, deployment, volume);
+  if (volume.refusal !== null) return await failWithoutRunning(ctx, deployment, volume.refusal);
 
   const claim = await claimDeployment(env.DB, logger, {
     projectId: project.id,
@@ -595,6 +595,9 @@ async function runOneDeployment(
       deploymentId: deployment.id,
       projectId: project.id,
     });
+    // This message will be redelivered and will reserve again; the unit taken
+    // above belongs to no deploy, so it goes back.
+    await volume.release();
     return { deploymentId: deployment.id, name: deployment.name, status: deployment.status };
   }
   if (!claim.data.claimed) {
@@ -606,8 +609,14 @@ async function runOneDeployment(
       projectId: project.id,
       why: claim.data.reason,
     });
+    // Whoever does hold the lease reserved its own unit; this attempt's is not
+    // paying for anything.
+    await volume.release();
     return { deploymentId: deployment.id, name: deployment.name, status: deployment.status };
   }
+  // Past this point the attempt owns the row and the `finally` below always
+  // writes it terminal, so the reservation is spent on a deploy that happened —
+  // successful or failed — and is never released.
 
   const startedAt = ctx.now();
   /**
@@ -706,35 +715,74 @@ async function runOneDeployment(
   return record;
 }
 
+/** A volume decision, plus the means to hand back what it reserved. */
+interface DeployVolumeCheck {
+  /** Why this deploy may not run, or `null` when it may. */
+  refusal: string | null;
+  /**
+   * Gives back the unit this check reserved. Called on every path that does NOT
+   * go on to run the deploy, because `reserve` is a charge and only a deploy
+   * that actually happens should carry one.
+   */
+  release: () => Promise<void>;
+}
+
+/** Nothing was checked, so there is nothing to refuse and nothing to give back. */
+const NO_VOLUME_CHECK: DeployVolumeCheck = { refusal: null, release: async () => {} };
+
 /**
- * The reason this deploy may not run against the subject's allowance, or `null`
- * when it may.
+ * Whether this deploy fits the subject's monthly allowance.
  *
- * The enforcement subject is the deploy's requester when a human asked for it
- * (an approve or a retry), and otherwise the project's own billing subject: a
- * merge-triggered deploy names no acting user at all, and a check against the
- * recorded owner is weaker than PRD §4a wants but strictly better than the only
- * alternative here, which is no check.
+ * The enforcement subject is the deploy's requester when a human asked for one
+ * (an approve or a retry), and otherwise the project's own billing subject —
+ * but only when that names a PERSON. A merge-triggered deploy of an ORG-owned
+ * project names no actor, and `resolveEnforcementSubject` reports the check
+ * unavailable there rather than making the org its own subject, which would
+ * hand every org a fresh, permanently unlimited deploy allowance (PRD §4a). So
+ * that one case is deliberately unmetered, and logged where it happens.
  *
- * Inert with the billing service unconfigured — `checkMeter` returns before it
- * reads anything — so a self-hoster's deploys are untouched.
+ * Inert with the billing service unconfigured — `resolveEnforcementSubject`
+ * names nobody and `checkMeter` returns before it reads anything — so a
+ * self-hoster's deploys cost neither the D1 walk nor the check.
  */
-async function checkDeployVolume(ctx: RunContext, deployment: Deployment): Promise<string | null> {
+async function checkDeployVolume(
+  ctx: RunContext,
+  deployment: Deployment,
+): Promise<DeployVolumeCheck> {
   const { env, logger, project } = ctx;
   const actorUserId = deployment.requestedByType === "user" ? deployment.requestedById : undefined;
   const subject = await resolveEnforcementSubject(env, logger, {
     ...(actorUserId !== undefined ? { actorUserId } : {}),
     owner: { ownerId: project.ownerId, ownerType: project.ownerType },
   });
-  if (!subject) return null;
+  if (!subject) return NO_VOLUME_CHECK;
+  const nowMs = ctx.now();
   const decision = await checkMeter(env, logger, {
     subject,
     meter: "deploys_month",
     estimate: 1,
-    nowMs: ctx.now(),
+    nowMs,
     what: "This deployment",
   });
-  return decision.admitted ? null : (decision.reason ?? "Deploy allowance exhausted");
+  // A deploy meter has no natural settle — the true cost of a deploy is one
+  // deploy — so the reservation is released explicitly by whoever decides this
+  // attempt is not the one that runs. Without it, every attempt that stops
+  // before the claim (a lease held elsewhere, a D1 failure, a redelivered
+  // message) burned another unit, and one deploy could cost two or three.
+  const release = decision.reserved
+    ? async () => {
+        await settleMeter(env, logger, {
+          subject,
+          meter: "deploys_month",
+          delta: -1,
+          nowMs,
+        });
+      }
+    : NO_VOLUME_CHECK.release;
+  return {
+    refusal: decision.admitted ? null : (decision.reason ?? "Deploy allowance exhausted"),
+    release,
+  };
 }
 
 /**
