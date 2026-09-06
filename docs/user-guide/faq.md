@@ -121,9 +121,11 @@ agent, not laundered through a human account.
 ## What does it cost, and what is metered?
 
 The software is free software (see the licensing question below) and costs
-nothing; self-hosted, you pay only for the Cloudflare resources you use
-(Workers, Artifacts, D1, KV, Queues, plus Workers AI and Sandboxes if you
-enable those evaluators). Stratum meters estimated
+nothing; self-hosted, you pay only for the Cloudflare resources you use. The
+full binding list is in the [README](https://github.com/stratum-eng/stratum#prerequisites)
+— Workers, Artifacts, D1, KV, Queues, Durable Objects, R2 and Analytics Engine,
+plus Workers AI for the `llm` evaluator and Sandboxes for the `sandbox`
+evaluator **and** `merge.postMergeCommand`. Stratum meters estimated
 resource usage per change — LLM tokens, sandbox execution milliseconds, and git
 operations — and shows it alongside the evaluation evidence, so you can see what
 each (agent) change cost you. The hosted instance has open signup and is free

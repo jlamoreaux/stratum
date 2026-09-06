@@ -33,6 +33,12 @@ fourth hands your code to a hosting provider that runs it:
 >   `every(passed)` (`src/evaluation/composite-evaluator.ts:63-65`), so the
 >   failed `sandbox` result sinks it. The change lands in `needs_changes` and
 >   **every merge in that project is blocked** until you remove the evaluator.
+>   The one exception is `merge.allowForce: true`, which is off by default
+>   (force is deny-by-default, `changes.ts:477-480`) and which lets a writer
+>   force *other* changes past the failed evaluator — but **not the policy edit
+>   that removes it**: `.stratum/policy.yaml` is protected config, and force is
+>   refused on a change that touches it (`changes.ts:483-488`). So force is not
+>   a way out of this particular trap.
 > - Under `requireAll: false` the aggregate is `some(passed)`, so another
 >   passing evaluator still carries it — *unless* `sandbox` is named in
 >   `merge.requiredEvaluators`, which is checked per evaluator
