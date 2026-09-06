@@ -5,6 +5,7 @@ import {
   SandboxEvaluator,
   SecretScanEvaluator,
   WebhookEvaluator,
+  WorkersAiProvider,
   diffTouchesProtectedConfig,
   loadPolicy,
 } from "../evaluation";
@@ -174,7 +175,8 @@ export function buildEvaluators(
         case "webhook":
           return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
         case "llm":
-          if (env.AI) return [{ type: "llm", evaluator: new LLMEvaluator(env.AI) }];
+          if (env.AI)
+            return [{ type: "llm", evaluator: new LLMEvaluator(new WorkersAiProvider(env.AI)) }];
           return [
             {
               type: "llm",

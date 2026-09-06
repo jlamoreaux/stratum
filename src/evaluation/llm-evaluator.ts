@@ -1,9 +1,10 @@
-import type { AiBinding } from "../types";
 import type { AppError } from "../utils/errors";
 import { ExternalServiceError } from "../utils/errors";
 import type { Logger } from "../utils/logger";
 import type { Result } from "../utils/result";
 import { err, ok } from "../utils/result";
+import type { LlmProvider } from "./llm-provider";
+import { LlmProviderResponseError } from "./llm-provider";
 import { sanitizePolicy } from "./sanitize-policy";
 import type { EvalPolicy, EvalResult, Evaluator } from "./types";
 
@@ -30,7 +31,7 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 export class LLMEvaluator implements Evaluator {
-  constructor(private ai: AiBinding) {}
+  constructor(private provider: LlmProvider) {}
 
   async evaluate(
     diff: string,
@@ -81,23 +82,39 @@ export class LLMEvaluator implements Evaluator {
       ];
 
       const promptChars = messages.reduce((sum, m) => sum + m.content.length, 0);
-      const raw = await this.ai.run(model, { messages });
+      const runResult = await this.provider.run(model, messages);
 
-      if (raw instanceof ReadableStream) {
-        logger.error("LLM evaluation failed: unexpected stream response");
-        return ok({
-          score: 0,
-          passed: false,
-          reason: "LLM evaluator error: unexpected stream response",
-        });
+      if (!runResult.success) {
+        // A response that arrived but cannot be used fails the gate closed with
+        // a readable reason; a transport failure stays an error the caller
+        // surfaces. Either way the provider's own message is metadata only —
+        // it is copied into a user-visible reason by `runEvaluation`.
+        if (runResult.error instanceof LlmProviderResponseError) {
+          logger.error(`LLM evaluation failed: ${runResult.error.message}`);
+          return ok({
+            score: 0,
+            passed: false,
+            reason: `LLM evaluator error: ${runResult.error.message}`,
+          });
+        }
+        logger.error("LLM evaluation failed", runResult.error);
+        return err(runResult.error);
       }
 
-      const responseText = raw.response;
-      // Workers AI does not report token usage; ~4 chars/token is the standard estimate.
-      const estimatedTokens = Math.ceil((promptChars + (responseText?.length ?? 0)) / 4);
-      const costs: EvalResult["costs"] = [
-        { kind: "llm_tokens", quantity: estimatedTokens, estimated: true },
-      ];
+      const responseText = runResult.data.text;
+      const usage = runResult.data.usage;
+      // Real counts when the provider reports them, otherwise ~4 chars/token —
+      // the distinction is per provider, not per source. Workers AI reports no
+      // usage at all, so that path stays estimated.
+      const costs: EvalResult["costs"] = usage
+        ? [{ kind: "llm_tokens", quantity: usage.inputTokens + usage.outputTokens }]
+        : [
+            {
+              kind: "llm_tokens",
+              quantity: Math.ceil((promptChars + responseText.length) / 4),
+              estimated: true,
+            },
+          ];
 
       // A gate whose verdict can't be read has not passed. Never infer a score
       // from prose ("LGTM") — that let unparseable output half-approve a merge.
@@ -110,7 +127,7 @@ export class LLMEvaluator implements Evaluator {
           passed: false,
           reason: `LLM evaluator failed closed: ${why}`,
           issues: [
-            `Model response (${responseText?.length ?? 0} chars) was not a valid verdict object`,
+            `Model response (${responseText.length} chars) was not a valid verdict object`,
             ...(truncationNote ? [truncationNote] : []),
           ],
           costs,
@@ -119,7 +136,7 @@ export class LLMEvaluator implements Evaluator {
 
       let parsed: { score: unknown; passed: unknown; reason: unknown; issues?: unknown };
       try {
-        parsed = JSON.parse(responseText ?? "") as {
+        parsed = JSON.parse(responseText) as {
           score: unknown;
           passed: unknown;
           reason: unknown;

@@ -63,9 +63,15 @@ interface RateWindow {
    * The granularity the window is summed at. SHORT on purpose: one bucket per
    * window is a fixed window, and a fixed window admits the whole allowance in
    * the first second of every new one — twice the limit across the boundary,
-   * which is the burst the meter exists to bound. Twelve buckets make the
-   * window slide, so an hour's allowance is an hour's allowance wherever the
-   * caller starts.
+   * which is the burst the meter exists to bound.
+   *
+   * Twelve buckets do not eliminate that, they bound it: this is the ordinary
+   * bucketed approximation of a sliding window, so a caller spending the whole
+   * allowance at the very end of one bucket gets it back one bucket-width
+   * before the hour is out — up to 2x the limit inside 55 minutes rather than
+   * inside a second. Halving `bucketSeconds` halves the error and doubles the
+   * stored keys. Say the bound out loud rather than claiming an exactness the
+   * arithmetic does not have.
    */
   bucketSeconds: number;
 }
@@ -212,7 +218,10 @@ export class UsageMeter extends DurableObject<Env> {
       // (NaN never compares below a limit again) would block the subject for
       // the rest of the month, which is the outcome the deviation exists to
       // avoid. The limit still applies to what is already counted.
-      warn("Usage meter estimate is not a usable quantity; reserving zero", { meter, estimate });
+      warn("Usage meter estimate is not a usable quantity; reserving zero", {
+        meter,
+        estimate: String(estimate),
+      });
     }
     const quantity = usable ?? 0;
     if (isRateMeter(meter)) return this.reserveRate(meter, quantity, limit, nowMs);
@@ -254,7 +263,18 @@ export class UsageMeter extends DurableObject<Env> {
       return;
     }
     const record = await this.ctx.storage.get<PeriodRecord>(PERIOD_KEY);
-    if (record?.period !== period) return;
+    if (record?.period !== period) {
+      // The period rolled between reserve and settle, so the charge being
+      // refunded is not in the live record. Logged rather than dropped: a
+      // reservation that outlives its month leaves the old counter high, and
+      // that has to be diagnosable from Workers Logs.
+      warn("Usage meter settle ignored: period has rolled since the reservation", {
+        meter,
+        settlePeriod: period,
+        livePeriod: record?.period ?? null,
+      });
+      return;
+    }
     const current = record.counts[meter] ?? 0;
     await this.ctx.storage.put<PeriodRecord>(PERIOD_KEY, {
       period,
@@ -348,6 +368,11 @@ export class UsageMeter extends DurableObject<Env> {
    */
   async purge(): Promise<void> {
     await this.ctx.storage.deleteAll();
+    // `deleteAll` does NOT clear a pending alarm in workerd, so without this a
+    // purged subject still gets one wake-up on a DO with no state. The test
+    // fake clears it inside deleteAll, which is exactly why this cannot be
+    // left to the fake to prove.
+    await this.ctx.storage.deleteAlarm();
   }
 
   /**
@@ -390,9 +415,13 @@ export class UsageMeter extends DurableObject<Env> {
 
     // Nothing left to expire: erase whatever remains (a key written by an
     // older shape of this class, say) and leave no alarm armed, so the object
-    // costs nothing until it is next used.
-    if (nextAlarm === null) await this.ctx.storage.deleteAll();
-    else await this.ctx.storage.setAlarm(nextAlarm);
+    // costs nothing until it is next used. `deleteAll` does NOT clear a pending
+    // alarm in workerd, so the alarm is dropped explicitly — relying on the
+    // sweep to do it left the object waking forever on empty storage.
+    if (nextAlarm === null) {
+      await this.ctx.storage.deleteAll();
+      await this.ctx.storage.deleteAlarm();
+    } else await this.ctx.storage.setAlarm(nextAlarm);
   }
 
   private async reservePeriod(
@@ -413,7 +442,10 @@ export class UsageMeter extends DurableObject<Env> {
     const current = counts[meter] ?? 0;
     const decision = limitAdmits(current, quantity, limit);
     if (decision.malformed) {
-      warn("Usage meter reserve admitted: limit is not a usable limit", { meter, limit });
+      warn("Usage meter reserve admitted: limit is not a usable limit", {
+        meter,
+        limit: String(limit),
+      });
     }
     if (!decision.admitted) return { admitted: false, count: current };
     const next = current + quantity;
@@ -432,8 +464,15 @@ export class UsageMeter extends DurableObject<Env> {
     limit: number,
     nowMs: number,
   ): Promise<MeterReserveOutcome> {
-    if (!Number.isFinite(nowMs)) {
-      warn("Usage meter reserve admitted: clock is not a usable timestamp", { meter, nowMs });
+    if (!isUsableClock(nowMs)) {
+      // Admit and count nothing, as with every other malformed input. Counting
+      // it is what the earlier version did, and a bucket ~1000x in the future
+      // (microseconds mistaken for milliseconds) then counted against every
+      // window from here on, refusing the subject permanently.
+      warn("Usage meter reserve admitted: clock is not a usable timestamp", {
+        meter,
+        nowMs: String(nowMs),
+      });
       return { admitted: true, count: 0 };
     }
     const window = RATE_WINDOWS[meter];
@@ -443,7 +482,10 @@ export class UsageMeter extends DurableObject<Env> {
     const total = sum(live);
     const decision = limitAdmits(total, quantity, limit);
     if (decision.malformed) {
-      warn("Usage meter reserve admitted: limit is not a usable limit", { meter, limit });
+      warn("Usage meter reserve admitted: limit is not a usable limit", {
+        meter,
+        limit: String(limit),
+      });
     }
     if (!decision.admitted) return { admitted: false, count: total };
     const key = String(bucket);
@@ -457,24 +499,63 @@ export class UsageMeter extends DurableObject<Env> {
 
   /**
    * Rate meters are reserve-with-no-settle by convention, so this exists only
-   * for the caller that reserved an evaluation which then never ran. The delta
-   * lands on the live bucket rather than on whichever bucket the reservation
-   * was taken in: the limit reads the window's SUM, so the sum is corrected
-   * either way, and per-bucket floors of zero keep a refund from inventing
-   * headroom that was never reserved.
+   * for the caller that reserved an evaluation which then never ran.
+   *
+   * A refund DRAWS DOWN the live buckets rather than landing on the current
+   * one. The earlier version added the delta to the bucket `nowMs` falls in,
+   * which is empty whenever the settle outlives the reservation's bucket — the
+   * normal case, since buckets are minutes and an LLM gate is seconds to
+   * minutes. `Math.max(0, …)` then clamped the refund away and the original
+   * charge sat in its own bucket for the rest of the window, so an evaluation
+   * that failed three minutes after it was reserved still burned its slot for
+   * the next hour.
+   *
+   * Oldest bucket first: the reservation is by definition older than its
+   * settle, so that is where the charge most likely sits, and it is the choice
+   * that cannot free capacity a later reservation is still holding. Per-bucket
+   * floors of zero keep a refund from inventing headroom that was never taken.
    */
   private async settleRate(meter: RateMeterKey, delta: number, nowMs: number): Promise<void> {
-    if (!Number.isFinite(nowMs)) {
-      warn("Usage meter settle ignored: clock is not a usable timestamp", { meter, nowMs });
+    if (!isUsableClock(nowMs)) {
+      warn("Usage meter settle ignored: clock is not a usable timestamp", {
+        meter,
+        nowMs: String(nowMs),
+      });
       return;
     }
     const window = RATE_WINDOWS[meter];
     const bucket = bucketId(nowMs, window.bucketSeconds);
     const record = await this.ctx.storage.get<RateRecord>(RATE_KEY);
-    if (!record) return;
+    if (!record) {
+      warn("Usage meter rate settle ignored: no record for this subject", { meter, delta });
+      return;
+    }
     const live = liveBuckets(record.meters[meter], bucket, window);
-    const key = String(bucket);
-    live[key] = Math.max(0, (live[key] ?? 0) + delta);
+
+    if (delta >= 0) {
+      const key = String(bucket);
+      live[key] = (live[key] ?? 0) + delta;
+    } else {
+      let owed = -delta;
+      for (const key of Object.keys(live).sort((a, b) => Number(a) - Number(b))) {
+        if (owed <= 0) break;
+        const taken = Math.min(owed, live[key] ?? 0);
+        live[key] = (live[key] ?? 0) - taken;
+        owed -= taken;
+      }
+      if (owed > 0) {
+        // More was given back than the window is holding — a settle without a
+        // matching reserve, or one whose reservation has already aged out.
+        // Refusing to go negative is right; saying so is what makes it
+        // diagnosable rather than a counter that quietly disagrees with D1.
+        warn("Usage meter rate refund exceeded the window's charge", {
+          meter,
+          delta,
+          unapplied: owed,
+        });
+      }
+    }
+
     await this.ctx.storage.put<RateRecord>(RATE_KEY, {
       meters: { ...record.meters, [meter]: live },
     });
@@ -486,9 +567,50 @@ export class UsageMeter extends DurableObject<Env> {
    * `alarm()` re-arms for whatever it did not erase.
    */
   private async armCleanup(atMs: number): Promise<void> {
+    // Capped, because `armCleanup` only ever RAISES the alarm: one bad input
+    // that armed it centuries out could never be lowered by a later correct
+    // call, and the subject's storage would never be swept.
+    const ceiling = Date.now() + MAX_ALARM_HORIZON_MS;
+    const at = Math.min(atMs, ceiling);
+    if (at !== atMs) {
+      warn("Usage meter cleanup alarm clamped to the horizon", { requestedAtMs: atMs, atMs: at });
+    }
     const existing = await this.ctx.storage.getAlarm();
-    if (existing === null || existing < atMs) await this.ctx.storage.setAlarm(atMs);
+    if (existing === null || existing < at) await this.ctx.storage.setAlarm(at);
   }
+}
+
+/**
+ * The band a caller's `nowMs` must fall in to be a timestamp at all.
+ *
+ * Deliberately an ABSOLUTE range rather than a tolerance around this object's
+ * own clock. What this rejects is the wrong UNIT or the wrong epoch — seconds
+ * (which land in 1970), microseconds or nanoseconds (which land tens of
+ * thousands of years out) — not skew, which is real and must keep working. A
+ * tolerance around `Date.now()` would also make the check depend on wall time,
+ * so a test with a fixed synthetic clock would pass or fail by the calendar.
+ *
+ * The failure this closes: a microsecond value passes `Number.isFinite`, lands
+ * a bucket ~1000x into the future where it counts against every later window
+ * forever, and re-arms the cleanup alarm past the year 58000. The subject's
+ * evaluations are refused permanently and its storage is stranded — the same
+ * "metering causes the outage" failure the malformed-input deviation exists to
+ * prevent, arriving through a value that looked finite.
+ */
+const MIN_PLAUSIBLE_MS = Date.UTC(2020, 0, 1);
+const MAX_PLAUSIBLE_MS = Date.UTC(2200, 0, 1);
+
+/**
+ * The furthest ahead a cleanup alarm may ever be set. Longest month plus slack:
+ * nothing this object sweeps has a lifetime beyond one period, so an alarm
+ * further out than this is arithmetic on a bad input, and `armCleanup` only
+ * ever RAISES — so one bad value could never be lowered by a later good one.
+ */
+const MAX_ALARM_HORIZON_MS = 40 * 24 * 60 * 60 * 1000;
+
+/** Is `nowMs` a timestamp this object can do window arithmetic with? */
+function isUsableClock(nowMs: number): boolean {
+  return Number.isFinite(nowMs) && nowMs >= MIN_PLAUSIBLE_MS && nowMs <= MAX_PLAUSIBLE_MS;
 }
 
 function isRateMeter(meter: UsageMeterKey): meter is RateMeterKey {
@@ -610,10 +732,15 @@ function pruneRates(
 let meterLogger: Logger | undefined;
 
 /**
- * Every deviation from "count it" is logged, because each one silently ADMITS
- * (see the class doc comment) and AGENTS.md forbids swallowing a failure. A
- * limit that stopped limiting must be visible in Workers Logs, not inferred
- * from a bill.
+ * Every path that admits without counting, and every settle that cannot be
+ * applied, logs. Each one silently ADMITS or silently keeps a charge (see the
+ * class doc comment), and AGENTS.md forbids swallowing a failure. A limit that
+ * stopped limiting, or a refund that never landed, must be visible in Workers
+ * Logs rather than inferred from a bill.
+ *
+ * Values that may be `NaN` or an infinity are stringified by the caller: JSON
+ * collapses all three to `null`, which would make the log unable to report the
+ * exact value it exists to report.
  */
 function warn(message: string, meta: Record<string, unknown>): void {
   meterLogger ??= createLogger({ component: "usage-meter" });

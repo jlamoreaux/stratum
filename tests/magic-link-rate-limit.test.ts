@@ -109,6 +109,10 @@ describe("MagicLinkRateLimiter", () => {
     const windowEndMs = (Math.floor(now / 1000 / WINDOW) + 1) * HOUR_MS;
     expect(alarm).toBeGreaterThan(windowEndMs);
 
+    // workerd consumes an alarm by firing it, so the fake clears it here rather
+    // than inside `deleteAll` — which does NOT clear a pending alarm in
+    // production, and modelling it as if it did hid that from every test.
+    await storage.deleteAlarm();
     await instance.alarm();
     expect(await storage.getAlarm()).toBeNull();
     // Storage erased, so the next window starts from nothing.

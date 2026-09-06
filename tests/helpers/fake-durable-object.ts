@@ -18,6 +18,7 @@ export interface FakeDurableObjectStorage {
   deleteAll(): Promise<void>;
   setAlarm(scheduledTime: number): Promise<void>;
   getAlarm(): Promise<number | null>;
+  deleteAlarm(): Promise<void>;
 }
 
 export interface FakeDurableObjects<T> {
@@ -54,14 +55,20 @@ function makeStorage(): FakeDurableObjectStorage {
       values.set(key, structuredClone(value));
     },
     delete: async (key: string) => values.delete(key),
+    // Does NOT clear the alarm, matching workerd: `deleteAll` erases stored
+    // values and leaves a pending alarm armed, so a purged object still wakes
+    // once. Clearing it here would hide that from every test — a fake that is
+    // kinder than production proves the wrong thing.
     deleteAll: async () => {
       values.clear();
-      alarm = null;
     },
     setAlarm: async (scheduledTime: number) => {
       alarm = scheduledTime;
     },
     getAlarm: async () => alarm,
+    deleteAlarm: async () => {
+      alarm = null;
+    },
   };
 }
 

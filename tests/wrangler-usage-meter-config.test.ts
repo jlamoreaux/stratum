@@ -91,7 +91,10 @@ describe("wrangler.toml UsageMeter configuration", () => {
       expect(settingValue(body as string, "ENTITLEMENTS_ENFORCE")).toBe("0");
       // The other three ship commented (a URL, a secret's name, an operator
       // allowlist), so what is asserted is that each block documents them —
-      // the same shape-based assertion the telemetry guard makes.
+      // the same shape-based assertion the telemetry guard makes. This checks
+      // presence only: it deliberately does NOT assert what the prose says,
+      // because LLM_PROVIDERS is reserved and unread until Task 7, and a test
+      // that pinned its description would lock a false claim into place.
       for (const key of ["BILLING_SERVICE_URL", "BILLING_SERVICE_SECRET", "LLM_PROVIDERS"]) {
         expect(body as string, `${key} undocumented in [${scope}]`).toContain(key);
       }

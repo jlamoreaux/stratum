@@ -231,14 +231,17 @@ OAUTH_REDIRECT_URI = "http://localhost:8787/auth/github/callback"
 # `entitlementsConfigError` (src/middleware/config-guard.ts) logs exactly that.
 ENTITLEMENTS_ENFORCE = "0"
 #
-# The evaluator's provider allowlist, and the ONLY place a provider endpoint may
-# be named: a project's .stratum/policy.yaml may SELECT one of these by name and
-# can never supply a `baseUrl`, so a project owner cannot aim the operator's
-# Worker at a host of their choosing. An unrecognized name fails the policy
-# closed — a merge gate that cannot run must not pass. Unset (the default) means
-# Workers AI (`env.AI`) only, which is today's behavior. Credentials are NOT
-# here: they live per project in `project_secrets`. Shape illustrated, parsed by
-# the provider seam:
+# NOT YET IMPLEMENTED — reserved, and documented here so the shape is settled
+# before anything reads it. Setting it today does nothing: no code parses it.
+#
+# When Task 7 lands it becomes the evaluator's provider allowlist, and the ONLY
+# place a provider endpoint may be named: a project's .stratum/policy.yaml will
+# SELECT one of these by name and will never be able to supply a `baseUrl`, so a
+# project owner cannot aim the operator's Worker at a host of their choosing. An
+# unrecognized name will fail the policy closed — a merge gate that cannot run
+# must not pass. Unset (the default) means Workers AI (`env.AI`) only, which is
+# both today's behavior and the behavior until that work ships. Credentials are
+# NOT here: they live per project in `project_secrets`. Intended shape:
 # LLM_PROVIDERS = '[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]'
 
 # Instance-wide telemetry kill switch. Not a secret — a plain var, listed here

@@ -403,6 +403,59 @@ describe("UsageMeter evaluations_per_hour", () => {
     expect((await stub.reserve("evaluations_per_hour", 1, 3, PERIOD, NOW)).admitted).toBe(true);
   });
 
+  it("returns a rate reservation settled in a LATER bucket than it was taken in", async () => {
+    // The refund used to be added to the bucket `nowMs` falls in, which is
+    // empty once the settle outlives the reservation's bucket — the normal
+    // case, since buckets are minutes and an evaluation is seconds to minutes.
+    // Math.max(0, …) then clamped the refund away and the charge sat in its own
+    // bucket for the rest of the hour, so a provider call that failed three
+    // minutes in still burned its slot until the window rolled.
+    const { stub } = meter();
+    const sixMinutes = 6 * 60 * 1000;
+
+    for (let i = 0; i < 3; i++) {
+      await stub.reserve("evaluations_per_hour", 1, 3, PERIOD, NOW);
+    }
+    expect((await stub.reserve("evaluations_per_hour", 1, 3, PERIOD, NOW)).admitted).toBe(false);
+
+    await stub.settle("evaluations_per_hour", -1, PERIOD, NOW + sixMinutes);
+
+    const after = await stub.reserve("evaluations_per_hour", 1, 3, PERIOD, NOW + sixMinutes);
+    expect(after.admitted).toBe(true);
+  });
+
+  it("refuses to refund more than the window is holding", async () => {
+    const { stub } = meter();
+    await stub.reserve("evaluations_per_hour", 1, 5, PERIOD, NOW);
+
+    await stub.settle("evaluations_per_hour", -4, PERIOD, NOW);
+
+    // Back to empty, not negative — a refund must not invent headroom.
+    const outcome = await stub.reserve("evaluations_per_hour", 5, 5, PERIOD, NOW);
+    expect(outcome.admitted).toBe(true);
+    expect(outcome.count).toBe(5);
+  });
+
+  it.each([
+    ["microseconds mistaken for milliseconds", NOW * 1000],
+    ["seconds mistaken for milliseconds", Math.floor(NOW / 1000)],
+  ])("admits and counts nothing for a clock in %s", async (_label, badClock) => {
+    // Finite, so the old `Number.isFinite` guard let it through: the bucket
+    // landed ~1000x into the future, counted against every later window, and
+    // refused the subject permanently while arming a cleanup alarm past the
+    // year 58000. Admitting and counting nothing is the same treatment every
+    // other malformed input gets.
+    const { stub } = meter();
+
+    const bad = await stub.reserve("evaluations_per_hour", 1, 1, PERIOD, badClock);
+    expect(bad).toEqual({ admitted: true, count: 0 });
+
+    // And the good clock that follows is unaffected — the whole allowance is
+    // still there, which is what "counts nothing" has to mean.
+    const good = await stub.reserve("evaluations_per_hour", 1, 1, PERIOD, NOW);
+    expect(good.admitted).toBe(true);
+  });
+
   it("admits when the clock is not a usable timestamp", async () => {
     const { stub } = meter();
 
