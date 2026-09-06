@@ -29,6 +29,7 @@
  * injects its own seams: without them, testing any of the above needs a real git
  * remote, a real clock, and a real provider account.
  */
+import { type LlmProviderCatalog, llmProviderCatalog } from "../evaluation/llm-providers";
 import { parsePolicyContent } from "../evaluation/policy-loader";
 import type { DeployConfig, DeployRejection } from "../evaluation/types";
 import { type StratumEvent, emitEvent } from "../queue/events";
@@ -353,7 +354,7 @@ async function runMergeMessage(
   }
 
   const files = treeResult.data;
-  const policy = policyFromTree(files, logger);
+  const policy = policyFromTree(files, logger, llmProviderCatalog(env, logger));
 
   // A rejected entry becomes a visible failed row, never a dropped one: a deploy
   // the author wrote and that never runs means production silently stopped
@@ -488,7 +489,7 @@ async function runDeploymentMessage(
 
   // Config comes from the pinned commit here too, so an approval granted days
   // later still deploys with the configuration the commit was reviewed under.
-  const policy = policyFromTree(treeResult.data, logger);
+  const policy = policyFromTree(treeResult.data, logger, llmProviderCatalog(env, logger));
   const config = policy.deploys.find((entry) => entry.name === deployment.name);
   if (!config) {
     const rejection = policy.rejections.find((entry) => entry.name === deployment.name);
@@ -879,14 +880,23 @@ async function readTree(
  * effect. A malformed file yields one named rejection rather than silence,
  * because a single YAML typo must not quietly stop production updating.
  */
-function policyFromTree(files: ReadonlyMap<string, Uint8Array>, logger: Logger): TreePolicy {
+function policyFromTree(
+  files: ReadonlyMap<string, Uint8Array>,
+  logger: Logger,
+  /** The same allowlist the evaluation path parses with. Passed even though
+   * only `deploys:` is read here: a policy naming a provider the parser cannot
+   * resolve is *malformed*, and reading it without the catalog would report
+   * "no deploy configuration could be read" for a file that is perfectly
+   * valid. */
+  providers: LlmProviderCatalog,
+): TreePolicy {
   const decoder = new TextDecoder();
 
   for (const { path, format } of POLICY_FILES) {
     const bytes = files.get(path);
     if (bytes === undefined) continue;
 
-    const parsed = parsePolicyContent(decoder.decode(bytes), format, logger);
+    const parsed = parsePolicyContent(decoder.decode(bytes), format, logger, providers);
     if (parsed.status === "malformed") {
       return {
         deploys: [],

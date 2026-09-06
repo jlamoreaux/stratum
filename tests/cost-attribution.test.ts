@@ -283,6 +283,27 @@ describe("recordCosts attribution columns", () => {
     expect(kept[0]?.kind).toBe("git_ops");
   });
 
+  it("drops a negative quantity, which would write fine and refund a month", async () => {
+    // Unlike NaN this one costs nothing to store, which is the problem: it
+    // becomes a ledger row for negative spend and decrements the owner's usage
+    // period. No meter recorded here can run backwards.
+    const { db, raw } = makeSqliteD1();
+    const result = await recordCosts(
+      db,
+      logger,
+      { project: "p", changeId: "chg_1", ownerId: "user_alice", ownerType: "user" },
+      [
+        { kind: "llm_tokens", quantity: -1e12 },
+        { kind: "git_ops", quantity: 2 },
+      ],
+    );
+
+    expect(result.success).toBe(true);
+    const kept = rows(raw);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.kind).toBe("git_ops");
+  });
+
   it("serves an owner-scoped, newest-first history from the new index", async () => {
     // What idx_costs_owner exists for. `created_at` is written only by
     // recordCosts as an ISO 8601 string, so ordering it in SQL is safe here —

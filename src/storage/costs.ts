@@ -186,9 +186,18 @@ export async function recordCosts(
   // evaluation. Filtering here keeps one bad number from taking the ledger with
   // it, and is why `upsertUsage`'s own guard is a backstop rather than the
   // first line of defence.
-  const usable = samples.filter((sample) => Number.isFinite(sample.quantity));
+  //
+  // Negative quantities are dropped for a different reason: they write fine.
+  // A row for negative spend is never right — it silently refunds an owner's
+  // month through `accumulateUsage` — and no meter this records can go
+  // backwards. The providers validate their own token counts (`usageOrNothing`
+  // in `evaluation/llm-provider.ts`); this is the defence that does not depend
+  // on every future sample source remembering to.
+  const usable = samples.filter(
+    (sample) => Number.isFinite(sample.quantity) && sample.quantity >= 0,
+  );
   if (usable.length !== samples.length) {
-    logger.warn("Cost samples dropped: quantity is not finite", {
+    logger.warn("Cost samples dropped: quantity is not a finite, non-negative number", {
       project: opts.project,
       dropped: samples.length - usable.length,
     });

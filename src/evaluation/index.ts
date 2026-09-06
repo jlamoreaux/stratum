@@ -5,5 +5,7 @@ export * from "./composite-evaluator";
 export * from "./policy-loader";
 export * from "./sandbox-evaluator";
 export * from "./llm-provider";
+export * from "./llm-providers";
+export * from "./llm-byok";
 export * from "./llm-evaluator";
 export * from "./secret-scanner";

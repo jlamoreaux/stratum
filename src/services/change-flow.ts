@@ -9,6 +9,8 @@ import {
   diffTouchesProtectedConfig,
   loadPolicy,
 } from "../evaluation";
+import { resolveLlmProvider } from "../evaluation/llm-byok";
+import { llmProviderCatalog } from "../evaluation/llm-providers";
 import type { SandboxRepoAccess } from "../evaluation/sandbox-evaluator";
 import type {
   BillingContext,
@@ -153,13 +155,19 @@ export function billingContextFor(project: ProjectEntry): BillingContext | undef
  * ops decision) — a policy naming `sandbox` fails closed with a reason that
  * says exactly which prerequisite is missing.
  */
-export function buildEvaluators(
+export async function buildEvaluators(
   env: Env,
   policy: EvalPolicy,
   project: ProjectEntry,
   logger: Logger,
   workspaceRepo?: SandboxRepoAccess,
-): Array<{ type: string; evaluator: Evaluator }> {
+): Promise<Array<{ type: string; evaluator: Evaluator }>> {
+  // Async only because of this: a policy that selects a BYOK provider needs the
+  // project's credential resolved before the evaluator exists. It is a no-op —
+  // no D1 read, no key derivation — for every policy that names no provider,
+  // which is every policy that has not opted in.
+  const llmProvider = await resolveLlmProvider(env, project, policy, logger);
+
   // Guarded, because a legacy entry can carry no namespace — see
   // `projectDisplayName`, and this file's own `resolveProjectHead`.
   const projectName = projectDisplayName(project);
@@ -174,7 +182,25 @@ export function buildEvaluators(
           return [{ type: "diff", evaluator: new DiffEvaluator() }];
         case "webhook":
           return [{ type: "webhook", evaluator: new WebhookEvaluator() }];
-        case "llm":
+        case "llm": {
+          // Every failure to resolve a project-supplied credential lands here,
+          // and NONE of them falls back to `env.AI`. Falling back would move
+          // the spend to the operator's bill — the hole BYOK closes — and would
+          // turn a misconfigured gate into one that quietly passes on someone
+          // else's budget. Fail closed with the reason instead.
+          if (llmProvider.status === "unavailable") {
+            return [
+              { type: "llm", evaluator: new UnavailableEvaluator("llm", llmProvider.reason) },
+            ];
+          }
+          if (llmProvider.status === "byok") {
+            return [
+              {
+                type: "llm",
+                evaluator: new LLMEvaluator(llmProvider.provider, "byok"),
+              },
+            ];
+          }
           if (env.AI)
             return [{ type: "llm", evaluator: new LLMEvaluator(new WorkersAiProvider(env.AI)) }];
           return [
@@ -183,6 +209,7 @@ export function buildEvaluators(
               evaluator: new UnavailableEvaluator("llm", "AI binding is not configured"),
             },
           ];
+        }
         case "sandbox":
           if (!env.SANDBOX) {
             // Fail closed with an actionable reason: the [[sandboxes]] binding
@@ -421,7 +448,13 @@ export async function createChangeWithEvaluation(
   }
 
   const branch = projectDefaultBranch(project);
-  const policy = await loadPolicy(project.remote, projectReadToken.data, logger, branch);
+  const policy = await loadPolicy(
+    project.remote,
+    projectReadToken.data,
+    logger,
+    branch,
+    llmProviderCatalog(env, logger),
+  );
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -447,7 +480,7 @@ export async function createChangeWithEvaluation(
     baseOid,
   } = diffResult.data;
 
-  const evaluators = buildEvaluators(env, policy, project, logger, {
+  const evaluators = await buildEvaluators(env, policy, project, logger, {
     remote: workspaceRemote,
     token: workspaceReadToken.data,
     ref: evaluatedSha,

@@ -797,7 +797,7 @@ describe("buildEvaluators — sandbox wiring", () => {
     createdAt: "2026-01-01T00:00:00.000Z",
   };
 
-  function findSandbox(evaluators: ReturnType<typeof buildEvaluators>) {
+  function findSandbox(evaluators: Awaited<ReturnType<typeof buildEvaluators>>) {
     const entry = evaluators.find((e) => e.type === "sandbox");
     expect(entry).toBeDefined();
     // biome-ignore lint/style/noNonNullAssertion: asserted above
@@ -805,7 +805,7 @@ describe("buildEvaluators — sandbox wiring", () => {
   }
 
   it("no SANDBOX binding → fails closed with an actionable wrangler.toml reason", async () => {
-    const evaluators = buildEvaluators({} as Env, sandboxPolicy, project, mockLogger, repo);
+    const evaluators = await buildEvaluators({} as Env, sandboxPolicy, project, mockLogger, repo);
     const result = await findSandbox(evaluators).evaluate("", sandboxPolicy, mockLogger);
     expect(result.success).toBe(true);
     if (!result.success) return;
@@ -817,7 +817,7 @@ describe("buildEvaluators — sandbox wiring", () => {
 
   it("SANDBOX binding without workspace repo access → fails closed", async () => {
     const { binding } = makeMockSandbox({ exitCode: 0 });
-    const evaluators = buildEvaluators(
+    const evaluators = await buildEvaluators(
       { SANDBOX: binding } as Env,
       sandboxPolicy,
       project,
@@ -831,9 +831,9 @@ describe("buildEvaluators — sandbox wiring", () => {
     expect(binding.create).not.toHaveBeenCalled();
   });
 
-  it("SANDBOX binding + workspace repo access → a real SandboxEvaluator", () => {
+  it("SANDBOX binding + workspace repo access → a real SandboxEvaluator", async () => {
     const { binding } = makeMockSandbox({ exitCode: 0 });
-    const evaluators = buildEvaluators(
+    const evaluators = await buildEvaluators(
       { SANDBOX: binding } as Env,
       sandboxPolicy,
       project,

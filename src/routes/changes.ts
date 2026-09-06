@@ -1,5 +1,6 @@
 import { type Context, Hono } from "hono";
 import { diffTouchesProtectedConfig, loadPolicy } from "../evaluation";
+import { llmProviderCatalog } from "../evaluation/llm-providers";
 import type { EvalPolicy } from "../evaluation/types";
 import { GitHubClient } from "../github/client";
 import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync";
@@ -135,6 +136,7 @@ async function loadMergePolicyCached(
         tok.data,
         logger,
         projectDefaultBranch(project),
+        llmProviderCatalog(env, logger),
       );
       if (cacheable) {
         policyCache.set(project.id, { policy: loaded, expires: Date.now() + POLICY_CACHE_TTL_MS });
@@ -1383,7 +1385,13 @@ app.post("/changes/:id/evaluate", async (c) => {
   if (!workspaceReadToken.success) return internalError(workspaceReadToken.error.message);
 
   const branch = projectDefaultBranch(project);
-  const policy = await loadPolicy(project.remote, projectReadToken.data, logger, branch);
+  const policy = await loadPolicy(
+    project.remote,
+    projectReadToken.data,
+    logger,
+    branch,
+    llmProviderCatalog(c.env, logger),
+  );
 
   const diffResult = await getDiffBetweenRepos(
     project.remote,
@@ -1407,7 +1415,7 @@ app.post("/changes/:id/evaluate", async (c) => {
     baseOid,
   } = diffResult.data;
 
-  const evaluators = buildEvaluators(c.env, policy, project, logger, {
+  const evaluators = await buildEvaluators(c.env, policy, project, logger, {
     remote: workspace.remote,
     token: workspaceReadToken.data,
     ref: evaluatedSha,

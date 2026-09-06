@@ -73,7 +73,23 @@ export interface AiBinding {
       messages?: Array<{ role: string; content: string }>;
       prompt?: string;
     },
-  ): Promise<{ response?: string } | ReadableStream>;
+  ): Promise<
+    | {
+        response?: string;
+        /**
+         * Token counts Workers AI actually reported. Declared because it is
+         * genuinely there and this repo was throwing it away: Cloudflare's
+         * generated types give a text-generation output as `response`,
+         * `tool_calls` and `usage`, with the counts named `prompt_tokens` /
+         * `completion_tokens` (`AiTextGenerationOutput` and `UsageTags` in
+         * `@cloudflare/workers-types`). Optional field by field, unlike those
+         * types, because a binding that omits them must be a cost sample marked
+         * `estimated`, not a type error — `usageOrNothing` decides which.
+         */
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      }
+    | ReadableStream
+  >;
 }
 
 export interface SandboxBinding {
@@ -166,6 +182,15 @@ export interface Env {
    * Setting it without BILLING_SERVICE_URL is enforcement that looks on and does
    * nothing — `entitlementsConfigError` flags exactly that. */
   ENTITLEMENTS_ENFORCE?: string;
+  /** JSON array of the operator's LLM providers, e.g.
+   * `[{"name":"anthropic","kind":"anthropic","baseUrl":"https://api.anthropic.com"}]`.
+   * The ONLY place a provider endpoint may be named: a project's policy file
+   * selects one of these by name and can never supply a `baseUrl`. Unset (the
+   * default) means Workers AI only. Credentials are NOT here — they live per
+   * project in `project_secrets`. Parsed by `parseLlmProviders`, which rejects
+   * a non-https, credential-bearing, loopback, link-local or private-range
+   * `baseUrl` at parse time. */
+  LLM_PROVIDERS?: string;
   ANALYTICS?: AnalyticsEngineDataset;
   SANDBOX?: SandboxBinding;
   AI?: AiBinding;

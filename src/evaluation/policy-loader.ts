@@ -9,7 +9,14 @@ import {
   MIN_PHASE_TIMEOUT_MS,
   MIN_TOTAL_BUDGET_MS,
 } from "./limits";
-import type { EvalPolicy, EvaluatorConfig, MergePolicy, SandboxEvaluatorConfig } from "./types";
+import type { LlmProviderCatalog } from "./llm-providers";
+import type {
+  EvalPolicy,
+  EvaluatorConfig,
+  LlmEvaluatorConfig,
+  MergePolicy,
+  SandboxEvaluatorConfig,
+} from "./types";
 
 const DEFAULT_POLICY: EvalPolicy = {
   evaluators: [{ type: "diff" }],
@@ -24,6 +31,15 @@ const DEFAULT_POLICY: EvalPolicy = {
  * silently relax protection for later changes.
  */
 export const PROTECTED_CONFIG_FILES = [".stratum/policy.yaml", "stratum.config.json"] as const;
+
+/**
+ * The operator's provider allowlist, as the policy parser sees it.
+ *
+ * Defaulted to empty rather than made required so a caller that forgets to pass
+ * one blocks BYOK policies instead of admitting them: an empty catalog resolves
+ * no provider name, and an unresolved name fails the file closed.
+ */
+const NO_PROVIDERS: LlmProviderCatalog = new Map();
 
 /** Does a unified diff (git-style `diff --git a/… b/…` headers) modify a
  *  protected merge-protection config file? */
@@ -44,6 +60,9 @@ export async function loadPolicy(
   token: string,
   logger: Logger,
   branch = "main",
+  /** Operator-configured LLM providers a policy may select from. Omitted means
+   * none are configured, so any policy naming one fails closed. */
+  providers: LlmProviderCatalog = NO_PROVIDERS,
 ): Promise<EvalPolicy> {
   const yaml = await readAndParsePolicy(
     remote,
@@ -52,6 +71,7 @@ export async function loadPolicy(
     "yaml",
     logger,
     branch,
+    providers,
   );
   if (yaml.status === "ok") return yaml.policy;
   if (yaml.status === "malformed")
@@ -64,6 +84,7 @@ export async function loadPolicy(
     "json",
     logger,
     branch,
+    providers,
   );
   if (json.status === "ok") return json.policy;
   if (json.status === "malformed")
@@ -115,6 +136,7 @@ export function parsePolicyContent(
   content: string,
   format: "json" | "yaml",
   logger: Logger = defaultLogger,
+  providers: LlmProviderCatalog = NO_PROVIDERS,
 ): PolicyParse {
   let parsed: unknown;
   try {
@@ -162,7 +184,7 @@ export function parsePolicyContent(
     // default) by mutating what it was handed.
     const declared = raw.evaluators as unknown[];
     const evaluators = declared
-      .map((entry) => sanitizeEvaluator(entry, logger))
+      .map((entry) => sanitizeEvaluator(entry, logger, providers))
       .filter((entry): entry is EvaluatorConfig => entry !== null);
 
     // Any dropped entry fails the gate closed — not just the case where every
@@ -223,6 +245,7 @@ async function readAndParsePolicy(
   format: "json" | "yaml",
   logger: Logger,
   branch = "main",
+  providers: LlmProviderCatalog = NO_PROVIDERS,
 ): Promise<PolicyLoad> {
   try {
     const contentResult = await readFileFromRepo(remote, token, path, logger, branch);
@@ -231,7 +254,7 @@ async function readAndParsePolicy(
     const content = contentResult.data;
     if (content === null || content === undefined) return { status: "absent" };
 
-    return parsePolicyContent(content, format, logger);
+    return parsePolicyContent(content, format, logger, providers);
   } catch (e) {
     // A transient repo-read blip — treat as absent so it doesn't block every
     // merge. Sanitization failures cannot reach here; `parsePolicyContent`
@@ -404,6 +427,100 @@ function sanitizeSandboxConfig(
   return config;
 }
 
+/** Fields an `llm` evaluator entry may carry. Everything else is ignored. */
+const LLM_CONFIG_KEYS = new Set(["type", "provider", "model", "threshold", "maxDiffChars"]);
+
+/**
+ * Longest `model` a policy may name. Generous for every provider's identifiers
+ * (`@cf/meta/llama-3.1-8b-instruct`, `anthropic/claude-sonnet-4-5`) and short
+ * enough that the value cannot become a payload in its own right.
+ */
+const MAX_MODEL_LENGTH = 128;
+
+/** Model identifiers across the three providers: slugs with `/`, `.`, `:`, `@`, `-`, `_`. */
+const MODEL_PATTERN = /^[A-Za-z0-9._:@/-]+$/;
+
+/**
+ * Keep only whitelisted, well-typed fields from a user-supplied `llm` entry,
+ * resolving `provider` against the operator's allowlist.
+ *
+ * Returning null fails the **whole policy file** closed and blocks merges (see
+ * the dropped-entry check in `parsePolicyContent`). That is the opposite of
+ * what a rejected `deploys:` entry does two files away — `deploy/config.ts`
+ * says in as many words "do not fix this" — and the asymmetry is deliberate:
+ * a deploy runs *after* the merge, so a bad entry costs a failed deployment
+ * row, whereas an `llm` entry is a gate. A gate that cannot run must not pass.
+ * An unresolvable provider name is precisely a gate that cannot run, so it
+ * blocks rather than degrading to Workers AI on the operator's bill.
+ *
+ * `baseUrl` is never read here, at any level of validation. The endpoint set is
+ * closed and lives in `LLM_PROVIDERS`; a policy may only *select* from it by
+ * name. A `baseUrl` in the file is warned about and dropped like any other
+ * unrecognized key — see `llm-providers.ts` for why the field cannot exist.
+ */
+export function sanitizeLlmConfig(
+  source: Record<string, unknown>,
+  logger: Logger,
+  providers: LlmProviderCatalog,
+): LlmEvaluatorConfig | null {
+  const config: LlmEvaluatorConfig = { type: "llm" };
+
+  for (const key of Object.keys(source)) {
+    if (!LLM_CONFIG_KEYS.has(key)) {
+      logger.warn("Ignoring unrecognized llm evaluator field", { field: key });
+    }
+  }
+
+  if (source.provider !== undefined) {
+    if (typeof source.provider !== "string") {
+      logger.error("Dropping llm evaluator entry whose provider is not a string", undefined, {
+        submitted: forLog(source.provider),
+      });
+      return null;
+    }
+    if (!providers.has(source.provider)) {
+      logger.error(
+        "Dropping llm evaluator entry naming an unconfigured provider — failing the policy closed",
+        undefined,
+        { provider: forLog(source.provider) },
+      );
+      return null;
+    }
+    config.provider = source.provider;
+  }
+
+  if (source.model !== undefined) {
+    const model = typeof source.model === "string" ? source.model.trim() : "";
+    if (model.length === 0 || model.length > MAX_MODEL_LENGTH || !MODEL_PATTERN.test(model)) {
+      logger.error("Dropping llm evaluator entry with an unusable model", undefined, {
+        submitted: forLog(source.model),
+      });
+      return null;
+    }
+    config.model = model;
+  }
+
+  // Clamped, not rejected, for the reason `clampScore` gives: a threshold
+  // outside [0,1] is a bounded mistake, and 1.5 (nothing passes) is the safe
+  // direction anyway. -5 is not — it would make every model verdict pass — so
+  // the clamp is load-bearing rather than cosmetic.
+  const threshold = clampScore(source.threshold, logger);
+  if (threshold !== undefined) config.threshold = threshold;
+
+  if (typeof source.maxDiffChars === "number" && Number.isFinite(source.maxDiffChars)) {
+    // Left unclamped here on purpose: `LLMEvaluator` clamps it against its own
+    // floor and ceiling, which are the numbers that actually bound the prompt.
+    config.maxDiffChars = source.maxDiffChars;
+  } else if (source.maxDiffChars !== undefined) {
+    logger.warn("Ignoring policy field that is not a finite number", {
+      field: "llm.maxDiffChars",
+      submitted: forLog(source.maxDiffChars),
+    });
+  }
+
+  return config;
+}
+
 /**
  * Validate one entry of the user-supplied `evaluators` array.
  *
@@ -417,7 +534,11 @@ function sanitizeSandboxConfig(
  * passed through by reference, so a returned policy never shares object
  * identity with the parsed input or with `DEFAULT_POLICY`.
  */
-function sanitizeEvaluator(raw: unknown, logger: Logger): EvaluatorConfig | null {
+function sanitizeEvaluator(
+  raw: unknown,
+  logger: Logger,
+  providers: LlmProviderCatalog,
+): EvaluatorConfig | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     logger.warn("Dropping non-object evaluator entry", { submitted: forLog(raw) });
     return null;
@@ -429,6 +550,11 @@ function sanitizeEvaluator(raw: unknown, logger: Logger): EvaluatorConfig | null
   }
 
   if (source.type === "sandbox") return sanitizeSandboxConfig(source, logger);
+
+  // Replaces the copy-through below for `llm`, which used to hand the parsed
+  // object's fields to the evaluator unvalidated — including any `baseUrl` or
+  // inline credential the file carried.
+  if (source.type === "llm") return sanitizeLlmConfig(source, logger, providers);
 
   if (source.type === "webhook") {
     // `url` is required by the type, so check it rather than asserting it. The

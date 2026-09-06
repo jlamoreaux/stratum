@@ -286,8 +286,9 @@ describe("billingContextFor", () => {
 describe("buildEvaluators — ProjectEntry replaces the display name", () => {
   const project = projectEntry();
 
-  function evaluatorFor(policy: EvalPolicy, type: string, env: Env = makeEnv()) {
-    const entry = buildEvaluators(env, policy, project, logger).find((e) => e.type === type);
+  async function evaluatorFor(policy: EvalPolicy, type: string, env: Env = makeEnv()) {
+    const built = await buildEvaluators(env, policy, project, logger);
+    const entry = built.find((e) => e.type === type);
     expect(entry).toBeDefined();
     return entry?.evaluator;
   }
@@ -296,30 +297,32 @@ describe("buildEvaluators — ProjectEntry replaces the display name", () => {
   // file substitutes above, not the shipped classes. The assertions still
   // separate the wired branch from `UnavailableEvaluator`, which is what they
   // are for — they just don't prove the real class was constructed.
-  it("always prepends the blocking secret scan", () => {
-    const built = buildEvaluators(makeEnv(), { evaluators: [] }, project, logger);
+  it("always prepends the blocking secret scan", async () => {
+    const built = await buildEvaluators(makeEnv(), { evaluators: [] }, project, logger);
     expect(built.map((e) => e.type)).toEqual(["secret_scan"]);
     expect(built[0]?.evaluator).toBeInstanceOf(SecretScanEvaluator);
   });
 
-  it("builds a real DiffEvaluator for a diff entry", () => {
-    expect(evaluatorFor({ evaluators: [{ type: "diff" }] }, "diff")).toBeInstanceOf(DiffEvaluator);
+  it("builds a real DiffEvaluator for a diff entry", async () => {
+    expect(await evaluatorFor({ evaluators: [{ type: "diff" }] }, "diff")).toBeInstanceOf(
+      DiffEvaluator,
+    );
   });
 
-  it("builds a real WebhookEvaluator for a webhook entry", () => {
+  it("builds a real WebhookEvaluator for a webhook entry", async () => {
     const policy: EvalPolicy = { evaluators: [{ type: "webhook", url: "https://hook.test" }] };
-    expect(evaluatorFor(policy, "webhook")).toBeInstanceOf(WebhookEvaluator);
+    expect(await evaluatorFor(policy, "webhook")).toBeInstanceOf(WebhookEvaluator);
   });
 
-  it("wires the llm evaluator, not UnavailableEvaluator, when the AI binding is present", () => {
-    const evaluator = evaluatorFor({ evaluators: [{ type: "llm" }] }, "llm");
+  it("wires the llm evaluator, not UnavailableEvaluator, when the AI binding is present", async () => {
+    const evaluator = await evaluatorFor({ evaluators: [{ type: "llm" }] }, "llm");
     expect(evaluator).toBeInstanceOf(LLMEvaluator);
     expect(evaluator).not.toBeInstanceOf(UnavailableEvaluator);
   });
 
   it("still fails the llm evaluator closed when the AI binding is missing", async () => {
     const policy: EvalPolicy = { evaluators: [{ type: "llm" }] };
-    const evaluator = evaluatorFor(policy, "llm", {} as Env);
+    const evaluator = await evaluatorFor(policy, "llm", {} as Env);
     expect(evaluator).toBeInstanceOf(UnavailableEvaluator);
     const result = await evaluator?.evaluate("", policy, logger);
     expect(result?.success).toBe(true);
@@ -331,7 +334,7 @@ describe("buildEvaluators — ProjectEntry replaces the display name", () => {
 
   it("still fails the sandbox evaluator closed when the binding is missing", async () => {
     const policy: EvalPolicy = { evaluators: [{ type: "sandbox" }] };
-    const evaluator = evaluatorFor(policy, "sandbox");
+    const evaluator = await evaluatorFor(policy, "sandbox");
     expect(evaluator).toBeInstanceOf(UnavailableEvaluator);
     const result = await evaluator?.evaluate("", policy, logger);
     expect(result?.success).toBe(true);
@@ -339,12 +342,12 @@ describe("buildEvaluators — ProjectEntry replaces the display name", () => {
     expect(result.data.reason).toContain("SANDBOX binding is not configured");
   });
 
-  it("drops an unknown evaluator type and names the project in the warning", () => {
+  it("drops an unknown evaluator type and names the project in the warning", async () => {
     const warn = vi.fn();
     const warningLogger = { ...logger, warn } as unknown as Logger;
     const policy = { evaluators: [{ type: "quantum" }] } as unknown as EvalPolicy;
 
-    const built = buildEvaluators(makeEnv(), policy, project, warningLogger);
+    const built = await buildEvaluators(makeEnv(), policy, project, warningLogger);
 
     expect(built.map((e) => e.type)).toEqual(["secret_scan"]);
     expect(warn).toHaveBeenCalledTimes(1);

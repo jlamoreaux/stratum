@@ -26,9 +26,10 @@ export interface LlmResponse {
   /**
    * Present only when the provider reported real token counts. Its absence is
    * load-bearing: the evaluator falls back to the `~4 chars/token` estimate and
-   * marks the cost sample `estimated`. That distinction is **per provider, not
-   * per source** — Workers AI reports nothing, and an OpenAI-compatible
-   * endpoint that omits `usage` is estimated too.
+   * marks the cost sample `estimated`. That distinction is **per response, not
+   * per source**: every provider here reports counts when it has them (Workers
+   * AI included), and any response that omits `usage` — or reports one this
+   * file will not trust, see `usageOrNothing` — is estimated.
    */
   usage?: LlmUsage;
 }
@@ -48,19 +49,26 @@ export interface LlmProvider {
 
 /**
  * The provider answered, but the answer is unusable — a non-2xx status, a body
- * that is not JSON, a JSON body of the wrong shape, or a stream where a
- * completion was expected.
+ * that is not JSON, a JSON body of the wrong shape, a verdict truncated at the
+ * token cap, or a stream where a completion was expected.
  *
- * **The message is metadata only.** It reaches the user: `runEvaluation`
- * (`services/change-flow.ts`) copies `error.message` straight into the recorded
- * `EvalResult.reason`. A provider's error body can quote the request — which
- * contains the diff — and some providers echo the credential that failed, so
- * the body is never interpolated into it. Status codes and byte counts only.
+ * **The message is metadata only.** It reaches the user: `LLMEvaluator`
+ * intercepts every error of this class and interpolates the message into the
+ * `EvalResult.reason` it fails the gate closed with. A provider's error body
+ * can quote the request — which contains the diff — and some providers echo the
+ * credential that failed, so nothing the provider sent is ever interpolated
+ * into it: these messages carry an HTTP status, a fixed description of the
+ * shape problem, or a constant this file chose, and nothing else.
  */
 export class LlmProviderResponseError extends AppError {
-  constructor(message: string) {
+  constructor(message: string, cause?: unknown) {
     super(message, "LLM_PROVIDER_RESPONSE", 502);
     this.name = "LlmProviderResponseError";
+    // Attached rather than described: a `SyntaxError` from `JSON.parse` quotes
+    // the bytes that failed, which are the provider's body — exactly what the
+    // message must not carry. Dropping it entirely would swallow the only
+    // record of what went wrong.
+    if (cause !== undefined) this.cause = cause;
   }
 }
 
@@ -73,23 +81,65 @@ function transportError(error: unknown): AppError {
   ) as AppError;
 }
 
+/** How long any provider gets before the gate gives up on it. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+export interface ProviderOptions {
+  /** Give up on the request after this many milliseconds. */
+  timeoutMs?: number;
+}
+
+/**
+ * Bound a call that cannot be cancelled.
+ *
+ * `AiBinding.run` takes no `AbortSignal`, so unlike the HTTP providers there is
+ * nothing here to abort: the inference keeps running (and is still billed)
+ * after this rejects. What it bounds is how long the *gate* waits, which is the
+ * failure that matters — a binding that never settles otherwise holds the
+ * evaluation open for as long as the Worker's own limits allow.
+ */
+function withTimeout<T>(work: Promise<T>, timeoutMs: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${what} did not respond within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([work, expiry]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 /**
  * The Workers AI binding, and the default. Behaviour here is deliberately
  * identical to what `LLMEvaluator` did inline before the seam existed:
  * a `ReadableStream` is rejected rather than consumed, and a response object
- * with no `response` field yields `""` so the evaluator fails it closed as
- * unparseable output rather than treating it as a distinct condition.
+ * with no usable `response` field yields `""` so the evaluator fails it closed
+ * as unparseable output rather than treating it as a distinct condition.
  *
- * It reports no token usage, which is why the Workers AI path keeps the
- * `~4 chars/token` estimate and `estimated: true`.
+ * It does report token counts — Cloudflare documents the synchronous output of
+ * a text-generation model as `response`, `tool_calls` and `usage`, and its own
+ * generated types name the counts `usage.prompt_tokens` /
+ * `usage.completion_tokens` (`AiTextGenerationOutput` in
+ * `@cloudflare/workers-types`). They go through the same `usageOrNothing`
+ * validation as the HTTP providers, so this path falls back to the
+ * `~4 chars/token` estimate only when a response actually omits them.
  */
 export class WorkersAiProvider implements LlmProvider {
-  constructor(private ai: AiBinding) {}
+  constructor(
+    private ai: AiBinding,
+    private options: ProviderOptions = {},
+  ) {}
 
   async run(model: string, messages: Message[]): Promise<Result<LlmResponse, AppError>> {
     let raw: Awaited<ReturnType<AiBinding["run"]>>;
     try {
-      raw = await this.ai.run(model, { messages });
+      raw = await withTimeout(
+        this.ai.run(model, { messages }),
+        this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        "Workers AI",
+      );
     } catch (error) {
       return err(transportError(error));
     }
@@ -98,16 +148,14 @@ export class WorkersAiProvider implements LlmProvider {
       return err(new LlmProviderResponseError("unexpected stream response"));
     }
 
-    return ok({ text: raw.response ?? "" });
+    // Checked, not asserted: the binding's own types make `response` optional,
+    // and the evaluator dereferences `.length` on whatever comes back.
+    const text = typeof raw.response === "string" ? raw.response : "";
+    return ok({
+      text,
+      ...usageOrNothing(raw.usage?.prompt_tokens, raw.usage?.completion_tokens),
+    });
   }
-}
-
-/** How long a hosted provider gets before the gate gives up on it. */
-const DEFAULT_TIMEOUT_MS = 30_000;
-
-export interface HttpProviderOptions {
-  /** Abort the request after this many milliseconds. */
-  timeoutMs?: number;
 }
 
 /**
@@ -125,7 +173,7 @@ abstract class HttpLlmProvider implements LlmProvider {
   constructor(
     protected readonly baseUrl: string,
     protected readonly apiKey: string,
-    protected readonly options: HttpProviderOptions = {},
+    protected readonly options: ProviderOptions = {},
   ) {}
 
   abstract run(model: string, messages: Message[]): Promise<Result<LlmResponse, AppError>>;
@@ -158,11 +206,17 @@ abstract class HttpLlmProvider implements LlmProvider {
         );
       }
 
+      // Read the bytes first, parse them second. `response.json()` rejects both
+      // when the transfer drops mid-body and when a body that arrived whole is
+      // not JSON, and those mean opposite things to the gate: the first is a
+      // transport failure the caller surfaces (it falls to the outer catch),
+      // the second fails the evaluation closed with a user-visible reason.
+      const raw = await response.text();
       try {
-        return ok((await response.json()) as unknown);
-      } catch {
+        return ok(JSON.parse(raw) as unknown);
+      } catch (error) {
         return err(
-          new LlmProviderResponseError("provider response was not valid JSON") as AppError,
+          new LlmProviderResponseError("provider response was not valid JSON", error) as AppError,
         );
       }
     } catch (error) {
@@ -172,6 +226,14 @@ abstract class HttpLlmProvider implements LlmProvider {
     }
   }
 }
+
+/**
+ * The output budget for one verdict, shared by both HTTP providers so the gate
+ * is bounded by the same number whichever one runs it. The evaluator asks for a
+ * single small JSON object; a response that needs more than this has stopped
+ * answering the question it was asked.
+ */
+const VERDICT_TOKEN_BUDGET = 1024;
 
 /**
  * Anthropic's Messages API: `POST {baseUrl}/messages`, `x-api-key` plus the
@@ -186,7 +248,7 @@ export class AnthropicProvider extends HttpLlmProvider {
    * a value the caller could vary is a shape this code has not been written for. */
   static readonly API_VERSION = "2023-06-01";
   /** The evaluator asks for one small JSON verdict; `max_tokens` is required. */
-  static readonly MAX_TOKENS = 1024;
+  static readonly MAX_TOKENS = VERDICT_TOKEN_BUDGET;
 
   async run(model: string, messages: Message[]): Promise<Result<LlmResponse, AppError>> {
     // Anthropic takes the system prompt as a top-level parameter, not as a
@@ -214,12 +276,25 @@ export class AnthropicProvider extends HttpLlmProvider {
 
     const body = posted.data as {
       content?: unknown;
+      stop_reason?: unknown;
       usage?: { input_tokens?: unknown; output_tokens?: unknown };
     } | null;
 
     if (body === null || typeof body !== "object" || !Array.isArray(body.content)) {
       return err(
         new LlmProviderResponseError("provider response had no content array") as AppError,
+      );
+    }
+
+    // A verdict cut off at our own cap is well-formed JSON containing half a
+    // JSON object, so without this the evaluator fails closed blaming the
+    // model's formatting for a limit this file chose. Anthropic says so
+    // explicitly: `stop_reason` is `"max_tokens"` in exactly that case.
+    if (body.stop_reason === "max_tokens") {
+      return err(
+        new LlmProviderResponseError(
+          `provider response was truncated at the ${AnthropicProvider.MAX_TOKENS}-token limit`,
+        ) as AppError,
       );
     }
 
@@ -250,14 +325,24 @@ export class AnthropicProvider extends HttpLlmProvider {
  * https://docs.vllm.ai/en/latest/serving/openai_compatible_server/.
  */
 export class OpenAiCompatibleProvider extends HttpLlmProvider {
+  /** The same budget the Anthropic sibling sends; see `VERDICT_TOKEN_BUDGET`. */
+  static readonly MAX_COMPLETION_TOKENS = VERDICT_TOKEN_BUDGET;
+
   async run(model: string, messages: Message[]): Promise<Result<LlmResponse, AppError>> {
-    // No `max_tokens`: the four vendors this one endpoint serves disagree about
-    // it (newer OpenAI models take `max_completion_tokens` and reject
-    // `max_tokens`), and an unrecognised field is a 400 from the strict ones.
+    // `max_completion_tokens`, never `max_tokens`: OpenAI documents `max_tokens`
+    // as deprecated in its favour and "not compatible with o-series models",
+    // Groq documents the same deprecation, and OpenRouter and vLLM take either.
+    // Together AI documents only `max_tokens` and its schema does not forbid
+    // extra fields, so there the bound is still the timeout — an unenforced
+    // field on one vendor beats a 400 on the ones that reject `max_tokens`.
     const posted = await this.post(
       "/chat/completions",
       { authorization: `Bearer ${this.apiKey}` },
-      { model, messages },
+      {
+        model,
+        messages,
+        max_completion_tokens: OpenAiCompatibleProvider.MAX_COMPLETION_TOKENS,
+      },
     );
     if (!posted.success) return posted;
 
@@ -272,8 +357,23 @@ export class OpenAiCompatibleProvider extends HttpLlmProvider {
       );
     }
 
-    const content = (body.choices[0] as { message?: { content?: unknown } } | undefined)?.message
-      ?.content;
+    const choice = body.choices[0] as
+      | { message?: { content?: unknown }; finish_reason?: unknown }
+      | undefined;
+
+    // The same truncation the Anthropic path reports, under this shape's name
+    // for it: `finish_reason: "length"` means the cap above ended the verdict,
+    // not the model, and the half-object left behind must not be reported as
+    // the model's own formatting failure.
+    if (choice?.finish_reason === "length") {
+      return err(
+        new LlmProviderResponseError(
+          `provider response was truncated at the ${OpenAiCompatibleProvider.MAX_COMPLETION_TOKENS}-token limit`,
+        ) as AppError,
+      );
+    }
+
+    const content = choice?.message?.content;
     if (typeof content !== "string") {
       return err(
         new LlmProviderResponseError("provider response had no assistant message text") as AppError,
@@ -288,18 +388,25 @@ export class OpenAiCompatibleProvider extends HttpLlmProvider {
 }
 
 /**
- * Report usage only when both counts are real numbers. A partial or malformed
+ * A count that could actually be a number of tokens: a non-negative integer.
+ *
+ * `Number.isInteger` already excludes `NaN` and both infinities, so the whole
+ * test is integrality plus sign. Both halves matter downstream — a negative
+ * quantity becomes a ledger row for negative spend, and a fractional one a
+ * fractional token — and neither is a count any provider can legitimately
+ * report, so a value failing this is a malformed `usage`, not a small error.
+ */
+function isTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * Report usage only when both counts are usable. A partial or malformed
  * `usage` object is treated as absent rather than half-trusted: a wrong token
- * count recorded as exact is worse than an estimate labelled as one.
+ * count recorded as exact is worse than an estimate labelled as one — the
+ * estimate at least carries `estimated: true` into `cost_records`.
  */
 function usageOrNothing(input: unknown, output: unknown): { usage?: LlmUsage } {
-  if (
-    typeof input !== "number" ||
-    typeof output !== "number" ||
-    !Number.isFinite(input) ||
-    !Number.isFinite(output)
-  ) {
-    return {};
-  }
+  if (!isTokenCount(input) || !isTokenCount(output)) return {};
   return { usage: { inputTokens: input, outputTokens: output } };
 }

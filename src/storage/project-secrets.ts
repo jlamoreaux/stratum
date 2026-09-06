@@ -127,11 +127,28 @@ async function resolveKey(env: SecretKeyEnv): Promise<Result<CryptoKey, AppError
     );
   }
   try {
-    return ok(await deriveSecretKey(secret));
+    // Cached per isolate, keyed on the value so a rebind (or a test) is never
+    // served the key of a different secret. PBKDF2 at 100k iterations was
+    // affordable once per deploy; BYOK puts it on the change-creation path,
+    // which already does two clones and a diff, and that path runs on every
+    // change rather than on every merge. The *promise* is cached rather than
+    // the key so two concurrent evaluations in one isolate derive once, not
+    // twice. The derived key is non-extractable and the secret is already in
+    // this isolate's `env`, so the cache widens nothing.
+    if (derivedKeyCache?.secret !== secret) {
+      derivedKeyCache = { secret, key: deriveSecretKey(secret) };
+    }
+    return ok(await derivedKeyCache.key);
   } catch (error) {
+    // Never leave a rejected promise memoized: the next request would replay
+    // the same failure forever without retrying the derivation.
+    derivedKeyCache = null;
     return err(toAppError(error, "deriveSecretKey", {}));
   }
 }
+
+/** @see resolveKey — one entry, because one instance has one `DEPLOY_SECRET_KEY`. */
+let derivedKeyCache: { secret: string; key: Promise<CryptoKey> } | null = null;
 
 /**
  * Creates or replaces a project's secret, returning only its metadata.

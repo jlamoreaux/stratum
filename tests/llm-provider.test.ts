@@ -30,17 +30,26 @@ function jsonResponse(status: number, body: unknown) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    json: async () => body,
+    text: async () => JSON.stringify(body),
   };
 }
 
-/** A response whose body is not JSON — `json()` rejects, as the real one does. */
+/** A response whose body arrived whole and is not JSON — an HTML error page. */
 function nonJsonResponse(status = 200) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    json: async () => {
-      throw new SyntaxError("Unexpected token < in JSON at position 0");
+    text: async () => "<html><body>502 Bad Gateway</body></html>",
+  };
+}
+
+/** A response whose headers arrived but whose body transfer then died. */
+function bodyReadFailureResponse(status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => {
+      throw new TypeError("network connection lost");
     },
   };
 }
@@ -56,10 +65,14 @@ function lastFetchCall() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // `restoreAllMocks` does not undo `stubGlobal`: without this a `fetch` stub
+  // outlives its test, and a later test that forgot to stub one would pass on
+  // the previous test's provider rather than failing.
+  vi.unstubAllGlobals();
 });
 
 describe("WorkersAiProvider", () => {
-  it("returns the binding's response text and reports no usage", async () => {
+  it("returns the binding's response text, and no usage when it reported none", async () => {
     const ai: AiBinding = { run: vi.fn().mockResolvedValue({ response: "hello" }) };
     const result = await new WorkersAiProvider(ai).run("@cf/model", [
       { role: "user", content: "hi" },
@@ -67,8 +80,51 @@ describe("WorkersAiProvider", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.text).toBe("hello");
-    // Absent usage is what keeps the Workers AI path on the char estimate.
+    // Absent usage is what puts this response on the char estimate.
     expect(result.data.usage).toBeUndefined();
+  });
+
+  it("reads the token counts Workers AI does report", async () => {
+    const ai: AiBinding = {
+      run: vi.fn().mockResolvedValue({
+        response: "hello",
+        usage: { prompt_tokens: 31, completion_tokens: 7 },
+      }),
+    };
+    const result = await new WorkersAiProvider(ai).run("@cf/model", []);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.usage).toEqual({ inputTokens: 31, outputTokens: 7 });
+  });
+
+  it("a negative token count is treated as absent, never recorded as exact", async () => {
+    const ai: AiBinding = {
+      run: vi.fn().mockResolvedValue({
+        response: "hello",
+        usage: { prompt_tokens: -1e12, completion_tokens: 7 },
+      }),
+    };
+    const result = await new WorkersAiProvider(ai).run("@cf/model", []);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.usage).toBeUndefined();
+  });
+
+  it("a non-string `response` yields empty text rather than reaching the evaluator", async () => {
+    const ai: AiBinding = { run: vi.fn().mockResolvedValue({ response: 42 }) };
+    const result = await new WorkersAiProvider(ai).run("@cf/model", []);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.text).toBe("");
+  });
+
+  it("a binding that never settles becomes a transport error, not a hung gate", async () => {
+    const ai: AiBinding = { run: vi.fn(() => new Promise<never>(() => {})) };
+    const result = await new WorkersAiProvider(ai, { timeoutMs: 5 }).run("@cf/model", []);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).not.toBeInstanceOf(LlmProviderResponseError);
+    expect(result.error.message).toContain("did not respond within 5ms");
   });
 
   it("forwards the model and messages to the binding unchanged", async () => {
@@ -143,7 +199,11 @@ describe("AnthropicProvider — request shape", () => {
     expect(init.headers["anthropic-version"]).toBe("2023-06-01");
     expect(init.headers["content-type"]).toBe("application/json");
     expect(body.model).toBe("claude-sonnet-4-5");
-    expect(typeof body.max_tokens).toBe("number");
+    // The value, not just the type: Anthropic accepts `max_tokens: 0` and
+    // generates nothing for it, so "is a number" is not the assertion that
+    // catches a bound going wrong.
+    expect(body.max_tokens).toBe(1024);
+    expect(body.max_tokens).toBe(AnthropicProvider.MAX_TOKENS);
     // The system prompt is a top-level parameter; a system-role message is rejected.
     expect(body.system).toBe("be strict");
     expect(body.messages).toEqual([{ role: "user", content: "review this" }]);
@@ -288,6 +348,93 @@ describe("AnthropicProvider — response handling", () => {
     expect(result.data.usage).toBeUndefined();
   });
 
+  it("a negative token count is treated as absent, never billed as exact", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          content: [{ type: "text", text: "x" }],
+          usage: { input_tokens: -1e12, output_tokens: 5 },
+        }),
+      ),
+    );
+    const result = await new AnthropicProvider("https://api.anthropic.com/v1", "k").run("m", []);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.usage).toBeUndefined();
+  });
+
+  it("a fractional token count is treated as absent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          content: [{ type: "text", text: "x" }],
+          usage: { input_tokens: 10.5, output_tokens: 5 },
+        }),
+      ),
+    );
+    const result = await new AnthropicProvider("https://api.anthropic.com/v1", "k").run("m", []);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.usage).toBeUndefined();
+  });
+
+  it("a verdict truncated at max_tokens fails with that reason, not a parse error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          content: [{ type: "text", text: '{"score": 0.9, "passed": tr' }],
+          stop_reason: "max_tokens",
+          usage: { input_tokens: 100, output_tokens: 1024 },
+        }),
+      ),
+    );
+    const result = await new AnthropicProvider("https://api.anthropic.com/v1", "k").run("m", []);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toBeInstanceOf(LlmProviderResponseError);
+    expect(result.error.message).toBe("provider response was truncated at the 1024-token limit");
+  });
+
+  it("a normal `stop_reason` is not mistaken for truncation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          content: [{ type: "text", text: "verdict" }],
+          stop_reason: "end_turn",
+        }),
+      ),
+    );
+    const result = await new AnthropicProvider("https://api.anthropic.com/v1", "k").run("m", []);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.text).toBe("verdict");
+  });
+
+  it("a body that dies mid-transfer is a transport error, not a malformed body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(bodyReadFailureResponse()));
+    const result = await new AnthropicProvider("https://api.anthropic.com/v1", "k").run("m", []);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    // The distinction is load-bearing: a response error fails the gate closed
+    // with a user-visible reason, a transport error surfaces to the caller.
+    expect(result.error).not.toBeInstanceOf(LlmProviderResponseError);
+    expect(result.error.message).toContain("network connection lost");
+  });
+
+  it("keeps the parse failure as the response error's cause rather than dropping it", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(nonJsonResponse()));
+    const result = await new AnthropicProvider("https://api.anthropic.com/v1", "k").run("m", []);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.cause).toBeInstanceOf(SyntaxError);
+    // ...and it stays off the message, which reaches the user.
+    expect(result.error.message).toBe("provider response was not valid JSON");
+  });
+
   it("a network failure becomes a transport error, not a response error", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
     const result = await new AnthropicProvider("https://api.anthropic.com/v1", "k").run("m", []);
@@ -345,6 +492,10 @@ describe("OpenAiCompatibleProvider — request shape", () => {
     expect(body.model).toBe("gpt-4o-mini");
     // Unlike Anthropic, the system turn stays in the messages array.
     expect(body.messages).toEqual(messages);
+    // `max_completion_tokens`, never the deprecated `max_tokens`: OpenAI's
+    // reasoning models reject the latter outright.
+    expect(body.max_completion_tokens).toBe(1024);
+    expect(body).not.toHaveProperty("max_tokens");
   });
 
   it("works against a self-hosted base URL with a trailing slash", async () => {
@@ -448,6 +599,56 @@ describe("OpenAiCompatibleProvider — response handling", () => {
     expect(result.error.message).toBe("provider response had no assistant message text");
   });
 
+  it("a negative token count is treated as absent, never billed as exact", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [{ message: { content: "x" } }],
+          usage: { prompt_tokens: -1e12, completion_tokens: 3 },
+        }),
+      ),
+    );
+    const result = await new OpenAiCompatibleProvider("https://api.openai.com/v1", "k").run(
+      "m",
+      [],
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.usage).toBeUndefined();
+  });
+
+  it("a verdict truncated at the token bound fails with that reason", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          choices: [{ message: { content: '{"score": 0.9, "pass' }, finish_reason: "length" }],
+        }),
+      ),
+    );
+    const result = await new OpenAiCompatibleProvider("https://api.openai.com/v1", "k").run(
+      "m",
+      [],
+    );
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).toBeInstanceOf(LlmProviderResponseError);
+    expect(result.error.message).toBe("provider response was truncated at the 1024-token limit");
+  });
+
+  it("a body that dies mid-transfer is a transport error, not a malformed body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(bodyReadFailureResponse()));
+    const result = await new OpenAiCompatibleProvider("https://api.openai.com/v1", "k").run(
+      "m",
+      [],
+    );
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error).not.toBeInstanceOf(LlmProviderResponseError);
+    expect(result.error.message).toContain("network connection lost");
+  });
+
   it("a response with no usage reports none, keeping the caller on an estimate", async () => {
     vi.stubGlobal(
       "fetch",
@@ -522,13 +723,27 @@ describe("LLMEvaluator — cost accounting is per provider, not per source", () 
     expect(result.data.costs?.[0]?.quantity).toBeGreaterThan(0);
   });
 
-  it("Workers AI, which reports nothing, is on the estimate", async () => {
+  it("Workers AI without a usage object is on the estimate", async () => {
     const ai: AiBinding = { run: vi.fn().mockResolvedValue({ response: VERDICT }) };
     const evaluator = new LLMEvaluator(new WorkersAiProvider(ai));
     const result = await evaluator.evaluate("diff content", POLICY, mockLogger);
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.costs?.[0]?.estimated).toBe(true);
+  });
+
+  it("Workers AI reporting usage is billed on exact counts, not the estimate", async () => {
+    const ai: AiBinding = {
+      run: vi.fn().mockResolvedValue({
+        response: VERDICT,
+        usage: { prompt_tokens: 900, completion_tokens: 100 },
+      }),
+    };
+    const evaluator = new LLMEvaluator(new WorkersAiProvider(ai));
+    const result = await evaluator.evaluate("diff content", POLICY, mockLogger);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.costs).toEqual([{ kind: "llm_tokens", quantity: 1000 }]);
   });
 });
 

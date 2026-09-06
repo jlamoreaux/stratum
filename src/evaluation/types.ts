@@ -206,4 +206,31 @@ export type EvaluatorConfig =
     }
   | { type: "webhook"; url: string; secret?: string; timeoutMs?: number }
   | SandboxEvaluatorConfig
-  | { type: "llm"; model?: string; threshold?: number; maxDiffChars?: number };
+  | LlmEvaluatorConfig;
+
+/**
+ * The `llm` evaluator's slice of `.stratum/policy.yaml`.
+ *
+ * Named rather than inlined for the reason `SandboxEvaluatorConfig` is: two
+ * places narrow this shape out of a policy (`LLMEvaluator`, and the BYOK
+ * provider resolution), and an inline re-declaration in either would drift.
+ *
+ * Produced only by `sanitizeLlmConfig` (`policy-loader.ts`), which is a
+ * whitelist: these four fields are the whole surface a repository's policy file
+ * may set. There is deliberately **no `baseUrl`** — see `llm-providers.ts`.
+ */
+export interface LlmEvaluatorConfig {
+  type: "llm";
+  /**
+   * Selects one of the operator's `LLM_PROVIDERS` entries by name, running the
+   * evaluation on the project's own credential (BYOK). Absent means Workers AI,
+   * on the operator's bill. A name the operator has not configured is not a
+   * fallback: it fails the policy file closed.
+   */
+  provider?: string;
+  model?: string;
+  /** Score at or above which the model's verdict is allowed to pass. */
+  threshold?: number;
+  /** Diff characters sent to the model; clamped again by the evaluator. */
+  maxDiffChars?: number;
+}

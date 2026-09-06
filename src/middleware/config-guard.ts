@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from "hono";
+import { parseLlmProviders } from "../evaluation/llm-providers";
 import type { Env } from "../types";
 import { createLogger } from "../utils/logger";
 
@@ -57,20 +58,44 @@ export function entitlementsConfigError(
   return null;
 }
 
+/**
+ * Returns a human-readable error when `LLM_PROVIDERS` is set but unusable, else
+ * null.
+ *
+ * Loud on purpose, and the reason Open Question 3 settled on a typed parse: a
+ * malformed allowlist silently disables BYOK, and the projects that opted in
+ * discover it as blocked merges naming a provider the operator believes is
+ * configured. Unset is not a problem — it is the default, and it means Workers
+ * AI only.
+ */
+export function llmProvidersConfigError(env: Pick<Env, "LLM_PROVIDERS">): string | null {
+  const parse = parseLlmProviders(env.LLM_PROVIDERS);
+  if (parse.status === "invalid") {
+    // One template literal rather than concatenation: `useTemplate` rejects
+    // mixing an interpolated piece with `+`, and the sibling above can use plain
+    // strings only because it interpolates nothing.
+    return `LLM_PROVIDERS is set but could not be parsed (${parse.reason}) — no BYOK provider is available, so every policy selecting one blocks merges until this is fixed. Correct the value or unset it to run on Workers AI.`;
+  }
+  return null;
+}
+
 // Log the config problems at most once per isolate rather than on every request.
 let hasLoggedConfigError = false;
 
 /**
- * Surfaces an incoherent RepoDO/R2 or entitlements configuration loudly in
- * Workers Logs on the first request after a bad deploy, instead of only when a
- * later merge throws — or, for entitlements, never. Non-fatal: reads and the UI
- * still work in both cases, so we log rather than reject the request.
+ * Surfaces an incoherent RepoDO/R2, entitlements or LLM-provider configuration
+ * loudly in Workers Logs on the first request after a bad deploy, instead of
+ * only when a later merge throws — or, for entitlements, never. Non-fatal:
+ * reads and the UI still work in every case, so we log rather than reject the
+ * request.
  */
 export const configGuardMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   if (!hasLoggedConfigError) {
-    const problems = [repoDoConfigError(c.env), entitlementsConfigError(c.env)].filter(
-      (problem): problem is string => problem !== null,
-    );
+    const problems = [
+      repoDoConfigError(c.env),
+      entitlementsConfigError(c.env),
+      llmProvidersConfigError(c.env),
+    ].filter((problem): problem is string => problem !== null);
     if (problems.length > 0) {
       hasLoggedConfigError = true;
       const logger = createLogger({ component: "config-guard" });

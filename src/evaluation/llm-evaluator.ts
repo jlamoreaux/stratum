@@ -6,7 +6,7 @@ import { err, ok } from "../utils/result";
 import type { LlmProvider } from "./llm-provider";
 import { LlmProviderResponseError } from "./llm-provider";
 import { sanitizePolicy } from "./sanitize-policy";
-import type { EvalPolicy, EvalResult, Evaluator } from "./types";
+import type { EvalPolicy, EvalResult, Evaluator, LlmEvaluatorConfig } from "./types";
 
 const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const DEFAULT_THRESHOLD = 0.7;
@@ -31,7 +31,20 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 export class LLMEvaluator implements Evaluator {
-  constructor(private provider: LlmProvider) {}
+  /**
+   * @param provider Who runs the model. Workers AI by default; an operator-
+   *   configured HTTP provider on the project's own credential under BYOK.
+   * @param costSource Who paid for the tokens this run reports. `"byok"` marks
+   *   every cost sample so a project running on its own key does not decrement
+   *   the hosted allowance — the whole point of the field, and something no
+   *   later layer can reconstruct, since the recorded sample is all it sees.
+   *   Defaults to `"platform"`, which the sample omits entirely (absent means
+   *   the operator paid).
+   */
+  constructor(
+    private provider: LlmProvider,
+    private costSource: "platform" | "byok" = "platform",
+  ) {}
 
   async evaluate(
     diff: string,
@@ -41,9 +54,7 @@ export class LLMEvaluator implements Evaluator {
     logger.debug("Starting LLM evaluation");
 
     try {
-      const config = policy.evaluators.find((e) => e.type === "llm") as
-        | { type: "llm"; model?: string; threshold?: number; maxDiffChars?: number }
-        | undefined;
+      const config = policy.evaluators.find((e): e is LlmEvaluatorConfig => e.type === "llm");
       const model = config?.model ?? DEFAULT_MODEL;
       const threshold = config?.threshold ?? DEFAULT_THRESHOLD;
       const maxDiffChars =
@@ -87,8 +98,10 @@ export class LLMEvaluator implements Evaluator {
       if (!runResult.success) {
         // A response that arrived but cannot be used fails the gate closed with
         // a readable reason; a transport failure stays an error the caller
-        // surfaces. Either way the provider's own message is metadata only —
-        // it is copied into a user-visible reason by `runEvaluation`.
+        // surfaces. Either way the provider's own message is metadata only and
+        // becomes user-visible: this block interpolates it into the reason
+        // below, and `runEvaluation` copies the message of the error the other
+        // branch returns into a reason of its own.
         if (runResult.error instanceof LlmProviderResponseError) {
           logger.error(`LLM evaluation failed: ${runResult.error.message}`);
           return ok({
@@ -103,16 +116,23 @@ export class LLMEvaluator implements Evaluator {
 
       const responseText = runResult.data.text;
       const usage = runResult.data.usage;
+      // Written only for `byok`: an absent `source` already means "platform",
+      // so always emitting it would add a field that says nothing to every
+      // sample the operator pays for.
+      const source = this.costSource === "byok" ? { source: "byok" as const } : {};
       // Real counts when the provider reports them, otherwise ~4 chars/token —
-      // the distinction is per provider, not per source. Workers AI reports no
-      // usage at all, so that path stays estimated.
+      // the distinction is per response, not per source. Every provider behind
+      // this seam reports counts when it has them, Workers AI included; a
+      // response that omits them, or reports ones the provider would not trust,
+      // is what keeps a run on the estimate.
       const costs: EvalResult["costs"] = usage
-        ? [{ kind: "llm_tokens", quantity: usage.inputTokens + usage.outputTokens }]
+        ? [{ kind: "llm_tokens", quantity: usage.inputTokens + usage.outputTokens, ...source }]
         : [
             {
               kind: "llm_tokens",
               quantity: Math.ceil((promptChars + responseText.length) / 4),
               estimated: true,
+              ...source,
             },
           ];
 
