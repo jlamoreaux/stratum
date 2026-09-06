@@ -70,10 +70,10 @@ Humans and AI agents are both first-class citizens, with different powers by des
   | D1 | changes, issues, events, audit, costs | **required** |
   | KV | project/workspace identity, session state | **required** |
   | Queues | imports, events, webhook delivery | recommended |
-  | Durable Objects | merge queue, repo hot index, rate limiting | recommended |
+  | Durable Objects | merge queue, repo hot index, rate limiting, usage meter | recommended |
   | R2 | backups; backups no-op when unbound | recommended |
   | Analytics Engine | request analytics | optional |
-  | Workers AI | the LLM evaluator | optional |
+  | Workers AI | the LLM evaluator (unless projects bring their own provider key) | optional |
   | Sandboxes | sandbox evaluator, post-merge smoke tests | **beta, off by default** |
 
   `wrangler.toml` declares every binding above **except `[[sandboxes]]`, which is commented
@@ -218,7 +218,7 @@ into an editor's config, and **Settings → Connected applications** revokes acc
 immediately. Headless callers can present a `stratum_user_` or `stratum_agent_` token
 directly instead.
 
-That exposes the whole eval-gated change flow as eighteen MCP tools, so Claude Code,
+That exposes the whole eval-gated change flow as nineteen MCP tools, so Claude Code,
 Cursor, Zed, Copilot, or a custom agent can drive Stratum without a bespoke integration.
 See the [MCP guide](docs/user-guide/mcp.md).
 
@@ -307,10 +307,10 @@ commit log, and tags.
 
 **The evaluation gate**
 Secret scanner (always on and blocking; 25+ credential patterns plus entropy detection) ·
-diff analysis · webhook for external CI · LLM review via the Workers AI binding · sandboxed
-test execution (Sandboxes beta; see [Prerequisites](#prerequisites)) · per-evaluator
-evidence and estimated resource costs (LLM tokens, sandbox time, git ops) · branch
-protection · provenance recorded per merged commit.
+diff analysis · webhook for external CI · LLM review, on the Workers AI binding or on the
+project's own provider key · sandboxed test execution (Sandboxes beta; see
+[Prerequisites](#prerequisites)) · per-evaluator evidence and metered resource costs (LLM
+tokens, sandbox time, git ops) · branch protection · provenance recorded per merged commit.
 
 **Post-merge deployments**
 A `deploys:` block in `.stratum/policy.yaml` publishes the merged tree to Cloudflare
