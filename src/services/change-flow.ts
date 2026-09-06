@@ -104,16 +104,28 @@ export class UnavailableEvaluator implements Evaluator {
 
 /**
  * The billing subject an evaluation of `project` should be charged to, or
- * `undefined` when the project has none that can be named yet.
+ * `undefined` when the project has none that can be named.
+ *
+ * Two cases yield nothing, and both are deliberate.
  *
  * `ProjectEntry.ownerType` admits `"agent"`, which `BillingContext` does not:
  * an agent is not a payer, it belongs to one. Walking `agents.owner_id` to that
  * user is `resolveBillingSubject`'s job in the attribution work that follows —
  * so an agent-owned project yields no context here rather than a guessed one.
  * Attributing spend to an agent id would be worse than attributing none.
+ *
+ * The field check is the same principle applied to a shape the type system
+ * promises but KV cannot: entries are cast without validation
+ * (`src/storage/state.ts`), legacy rows genuinely lack `namespace` and can lack
+ * `ownerId` — `canWriteProject` guards that exact case — and a restored backup
+ * re-writes whatever JSON it held. Returning a context keyed on `""` or
+ * `undefined` would be worse than returning none: spend that *looks* attributed
+ * aggregates under an empty key that no account will ever reconcile, where an
+ * absent subject is at least visibly absent.
  */
 export function billingContextFor(project: ProjectEntry): BillingContext | undefined {
-  if (project.ownerType === "agent") return undefined;
+  if (project.ownerType !== "user" && project.ownerType !== "org") return undefined;
+  if (!project.ownerId || !project.id) return undefined;
   return {
     ownerId: project.ownerId,
     ownerType: project.ownerType,
@@ -126,9 +138,11 @@ export function billingContextFor(project: ProjectEntry): BillingContext | undef
  * whatever the policy configures. Evaluators whose binding is missing become
  * UnavailableEvaluator (score 0, fail) rather than silently vanishing.
  *
- * Takes the whole `ProjectEntry` rather than a display name so an evaluator can
- * be told who owns the project it is judging; the display name every call site
- * used to pass is derived here so no caller has to build it twice.
+ * Takes the whole `ProjectEntry` rather than a display name because the payer
+ * has to be nameable from it. Nothing built here receives the project: the
+ * billing subject reaches evaluators on the `EvaluationContext` that
+ * `runEvaluation` forwards, and inside this function the entry is used for the
+ * log line below and nothing else.
  *
  * `workspaceRepo` is read access to the workspace being evaluated (remote +
  * read token + the pinned evaluated commit); the sandbox evaluator needs it to
@@ -144,10 +158,12 @@ export function buildEvaluators(
   logger: Logger,
   workspaceRepo?: SandboxRepoAccess,
 ): Array<{ type: string; evaluator: Evaluator }> {
-  // The whole entry, not a name: an evaluator that spends money has to be able
-  // to name the payer, and a "@ns/slug" string identifies no owner and no
-  // project id. Only the log line below needs the human-readable form.
-  const projectName = `${project.namespace}/${project.slug}`;
+  // Guarded because a legacy entry can carry no namespace, as this file already
+  // assumes at `resolveProjectHead` and `ensureWorkspaceRepo`. Interpolating
+  // unguarded would log "undefined/old-project" for exactly the projects whose
+  // identity is already hardest to trace.
+  const projectName =
+    project.namespace && project.slug ? `${project.namespace}/${project.slug}` : project.name;
   const evaluators: Array<{ type: string; evaluator: Evaluator }> = [
     { type: "secret_scan", evaluator: new SecretScanEvaluator() },
   ];
@@ -224,10 +240,15 @@ export async function runEvaluation(
   diff: string,
   policy: EvalPolicy,
   logger: Logger,
-  /** What the diff is a diff of. Forwarded to every evaluator so one that
-   * reproduces the change out-of-process can pin the base it applies to (#274).
-   * Callers pass the base resolved from the clone the diff came from, never a
-   * fresh read of the project head. */
+  /** What the diff is a diff of, and who pays for evaluating it. Forwarded to
+   * every evaluator so one that reproduces the change out-of-process can pin
+   * the base it applies to (#274). Callers pass the base resolved from the
+   * clone the diff came from, never a fresh read of the project head, and the
+   * billing subject from `billingContextFor`.
+   *
+   * One object is shared by every evaluator in the `Promise.all` below, so it
+   * must stay immutable data. Hanging a mutable balance or counter off it would
+   * be a race across concurrently running evaluators, not a shared budget. */
   context?: EvaluationContext,
 ): Promise<{ evalRuns: EvaluationRun[]; evalResult: EvalResult }> {
   const evalRuns = await Promise.all(

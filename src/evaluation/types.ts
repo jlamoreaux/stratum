@@ -14,30 +14,38 @@ export interface EvalResult {
 /**
  * Who pays for the metered resources an evaluation consumes.
  *
- * The evaluator layer has no project today — `buildEvaluators` was given a
- * display name and `runEvaluation` nothing at all — so the LLM evaluator's
- * spend lands on the operator's Workers AI account with nothing recording
- * whose change caused it. Carrying the subject on the evaluation context is
- * what makes that spend attributable and, later, meterable, without every
- * evaluator having to grow a project-shaped constructor argument.
+ * The LLM evaluator spends the operator's Workers AI budget on every call, and
+ * before this existed nothing at the evaluator layer could say whose change
+ * caused it. Carrying the subject on the evaluation context is what makes that
+ * spend attributable, and later meterable, without every evaluator having to
+ * grow a project-shaped constructor argument.
  *
  * `ownerType` is narrower than `ProjectEntry.ownerType`, which also admits
  * `"agent"`: an agent is not a billing subject, it resolves to the user that
- * owns it. That resolution is deliberately not done here.
+ * owns it. `billingContextFor` yields nothing rather than performing that
+ * resolution.
  */
 export interface BillingContext {
   /** The paying user or org. Never an agent id — see `ownerType`. */
   ownerId: string;
   ownerType: "user" | "org";
-  /** The project whose policy is being enforced. Keys per-project credentials. */
+  /** The project whose policy is being enforced. */
   projectId: string;
 }
 
 /**
- * What the diff is a diff *of*. A diff alone does not identify the tree it
- * applies to, so an evaluator that reproduces the change out-of-process (the
- * webhook evaluator) cannot tell which base it should apply the hunks to
- * (#274).
+ * What an evaluation is *of*, and who pays for it: the tree the diff applies
+ * to, plus the billing subject. A diff alone does not identify the tree, so an
+ * evaluator that reproduces the change out-of-process (the webhook evaluator)
+ * cannot tell which base it should apply the hunks to (#274).
+ *
+ * **Nothing on this type may be forwarded off-box wholesale.** The webhook
+ * evaluator POSTs to a URL taken from `.stratum/policy.yaml` — repository
+ * content — and it stays safe only because it names the fields it sends
+ * (`diff`, sanitized policy, `baseSha`) instead of spreading this object. A
+ * `...context` there would ship `billing.ownerId` to an arbitrary endpoint the
+ * policy file chose. Add a field here and that exclusion is one careless
+ * refactor away; `tests/evaluator-billing-context.test.ts` pins it.
  */
 export interface EvaluationContext {
   /**

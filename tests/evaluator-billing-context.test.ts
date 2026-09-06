@@ -4,6 +4,7 @@ import type { EvalPolicy, EvaluationContext, Evaluator } from "../src/evaluation
 import { authMiddleware } from "../src/middleware/auth";
 import type { Change, Env, ProjectEntry } from "../src/types";
 import type { Logger } from "../src/utils/logger";
+import { makeFakeKV } from "./helpers/fake-kv";
 
 /**
  * Task 1 is a pure refactor whose only observable effect is what reaches the
@@ -251,6 +252,17 @@ describe("billingContextFor", () => {
     });
   });
 
+  it.each([
+    ["a missing ownerId", { ownerId: "" }],
+    ["a missing project id", { id: "" }],
+  ])("yields no subject for %s rather than one keyed on an empty string", (_label, overrides) => {
+    // KV entries are cast without shape validation and legacy rows genuinely
+    // lack fields, so the type's promise is not a runtime guarantee. Spend that
+    // *looks* attributed but aggregates under "" is worse than spend visibly
+    // attributed to nobody.
+    expect(billingContextFor(projectEntry(overrides))).toBeUndefined();
+  });
+
   it("yields no subject for an agent-owned project rather than billing the agent", () => {
     // An agent is not a payer — it resolves to its owning user, which is
     // deliberately not done here. Attributing spend to an agent id would be
@@ -273,6 +285,10 @@ describe("buildEvaluators — ProjectEntry replaces the display name", () => {
     return entry?.evaluator;
   }
 
+  // `SecretScanEvaluator` and `LLMEvaluator` are the recording stand-ins this
+  // file substitutes above, not the shipped classes. The assertions still
+  // separate the wired branch from `UnavailableEvaluator`, which is what they
+  // are for — they just don't prove the real class was constructed.
   it("always prepends the blocking secret scan", () => {
     const built = buildEvaluators(makeEnv(), { evaluators: [] }, project, logger);
     expect(built.map((e) => e.type)).toEqual(["secret_scan"]);
@@ -288,8 +304,10 @@ describe("buildEvaluators — ProjectEntry replaces the display name", () => {
     expect(evaluatorFor(policy, "webhook")).toBeInstanceOf(WebhookEvaluator);
   });
 
-  it("builds a real LLMEvaluator when the AI binding is present", () => {
-    expect(evaluatorFor({ evaluators: [{ type: "llm" }] }, "llm")).toBeInstanceOf(LLMEvaluator);
+  it("wires the llm evaluator, not UnavailableEvaluator, when the AI binding is present", () => {
+    const evaluator = evaluatorFor({ evaluators: [{ type: "llm" }] }, "llm");
+    expect(evaluator).toBeInstanceOf(LLMEvaluator);
+    expect(evaluator).not.toBeInstanceOf(UnavailableEvaluator);
   });
 
   it("still fails the llm evaluator closed when the AI binding is missing", async () => {
@@ -333,6 +351,34 @@ describe("buildEvaluators — ProjectEntry replaces the display name", () => {
 // ---------------------------------------------------------------------------
 // runEvaluation forwards the whole context, billing included
 // ---------------------------------------------------------------------------
+
+describe("the billing subject stays inside the Worker", () => {
+  it("is not forwarded to the policy-supplied webhook URL", async () => {
+    // The webhook evaluator POSTs to a URL taken from .stratum/policy.yaml —
+    // repository content. It is safe only because it names the fields it sends
+    // rather than spreading the context. This pins that: a `...context` there
+    // would ship ownerId and projectId to an endpoint the policy file chose.
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ score: 1, passed: true })));
+    const original = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const policy: EvalPolicy = { evaluators: [{ type: "webhook", url: "https://hook.test" }] };
+      await new WebhookEvaluator().evaluate("a diff", policy, logger, {
+        baseSha: "base",
+        billing: billingContextFor(projectEntry()),
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body);
+      expect(body).toContain("baseSha");
+      expect(body).not.toContain("billing");
+      expect(body).not.toContain("user_alice");
+      expect(body).not.toContain("proj_abc");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
 
 describe("runEvaluation", () => {
   it("forwards the billing context to every evaluator", async () => {
@@ -485,14 +531,9 @@ describe("POST /api/projects/conflicts/:id/resolve passes the project through", 
   }
 
   function makeKv(): KVNamespace {
-    const store: Record<string, string> = {
-      [`conflict:${CONFLICT_CTX.conflictId}`]: JSON.stringify(CONFLICT_CTX),
-    };
-    return {
-      get: vi.fn(async (key: string) => store[key] ?? null),
-      put: vi.fn(async () => undefined),
-      delete: vi.fn(async () => undefined),
-    } as unknown as KVNamespace;
+    const kv = makeFakeKV();
+    kv.store.set(`conflict:${CONFLICT_CTX.conflictId}`, JSON.stringify(CONFLICT_CTX));
+    return kv;
   }
 
   it("bills the loaded project rather than the synthesized @ns/slug string", async () => {
