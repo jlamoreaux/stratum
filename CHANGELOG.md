@@ -105,16 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gated form. Account creation for every signup method — magic link, GitHub,
   Google — now has exactly one door. No behaviour changes for a live deployment:
   the create branch was already dead, and sign-in is untouched.
-- **The legacy `POST /auth/email/send` no longer starts a signup under the gate.**
-  It carries no invite code, so with the gate on it minted a signup magic link
-  that could only fail at verify — an email sent, a link clicked, and an
-  "invalid invite code" at the end of it. Nothing is minted or sent for a new
-  address now. The response is deliberately unchanged: this endpoint answers a
-  registered and an unknown address identically, and an honest "you need an
-  invite" here would have made it a one-request-per-address membership oracle
-  for the beta population, needing no code to run it. The invite prompt lives on
-  `/auth/signup`, which can actually collect one. Login links for existing
-  accounts are unaffected, as is the endpoint with the gate off.
 - **GitHub sign-in no longer trusts an unverified email.** The callback picked
   the primary address, verified or not, and fell back to *any* address on the
   account. That address then matched (and linked to) an existing Stratum

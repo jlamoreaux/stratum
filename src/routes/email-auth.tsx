@@ -476,20 +476,6 @@ app.post("/send", async (c) => {
   try {
     // Check if user exists to determine intent
     const existingUser = await getUserByEmail(c.env.DB, email, logger);
-    // This endpoint takes no invite code, so under the closed beta the only
-    // link it could mint for a new address is one that dies at verify: an email
-    // sent, a link clicked, and an "invalid invite code" at the end of it. Skip
-    // that send — but answer exactly as a sent link does. Saying "you need an
-    // invite" here while a registered address said "check your email" would
-    // turn this endpoint into a membership oracle for the beta population, one
-    // request per address and no code needed to run it, which is the very thing
-    // the send-only-for-real-accounts branch above is shaped to avoid. Someone
-    // who holds a code signs up at /auth/signup, which asks for one.
-    if (!existingUser.success && betaGateEnabled(c.env)) {
-      logger.info("Legacy signup link not minted — closed beta", { emailHash });
-      return emailAuthRedirect(c, "success", "email_sent");
-    }
-
     const intent = existingUser.success ? "login" : "signup";
     let username: string | undefined;
     if (!existingUser.success) {
