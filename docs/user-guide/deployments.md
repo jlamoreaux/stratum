@@ -134,7 +134,8 @@ you actually see.
 
 | What you see | What it means | Fix |
 |---|---|---|
-| **No deployment row at all** | The merge never enqueued: the post-merge check reverted or failed the merge, the merge went through `merge-batch`, or the instance has no `DEPLOY_QUEUE` binding | Check the post-merge check passed (or is not configured); then step 1 |
+| **No deployment row at all** | The merge never enqueued: the post-merge check reverted or failed the merge, or the instance has no `DEPLOY_QUEUE` binding | Check the post-merge check passed (or is not configured); then step 1 |
+| **No deployment row, and the merge went through `merge-batch`** | Expected. `merge-batch` (`src/routes/changes.ts:898`) never calls `enqueueMergeDeploy` — it runs no post-merge check and enqueues no deploy, by design: the batch path merges many changes in one push | **No post-merge recovery exists.** Approve and Retry both act on an existing row (`notFound("Deployment", id)` otherwise), and the deployments API has no route that creates one. Merge through the single-change path when you want a deploy |
 | Status `skipped` | There was nothing configured to deploy at that commit — no policy file, or a policy with no `deploys:` entries | Check `.stratum/policy.yaml` is committed on the **default branch** and declares `deploys:`. `skipped` never means an error |
 | `Missing project secret: X — add it in project settings` | The policy names a secret the store doesn't have | Add it (step 3); names are case-sensitive |
 | `DEPLOY_SECRET_KEY is not configured on this instance…` | Instance prerequisite missing | Step 1 |

@@ -102,14 +102,24 @@ and the `require_*` toggles are cost controls as much as noise controls.
 TTFB grows with the prompt, so the wall is a token budget as much as a clock. Measured on
 2026-09-04, one auto-review per row:
 
-| PR | Input tokens | Wall clock | Result |
+| PR | Input tokens | Job wall clock | Result |
 |---|---|---|---|
 | #361 | 4,487 | 3m40s | posted |
 | docs/deployments-roadmap | 6,473 | 1m58s | posted |
 | docs/deploy-quickstart | 7,800 | 2m34s | posted |
-| #362 | 16,788 | 8m00s | posted, ~10s of margin |
+| #362 | 16,788 | 8m00s | posted; the closest run to the wall |
 | #358 | pruned to 32,000 (from 36,219) | 20m, killed | nothing |
 | #359 | pruned to 32,000 (from 177,415) | 20m, killed | nothing |
+
+**The column is job wall clock, not request duration.** It is what the Actions
+run reports, so it includes checkout, the PR-Agent container, and the job's own
+setup — the two killed rows read `20m` because that is `timeout-minutes`, not
+because any single call ran that long. It is therefore an upper bound on the
+call: #362's `8m00s` is 480s of *job* against a 420s `config.ai_timeout`, and
+the review posted, so the call itself landed inside the bound with the
+remainder spent outside the request. Read the column for the trend against
+input size, not for margin against the wall — the per-request durations are in
+AI Gateway analytics, not here.
 
 The 420s wall sits somewhere around 17–20K input tokens. Above it a call cannot land, and the
 failure is not one timeout but six: PR-Agent retries each model twice across a three-model

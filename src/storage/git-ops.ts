@@ -1069,9 +1069,12 @@ async function resolveFetchedTip(
  * It does **not** fall back to a squash on conflict, and has not for some time.
  * The old fallback swallowed real conflicts: it copied the workspace's files
  * over the project's, which silently discarded any project commit made after
- * the workspace forked. A conflict now returns `MergeConflictError` with the
- * conflicting paths, which the route turns into `409 MERGE_CONFLICT` carrying a
- * `conflictId` for out-of-band resolution.
+ * the workspace forked. A conflict now returns `MergeConflictError`, which the
+ * route turns into `409 MERGE_CONFLICT` carrying a `conflictId` for out-of-band
+ * resolution. It carries the conflicting paths *when they are known*: the
+ * `isGitMergeConflict` branch below reads them from `error.data.filepaths`, but
+ * the `MergeNotSupportedError` branch has no file list and constructs the error
+ * with an empty array. Treat the paths as advisory, not guaranteed.
  *
  * This comment is called out because its earlier wording outlived the change
  * and propagated: the README, the getting-started guide and the roadmap all

@@ -74,9 +74,12 @@ environment, including the maintainer's hosted instance, with two consequences:
   / failed (`src/services/change-flow.ts:137-152`), so naming `sandbox` in
   `merge.requiredEvaluators` **blocks every merge in that project** until the
   binding is enabled or the evaluator is removed from the policy.
-- **`merge.postMergeCommand` is silently skipped**, returning
+- **`merge.postMergeCommand` is skipped with a warning**: `post-merge.ts`
+  logs `Post-merge command configured but SANDBOX binding is absent` and returns
   `{ status: "skipped", reason: "Sandbox binding is not configured" }`
-  (`src/merge/post-merge.ts:39-43`). Nothing runs and nothing is reverted.
+  (`src/merge/post-merge.ts:39-43`). Nothing runs and nothing is reverted, but
+  the skip is reported — it is in the logs and in the merge's post-merge status,
+  not swallowed.
 
 This repo's own `.stratum/policy.yaml` uses only `diff` and `llm` and sets no
 `postMergeCommand`, so it avoids both. The `llm` evaluator has the same

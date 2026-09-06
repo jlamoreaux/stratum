@@ -42,7 +42,9 @@ exists. A separate display name, shown in the header, can be changed any time.
 
 Stratum is AGPL-3.0-or-later and self-hostable on your own Cloudflare account. You
 need Node.js 22.13+ and a Cloudflare account with Workers, **Artifacts (beta)**,
-D1, KV, Queues, Durable Objects, and R2; the Workers AI binding is optional and
+D1, KV, Queues, and Durable Objects. R2 is optional — it backs the scheduled
+backup run, which logs a warning and skips when `BACKUPS` is unbound
+(`src/backup/run-backup.ts:116`). The Workers AI binding is optional too, and
 only needed for the LLM evaluator. Sandboxes — needed by the `sandbox`
 evaluator and by `merge.postMergeCommand` — is a **gated Cloudflare beta**, and
 its `[[sandboxes]]` binding ships **commented out** in `wrangler.toml`, so

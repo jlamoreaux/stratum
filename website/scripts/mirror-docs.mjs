@@ -227,7 +227,10 @@ async function renderEndpointsPage() {
 
 /**
  * Every `.md` under `docs/api/endpoints` must be registered in
- * `ENDPOINT_ORDER`, and every registered slug must exist.
+ * `ENDPOINT_ORDER`, every registered slug must exist, and no slug may be
+ * registered twice. Set membership alone would let a duplicate through both
+ * loops below, and `renderEndpointsPage` would then emit that section twice,
+ * with two identical anchors and an `anchors.set` that silently overwrites.
  */
 async function endpointsAudit() {
   const dir = join(DOCS, "api", "endpoints");
@@ -237,6 +240,15 @@ async function endpointsAudit() {
     .sort();
   const registered = [...ENDPOINT_ORDER].sort();
   const problems = [];
+  const seen = new Set();
+  for (const slug of ENDPOINT_ORDER) {
+    if (seen.has(slug)) {
+      problems.push(
+        `ENDPOINT_ORDER lists "${slug}" more than once, so its section would be published twice`,
+      );
+    }
+    seen.add(slug);
+  }
   for (const slug of present) {
     if (!registered.includes(slug)) {
       problems.push(
@@ -275,7 +287,10 @@ async function publishedPages(dir = OUT, prefix = "") {
 async function inventoryAudit(generated) {
   const owned = new Set([...generated, ...SITE_OWNED.keys()]);
   const problems = [];
-  for (const page of await publishedPages()) {
+  // Walk the output tree once; the SITE_OWNED loop below reuses the same list
+  // rather than re-reading the tree per declared entry.
+  const published = await publishedPages();
+  for (const page of published) {
     if (!owned.has(page)) {
       problems.push(
         `${page} is published but nothing generates it. Either mirror it from docs/, or add it to SITE_OWNED with a reason.`,
@@ -283,7 +298,7 @@ async function inventoryAudit(generated) {
     }
   }
   for (const declared of SITE_OWNED.keys()) {
-    if (!(await publishedPages()).includes(declared)) {
+    if (!published.includes(declared)) {
       problems.push(`SITE_OWNED lists ${declared}, which no longer exists`);
     }
   }

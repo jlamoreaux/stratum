@@ -22,13 +22,30 @@ fourth hands your code to a hosting provider that runs it:
 > That makes **1. the sandbox evaluator** and **3. `merge.postMergeCommand`**
 > unavailable unless you self-host *and* have Sandboxes access *and* uncomment
 > the binding. The consequence is not cosmetic: a policy naming the `sandbox`
-> evaluator does not skip it, it **fails closed** — score 0, failed — so
-> **every merge in that project is blocked** until you remove it. See
-> [the sandbox evaluator](#1-the-sandbox-evaluator) for why it behaves that way.
+> evaluator does not skip it, it **fails closed** — score 0, failed. How far
+> that reaches depends on two policy settings:
 >
-> The two that work out of the box are **2. the `webhook` evaluator** and
-> **4. `deploys:`**. If you want tests gating your merges today, the webhook
-> evaluator is the supported route.
+> - Under the default `requireAll: true`, the aggregate verdict is
+>   `every(passed)` (`src/evaluation/composite-evaluator.ts:63-65`), so the
+>   failed `sandbox` result sinks it. The change lands in `needs_changes` and
+>   **every merge in that project is blocked** until you remove the evaluator.
+> - Under `requireAll: false` the aggregate is `some(passed)`, so another
+>   passing evaluator still carries it — *unless* `sandbox` is named in
+>   `merge.requiredEvaluators`, which is checked per evaluator
+>   (`src/merge/protection.ts:59-65`) and blocks the merge on its own either way.
+>
+> See [the sandbox evaluator](#1-the-sandbox-evaluator) for why it behaves that
+> way.
+>
+> Neither **2. the `webhook` evaluator** nor **4. `deploys:`** needs the
+> Sandbox binding, but they are not equally ready. The webhook evaluator needs
+> only a reachable `https://` endpoint you host and its `url` in the policy.
+> `deploys:` needs deployment setup first: a supported `target`, that
+> provider's credentials in the project secret store, an instance-level
+> `DEPLOY_SECRET_KEY` to decrypt them, and a `DEPLOY_QUEUE` binding — without
+> those a deployment fails or is never enqueued. See
+> [Deployments](deployments.md). If you want tests gating your merges today,
+> the webhook evaluator is the supported route.
 
 ### 1. The sandbox evaluator
 

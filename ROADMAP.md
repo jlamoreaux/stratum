@@ -125,7 +125,9 @@ build, the set of projects this serves stays small. Rationale for each in
 ### Merge conflict resolution for changes
 
 - [ ] A conflicting three-way merge is **refused**, not silently squashed: the merge answers
-      `409 MERGE_CONFLICT` with a `conflictId` and the conflicting paths. What is missing is
+      `409 MERGE_CONFLICT` with a `conflictId`, and the conflicting paths where they are
+      known (isomorphic-git's `MergeNotSupportedError` shapes carry no file list, so
+      `conflictingFiles` is empty for those). What is missing is
       an interactive way to resolve one for a *change* — resolution today is the out-of-band
       `POST /api/projects/conflicts/{id}/resolve` (`accept-project`, `accept-workspace`, or
       `manual`). (GitHub *sync* conflicts do have a resolution UI.)
