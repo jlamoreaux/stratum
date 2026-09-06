@@ -134,7 +134,7 @@ evaluator **and** `merge.postMergeCommand`. Stratum meters resource
 usage per change — LLM tokens, sandbox execution milliseconds, and git
 operations — and shows it alongside the evaluation evidence, so you can see what
 each (agent) change cost you. LLM tokens are the counts the provider reported,
-falling back to a `~4 chars/token` estimate (marked as one) only when a response
+falling back to a `~4 chars/token` estimate (marked as estimated) only when a response
 omits them. Those per-change records roll up into a monthly per-account total
 you can read at `/settings/usage`.
 

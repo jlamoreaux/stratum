@@ -1074,6 +1074,15 @@ async function createDeployment(
  * Write a terminal `failed` on a row that was never claimed — the change was
  * reverted, the project is being deleted, the tree would not read, or the deploy
  * is no longer declared. Leaving it `queued` would strand it forever.
+ *
+ * `onlyIfUnclaimed` because this runs BEFORE `claimDeployment`: a redelivery of
+ * the same message may already hold the lease and be deploying, and `running` is
+ * not a terminal status, so the write would otherwise land on a live row and
+ * release its lease. When it does not land — that case, or a row that reached a
+ * terminal status first — the row belongs to someone else, so no
+ * `deployment.failed` is emitted and the row's own status is reported back. An
+ * event announcing a failure for a deploy that is about to succeed is worse than
+ * no event: it is the one a webhook consumer acts on.
  */
 async function failWithoutRunning(
   ctx: RunContext,
@@ -1088,12 +1097,21 @@ async function failWithoutRunning(
     status: "failed",
     reason: truncated,
     completedAt: ctx.iso(),
+    onlyIfUnclaimed: true,
   });
   if (!completed.success) {
     ctx.logger.error("Could not fail the deployment", completed.error, {
       deploymentId: deployment.id,
       projectId: ctx.project.id,
     });
+  }
+  if (!completed.success || !completed.data) {
+    ctx.logger.warn("Deployment was not failed; leaving it to its owner", {
+      deploymentId: deployment.id,
+      projectId: ctx.project.id,
+      reason: truncated,
+    });
+    return { deploymentId: deployment.id, name: deployment.name, status: deployment.status };
   }
 
   await emitDeploymentEvent(ctx, deployment, "deployment.failed", { reason: truncated });
@@ -1130,12 +1148,16 @@ async function supersedeWithoutRunning(
     status: "superseded",
     reason: truncated,
     completedAt: ctx.iso(),
+    onlyIfUnclaimed: true,
   });
   if (!completed.success) {
     ctx.logger.error("Could not supersede the deployment", completed.error, {
       deploymentId: deployment.id,
       projectId: ctx.project.id,
     });
+  }
+  if (!completed.success || !completed.data) {
+    return { deploymentId: deployment.id, name: deployment.name, status: deployment.status };
   }
 
   return {

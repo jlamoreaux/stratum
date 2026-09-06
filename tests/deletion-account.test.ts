@@ -326,6 +326,32 @@ describe("deleteAccountCascade and the UsageMeter Durable Object", () => {
     expect(executed.some((s) => s.sql.includes("DELETE FROM users WHERE id = ?"))).toBe(false);
   });
 
+  it("retains the org row when its counter could not be purged", async () => {
+    const kv = makeKvStub(50);
+    const { db, executed } = makeAccountD1((sql) => {
+      if (sql.includes("SELECT id, owner_id FROM orgs WHERE owner_id")) {
+        return [{ id: "org_1", owner_id: "usr_1" }];
+      }
+      return [];
+    });
+    const failing = {
+      idFromName: (name: string) => ({ name }),
+      get: (id: { name: string }) => ({
+        purge: async () => {
+          if (id.name === "org:org_1") throw new Error("durable object unavailable");
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+
+    const result = await deleteAccountCascade(makeEnv(db, kv.kv, failing), "usr_1", mockLogger);
+
+    expect(result.success && result.data.residuals).toContain("do:UsageMeter:org:org_1");
+    // The orgs row is how step 4 finds this org again (`WHERE owner_id = ?`),
+    // so dropping it would leave `org:org_1` with nothing that can ever name it
+    // and a residual no re-drive could clear.
+    expect(executed.some((s) => s.sql.includes("DELETE FROM orgs WHERE id = ?"))).toBe(false);
+  });
+
   it("completes without the binding, as a minimal deployment has none", async () => {
     const kv = makeKvStub(50);
     const { db } = makeAccountD1(() => []);

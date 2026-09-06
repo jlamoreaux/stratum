@@ -139,6 +139,12 @@ describe("parseLlmProviders — the allowlist is the only place an endpoint is n
     // The GCP metadata endpoint is a NAME, not an address: no IP check sees it.
     ["https://metadata.google.internal/computeMetadata/v1", ".internal"],
     ["https://printer.local/v1", ".local"],
+    // A bare label: `metadata` is the metadata endpoint's short name on both
+    // AWS and GCP, and no address check sees it. `validateWebhookUrl` had this
+    // rule and the provider allowlist did not — the third way these two filters
+    // drifted, and why the rule now lives in the shared one.
+    ["https://metadata/v1", "single-label host"],
+    ["https://intranet/v1", "single-label host"],
   ])("rejects %s at parse time", (baseUrl, expected) => {
     const parse = parseLlmProviders(JSON.stringify([{ ...ANTHROPIC_ENTRY, baseUrl }]));
     expect(parse.status, `${baseUrl} was accepted`).toBe("invalid");

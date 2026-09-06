@@ -448,7 +448,7 @@ describe("observe-only keeps measuring past the limit", () => {
   });
 });
 
-describe("a settle that fails is not a merge outage", () => {
+describe("an unreachable meter is not a merge outage", () => {
   it("still returns the evaluator's verdict when the meter RPC throws", async () => {
     const userId = nextUserId();
     cachePlan("user", userId, tokenPlan(100_000));
@@ -475,6 +475,39 @@ describe("a settle that fails is not a merge outage", () => {
 
     const result = await new LLMEvaluator(provider, "platform", {
       env: makeEnv({ USAGE_METER: exploding } as Partial<Env>),
+    }).evaluate("diff", POLICY, logger, billingContext(userId, userId));
+
+    expect(result.success && result.data.passed).toBe(true);
+    expect(provider.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("still runs the gate when the RESERVE RPC throws, under enforcement", async () => {
+    const userId = nextUserId();
+    cachePlan("user", userId, tokenPlan(100_000));
+    const provider = llmProvider();
+    // The symmetric case, and the worse one: `checkMeter` awaits `reserve`
+    // BEFORE the provider call and with `ENTITLEMENTS_ENFORCE=1` on, so an
+    // unreachable object here would turn a billing outage into a refused merge
+    // for a customer who is paying. Entitlements fail OPEN; that is the rule
+    // this pins.
+    const exploding = {
+      idFromName: meters.namespace.idFromName.bind(meters.namespace),
+      get: (id: unknown) => {
+        const stub = meters.namespace.get(id as never);
+        return {
+          ...stub,
+          read: stub.read.bind(stub),
+          setFloor: stub.setFloor.bind(stub),
+          settle: stub.settle.bind(stub),
+          reserve: async () => {
+            throw new Error("durable object unreachable");
+          },
+        };
+      },
+    } as unknown as Env["USAGE_METER"];
+
+    const result = await new LLMEvaluator(provider, "platform", {
+      env: makeEnv({ USAGE_METER: exploding, ENTITLEMENTS_ENFORCE: "1" } as Partial<Env>),
     }).evaluate("diff", POLICY, logger, billingContext(userId, userId));
 
     expect(result.success && result.data.passed).toBe(true);

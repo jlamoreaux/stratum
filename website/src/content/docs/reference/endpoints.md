@@ -548,6 +548,7 @@ credential — in [Authentication](/reference/authentication/).
 Returns the authenticated user's profile.
 
 ### Get Current Usage
+
 `GET /api/users/me/usage`
 
 The caller's metered usage against their plan for the current billing period:

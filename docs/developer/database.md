@@ -21,6 +21,7 @@
 - id, user_id, name, token_hash, token_prefix, scope, expires_at, revoked_at
 
 ### usage_periods
+
 - owner_id, owner_type, period ('YYYY-MM' UTC), meter, source, quantity
 - PK is `(owner_id, period, meter, source)`. `source` is in the key on purpose:
   `platform` and `byok` spend accumulate as separate rows, and an enforcement

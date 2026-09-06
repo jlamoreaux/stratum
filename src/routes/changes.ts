@@ -1430,11 +1430,15 @@ app.post("/changes/:id/evaluate", async (c) => {
   // The base this re-evaluation's diff was built against — not `change.baseSha`,
   // which records the base at creation and is exactly the value that has gone
   // stale by the time a change is re-evaluated (#274).
+  // One resolution for both the meters and the ledger below (see
+  // `billingContextFor`): an agent-owned project's payer is a D1 walk, and
+  // resolving it twice would pay for it twice and could name two payers.
+  const evaluateSubject = await resolveBillingSubject(c.env.DB, logger, project);
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
     baseSha: baseOid,
     // This route is user-credentialed (agent tokens are rejected above), so the
     // acting user is the caller — the subject PRD §4a checks a limit against.
-    billing: billingContextFor(project, userId),
+    billing: billingContextFor(evaluateSubject, project.id, userId),
   });
 
   const recordResult = await recordEvalRuns(c.env.DB, logger, id, evalRuns);
@@ -1447,7 +1451,6 @@ app.post("/changes/:id/evaluate", async (c) => {
     { kind: "git_ops", quantity: 2 },
     ...evalRuns.flatMap(({ result }) => result.costs ?? []),
   ];
-  const evaluateSubject = await resolveBillingSubject(c.env.DB, logger, project);
   await recordCosts(
     c.env.DB,
     logger,

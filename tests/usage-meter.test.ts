@@ -570,6 +570,32 @@ describe("UsageMeter cleanup", () => {
     expect(await storage?.get("period")).toBeUndefined();
     expect(await storage?.get("rate")).toBeUndefined();
     expect((await stub.read(PERIOD)).counts).toEqual({});
+    // A purged subject must not be left with something to wake it: the cleanup
+    // alarm goes with the storage it was arming a sweep of.
+    expect(await storage?.getAlarm()).toBeNull();
+  });
+
+  it("clamps the sweep's re-arm to the horizon, as the reserve path does", async () => {
+    // The sweep re-arms from a period read out of storage, so a record written
+    // far enough ahead — an older shape of this class, a corrected clock, a bad
+    // caller — would arm an alarm the same distance out. `armCleanup` only ever
+    // raises, so that alarm could never be talked back down and the object's
+    // storage would be stranded behind it.
+    const { stub, instances, storages } = meter();
+    const distant = "2199-12";
+
+    await stub.reserve("llm_tokens_month", 100, 1000, distant, NOW);
+    const instance = instances.get("user:usr_1");
+    const storage = storages.get("user:usr_1");
+    if (!instance || !storage) throw new Error("instance not created");
+
+    await instance.alarm();
+
+    // Still held — the period has not closed, so there is nothing to erase.
+    expect(await storage.get("period")).toBeDefined();
+    const alarm = await storage.getAlarm();
+    expect(alarm).not.toBeNull();
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 41 * 24 * HOUR_MS);
   });
 });
 

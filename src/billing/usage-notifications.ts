@@ -166,15 +166,32 @@ async function deliver(env: Env, logger: Logger, input: UsageNoticeInput): Promi
       });
     }
 
-    await send(env, logger, {
-      subject,
-      actorUserId: input.actorUserId,
-      meter: total.meter,
-      used: total.quantity,
-      limit,
-      period: input.period,
-    });
-    await markSent(env, logger, key);
+    // Per meter, because the crossing is edge-triggered on `markSent`: a mail
+    // provider that rejects one meter's notice would otherwise throw out of the
+    // loop, and a second meter that crossed in the same batch would lose both
+    // its email and its banner for the rest of the period — one delivery
+    // failure silencing a warning nobody gets a second chance at.
+    try {
+      await send(env, logger, {
+        subject,
+        actorUserId: input.actorUserId,
+        meter: total.meter,
+        used: total.quantity,
+        limit,
+        period: input.period,
+      });
+      await markSent(env, logger, key);
+    } catch (error) {
+      // Deliberately NOT marked sent: the receipt is what makes this
+      // once-per-crossing, so leaving it unwritten is what lets the next
+      // evaluation in this period try again.
+      logger.warn("Usage threshold notice failed for one meter", {
+        meter: total.meter,
+        subjectId: subject.ownerId,
+        subjectType: subject.ownerType,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
 

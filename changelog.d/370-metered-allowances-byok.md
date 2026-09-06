@@ -91,6 +91,15 @@
   that made the entry unusable instead of only counting entries. A verdict
   truncated at the provider's token cap records the tokens the provider reported
   for it, rather than recording a charged call as free.
+- **A deploy refusal can no longer overwrite a deployment that is running.** The
+  paths that write a terminal status without claiming the row first — a failed
+  guard, a superseded commit, and now an exhausted allowance — run before
+  `claimDeployment`, and `running` is not a terminal status, so a redelivery of
+  the same message could land `failed` on a row another delivery was mid-deploy
+  on and clear its lease. Those writes are now refused against a claimed row,
+  and the `deployment.failed` event they emit is withheld when the write does
+  not land: an event announcing a failure for a deploy that is about to succeed
+  is the one a webhook consumer acts on.
 - **The commented `LLM_PROVIDERS` example carries the API version path.** The
   provider appends `/messages` (or `/chat/completions`) to `baseUrl`, so the
   `https://api.anthropic.com` shown in `wrangler.toml` would have 404'd on every
@@ -131,7 +140,10 @@
   straight from `.stratum/policy.yaml` — had the last two gaps too, so a
   `webhook` entry pointed at `[::127.0.0.1]` or at `feb0::…` used to reach the
   loopback and link-local addresses it was written to refuse. Both are refused
-  now.
+  now. The bare-label rule moved into that shared filter as well: `metadata` is
+  the metadata endpoint's short name on both AWS and GCP, DNS is what makes it
+  an address, and the webhook check had the rule while the provider allowlist
+  did not.
 - **A policy declaring two `llm` entries is refused.** The BYOK provider was
   resolved from the first entry while an evaluator was built for every entry, so
   `[{llm}, {llm, provider: …}]` silently ran twice on the operator's Workers AI

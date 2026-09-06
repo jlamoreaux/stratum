@@ -401,12 +401,10 @@ export class UsageMeter extends DurableObject<Env> {
    * (`src/storage/deletion.ts`, and migration 049's header).
    */
   async purge(): Promise<void> {
+    // Clears the cleanup alarm along with the counters: `deleteAll` deletes an
+    // object's alarm from compatibility date 2026-02-24, and this Worker is on
+    // 2026-04-29, so a purged subject is left with nothing to wake it.
     await this.ctx.storage.deleteAll();
-    // `deleteAll` does NOT clear a pending alarm in workerd, so without this a
-    // purged subject still gets one wake-up on a DO with no state. The test
-    // fake clears it inside deleteAll, which is exactly why this cannot be
-    // left to the fake to prove.
-    await this.ctx.storage.deleteAlarm();
   }
 
   /**
@@ -448,14 +446,14 @@ export class UsageMeter extends DurableObject<Env> {
     }
 
     // Nothing left to expire: erase whatever remains (a key written by an
-    // older shape of this class, say) and leave no alarm armed, so the object
-    // costs nothing until it is next used. `deleteAll` does NOT clear a pending
-    // alarm in workerd, so the alarm is dropped explicitly — relying on the
-    // sweep to do it left the object waking forever on empty storage.
-    if (nextAlarm === null) {
-      await this.ctx.storage.deleteAll();
-      await this.ctx.storage.deleteAlarm();
-    } else await this.ctx.storage.setAlarm(nextAlarm);
+    // older shape of this class, say), which drops the alarm with it, so the
+    // object costs nothing until it is next used. Re-arming goes through
+    // `armCleanup` rather than `setAlarm` so the horizon clamp applies here
+    // too — a stored period far enough in the future is exactly the input that
+    // would otherwise strand this object's storage behind an alarm centuries
+    // out.
+    if (nextAlarm === null) await this.ctx.storage.deleteAll();
+    else await this.armCleanup(nextAlarm);
   }
 
   private async reservePeriod(

@@ -622,6 +622,12 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   if (!projectToken.success) return c.json({ error: projectToken.error.message }, 502);
   if (!workspaceToken.success) return c.json({ error: workspaceToken.error.message }, 502);
 
+  // One resolution for every billing site on this route. Both recording sites
+  // and the manual path's meters attribute the same project, and for an
+  // agent-owned one this is a `getAgent` D1 read — paid for once, and unable to
+  // name two different payers for the same request.
+  const billingSubject = await resolveBillingSubject(c.env.DB, logger, project);
+
   // Route a manual resolution through the same merge gate a normal Change goes
   // through: the project's configured evaluator suite, then merge protection
   // (required evaluators + required approvals), both run against the exact
@@ -686,7 +692,7 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
       baseSha,
       // The resolver is the actor: this route is user-credentialed, and PRD §4a
       // checks the allowance against the person who ran the suite.
-      billing: billingContextFor(project, userId),
+      billing: billingContextFor(billingSubject, project.id, userId),
     });
 
     // Recorded here, BEFORE the verdict is acted on, because the spend is
@@ -694,7 +700,6 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
     // model tokens as one it accepts, and the early return below would drop
     // them. Mirrors the recording POST /changes/:id/evaluate does, with one
     // git_op rather than its pair — `buildManualResolutionDiff` cloned once.
-    const resolveSubject = await resolveBillingSubject(c.env.DB, logger, project);
     await recordCosts(
       c.env.DB,
       logger,
@@ -705,7 +710,7 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
         // conflict context named one — a resolution is part of landing it.
         ...(conflictCtx.changeId ? { changeId: conflictCtx.changeId } : {}),
         workspace: conflictCtx.workspaceName,
-        ...(resolveSubject ?? {}),
+        ...(billingSubject ?? {}),
         notify: { env: c.env, actorUserId: userId, waitUntil: getWaitUntil(c) },
       },
       [{ kind: "git_ops", quantity: 1 }, ...evalRuns.flatMap(({ result }) => result.costs ?? [])],
@@ -818,7 +823,6 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
   // (`meterForCostKind`); if it ever gains one, `resolveConflict` has to report
   // the operations it actually completed rather than being guessed at here.
   const resolveGitOps = strategy === "accept-workspace" ? 3 : 2;
-  const resolveGitSubject = await resolveBillingSubject(c.env.DB, logger, project);
   await recordCosts(
     c.env.DB,
     logger,
@@ -827,7 +831,7 @@ app.post("/projects/conflicts/:id/resolve", async (c) => {
       projectId: project.id,
       ...(conflictCtx.changeId ? { changeId: conflictCtx.changeId } : {}),
       workspace: conflictCtx.workspaceName,
-      ...(resolveGitSubject ?? {}),
+      ...(billingSubject ?? {}),
     },
     [{ kind: "git_ops", quantity: resolveGitOps }],
   );

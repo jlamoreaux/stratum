@@ -48,7 +48,8 @@ inert with `BILLING_SERVICE_URL` unset; enforcement consults it at the LLM
 evaluator, the deploy consumer, the request limiter and private-project
 creation, observe-only unless `ENTITLEMENTS_ENFORCE=1`. Limits are checked
 against the acting user rather than the project's owner, so an allowance follows
-the person. `.stratum/policy.yaml` can select an operator-configured LLM
+the person — except for an org the billing service positively reports as
+pooling, which is the subject for its own projects. `.stratum/policy.yaml` can select an operator-configured LLM
 provider and run the merge gate on the project's own key. Usage is visible at
 `/settings/usage`, in an 80% banner and email, over MCP (`stratum_get_usage`)
 and at `GET /api/users/me/usage`.
@@ -70,7 +71,7 @@ and at `GET /api/users/me/usage`.
 - **No retention or storage limits.** The metered flows are LLM tokens, sandbox
   milliseconds and deploys, plus a private-project gauge. Repository storage,
   event/audit retention and artifact size are unmetered and unbounded.
-- **Org creation is still unquotaed.** Charging the actor closed the allowance
+- **Org creation is still subject to no per-user quota.** Charging the actor closed the allowance
   *reset* (a new org no longer means a new allowance), but `POST /api/orgs`
   itself has no per-user cap, and the multi-account variant of the same trick is
   accepted rather than solved. The escalation ladder — rate-limit org creation,

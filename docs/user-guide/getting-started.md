@@ -227,7 +227,7 @@ requiring a human approval and refusing force-merge.
   instance's binding (see [Bringing your own model key](#bringing-your-own-model-key)).
   An unavailable model or unparseable verdict fails closed. Token usage is
   recorded on the change as a cost record — the counts the provider reports,
-  or an estimate marked as one when a response omits them.
+  or an estimate marked as estimated when a response omits them.
   **A policy may declare at most one `llm` entry** — a second one is a
   merge-blocking policy error, because the two entries cannot both be the
   configuration in force.
@@ -286,9 +286,9 @@ provider entry that does not name its model is rejected rather than guessed at.
 **Everything here fails closed, and never falls back to the instance's
 binding.** A provider name the instance has not configured, a missing or
 undecryptable key, an instance with no `DEPLOY_SECRET_KEY`, a provider that
-answers with a redirect — each one fails the `llm` gate with a reason saying
-which, and none of them quietly moves your review back onto the operator's
-account. The corollary is worth planning for: a policy that names a provider
+answers with a redirect — each one fails the `llm` gate with a reason naming
+which of them it was, and none of them quietly moves your review back onto the
+operator's account. The corollary is worth planning for: a policy that names a provider
 this instance does not have is a **policy error, and policy errors block
 merges**.
 
@@ -298,8 +298,9 @@ Two more consequences to know before you switch:
   the token bill to your provider account; it does not add an approval step in
   front of it.
 - **On a hosted instance, your own key lifts the token allowance and nothing
-  else.** The evaluation rate ceiling below still applies, because the operator
-  still pays for the request and the compute around it.
+  else.** The evaluation rate ceiling below is independent of who is billed for
+  tokens: it bounds evaluation and Worker capacity, which is the operator's
+  whoever owns the model account.
 
 ### Usage limits on a hosted instance
 
@@ -312,10 +313,15 @@ unlimited. On a hosted instance the shape is:
   is billed by that provider and is tracked separately.
 - **An hourly ceiling on evaluations**, which bounds burst rather than spend.
   **Bringing your own key does not lift it.**
-- **An allowance follows the person, not the project.** It is checked against
-  whoever ran the evaluation (an agent spends its owner's), so it is the same
-  allowance whether you work in your own namespace or an organization's, and
-  creating another organization does not hand you a fresh one.
+- **An allowance follows the person, not the project.** By default it is checked
+  against whoever ran the evaluation (an agent spends its owner's), so it is the
+  same allowance whether you work in your own namespace or an organization's, and
+  creating another organization does not hand you a fresh one. The one exception
+  is an organization on a plan that pools: there the organization is the subject
+  and its members draw on its allowance rather than their own. An organization
+  the billing service has never heard of is not that — pooling has to be
+  positively granted, or creating an organization would be the reset this rule
+  exists to close.
 
 You can see all of it — consumption, allowance, and when the period resets — at
 `/settings/usage`, or over MCP with `stratum_get_usage`. Crossing 80% of a meter

@@ -23,7 +23,12 @@ import { buildEvaluationReport, reportEvaluationToGitHub } from "../github/sync"
 import { type EventActor, emitEvent } from "../queue/events";
 import { getAgent } from "../storage/agents";
 import { createChange, updateChangeStatus } from "../storage/changes";
-import { type CostSample, recordCosts, resolveBillingSubject } from "../storage/costs";
+import {
+  type BillingSubject,
+  type CostSample,
+  recordCosts,
+  resolveBillingSubject,
+} from "../storage/costs";
 import { recordEvalRuns } from "../storage/eval-runs";
 import {
   artifactsRepoNameFromRemote,
@@ -107,44 +112,42 @@ export class UnavailableEvaluator implements Evaluator {
 }
 
 /**
- * The billing subject an evaluation of `project` should be charged to, or
- * `undefined` when the project has none that can be named.
+ * The evaluation-time view of an already-resolved billing subject, or
+ * `undefined` when none could be named.
  *
- * Two cases yield nothing, and both are deliberate.
+ * Takes the subject rather than the `ProjectEntry` it came from, and that is the
+ * whole point of the signature. `ownerType` admits `"agent"` and an agent is not
+ * a payer — it belongs to one — so naming the payer means walking
+ * `agents.owner_id`, which is D1 and therefore async. This function used to
+ * refuse an agent-owned project instead, which left `LLMEvaluator` with no
+ * billing context and so no meter check at all: the walk existed in
+ * `resolveEnforcementSubject` and nothing ever reached it. Every call site now
+ * resolves once with `resolveBillingSubject` and passes the result to both this
+ * and `recordCosts`, so the allowance and the ledger cannot disagree about who
+ * pays, and neither pays for two D1 reads of the same fact.
  *
- * `ProjectEntry.ownerType` admits `"agent"`, which `BillingContext` does not:
- * an agent is not a payer, it belongs to one. Walking `agents.owner_id` to that
- * user is `resolveBillingSubject`'s job in the attribution work that follows —
- * so an agent-owned project yields no context here rather than a guessed one.
- * Attributing spend to an agent id would be worse than attributing none.
+ * `projectId` is checked because KV entries are cast without validation
+ * (`src/storage/state.ts`) and legacy rows can lack fields the type promises. A
+ * context keyed on `""` would be worse than none: spend that *looks* attributed
+ * aggregates under an empty key no account will ever reconcile.
  *
- * The field check is the same principle applied to a shape the type system
- * promises but KV cannot: entries are cast without validation
- * (`src/storage/state.ts`), legacy rows genuinely lack `namespace` and can lack
- * `ownerId` — `canWriteProject` guards that exact case — and a restored backup
- * re-writes whatever JSON it held. Returning a context keyed on `""` or
- * `undefined` would be worse than returning none: spend that *looks* attributed
- * aggregates under an empty key that no account will ever reconcile, where an
- * absent subject is at least visibly absent.
+ * @param subject - From `resolveBillingSubject`; `null` when nobody can be named
+ * @param projectId - The project whose policy is being enforced
+ * @param actorUserId - The user who ran the evaluation, when the caller knows
+ *   one. Carried alongside the payer rather than instead of it: PRD §4a checks a
+ *   limit against the actor while the ledger keeps recording the owner. For an
+ *   agent-authored change this is the agent's OWNER.
  */
 export function billingContextFor(
-  project: ProjectEntry,
-  /**
-   * The user who ran the evaluation, when the caller knows one. Carried
-   * alongside the payer rather than instead of it: PRD §4a checks a limit
-   * against the actor while the ledger keeps recording the owner, so a spend on
-   * an org-owned project can be billed to the org and counted against the
-   * person who caused it. For an agent-authored change this is the agent's
-   * OWNER — an agent is not a subject any more than it is a payer.
-   */
+  subject: BillingSubject | null,
+  projectId: string | undefined,
   actorUserId?: string,
 ): BillingContext | undefined {
-  if (project.ownerType !== "user" && project.ownerType !== "org") return undefined;
-  if (!project.ownerId || !project.id) return undefined;
+  if (!subject || !projectId) return undefined;
   return {
-    ownerId: project.ownerId,
-    ownerType: project.ownerType,
-    projectId: project.id,
+    ownerId: subject.ownerId,
+    ownerType: subject.ownerType,
+    projectId,
     ...(actorUserId ? { actorUserId } : {}),
   };
 }
@@ -545,11 +548,15 @@ export async function createChangeWithEvaluation(
   // `baseOid`, not the `baseSha` resolved further up: that one is read before
   // the diff clone, so the default branch can advance in between. The evaluated
   // base must be the one the diff was actually built against (#274).
+  // Once per request, and before the evaluation rather than after it: the same
+  // subject gates the meters below and is recorded in the ledger, so resolving
+  // it twice would pay for two agent walks and could name two different payers.
+  const createSubject = await resolveBillingSubject(env.DB, logger, project);
   const { evalRuns, evalResult } = await runEvaluation(evaluators, diff, policy, logger, {
     baseSha: baseOid,
     // The actor is the human behind the change — the agent's owner for an
     // agent-authored one — which is who an allowance follows under PRD §4a.
-    billing: billingContextFor(project, createdByUserId),
+    billing: billingContextFor(createSubject, project.id, createdByUserId),
   });
 
   const newStatus: Change["status"] = evalResult.passed ? "accepted" : "needs_changes";
@@ -567,10 +574,6 @@ export async function createChangeWithEvaluation(
     { kind: "git_ops", quantity: 2 },
     ...evalRuns.flatMap(({ result }) => result.costs ?? []),
   ];
-  // Resolved rather than reused from `billingContextFor` above: that one yields
-  // nothing for an agent-owned project, while the ledger can still name the
-  // agent's owning user as the payer.
-  const createSubject = await resolveBillingSubject(env.DB, logger, project);
   await recordCosts(
     env.DB,
     logger,

@@ -748,6 +748,7 @@ src/
 │   ├── state.ts             # KV state management
 │   ├── sync.ts              # Sync status tracking
 │   ├── teams.ts
+│   ├── usage.ts             # usage_periods, the owner-scoped monthly aggregate
 │   ├── users.ts
 │   └── webhooks.ts
 ├── templates/

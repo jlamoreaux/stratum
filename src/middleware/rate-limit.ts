@@ -92,20 +92,25 @@ export function rateLimitMiddleware(opts?: RateLimitOptions): MiddlewareHandler<
     //   of the entitlements layer, so honouring it literally would let one
     //   uncached miss (or one billing outage) uncap a user's request rate. The
     //   default cap stands instead.
-    const planLimit = await entitledRequestsPerMinute(c.env, userId);
+    // - **Read only where it is used.** Analytics ingest and any route passing
+    //   its own `requestsPerMinute` (`POST /projects` sets 20) discard this
+    //   value, and paying a KV round trip on the request path for a number
+    //   thrown away is a cost with no decision behind it.
+    //
     // Observe-only never tightens: with `ENTITLEMENTS_ENFORCE` off a plan may
     // raise this ceiling but not lower it, so the month of measurement PRD §8
     // asks for cannot start 429-ing anybody.
-    const subjectLimit =
-      planLimit === null
-        ? defaultLimit
-        : enforcementBinding(c.env)
-          ? planLimit
-          : Math.max(planLimit, defaultLimit);
+    const subjectLimit = async (): Promise<number> => {
+      const planLimit = await entitledRequestsPerMinute(c.env, userId);
+      if (planLimit === null) return defaultLimit;
+      return enforcementBinding(c.env) ? planLimit : Math.max(planLimit, defaultLimit);
+    };
     // Far above what a real session produces and far below anything worth
     // relaying through someone else's Worker.
     const analyticsLimit = 600;
-    const limit = isAnalyticsIngest ? analyticsLimit : (opts?.requestsPerMinute ?? subjectLimit);
+    const limit = isAnalyticsIngest
+      ? analyticsLimit
+      : (opts?.requestsPerMinute ?? (await subjectLimit()));
 
     const identifier = userId ?? agentId ?? c.req.header("CF-Connecting-IP") ?? "anonymous";
     const minuteBucket = Math.floor(Date.now() / 60000);

@@ -821,7 +821,19 @@ async function resolveOrgOwnership(
   // name. Purging a shared counter here would erase a stranger's allowance.
   const meterName = usageMeterName("org", org.id);
   if (!(await purgeDurableObject(env.USAGE_METER, meterName, "UsageMeter", logger))) {
+    // The orgs row is what a re-drive finds this org by (step 4 selects on
+    // `owner_id`), so dropping it now would strand the counter permanently:
+    // nothing would ever name `org:<id>` again, and the residual would name a
+    // purge no run can retry. Retained instead, exactly as the users row is —
+    // the org has no members and no projects left, and the residual keeps the
+    // erasure job out of `completed` until the purge lands.
     residuals.push(`do:UsageMeter:${meterName}`);
+    residuals.push(`org:${org.id}:row-retained-pending-residuals`);
+    logger.warn("Org meter purge failed; retaining the org row for re-drive", {
+      orgId: org.id,
+      meterName,
+    });
+    return;
   }
   await db.prepare("DELETE FROM orgs WHERE id = ?").bind(org.id).run();
 }

@@ -243,7 +243,7 @@ beforeEach(() => {
 
 describe("billingContextFor", () => {
   it("names a user-owned project's owner as the billing subject", () => {
-    expect(billingContextFor(projectEntry())).toEqual({
+    expect(billingContextFor({ ownerId: "user_alice", ownerType: "user" }, "proj_abc")).toEqual({
       ownerId: "user_alice",
       ownerType: "user",
       projectId: "proj_abc",
@@ -251,31 +251,54 @@ describe("billingContextFor", () => {
   });
 
   it("names an org-owned project's org as the billing subject", () => {
-    const project = projectEntry({ ownerId: "org_acme", ownerType: "org" });
-    expect(billingContextFor(project)).toEqual({
+    expect(billingContextFor({ ownerId: "org_acme", ownerType: "org" }, "proj_abc")).toEqual({
       ownerId: "org_acme",
       ownerType: "org",
       projectId: "proj_abc",
     });
   });
 
-  it.each([
-    ["a missing ownerId", { ownerId: "" }],
-    ["a missing project id", { id: "" }],
-  ])("yields no subject for %s rather than one keyed on an empty string", (_label, overrides) => {
+  it("carries the actor alongside the payer, never instead of it", () => {
+    // PRD §4a: the ledger records the owner, the limit is checked against the
+    // person. One field each, so neither can be read as the other.
+    expect(
+      billingContextFor({ ownerId: "org_acme", ownerType: "org" }, "proj_abc", "user_alice"),
+    ).toEqual({
+      ownerId: "org_acme",
+      ownerType: "org",
+      projectId: "proj_abc",
+      actorUserId: "user_alice",
+    });
+  });
+
+  it("yields no subject when the project id is missing, rather than one keyed on ''", () => {
     // KV entries are cast without shape validation and legacy rows genuinely
     // lack fields, so the type's promise is not a runtime guarantee. Spend that
     // *looks* attributed but aggregates under "" is worse than spend visibly
     // attributed to nobody.
-    expect(billingContextFor(projectEntry(overrides))).toBeUndefined();
+    expect(billingContextFor({ ownerId: "user_alice", ownerType: "user" }, "")).toBeUndefined();
   });
 
-  it("yields no subject for an agent-owned project rather than billing the agent", () => {
-    // An agent is not a payer — it resolves to its owning user, which is
-    // deliberately not done here. Attributing spend to an agent id would be
-    // worse than attributing none, so the field is absent, not guessed.
-    const project = projectEntry({ ownerId: "agent_bot", ownerType: "agent" });
-    expect(billingContextFor(project)).toBeUndefined();
+  it("yields no subject when none could be resolved", () => {
+    // `resolveBillingSubject` returns null for a project naming no owner, and
+    // for an agent whose owner row could not be read. Either way there is
+    // nobody to charge, and guessing would be worse than not checking.
+    expect(billingContextFor(null, "proj_abc", "user_alice")).toBeUndefined();
+  });
+
+  it("takes an agent-owned project's resolved owner, so its meters are checked", () => {
+    // The regression this replaced: this function used to refuse an agent-owned
+    // project outright, which left `LLMEvaluator` with no billing context and
+    // therefore no meter check at all — the agent walk lived in
+    // `resolveEnforcementSubject` and nothing ever reached it. The walk is
+    // `resolveBillingSubject`'s, and its result is what arrives here.
+    expect(billingContextFor({ ownerId: "user_bot_owner", ownerType: "user" }, "proj_abc")).toEqual(
+      {
+        ownerId: "user_bot_owner",
+        ownerType: "user",
+        projectId: "proj_abc",
+      },
+    );
   });
 });
 
@@ -375,7 +398,7 @@ describe("the billing subject stays inside the Worker", () => {
       const policy: EvalPolicy = { evaluators: [{ type: "webhook", url: "https://hook.test" }] };
       await new WebhookEvaluator().evaluate("a diff", policy, logger, {
         baseSha: "base",
-        billing: billingContextFor(projectEntry()),
+        billing: billingContextFor({ ownerId: "user_alice", ownerType: "user" }, "proj_abc"),
       });
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -391,6 +414,43 @@ describe("the billing subject stays inside the Worker", () => {
 });
 
 describe("runEvaluation", () => {
+  it("keeps a passing verdict when another evaluator REJECTS rather than returning", async () => {
+    // `evaluate` returns a Result by contract, but a meter RPC or a provider
+    // client can still reject. One rejection must not take the whole run down
+    // with it: the gate that could not run fails, and everything else keeps its
+    // verdict. Without the catch in `runEvaluation` this rejects the
+    // `Promise.all` and fails change creation outright.
+    const ok: Evaluator = {
+      evaluate: async () => ({ success: true, data: { score: 1, passed: true, reason: "ok" } }),
+    };
+    const rejecting: Evaluator = {
+      evaluate: async () => {
+        throw new Error("durable object unreachable");
+      },
+    };
+    const policy: EvalPolicy = { evaluators: [], requireAll: false, minScore: 0.7 };
+
+    const { evalRuns, evalResult } = await runEvaluation(
+      [
+        { type: "secret_scan", evaluator: ok },
+        { type: "llm", evaluator: rejecting },
+      ],
+      "diff",
+      policy,
+      logger,
+      { baseSha: "base" },
+    );
+
+    expect(evalRuns).toHaveLength(2);
+    const failed = evalRuns.find((run) => run.evaluatorType === "llm");
+    expect(failed?.result).toMatchObject({ score: 0, passed: false });
+    expect(failed?.result.reason).toContain("llm evaluator failed");
+    expect(failed?.result.reason).toContain("durable object unreachable");
+    expect(evalRuns.find((run) => run.evaluatorType === "secret_scan")?.result.passed).toBe(true);
+    // The run resolved rather than rejecting, which is the property under test.
+    expect(typeof evalResult.passed).toBe("boolean");
+  });
+
   it("forwards the billing context to every evaluator", async () => {
     const seen: Array<EvaluationContext | undefined> = [];
     const spy: Evaluator = {
@@ -409,7 +469,10 @@ describe("runEvaluation", () => {
       "diff",
       policy,
       logger,
-      { baseSha: "base", billing: billingContextFor(projectEntry()) },
+      {
+        baseSha: "base",
+        billing: billingContextFor({ ownerId: "user_alice", ownerType: "user" }, "proj_abc"),
+      },
     );
 
     expect(seen).toHaveLength(2);

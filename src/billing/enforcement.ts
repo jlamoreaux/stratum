@@ -34,6 +34,7 @@
  * spend is RECORDED against. See {@link resolveEnforcementSubject}.
  */
 import {
+  type MeterReserveOutcome,
   type RateMeterKey,
   type UsageMeterKey,
   rateWindowSeconds,
@@ -410,9 +411,25 @@ export async function checkMeter(
   // spend it did not stop still happens; a counter that froze at the limit
   // would leave the measurement period unable to answer the one question it
   // exists for — by how much would this subject have gone over?
-  const outcome = await stub.reserve(opts.meter, opts.estimate, limit, period, nowMs, {
-    countRefused: !enforcing,
-  });
+  let outcome: MeterReserveOutcome;
+  try {
+    outcome = await stub.reserve(opts.meter, opts.estimate, limit, period, nowMs, {
+      countRefused: !enforcing,
+    });
+  } catch (error) {
+    // Fails open, for the reason the whole seam does: a meter that cannot be
+    // reached is a billing outage, and a billing outage that blocks a paying
+    // customer's merge is a worse failure than a spend that went uncounted.
+    // Reported, never silent — `checked: false` keeps an unmeasured admission
+    // out of the observe-only numbers rather than passing it off as a fit.
+    logger.warn("Usage meter unreachable; admitting without a reservation", {
+      subjectId: opts.subject.ownerId,
+      subjectType: opts.subject.ownerType,
+      meter: opts.meter,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return inert();
+  }
   const refused = !outcome.admitted;
 
   const decision: EnforcementDecision = {
@@ -441,9 +458,7 @@ export async function checkMeter(
  */
 export async function settleMeter(
   env: Env,
-  // Kept for signature symmetry with `checkMeter`, which every call site pairs
-  // it with; settling reports nothing of its own.
-  _logger: Logger,
+  logger: Logger,
   opts: {
     subject: EnforcementSubject;
     meter: UsageMeterKey;
@@ -462,7 +477,21 @@ export async function settleMeter(
   const stub = meterNamespace.get(
     meterNamespace.idFromName(usageMeterName(opts.subject.ownerType, opts.subject.ownerId)),
   );
-  await stub.settle(opts.meter, opts.delta, period, nowMs);
+  try {
+    await stub.settle(opts.meter, opts.delta, period, nowMs);
+  } catch (error) {
+    // Callers settle in a `finally`, so a throw here would replace whatever the
+    // block was returning — including a successful evaluation — with a metering
+    // error. The reservation stands uncorrected instead, which overcharges by
+    // the difference and is the cheaper of the two failures.
+    logger.warn("Usage meter unreachable; reservation left unsettled", {
+      subjectId: opts.subject.ownerId,
+      subjectType: opts.subject.ownerType,
+      meter: opts.meter,
+      delta: opts.delta,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**

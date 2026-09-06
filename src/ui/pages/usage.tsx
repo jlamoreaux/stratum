@@ -85,8 +85,8 @@ const MeterRow: FC<{ entry: UsageMeterReport }> = ({ entry }) => {
         {entry.byok > 0 && (
           <>
             {" "}
-            Separately, {formatQuantity(entry.meter, entry.byok)} was spent on this project's own
-            provider key (BYOK). That is billed to you by your provider and is <strong>not</strong>{" "}
+            Separately, {formatQuantity(entry.meter, entry.byok)} was spent on your projects' own
+            provider keys (BYOK). That is billed to you by your provider and is <strong>not</strong>{" "}
             counted against the allowance above.
           </>
         )}

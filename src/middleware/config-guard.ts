@@ -91,13 +91,19 @@ let hasLoggedConfigError = false;
  */
 export const configGuardMiddleware: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   if (!hasLoggedConfigError) {
+    // Set before the checks, not inside the `problems.length` branch: a
+    // correctly configured deploy has no problems to log, so the flag would
+    // never be set and every request would re-run all three — including
+    // `llmProvidersConfigError`, which `JSON.parse`s `LLM_PROVIDERS`. The
+    // config cannot change within an isolate, so one evaluation answers for
+    // its whole life either way.
+    hasLoggedConfigError = true;
     const problems = [
       repoDoConfigError(c.env),
       entitlementsConfigError(c.env),
       llmProvidersConfigError(c.env),
     ].filter((problem): problem is string => problem !== null);
     if (problems.length > 0) {
-      hasLoggedConfigError = true;
       const logger = createLogger({ component: "config-guard" });
       for (const problem of problems) logger.error(problem);
     }

@@ -256,6 +256,13 @@ export function privateHostReason(hostname: string): string | null {
     return "'localhost' names the loopback interface";
   }
   if (host.startsWith("[")) return privateIpv6Reason(host);
+  // A bare single label is either an intranet name — `metadata`, the AWS/GCP
+  // metadata endpoint's short name, resolves to 169.254.169.254 on an instance
+  // — or an obfuscated integer/hex IP. Neither is a public host, and DNS is
+  // what makes it one, which is exactly what this check cannot see. Rejected
+  // here rather than at one call site, because the caller that had this rule
+  // and the caller that did not is how the two filters drifted apart before.
+  if (!host.includes(".")) return `${host} is a single-label host, not a public name`;
   if (host.endsWith(".internal")) {
     // metadata.google.internal is the cloud metadata endpoint — the single most
     // valuable SSRF target there is, and it is a DNS name, not an address.
@@ -377,7 +384,8 @@ function privateIpv6Reason(host: string): string | null {
 /**
  * Validates an outbound webhook URL. Requires http(s) and rejects hostnames
  * that resolve to private space (loopback, RFC 1918, link-local, ULA, CGNAT,
- * `.internal`/`.local`), including obfuscated IP encodings — see
+ * `.internal`/`.local`, bare single labels), including obfuscated IP
+ * encodings — see
  * {@link privateHostReason}, which is the shared filter. DNS-level rebinding is
  * out of scope here; Workers egress is not a guaranteed second layer, so keep
  * this the primary gate.
@@ -401,12 +409,7 @@ export function validateWebhookUrl(value: unknown, logger?: Logger): ValidationR
   }
 
   const hostname = parsed.hostname.toLowerCase();
-  if (
-    isPrivateIpLiteral(hostname) ||
-    // A bare single label (no dot) is either an intranet name or an obfuscated
-    // integer/hex IP — reject. Bracketed IPv6 is handled by the filter above.
-    (!hostname.includes(".") && !hostname.startsWith("["))
-  ) {
+  if (isPrivateIpLiteral(hostname)) {
     log.debug("Validation failed - webhook URL targets a private host", { hostname });
     return err([{ field: "url", message: "URL must target a public host" }]);
   }

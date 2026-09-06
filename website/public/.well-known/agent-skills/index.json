@@ -23,7 +23,7 @@
       "name": "stratum-merge-gate",
       "type": "skill-md",
       "description": "Get a change through Stratum's evaluation gates and merged, and read the verdict when a gate blocks it.",
-      "digest": "sha256:734712aef670af8c9ce73ccd32d1d04e1db3c18600d19d0f9e8520d705a145fb",
+      "digest": "sha256:ace75ea8b95503b50381093e6466835c76c506a5fb629afffa603ff5f50a64b9",
       "url": "https://docs.usestratum.dev/.well-known/agent-skills/stratum-merge-gate/SKILL.md"
     }
   ]

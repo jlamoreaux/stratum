@@ -297,16 +297,21 @@ describe("createChangeWithEvaluation records attributed costs", () => {
 
   it("bills an org-owned project to the org", async () => {
     await create(projectEntry({ ownerId: "org_acme", ownerType: "org" }));
+    // Guarded: a regression that stopped recording costs entirely would leave a
+    // bare `for` over an empty array green, which is the one property this file
+    // exists to protect.
+    expect(costRows().length).toBeGreaterThan(0);
     for (const row of costRows()) {
       expect(row.owner_id).toBe("org_acme");
       expect(row.owner_type).toBe("org");
     }
   });
 
-  it("walks an agent-owned project to its user, where the evaluation context could not", async () => {
-    // `billingContextFor` yields no context for an agent-owned project, so the
-    // evaluators see none. The ledger can still name a payer, because
-    // `resolveBillingSubject` is allowed the D1 read that walk needs.
+  it("walks an agent-owned project to its user", async () => {
+    // An agent is not a payer, it belongs to one. The walk is
+    // `resolveBillingSubject`'s D1 read, and every site on the request — the
+    // ledger row below and the evaluators' meter checks — now sees the same
+    // resolved user, where the evaluators used to see nothing at all.
     raw
       .prepare("INSERT INTO users (id, email, token_hash, created_at) VALUES (?, ?, ?, ?)")
       .run("user_alice", "alice@example.com", "hash", "2026-01-01T00:00:00.000Z");
@@ -553,6 +558,7 @@ describe("POST /api/projects/conflicts/:id/resolve records attributed costs", ()
     );
 
     expect(res.status).toBe(200);
+    expect(costRows().length).toBeGreaterThan(0);
     for (const row of costRows()) {
       expect(row.change_id).toBeNull();
       // Still attributed: the payer comes from the project, not the change.
