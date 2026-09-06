@@ -6,7 +6,7 @@ import type { Env } from "../src/types";
 vi.mock("../src/storage/users", () => ({
   createUser: vi.fn(),
   getUserByEmail: vi.fn(),
-  upsertGitHubUser: vi.fn(),
+  signInGitHubUser: vi.fn(),
 }));
 
 vi.mock("../src/storage/sessions", () => ({

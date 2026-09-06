@@ -479,6 +479,14 @@ app.post("/send", async (c) => {
     const intent = existingUser.success ? "login" : "signup";
     let username: string | undefined;
     if (!existingUser.success) {
+      // This endpoint carries no invite code, so under the closed beta it can
+      // only ever mint a signup link that dies at verify. Say so here instead:
+      // the gate belongs on every path that *starts* a signup, not on the one
+      // check at the end of one of them.
+      if (betaGateEnabled(c.env)) {
+        logger.warn("Blocked legacy signup link — closed beta", { emailHash });
+        return emailAuthRedirect(c, "error", "invite_required", "/auth/signup");
+      }
       // Generate and validate username from email
       const candidate = (email.split("@")[0] ?? "")
         .toLowerCase()

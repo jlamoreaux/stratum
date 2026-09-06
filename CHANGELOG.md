@@ -91,6 +91,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events are not corrected.
 
 ### Security
+- **The closed-beta gate can no longer be routed around by an SSO signup.** The
+  gate is enforced on the `/auth/signup/complete` form every OAuth signup passes
+  through, and that check held — but `upsertGitHubUser` still carried a branch
+  that *created* an account outright, and the only thing keeping the GitHub
+  callback out of it was a second copy of the same lookup, in a different file,
+  under a comment asserting the branch was unreachable. Two copies of one
+  decision is a gate that opens the moment they disagree, and a callback is
+  exactly where a matching rule gets tweaked (an email normalized, a soft-deleted
+  account skipped). The lookup now lives in one place: `signInGitHubUser` matches
+  by GitHub id or verified email, links the identity, and creates nothing — an
+  identity with no account comes back as `null` and the callback parks it for the
+  gated form. Account creation for every signup method — magic link, GitHub,
+  Google — now has exactly one door. No behaviour changes for a live deployment:
+  the create branch was already dead, and sign-in is untouched.
+- **The legacy `POST /auth/email/send` no longer starts a signup under the gate.**
+  It carries no invite code, so with the gate on it minted a signup magic link
+  that could only fail at verify — an email sent, a link clicked, and an
+  "invalid invite code" at the end of it. It now refuses up front and points at
+  `/auth/signup`, where a code can be given. Login links for existing accounts
+  are unaffected, as is the endpoint with the gate off.
 - **GitHub sign-in no longer trusts an unverified email.** The callback picked
   the primary address, verified or not, and fell back to *any* address on the
   account. That address then matched (and linked to) an existing Stratum

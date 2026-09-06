@@ -107,7 +107,10 @@ vi.mock("../src/storage/users", () => {
       return { success: false, error: new NotFoundError("User", githubId) };
     }),
 
-    upsertGitHubUser: vi.fn(async (_db, opts, _logger) => {
+    // Mirrors production: matches, links — and creates nothing. A GitHub
+    // identity with no account comes back as null so the callback parks it for
+    // the (invite-gated) username form.
+    signInGitHubUser: vi.fn(async (_db, opts, _logger) => {
       const users = getMockUsers();
       // Check if user exists by GitHub ID first
       for (const user of users.values()) {
@@ -125,23 +128,7 @@ vi.mock("../src/storage/users", () => {
         return { success: true, data: existingByEmail };
       }
 
-      // Create new user
-      const counter = incrementMockUserIdCounter();
-      const user: User = {
-        id: `usr_${counter.toString(36)}`,
-        email: opts.email,
-        username: opts.username.toLowerCase().replace(/[^a-z0-9]/g, ""),
-        githubId: opts.githubId,
-        githubUsername: opts.username,
-        tokenHash: `hash_${counter}`,
-        createdAt: new Date().toISOString(),
-      };
-
-      users.set(`email:${user.email}`, user);
-      users.set(`username:${user.username}`, user);
-      users.set(`id:${user.id}`, user);
-
-      return { success: true, data: user };
+      return { success: true, data: null };
     }),
     getUserByToken: vi.fn(),
     getUser: vi.fn(),
@@ -1571,6 +1558,53 @@ describe("Auth Signup/Login Integration Tests", () => {
       if (!token) throw new Error("Token should not be null");
       const tokenData = (await getMagicLinkData(env, token)) as { intent: string };
       expect(tokenData.intent).toBe("login");
+    });
+
+    it("refuses to start a signup while the closed-beta gate is on", async () => {
+      // The endpoint takes no invite code, so under the gate the only link it
+      // could mint is one that dies at verify. It must refuse up front instead,
+      // and send the caller to the form that can collect a code.
+      const gated = makeEnv({
+        BETA_GATE: "1",
+        REFERRAL_SERVICE_URL: "https://referral.example.com",
+      });
+
+      const res = await app.fetch(
+        request("/auth/email/send", {
+          method: "POST",
+          body: createFormData({ email: "gatecrasher@example.com" }),
+        }),
+        gated,
+      );
+
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth/signup?error=invite_required");
+      expect(await extractMagicLinkToken(gated)).toBeNull();
+      expect(gated.EMAIL?.send).not.toHaveBeenCalled();
+    });
+
+    it("still sends a login link to an existing account while the gate is on", async () => {
+      const { createUser } = await import("../src/storage/users");
+      await createUser(env.DB, "member@example.com", {} as unknown as Logger, "member");
+      const gated = makeEnv({
+        BETA_GATE: "1",
+        REFERRAL_SERVICE_URL: "https://referral.example.com",
+      });
+
+      const res = await app.fetch(
+        request("/auth/email/send", {
+          method: "POST",
+          body: createFormData({ email: "member@example.com" }),
+        }),
+        gated,
+      );
+
+      expect(res.headers.get("location")).toContain("success=email_sent");
+      const token = await extractMagicLinkToken(gated);
+      if (!token) throw new Error("Token should not be null");
+      expect((await getMagicLinkData(gated, token)) as { intent: string }).toMatchObject({
+        intent: "login",
+      });
     });
 
     it("enforces rate limiting on legacy endpoint", async () => {
