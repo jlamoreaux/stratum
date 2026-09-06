@@ -58,7 +58,7 @@ export const ProjectHeader: FC<ProjectHeaderProps> = ({ project, active, canWrit
         <div class="project-crumb">
           <span class="project-crumb-namespace">{project.namespace}</span>
           <span class="project-crumb-sep">/</span>
-          <a class="project-crumb-name" href={base}>
+          <a class="project-crumb-name" href={base} data-ph="project-crumb">
             {project.slug}
           </a>
           {project.visibility === "public" && <span class="badge badge-public">public</span>}
@@ -71,6 +71,11 @@ export const ProjectHeader: FC<ProjectHeaderProps> = ({ project, active, canWrit
             key={tab.key}
             href={tab.href}
             class={`project-tab ${active === tab.key ? "project-tab-active" : ""}`}
+            // The one interpolated `data-ph` in the app, and safe by
+            // construction: `tab.key` is the ProjectTab union, so every value
+            // it can produce is a literal a few lines above. Nothing here can
+            // become a project or file name.
+            data-ph={`project-tab-${tab.key}`}
             {...(active === tab.key ? { "aria-current": "page" } : {})}
           >
             {tab.label}

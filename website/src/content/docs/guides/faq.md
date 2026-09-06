@@ -303,6 +303,7 @@ below describe how we configure it rather than what we choose to emit:
 | `$identify` | A signed-in user is associated with their account |
 | `$set` | Person properties are recorded, as part of identifying |
 | `$create_alias` | A pre-sign-in anonymous session is linked to the account |
+| `ui_click` | An instrumented control is clicked. Carries one property, `element` |
 
 Every event additionally carries `environment` — the label the operator set in
 `STRATUM_ENVIRONMENT`, so staging traffic can be told apart from production —
@@ -359,6 +360,20 @@ this app's URLs and page titles are made of the things the promise forbids.
   a click on a repository link would send the repository name as link text and
   its path as an `href`. You therefore see that a file link was clicked, not
   which file.
+- **`ui_click` names the control, and only from a fixed vocabulary.** Because
+  of the masking above, `$autocapture` can say a button was clicked but never
+  which one, so navigation and the main actions carry a `data-ph` attribute
+  whose value is written literally in Stratum's own source — `nav-settings`,
+  `project-tab-deployments`. `ui_click` reports that value in `element` and
+  nothing else, and the browser drops any value that is not a plain
+  `[a-z][a-z0-9-]*` token, so a name assembled from a repository or file name
+  cannot be reported even by mistake. This is the only event on this page
+  Stratum sends itself rather than configuring PostHog to send.
+- **No feature flags are requested.** The SDK's flags call is not a captured
+  event, so the redaction above cannot reach it — and PostHog builds its body
+  from stored properties that include the first URL of the session. Stratum
+  reads no flags in the browser, so the call is switched off entirely rather
+  than trusted.
 - **No Core Web Vitals or dead-click tracking.** Both are implemented in code
   posthog-js downloads at runtime, and Stratum blocks runtime downloads so the
   only script your users receive is the pinned one served from your origin.

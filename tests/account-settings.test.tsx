@@ -152,7 +152,10 @@ describe("GET /settings: account", () => {
 
   it("marks the settings link as the current page and drops the profile link", async () => {
     const html = await (await makeApp().fetch(get(), makeEnv())).text();
-    expect(html).toContain('href="/settings" class="nav-auth-link" aria-current="page"');
+    // Matched loosely across the attributes between them: pinning the exact
+    // rendered attribute string makes an unrelated addition to the link (the
+    // analytics `data-ph`, say) fail a test about the current-page marker.
+    expect(html).toMatch(/href="\/settings"[^>]*aria-current="page"/);
     expect(html).not.toContain('href="/profile"');
   });
 
